@@ -339,7 +339,7 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
     );
   }
   assert.equal(jobs.javascript.needs, "changes");
-  assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive", "javascript-workers"]);
+  assert.deepEqual(jobs.rust.needs, ["changes", "rust-archive"]);
   assert.equal(jobs["rust-archive"].needs, "changes", "Rust compilation can overlap JavaScript");
   assert.equal(jobs["rust-policy"].needs, "changes", "cold policy checks can overlap JavaScript");
   for (const [name, scope] of [
@@ -367,8 +367,8 @@ test("distributed gate jobs retain source identity and pinned Rust tools", () =>
   const tests = jobs["rust-tests"];
   assert.deepEqual(
     tests.needs,
-    ["changes", "rust-archive", "javascript-workers"],
-    "Rust consumers start after the archive and JS workers without waiting for JS reporting",
+    ["changes", "rust-archive"],
+    "Rust consumers start after the archive without waiting for JavaScript",
   );
   for (const job of [tests, jobs.rust]) {
     assert.equal(job.env.GITHUB_TOKEN, "${{ github.token }}");
@@ -633,7 +633,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   for (const name of ["rust-archive", "rust-tests", "rust-policy"])
     assert.equal(jobs[name].env.NEXTEST_PROFILE, "without-confinement");
   for (const name of ["rust-tests", "rust"])
-    assert.deepEqual(jobs[name].needs, ["changes", "rust-archive", "javascript-workers"]);
+    assert.deepEqual(jobs[name].needs, ["changes", "rust-archive"]);
   for (const js of ["true", "false"])
     for (const rust of ["true", "false"]) {
       const context = {
@@ -660,15 +660,14 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
         ...context,
         needs: {
           changes: { result: "success", outputs: {} },
-          "rust-archive": { result: "success" },
-          "javascript-workers": { result },
+          "rust-archive": { result },
         },
       };
       for (const name of ["rust-tests", "rust", "rust-policy"]) {
         assert.match(
           jobs[name].if,
           /^always\(\)/,
-          "a skipped JavaScript gate must allow Rust-only runs",
+          "archive failure must retain Rust's failure evidence",
         );
         assert.equal(workflowExpression(jobs[name].if, selected), gate !== "js");
       }
@@ -828,6 +827,10 @@ test("job names match the workflow graph and timeout backstops", () => {
   for (const [id, node] of Object.entries(CLOUD_JOB_GRAPH)) {
     const job = jobs[id];
     assert.deepEqual(node.needs, [job.needs ?? []].flat(), id);
+    // jobReadyAt expects one job per need. A skipped matrix need leaves only a placeholder row.
+    for (const need of node.needs) {
+      assert.equal(CLOUD_JOB_GRAPH[need].names.length, 1, `${id} needs ${need}`);
+    }
     assert.deepEqual(
       node.names,
       job.strategy?.matrix?.shard
@@ -955,6 +958,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
   const rustPhase = [
     "rust-tests",
     "rust",
+    "javascript-workers",
     "javascript",
     "javascript-prepare",
     "rust-policy",
@@ -981,9 +985,9 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     );
   }
   assert.equal(concurrent(initial), JS_SHARDS + 5);
-  assert.equal(concurrent(rustPhase), RUST_SHARDS + 5);
-  assert.equal(peak, Math.max(JS_SHARDS + 5, RUST_SHARDS + 5));
-  assert.equal(peak, 19);
+  assert.equal(concurrent(rustPhase), JS_SHARDS + RUST_SHARDS + 4);
+  assert.equal(peak, Math.max(JS_SHARDS + 5, JS_SHARDS + RUST_SHARDS + 4));
+  assert.equal(peak, 26);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
 

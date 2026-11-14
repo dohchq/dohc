@@ -1,0 +1,295 @@
+{
+  "runId": 43478162335,
+  "jobs": [
+    {
+      "name": "what changed",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:20Z",
+      "started_at": "2026-11-13T17:59:22Z",
+      "completed_at": "2026-11-13T17:59:24Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "shared preparation",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:27Z",
+      "completed_at": "2026-11-13T18:01:55Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "compiler confinement",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:02:56Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust build once",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:03:13Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "typecheck + tests",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:04:02Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "relay confinement",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:03:25Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust policy checks",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:04:27Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 7",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:27Z",
+      "completed_at": "2026-11-13T18:02:47Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 13",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:27Z",
+      "completed_at": "2026-11-13T18:03:24Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 3",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:03:13Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 1",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:02:43Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 9",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:02:44Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 10",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:03:39Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 12",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:02:35Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 8",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:27Z",
+      "completed_at": "2026-11-13T18:02:57Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 11",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:27Z",
+      "completed_at": "2026-11-13T18:02:46Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 5",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:02:40Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 4",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:26Z",
+      "completed_at": "2026-11-13T18:03:07Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 6",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:27Z",
+      "completed_at": "2026-11-13T18:02:57Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "JS worker 2",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T17:59:24Z",
+      "started_at": "2026-11-13T17:59:27Z",
+      "completed_at": "2026-11-13T18:03:51Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "engine gate",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:03:13Z",
+      "started_at": "2026-11-13T18:03:15Z",
+      "completed_at": "2026-11-13T18:06:34Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust tests 6",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:03:13Z",
+      "started_at": "2026-11-13T18:03:15Z",
+      "completed_at": "2026-11-13T18:05:38Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust tests 5",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:03:13Z",
+      "started_at": "2026-11-13T18:03:15Z",
+      "completed_at": "2026-11-13T18:06:16Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust tests 1",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:03:13Z",
+      "started_at": "2026-11-13T18:03:15Z",
+      "completed_at": "2026-11-13T18:06:23Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust tests 2",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:03:13Z",
+      "started_at": "2026-11-13T18:03:15Z",
+      "completed_at": "2026-11-13T18:06:01Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust tests 4",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:03:13Z",
+      "started_at": "2026-11-13T18:03:15Z",
+      "completed_at": "2026-11-13T18:05:32Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust tests 3",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:03:13Z",
+      "started_at": "2026-11-13T18:03:15Z",
+      "completed_at": "2026-11-13T18:05:53Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Rust tests 7",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:03:13Z",
+      "started_at": "2026-11-13T18:03:16Z",
+      "completed_at": "2026-11-13T18:06:01Z",
+      "run_attempt": 1
+    },
+    {
+      "name": "Manual verification",
+      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-13T18:06:34Z",
+      "started_at": "2026-11-13T18:06:36Z",
+      "completed_at": "2026-11-13T18:06:48Z",
+      "run_attempt": 1
+    }
+  ]
+}
