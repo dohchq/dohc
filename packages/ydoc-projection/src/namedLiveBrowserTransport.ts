@@ -218,8 +218,8 @@ export function createNamedLiveBrowserTransport<
       typingStopped,
     });
     const notify = () => {
-      const now = { ...provider.state(), ...override };
-      if (attempted && now.typingAhead && now.status === "disconnected") typingStopped = true;
+      if (attempted && { ...provider.state(), ...override }.status === "disconnected")
+        typingStopped = true;
       for (const listener of listeners) {
         try {
           listener(state());
