@@ -120,6 +120,13 @@ describe("dohc members", () => {
     );
   });
 
+  it("names the command that lists Members where the desktop says Reload Members, and names dohc once", async () => {
+    const request = async () => { throw new Error("dohc could not send the invite because your role in this workspace does not allow it. Reload Members to see what you can do."); };
+    const result = await executeCli({ argv: ["members", "invite", "lee@test"], cwd: "/workspace", env: {}, request });
+    expect(result).toEqual({ exitCode: 1, stdout: "",
+      stderr: "dohc could not send the invite because your role in this workspace does not allow it. Run dohc members list to see what you can do.\n" });
+  });
+
   it("exits with the refusal when the server lists no Members page", async () => {
     for (const argv of [
       ["members", "list"],

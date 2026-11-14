@@ -127,3 +127,11 @@ export const MembersResult = z.discriminatedUnion("status", [
 ]);
 export type MembersResult = z.infer<typeof MembersResult>;
 export const MEMBERS_REFUSED = "Your server does not list Members for this workspace and account.";
+
+// The desktop's Members words point at its page. A terminal has no page to
+// reload, so they name the command that lists Members.
+export function membersWordsForCli(error: unknown): unknown {
+  return error instanceof Error && error.message.includes("Reload Members")
+    ? new Error(error.message.replaceAll("Reload Members", "Run dohc members list"))
+    : error;
+}
