@@ -22,6 +22,7 @@ import { cpus, freemem, totalmem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { wslPath } from "./linux.mjs";
 import { git, run } from "./process.mjs";
 import {
   envHelper,
@@ -311,9 +312,16 @@ export function trustCheckFailure(outcome, receipt, gates, previous, { disk, mem
     .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   const step = receipt?.failure?.cause ?? "";
   // Every log a receipt names sits under its attempt folder, whose path carries the attempt number.
-  const error = receipt?.output
-    ? (receipt.error ?? "").replaceAll(receipt.output, "<attempt>")
-    : (receipt?.error ?? "");
+  let error = receipt?.error ?? "";
+  if (receipt?.output) {
+    error = error.replaceAll(receipt.output, "<attempt>");
+    try {
+      // The Linux verifier on Windows names the same folder by its WSL path.
+      error = error.replaceAll(wslPath(receipt.output), "<attempt>");
+    } catch {
+      // The folder is not on a Windows drive, so it has no WSL form.
+    }
+  }
   const selected = receipt?.gates ?? gates;
   const signature =
     failed.length || error

@@ -84,6 +84,13 @@ test("only consecutive matching low-memory failures corroborate a check", () => 
     ).outcome,
     "environment",
   );
+  // The Linux verifier on Windows names the attempt folder by its WSL path.
+  const linuxFailure = (n) => ({
+    ...receipt,
+    output: `C:\\queue\\requests\\r\\attempts\\${n}`,
+    error: `Rust failed on Linux: cargo failed (101). Log: /mnt/c/queue/requests/r/attempts/${n}/rust-linux/rust.log`,
+  });
+  assert.equal(classify(linuxFailure(2), classify(linuxFailure(1))).outcome, "failed");
 });
 
 test("repeated disk and Docker failures stay untrusted, including alongside low memory", () => {
@@ -235,6 +242,7 @@ test("service trusts a repeated JavaScript test failure whose log sits in the at
   const final = h.status("javascript");
   assert.equal(final.state, "failed");
   assert.equal(final.attempts[1].cause, "check");
+  assert.match(final.reason, /repeated under low memory/u);
   assert.match(final.attempts[0].lowMemoryFailure, /^[0-9a-f]{64}$/u);
 });
 
