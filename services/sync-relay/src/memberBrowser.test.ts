@@ -40,13 +40,17 @@ const AGENT = "wire-agent";
 const limits = { maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 8, maxRequestBytes: 100_000, maxResponseBytes: 200_000, timeoutMs: 1000 };
 
 let ownerSeq = 0;
-const channel = (wireId: string, name: string, kind: "channel" | "dm" | "agent" = "channel") =>
+const channel = (wireId: string, name: string, kind: "channel" | "dm" | "agent" = "channel", type: "posts" | "chat" | "both" = "both") =>
   logOp("chat.channel.create", chatChannelCreate(wireId, {
-    channelId: `chan-${wireId}`, name, slug: name, kind, ...(kind === "channel" ? { type: "both", purpose: "", folderPath: name } : {}),
+    channelId: `chan-${wireId}`, name, slug: name, kind, ...(kind === "channel" ? { type, purpose: "", folderPath: name } : {}),
   }).payload);
 const thread = (threadId: string, wireId: string) => logOp("chat.thread.create", chatThreadCreate(threadId, wireId, { slug: threadId }).payload);
+// A Group's chat: the oldest chat-lane thread is its one conversation.
+const laneThread = (threadId: string, wireId: string) => logOp("chat.thread.create", chatThreadCreate(threadId, wireId, { slug: threadId, lane: "chat" }).payload);
 const message = (messageId: string, threadId: string, body: string) =>
   logOp("chat.message.append", chatMessageAppend(messageId, threadId, body, { authorUserId: OWNER }).payload);
+const reply = (messageId: string, threadId: string, parentMessageId: string, body: string) =>
+  logOp("chat.message.append", chatMessageAppend(messageId, threadId, body, { authorUserId: OWNER, parentMessageId }).payload);
 
 async function ownerAppend(h: SyncRelayHandler, ops: unknown[]) {
   const response = await h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-owner", ops })));
@@ -261,14 +265,86 @@ describe("a member's Chats in a browser", () => {
   it("posts in a Group at Comment, and refuses a post at View", async () => {
     const { h, storage } = await seed();
     const ana = await member(h, storage, "ana");
-    const posted = await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, channelWireId: GROUP, id: "r-1", body: "hello team", authorKind: "human" }));
+    const posted = await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, channelWireId: GROUP, id: "r-1", lane: "posts", body: "hello team", authorKind: "human" }));
     expect(posted.status, await posted.clone().text()).toBe(200);
     expect(await json(posted)).toMatchObject({ shareId: ana.shareId, channelWireId: GROUP, message: { body: "hello team", authorUserId: "ana" } });
     for (const wireId of [GENERAL_CHANNEL_WIRE_ID, DM, AGENT]) {
-      expect((await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, channelWireId: wireId, id: `r-${wireId}`, body: "x", authorKind: "human" }))).status, wireId).toBe(404);
+      expect((await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, channelWireId: wireId, id: `r-${wireId}`, lane: "posts", body: "x", authorKind: "human" }))).status, wireId).toBe(404);
     }
     await setLevel(h, "view");
-    expect((await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, channelWireId: GROUP, id: "r-2", body: "x", authorKind: "human" }))).status).toBe(403);
+    expect((await chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, channelWireId: GROUP, id: "r-2", lane: "posts", body: "x", authorKind: "human" }))).status).toBe(403);
+  });
+
+  it("lists each Group's type, and reads each message's lane and the message it replies to", async () => {
+    const { h, storage } = await seed();
+    await ownerAppend(h, [channel("wire-posts", "news", "channel", "posts"), thread("t-news", "wire-posts"),
+      laneThread("t-team-chat", GROUP), message("msg-chat", "t-team-chat", "anyone free?"),
+      reply("msg-chat-reply", "t-team-chat", "msg-chat", "me")]);
+    const ana = await member(h, storage, "ana");
+    expect((await json(await chat(h, `channels?grantId=${ana.grantId}`, "ana"))).channels).toEqual([
+      expect.objectContaining({ channelWireId: GROUP, type: "both" }), expect.objectContaining({ channelWireId: "wire-posts", type: "posts" })]);
+    const page = await json(await chat(h, `messages?shareId=${ana.shareId}&since=0&limit=50`, "ana"));
+    expect(page.messages).toEqual([
+      expect.objectContaining({ messageId: "msg-team", lane: "posts", parentMessageId: null }),
+      expect.objectContaining({ messageId: "msg-chat", lane: "chat", parentMessageId: null }),
+      expect.objectContaining({ messageId: "msg-chat-reply", lane: "chat", parentMessageId: "msg-chat" }),
+    ]);
+  });
+
+  it("starts a post, replies in a reached Group's threads, and refuses a reply to a thread outside the Group", async () => {
+    const { h, storage } = await seed();
+    await ownerAppend(h, [laneThread("t-team-chat", GROUP), message("msg-chat", "t-team-chat", "anyone free?"),
+      commentThread("c-plan", "docs/plan.md"), message("msg-plan", "c-plan", "a comment")]);
+    const ana = await member(h, storage, "ana");
+    const send = (body: Record<string, unknown>) =>
+      chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, channelWireId: GROUP, authorKind: "human", ...body }));
+
+    const started = await send({ id: "p-1", lane: "posts", body: "new post" });
+    expect(started.status, await started.clone().text()).toBe(200);
+    const post = (await json(started)).message as { threadId: string };
+    expect(post).toMatchObject({ lane: "posts", parentMessageId: null });
+    expect(post.threadId).not.toBe("t-team");
+
+    const replied = await send({ id: "p-2", threadId: "t-team", body: "a reply" });
+    expect(replied.status, await replied.clone().text()).toBe(200);
+    expect((await json(replied)).message).toMatchObject({ threadId: "t-team", lane: "posts", parentMessageId: null, body: "a reply" });
+
+    // The Group's chat is one conversation: a new chat message joins it, and a reply names the message it answers.
+    const chatted = await send({ id: "p-3", lane: "chat", body: "I am" });
+    expect(chatted.status, await chatted.clone().text()).toBe(200);
+    expect((await json(chatted)).message).toMatchObject({ threadId: "t-team-chat", lane: "chat", parentMessageId: null });
+    const answered = await send({ id: "p-4", threadId: "t-team-chat", parentMessageId: "msg-chat", body: "same" });
+    expect(answered.status, await answered.clone().text()).toBe(200);
+    expect((await json(answered)).message).toMatchObject({ threadId: "t-team-chat", parentMessageId: "msg-chat" });
+
+    // A thread in General, a direct message, an agent chat or a file's Comments is outside this Group.
+    for (const threadId of ["t-general", "t-dm", "t-agent", "c-plan", "t-missing"]) {
+      expect((await send({ id: `x-${threadId}`, threadId, body: "x" })).status, threadId).toBe(404);
+    }
+    // A post's replies stay in its thread; only the chat answers one message.
+    expect((await send({ id: "x-parent", threadId: "t-team", parentMessageId: "msg-team", body: "x" })).status).toBe(400);
+    expect((await send({ id: "x-lane", lane: "feed", body: "x" })).status).toBe(400);
+    expect((await send({ id: "x-both", threadId: "t-team", lane: "posts", body: "x" })).status).toBe(400);
+  });
+
+  it("starts only the lanes a Group's type has, and the first chat message starts its conversation", async () => {
+    const { h, storage } = await seed();
+    await ownerAppend(h, [channel("wire-posts", "news", "channel", "posts"), channel("wire-chat", "lounge", "channel", "chat")]);
+    const ana = await member(h, storage, "ana");
+    const send = (channelWireId: string, lane: string, id: string) => chat(h, "messages", "ana", jsonBody({ shareId: ana.shareId, channelWireId,
+      authorKind: "human", id, lane, body: "x" }));
+    expect((await send("wire-posts", "chat", "a")).status).toBe(400);
+    expect((await send("wire-chat", "posts", "b")).status).toBe(400);
+    expect((await send("wire-posts", "posts", "c")).status).toBe(200);
+    const first = (await json(await send("wire-chat", "chat", "d"))).message as { threadId: string };
+    const second = (await json(await send("wire-chat", "chat", "e"))).message as { threadId: string };
+    expect(second.threadId).toBe(first.threadId);
+    const log = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`)));
+    const creates = (log.ops as Array<{ opKind: string; payload?: Record<string, unknown>; payloadJson?: string }>)
+      .filter(op => op.opKind === "chat.thread.create")
+      .map(op => op.payload ?? JSON.parse(op.payloadJson ?? "{}") as Record<string, unknown>)
+      .filter(payload => payload.threadId === first.threadId);
+    expect(creates).toEqual([expect.objectContaining({ channelWireId: "wire-chat", lane: "chat" })]);
   });
 
   it("caps browser follows at 512 per workspace", () => {

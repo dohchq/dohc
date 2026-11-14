@@ -66,8 +66,23 @@ export interface NamedChatMessage {
   bodyTooLarge: boolean;
 }
 
+/** A named reader's message names its lane, and a chat reply names the message it answers. */
+export type ThreadedChatMessage = NamedChatMessage & {
+  lane: "posts" | "chat";
+  parentMessageId: string | null;
+};
+
 /** A message in a follow of every Group a workspace share reaches names its Group. */
-type PagedChatMessage = NamedChatMessage & { channelWireId?: string };
+type PagedChatMessage = ThreadedChatMessage & { channelWireId?: string };
+
+function threaded(
+  message: NamedChatMessage,
+  payload: unknown,
+  lane: "posts" | "chat",
+): ThreadedChatMessage {
+  const parent = (payload as { parentMessageId?: unknown }).parentMessageId;
+  return { ...message, lane, parentMessageId: typeof parent === "string" ? parent : null };
+}
 
 const linkId = (value: unknown): value is string =>
   typeof value === "string" &&
@@ -282,6 +297,8 @@ export function createNamedRecipientChat(options: {
             "path",
             "id",
             "threadId",
+            "lane",
+            "parentMessageId",
             "body",
             "authorKind",
             "authorDisplayName",
@@ -382,6 +399,7 @@ export function createNamedRecipientChat(options: {
                 channelWireId: group.channelWireId,
                 name: group.name,
                 kind: "channel",
+                type: group.type,
                 access: workspaceChatAccess(fresh),
               })),
             });
@@ -402,6 +420,10 @@ export function createNamedRecipientChat(options: {
                 channelWireId: chat.channelWireId,
                 name: labels.subjectName,
                 kind: storage.findChannelCreateKind(share.workspaceId, chat.channelWireId) ?? null,
+                type:
+                  storage
+                    .listChannelCreates(share.workspaceId)
+                    .find((group) => group.channelWireId === chat.channelWireId)?.type ?? "both",
                 access: writable ? "read-write" : "read-only",
               },
             ],
@@ -473,18 +495,58 @@ export function createNamedRecipientChat(options: {
           const originId = "browser-chat";
           const storedOrigin = namedShareOrigin(shareId, actor.userId, originId);
           const messageId = `browser-message:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`;
-          const createThread = input.threadId === undefined;
-          const threadId = createThread
-            ? `browser-thread:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`
-            : parseString(input.threadId, "threadId", 256);
+          // A new Group message starts a post, or joins the Group's chat, which is one conversation.
+          // A reply names its thread, and a reply in the chat may name the message it answers.
+          const replying = input.threadId !== undefined;
+          if ((file || replying) && input.lane !== undefined) throw badRequest("invalid thread");
+          if (file && input.parentMessageId !== undefined) throw badRequest("invalid parent");
+          let lane: "posts" | "chat" | undefined;
+          if (!replying && !file) {
+            const type =
+              storage
+                .listChannelCreates(share.workspaceId)
+                .find((group) => group.channelWireId === channelWireId)?.type ?? "both";
+            const asked = input.lane ?? (type === "chat" ? "chat" : "posts");
+            if ((asked !== "posts" && asked !== "chat") || (type !== "both" && type !== asked))
+              throw badRequest("invalid lane");
+            lane = asked;
+          }
+          const chatThread =
+            lane === "chat"
+              ? storage.findChannelChatThread(share.workspaceId, channelWireId!)
+              : null;
+          const createThread = !replying && chatThread === null;
+          const threadId =
+            chatThread ??
+            (createThread
+              ? `browser-thread:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`
+              : parseString(input.threadId, "threadId", 256));
           if (!threadId.isWellFormed()) throw badRequest("invalid thread id");
-          // A reply on a file joins one of that file's threads.
+          // A reply on a file joins one of that file's threads, and a reply in a Group one of that Group's.
           if (
             file &&
-            !createThread &&
+            replying &&
             commentFileOf(storage, share.workspaceId, threadId)?.objectId !== file.objectId
           )
             throw notFound();
+          if (
+            !file &&
+            replying &&
+            storage.findThreadCreateChannelWireId(share.workspaceId, threadId) !== channelWireId
+          )
+            throw notFound();
+          const threadLane = file
+            ? "posts"
+            : (lane ?? storage.findThreadCreateLane(share.workspaceId, threadId) ?? "posts");
+          const parentMessageId =
+            input.parentMessageId === undefined
+              ? undefined
+              : parseString(input.parentMessageId, "parentMessageId", 256);
+          if (
+            parentMessageId !== undefined &&
+            (!replying || threadLane !== "chat" || !parentMessageId.isWellFormed())
+          )
+            throw badRequest("invalid parent");
 
           const append = async () => {
             const createdAtMs = options.nowMs();
@@ -496,7 +558,7 @@ export function createNamedRecipientChat(options: {
                       opKind: "chat.thread.create",
                       payload: file
                         ? { threadId, title: "", linkedPath: file.filePath, createdAtMs }
-                        : { threadId, title: "", channelWireId, lane: "chat", createdAtMs },
+                        : { threadId, title: "", channelWireId, lane: threadLane, createdAtMs },
                     },
                   ]
                 : []),
@@ -505,6 +567,7 @@ export function createNamedRecipientChat(options: {
                 payload: {
                   messageId,
                   threadId,
+                  ...(parentMessageId === undefined ? {} : { parentMessageId }),
                   body,
                   authorKind,
                   authorDisplayName,
@@ -514,17 +577,15 @@ export function createNamedRecipientChat(options: {
                 },
               },
             ].map((op, originSeq) => ({ ...op, originSeq, recordedAtMs: createdAtMs }));
+            const payload = ops[ops.length - 1]!.payload;
+            const draft = messageFromOp(
+              { relaySeq: Number.MAX_SAFE_INTEGER, opKind: "chat.message.append", payload },
+              storedOrigin,
+            );
             boundedJson({
               shareId,
               ...place,
-              message: messageFromOp(
-                {
-                  relaySeq: Number.MAX_SAFE_INTEGER,
-                  opKind: "chat.message.append",
-                  payload: ops[ops.length - 1]!.payload,
-                },
-                storedOrigin,
-              ),
+              message: draft && threaded(draft, payload, threadLane),
             });
             return options.transport(
               new Request(request.url, {
@@ -548,13 +609,15 @@ export function createNamedRecipientChat(options: {
           });
           if (!row) throw notFound();
           recheck();
+          const stored = JSON.parse(row.payloadJson) as unknown;
+          const message = messageFromOp(
+            { relaySeq: row.relaySeq, opKind: row.opKind, payload: stored },
+            row.originId,
+          );
           return json({
             shareId,
             ...place,
-            message: messageFromOp(
-              { relaySeq: row.relaySeq, opKind: row.opKind, payload: JSON.parse(row.payloadJson) },
-              row.originId,
-            ),
+            message: message && threaded(message, stored, threadLane),
           });
         }
         return json(
@@ -634,7 +697,10 @@ function commentsOn(
 // `project` is the reader's view of a message, and the byte budget counts it.
 // With `comments` instead of a channel, a page of one file's Comments.
 export async function readSharedChannelPage<Message extends { relaySeq: number }>(input: {
-  storage: Pick<SyncRelayStorage, "fetchChatMessages" | "fetchChannelMessages">;
+  storage: Pick<
+    SyncRelayStorage,
+    "fetchChatMessages" | "fetchChannelMessages" | "findThreadCreateLane"
+  >;
   resolver: ChatShareThreadResolver;
   selector: AnyShareSelector;
   workspaceId: string;
@@ -674,6 +740,15 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
         : input.storage.fetchChatMessages({ ...page, channelWireId: input.channelWireId });
     position = result.nextCursor;
     const messages: PagedChatMessage[] = [];
+    const lanes = new Map<string, "posts" | "chat">();
+    const laneOf = (threadId: string): "posts" | "chat" => {
+      const lane =
+        lanes.get(threadId) ??
+        input.storage.findThreadCreateLane(input.workspaceId, threadId) ??
+        "posts";
+      lanes.set(threadId, lane);
+      return lane;
+    };
     for (const row of result.rows) {
       if (row.settlementAdmission?.status === "refused") continue;
       const decision = filterOpForShare(
@@ -683,13 +758,19 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
         input.resolver,
         "chat",
       );
-      const message = decision.allowed
+      const read = decision.allowed
         ? messageFromOp(
             { relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload },
             row.originId,
           )
         : null;
-      if (!message) continue;
+      if (!read) continue;
+      // A file's Comments are posts.
+      const message = threaded(
+        read,
+        decision.allowed ? decision.payload : {},
+        comments ? "posts" : laneOf(read.threadId),
+      );
       if (comments) {
         if (comments.onFile(message.threadId)) messages.push(message);
         continue;

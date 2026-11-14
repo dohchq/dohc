@@ -423,6 +423,8 @@ it("passes a link holder's post through as a link post with no account, and refu
     createdAtMs: 5,
     body: "From a link",
     bodyTooLarge: false,
+    lane: "posts",
+    parentMessageId: null,
   });
 
   const forged = {
@@ -437,6 +439,8 @@ it("passes a link holder's post through as a link post with no account, and refu
     createdAtMs: 5,
     body: "x",
     bodyTooLarge: false,
+    lane: "posts",
+    parentMessageId: null,
   };
   const web = createNamedRecipientChatClient({
     relayUrl: "http://relay.test",
@@ -551,7 +555,15 @@ it("caps the advertised post body at share-web's request budget", async () => {
         userId: "alice",
         maxPostBytes: 16384,
         maxBodyBytes: 65536,
-        channels: [{ channelWireId: "wire", name: "Team", kind: "channel", access: "read-write" }],
+        channels: [
+          {
+            channelWireId: "wire",
+            name: "Team",
+            kind: "channel",
+            type: "both",
+            access: "read-write",
+          },
+        ],
       }),
   });
   expect(await (await web(request("channels?grantId=grant"))).json()).toMatchObject({

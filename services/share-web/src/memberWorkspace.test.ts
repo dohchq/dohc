@@ -130,19 +130,25 @@ it("lists every Group and follows them all in one request, each message naming i
   const channels = await f.chat(`channels?grantId=${f.grantId}`);
   expect(channels.status, await channels.clone().text()).toBe(200);
   expect((await channels.json() as { channels: unknown[] }).channels).toEqual([
-    { channelWireId: "wire-plans", name: "plans", kind: "channel", access: "read-write" },
-    { channelWireId: "wire-food", name: "food", kind: "channel", access: "read-write" },
+    { channelWireId: "wire-plans", name: "plans", kind: "channel", type: "both", access: "read-write" },
+    { channelWireId: "wire-food", name: "food", kind: "channel", type: "both", access: "read-write" },
   ]);
   const follow = await f.chat(`messages?shareId=${f.shareId}&since=0`);
   expect(follow.status, await follow.clone().text()).toBe(200);
-  const page = await follow.json() as { messages: Array<{ body: string; channelWireId: string }>; channelWireId?: string };
+  const page = await follow.json() as { messages: Array<{ body: string; channelWireId: string; threadId: string; lane: string; parentMessageId: string | null }>; channelWireId?: string };
   expect(page.channelWireId).toBeUndefined();
-  expect(page.messages.map(({ body, channelWireId }) => ({ body, channelWireId }))).toEqual([
-    { body: "Plans start here", channelWireId: "wire-plans" }, { body: "Bring snacks", channelWireId: "wire-food" },
+  expect(page.messages.map(({ body, channelWireId, lane, parentMessageId }) => ({ body, channelWireId, lane, parentMessageId }))).toEqual([
+    { body: "Plans start here", channelWireId: "wire-plans", lane: "posts", parentMessageId: null },
+    { body: "Bring snacks", channelWireId: "wire-food", lane: "posts", parentMessageId: null },
   ]);
   const posted = await f.chat("messages", "sam", { method: "POST", body: JSON.stringify({ shareId: f.shareId, channelWireId: "wire-food", id: "post-1",
-    body: "Count me in", authorKind: "human" }) });
+    lane: "posts", body: "Count me in", authorKind: "human" }) });
   expect(posted.status, await posted.clone().text()).toBe(200);
+  // A reply joins the post it answers.
+  const replied = await f.chat("messages", "sam", { method: "POST", body: JSON.stringify({ shareId: f.shareId, channelWireId: "wire-food", id: "post-2",
+    threadId: page.messages[1]!.threadId, body: "Crisps", authorKind: "human" }) });
+  expect(replied.status, await replied.clone().text()).toBe(200);
+  expect((await replied.json() as { message: unknown }).message).toMatchObject({ threadId: page.messages[1]!.threadId, lane: "posts", parentMessageId: null });
 });
 
 it("reads one Group's history for a member, newest first, with the cursor that follows every Group", async () => {

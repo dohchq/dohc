@@ -17,7 +17,7 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 const MESSAGE_KEYS =
-  "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,linkAgent,messageId,relaySeq,threadId";
+  "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,lane,linkAgent,messageId,parentMessageId,relaySeq,threadId";
 
 /** A message in a follow of every Group a workspace share reaches also names its Group. */
 function groupMessage(value: unknown): boolean {
@@ -30,6 +30,9 @@ function message(value: unknown): boolean {
   if (!record(value) || Object.keys(value).sort().join() !== MESSAGE_KEYS) return false;
   return (
     ["messageId", "threadId", "authorDisplayName"].every((key) => typeof value[key] === "string") &&
+    (value.lane === "posts" || value.lane === "chat") &&
+    (value.parentMessageId === null ||
+      (typeof value.parentMessageId === "string" && value.lane === "chat")) &&
     (value.authorUserId === null || typeof value.authorUserId === "string") &&
     ((value.bodyTooLarge === true && value.body === null) ||
       (value.bodyTooLarge === false && typeof value.body === "string")) &&
@@ -75,8 +78,9 @@ function resultMatches(
       value.channels.every(
         (channel) =>
           record(channel) &&
-          Object.keys(channel).sort().join() === "access,channelWireId,kind,name" &&
+          Object.keys(channel).sort().join() === "access,channelWireId,kind,name,type" &&
           typeof channel.channelWireId === "string" &&
+          (channel.type === "posts" || channel.type === "chat" || channel.type === "both") &&
           (channel.name === null || typeof channel.name === "string") &&
           (channel.kind === null || channel.kind === "channel" || channel.kind === "dm") &&
           (channel.access === "read-only" || channel.access === "read-write"),

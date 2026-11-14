@@ -2049,7 +2049,9 @@ export interface SyncRelayStorage {
     channelWireId: string,
   ): string | null | undefined;
   /** Each channel's earliest create, in log order: its wire id and its name. */
-  listChannelCreates(workspaceId: string): { channelWireId: string; name: string }[];
+  listChannelCreates(workspaceId: string): { channelWireId: string; name: string; type: "posts" | "chat" | "both" }[];
+  findThreadCreateLane(workspaceId: string, threadId: string): "posts" | "chat" | undefined;
+  findChannelChatThread(workspaceId: string, channelWireId: string): string | null;
   // The file a thread is about, as claimed by the earliest
   // chat.thread.create for this threadId. Earliest-wins for the same reason
   // the channel binding uses it: a later forged re-create must not re-bind an

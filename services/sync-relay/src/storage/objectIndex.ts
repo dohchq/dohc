@@ -208,11 +208,16 @@ export function findChannelCreateKind(
   return undefined;
 }
 
+/** A Group's lanes: a feed of posts, one running chat, or both. */
+export type ChannelType = "posts" | "chat" | "both";
+const channelType = (value: unknown): ChannelType =>
+  value === "posts" || value === "chat" ? value : "both";
+
 /** Each channel's earliest create, in log order. The caller asks `findChannelCreateKind` which ones it may name. */
 export function listChannelCreates(
   storage: StorageContext,
   workspaceId: string,
-): { channelWireId: string; name: string }[] {
+): { channelWireId: string; name: string; type: ChannelType }[] {
   const rows = storage.db
     .prepare(
       `SELECT payload_json FROM sync_relay_log INDEXED BY idx_sync_relay_log_channel_creates
@@ -220,7 +225,7 @@ export function listChannelCreates(
      ORDER BY relay_seq`,
     )
     .iterate(workspaceId);
-  const channels = new Map<string, string>();
+  const channels = new Map<string, { name: string; type: ChannelType }>();
   for (const row of rows) {
     let record: Record<string, unknown> | null;
     try {
@@ -229,9 +234,58 @@ export function listChannelCreates(
       continue;
     }
     if (!record || typeof record.wireId !== "string" || channels.has(record.wireId)) continue;
-    channels.set(record.wireId, typeof record.name === "string" ? record.name : "");
+    channels.set(record.wireId, {
+      name: typeof record.name === "string" ? record.name : "",
+      type: channelType(record.type),
+    });
   }
-  return [...channels].map(([channelWireId, name]) => ({ channelWireId, name }));
+  return [...channels].map(([channelWireId, channel]) => ({ channelWireId, ...channel }));
+}
+
+/** The lane a thread's earliest create names; a thread with none is a post, as the engine reads it. */
+export function findThreadCreateLane(
+  storage: StorageContext,
+  workspaceId: string,
+  threadId: string,
+): "posts" | "chat" | undefined {
+  for (const row of threadCreateRows(storage, workspaceId, threadId)) {
+    let record: Record<string, unknown> | null;
+    try {
+      record = asRecord(JSON.parse(String(row.payload_json)));
+    } catch {
+      continue;
+    }
+    if (!record || record.threadId !== threadId) continue;
+    return record.lane === "chat" ? "chat" : "posts";
+  }
+  return undefined;
+}
+
+/** A Group's chat: the earliest chat-lane thread bound to it, or null before anyone chats. */
+export function findChannelChatThread(
+  storage: StorageContext,
+  workspaceId: string,
+  channelWireId: string,
+): string | null {
+  const rows = storage.db
+    .prepare(
+      `SELECT json_extract(payload_json, '$.threadId') AS thread_id FROM sync_relay_log INDEXED BY idx_sync_relay_log_thread_creates
+     WHERE workspace_id = ? AND op_kind = 'chat.thread.create' AND json_valid(payload_json)
+       AND json_extract(payload_json, '$.channelWireId') = ? AND json_extract(payload_json, '$.lane') = 'chat'
+     ORDER BY relay_seq`,
+    )
+    .iterate(workspaceId, channelWireId);
+  for (const row of rows) {
+    const threadId = row.thread_id;
+    // Only the thread's own earliest create binds it.
+    if (
+      typeof threadId === "string" &&
+      findThreadCreateChannelWireId(storage, workspaceId, threadId) === channelWireId &&
+      findThreadCreateLane(storage, workspaceId, threadId) === "chat"
+    )
+      return threadId;
+  }
+  return null;
 }
 
 export function findChannelCreateFolderPath(
