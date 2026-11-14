@@ -66,11 +66,27 @@ import {
 // on its earlier messages too.
 export function chatAuthorLabel(
   author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName"> &
-    Partial<Pick<ChatMessageRecord, "authorAgentId" | "presentation">>,
+    Partial<
+      Pick<
+        ChatMessageRecord,
+        "authorAgentId" | "presentation" | "authorOwnerDisplayName" | "linkAgent"
+      >
+    >,
 ): string {
   const agentId = author.presentation?.agentId ?? author.authorAgentId;
   if (author.authorKind === "agent" && agentId !== undefined && isPersonalAgentId(agentId)) {
     return personalAgentName(agentId) ?? author.authorDisplayName;
+  }
+  // "Agent" is dohc's word for an agent that gave no name. Another person's
+  // such agent goes by whose it is.
+  if (
+    author.authorKind === "agent" &&
+    author.authorDisplayName === "Agent" &&
+    author.authorOwnerDisplayName &&
+    author.presentation?.self === false &&
+    author.linkAgent !== true
+  ) {
+    return `${author.authorOwnerDisplayName}'s agent`;
   }
   return author.authorDisplayName;
 }

@@ -79,6 +79,15 @@ describe("PostCard for an automation's post", () => {
   });
 });
 
+describe("PostCard for another person's agent", () => {
+  it("names an unnamed agent by whose it is", () => {
+    card({ openingMessage: { presentation: { group: "agent-share", hue: null, self: false, connected: "unknown" },
+      id: "message-agent", authorKind: "agent", authorDisplayName: "Agent", authorOwnerDisplayName: "Sam",
+      createdAtMs: 1, bodySnippet: "The 9:11 train has seats." }, reactions: [], viewerAuthorId: "ice" });
+    expect(screen.getByTestId("chats-post-author").textContent).toBe("Sam's agent");
+  });
+});
+
 describe("PostCard as a feed row", () => {
   const at = new Date(2026, 6, 8, 14, 43).getTime();
   const sam = {

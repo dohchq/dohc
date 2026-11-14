@@ -765,9 +765,12 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
       page.getByTestId("chats-message-body").filter({ hasText: "Welcome, Sam." }),
     ).toBeVisible();
     await page.getByTestId("chats-thread-back").click();
-    await expect(
-      page.getByTestId("chats-thread").filter({ hasText: "Sam's agent: the dates line up." }),
-    ).toBeVisible({ timeout: 120_000 });
+    const samAgentPost = page
+      .getByTestId("chats-thread")
+      .filter({ hasText: "Sam's agent: the dates line up." });
+    await expect(samAgentPost).toBeVisible({ timeout: 120_000 });
+    // An agent that gave no name goes by whose it is, as the relay recorded it.
+    await expect(samAgentPost.getByTestId("chats-post-author")).toHaveText(/^\S.*'s agent$/u);
 
     // The owner reads Sam's comment on the plan. About reads a file's
     // comments when it opens.
