@@ -437,41 +437,42 @@ export class OwnerCommittedDelivery {
       // since waits for the next pass's drain.
       const outbox =
         drainedRegistration === adopted
-          ?{ admittedEntries: 0, hasMore: false, retryReady: false }
+          ? { admittedEntries: 0, hasMore: false, retryReady: false }
           : await drainOwnerOutbox({
-        storage: this.storage,
-        admission: c.ownerAdmission,
-        client: c.client,
-        workspace: c.workspace,
-        host: c.host,
-        registrationId,
-        binding: saved.binding,
-        nextRequestId: c.nextRequestId,
-        deadlineMs: c.deadlineMs,
-        signal,
-        assertCurrent: current.assertCurrent,
-        seedDelivery: c.seedDelivery?.(),
-        adoption: {
-          ...recorded,
-          applied: () => {
-            if (this.#adopted.get(key) === adopted) this.#seedApplied.set(key, recorded.adoptionId);
-          },
-        },
-        applyThrough: async (receipt) => {
-          await applyPending(receipt);
-          check();
-          latest.assertCurrent();
-          if ((progress.terminal?.journalCursor ?? 0) < receipt.journalCursor) return null;
-          const ack = await c.client.readLiveApplicationAck(
-            { ...request(), registrationId },
-            receipt,
-            signal,
-          );
-          check();
-          latest.assertCurrent();
-          return ack;
-        },
-      });
+              storage: this.storage,
+              admission: c.ownerAdmission,
+              client: c.client,
+              workspace: c.workspace,
+              host: c.host,
+              registrationId,
+              binding: saved.binding,
+              nextRequestId: c.nextRequestId,
+              deadlineMs: c.deadlineMs,
+              signal,
+              assertCurrent: current.assertCurrent,
+              seedDelivery: c.seedDelivery?.(),
+              adoption: {
+                ...recorded,
+                applied: () => {
+                  if (this.#adopted.get(key) === adopted)
+                    this.#seedApplied.set(key, recorded.adoptionId);
+                },
+              },
+              applyThrough: async (receipt) => {
+                await applyPending(receipt);
+                check();
+                latest.assertCurrent();
+                if ((progress.terminal?.journalCursor ?? 0) < receipt.journalCursor) return null;
+                const ack = await c.client.readLiveApplicationAck(
+                  { ...request(), registrationId },
+                  receipt,
+                  signal,
+                );
+                check();
+                latest.assertCurrent();
+                return ack;
+              },
+            });
       await applyPending();
       if (!settle)
         return outbox.hasMore || this.#store.nextOwnerApplication(latest)
