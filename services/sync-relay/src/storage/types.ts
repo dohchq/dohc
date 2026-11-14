@@ -1136,7 +1136,7 @@ export interface SyncRelayStorage {
   accountFeedThreadPaths(
     workspaceId: string,
     threadId: string,
-  ): { lastKnownPath: string | null; named: string[] };
+  ): ReturnType<typeof import("./accountFeed").accountFeedThreadPaths>;
   currentAutomationWorkspace(
     workspaceId: string,
   ): import("./automationWorkspaces").AutomationWorkspace | null;

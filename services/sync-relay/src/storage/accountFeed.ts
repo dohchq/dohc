@@ -109,20 +109,21 @@ export function accountFeedJournalRows(
  * What tells whether a thread is on a secret file: where the log last put
  * the object its first create names, or null when the log never placed it,
  * and the path and hint that create names. Both are empty for a thread on no
- * file, or one the log has no create for.
+ * file, or one the log has no create for; `created` and `linkedObjectId` tell
+ * those apart.
  */
 export function accountFeedThreadPaths(
   storage: StorageContext,
   workspaceId: string,
   threadId: string,
-): { lastKnownPath: string | null; named: string[] } {
+): ReturnType<typeof threadPathsInTransaction> {
   return storage.readTx(() => threadPathsInTransaction(storage, workspaceId, threadId));
 }
 
 /**
- * `accountFeedThreadPaths`, inside the caller's transaction, with what tells a
- * plain thread from one the log holds no create for: whether the create was
- * found, and the object it links, if any.
+ * `accountFeedThreadPaths`, inside the caller's transaction: whether the
+ * create was found, and the object it links, if any, tell a plain thread
+ * from one the log holds no create for.
  */
 export function threadPathsInTransaction(
   storage: StorageContext,

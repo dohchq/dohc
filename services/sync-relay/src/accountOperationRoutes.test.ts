@@ -3091,6 +3091,9 @@ describe("an account's chat writes through the server's copy", () => {
       {},
       { threadId: "" },
       { group: "a", threadId: "b" },
+      { group: "a", before: 1 },
+      { threadId: "thread-stay", before: 0 },
+      { threadId: "thread-stay", before: 1.5 },
       { threadId: "thread-stay", messageIds: ["message-stay"] },
       { threadId: "x".repeat(257) },
     ]) {
@@ -3127,6 +3130,140 @@ describe("an account's chat writes through the server's copy", () => {
     }
   });
 
+  it("judges a context's thread by everything the relay accepted before it answers", async () => {
+    const f = await writeRelay({ nowMs: () => LATE });
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    f.engine.files.seedTextFile({
+      workspace: "trip",
+      path: "notes.md",
+      text: "# Notes\n",
+      objectId: "object-notes",
+    });
+    const onNotes = await chats.createThread({
+      workspaceId: "trip",
+      title: "Notes",
+      linkedFile: { objectId: "object-notes", pathHint: "notes.md" },
+    });
+    const wakeId = unconfirmedWake(f, "op-notes", "message-notes", onNotes.id);
+    const db = (f.storage as StorageContext).db;
+    // Another device's move of the notes, which the relay accepts.
+    const accepted = (originSeq: number, path: string) => {
+      const relaySeq = Number(
+        db
+          .prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
+        VALUES ('trip', 'another-device', ?, 'moment.append', '{}', 1) RETURNING relay_seq`)
+          .get(originSeq)!.relay_seq,
+      );
+      db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
+        VALUES ('trip', 'object-notes', ?, ?, 'main', ?, 1)`).run(
+        relaySeq,
+        `moment-${originSeq}`,
+        path,
+      );
+    };
+    // The request's own check, the check after its body, the copy's open, and the check after its sync come first;
+    // the fifth follows the conversation's read.
+    const held = f.holdCheck(5);
+    const reading = f.write("chatContext", { threadId: onNotes.id });
+    await held.reached;
+    accepted(1, ".env");
+    await new VersionedLiveAdapter(f.engine, "trip", { workspaceId: "trip" }).deleteTextFile({
+      workspaceId: "trip",
+      versionId: "main",
+      path: "notes.md",
+      metadata: { origin: "api" },
+    });
+    held.release();
+    const response = await reading;
+    expect(await response.clone().text()).not.toContain(wakeId);
+    expect(await answer(response)).toEqual({
+      ok: false,
+      reason: `chat thread not found: ${onNotes.id}`,
+      refusal: "missing",
+    });
+
+    // A move during the read, and another during the read again, answer a failed read with no context.
+    const first = f.holdCheck(5);
+    const again = f.write("chatContext", { threadId: "thread-stay" });
+    await first.reached;
+    accepted(2, "notes-2.md");
+    first.release();
+    // The second read's sync, then its read.
+    const second = f.holdCheck(2);
+    await second.reached;
+    accepted(3, "notes-3.md");
+    second.release();
+    expect(await answer(await again)).toEqual({ ok: false, reason: "failed to read chat context" });
+  });
+
+  it("covers a thread's newest messages a page at a time, reading only that page", async () => {
+    const f = await writeRelay({ nowMs: () => LATE });
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    await chats.startChannelThread({
+      workspaceId: "trip",
+      channelId: f.seeded.planning.channelId,
+      threadId: "thread-long",
+      messageId: "long-0",
+      lane: "posts",
+      author: { kind: "human", displayName: "Zed" },
+      authorActorKey: null,
+      body: "0",
+    });
+    for (let order = 1; order < 250; order += 1)
+      await chats.sendMessage({
+        workspaceId: "trip",
+        threadId: "thread-long",
+        messageId: `long-${order}`,
+        author: { kind: "human", displayName: "Ana" },
+        authorActorKey: null,
+        body: String(order),
+      });
+    const oldest = unconfirmedWake(f, "op-oldest", "long-0", "thread-long");
+    const newest = unconfirmedWake(f, "op-newest", "long-249", "thread-long");
+    const covered = async (args: Record<string, number>) => {
+      const from = f.engine.asked.length;
+      const result = await answer(
+        await f.write("chatContext", { threadId: "thread-long", ...args }),
+      );
+      return {
+        reads: f.engine.asked
+          .slice(from)
+          .filter(
+            (method) =>
+              method === CHATS_METHOD.messagesList || method === CHATS_METHOD.reactionsList,
+          ),
+        nextBefore: (result.conversation as Record<string, unknown>).nextBefore,
+        wakes: (result.wakes as Array<{ wakeId: string }>).map((wake) => wake.wakeId),
+        people: (result.mentions as Array<{ kind: string; label: string }>)
+          .filter((mention) => mention.kind === "person")
+          .map((mention) => mention.label)
+          .sort(),
+      };
+    };
+    // One page of 100 messages each time, and no reactions, which list only whole.
+    expect(await covered({})).toEqual({
+      reads: [CHATS_METHOD.messagesList],
+      nextBefore: 150,
+      wakes: [newest],
+      people: ["Ana"],
+    });
+    expect(await covered({ before: 150 })).toEqual({
+      reads: [CHATS_METHOD.messagesList],
+      nextBefore: 50,
+      wakes: [],
+      people: ["Ana"],
+    });
+    expect(await covered({ before: 50 })).toEqual({
+      reads: [CHATS_METHOD.messagesList],
+      nextBefore: null,
+      wakes: [oldest],
+      people: ["Ana", "Zed"],
+    });
+    expect((await covered({ before: 1_000 })).nextBefore, "past the end covers the newest").toBe(
+      150,
+    );
+  });
+
   const wakeChanges = (
     since: string,
     options: { hold?: number; signal?: AbortSignal; headers?: Record<string, string> } = {},
@@ -3146,8 +3283,10 @@ describe("an account's chat writes through the server's copy", () => {
     const activity = new DiscussionActivityHub();
     const f = await writeRelay({ activity, nowMs: () => LATE });
     const stay = unconfirmedWake(f, "op-stay", "message-stay", "thread-stay");
-    // The log made this thread on a secret file.
-    logWriter(f.storage, activity)("chat.thread.create", {
+    // The log made one thread in a Group, and one on a secret file.
+    const log = logWriter(f.storage, activity);
+    log("chat.thread.create", { threadId: "thread-stay" });
+    log("chat.thread.create", {
       threadId: "thread-keys",
       linkedObjectId: "object-keys",
       linkedPathHint: ".env",
@@ -3204,6 +3343,54 @@ describe("an account's chat writes through the server's copy", () => {
     expect(await json(busy)).toMatchObject({ ok: false, code: "server_busy" });
     stop.abort();
     for (const response of await Promise.all(waiting)) expect(response.status).toBe(200);
+  });
+
+  it("names no thread whose create the log doesn't hold, and answers replace for its change instead", async () => {
+    const f = await writeRelay({ nowMs: () => LATE });
+    const { onSecret } = f.seeded;
+    const since = String(f.storage.chatWakeHead("ana"));
+    // The engine holds this thread on a secret file; the relay's log has no create for it.
+    unconfirmedWake(f, "op-secret", "message-secret", onSecret.id);
+    const response = await f.h(wakeChanges(since));
+    const text = await response.clone().text();
+    expect(await feed(response)).toEqual({
+      ok: true,
+      cursor: String(f.storage.chatWakeHead("ana")),
+      replace: true,
+    });
+    expect(text).not.toContain(onSecret.id);
+    expect(await answer(await f.write("chatContext", { threadId: onSecret.id }))).toMatchObject({
+      ok: false,
+      refusal: "missing",
+    });
+  });
+
+  it("judges the threads a wake read answers after its last check of access", async () => {
+    const activity = new DiscussionActivityHub();
+    const f = await writeRelay({ activity, nowMs: () => LATE });
+    const log = logWriter(f.storage, activity);
+    log("chat.thread.create", {
+      threadId: "thread-notes",
+      linkedObjectId: "object-notes",
+      linkedPathHint: "notes.md",
+    });
+    log("moment.append", { objectId: "object-notes", path: "notes.md" });
+    const since = String(f.storage.chatWakeHead("ana"));
+    unconfirmedWake(f, "op-notes", "message-notes", "thread-notes");
+    const head = String(f.storage.chatWakeHead("ana"));
+    expect(await feed(await f.h(wakeChanges(since)))).toEqual({
+      ok: true,
+      cursor: head,
+      threads: ["thread-notes"],
+    });
+
+    // The request's own check comes first; the second is the last before the answer.
+    const held = f.holdCheck(2);
+    const reading = f.h(wakeChanges(since));
+    await held.reached;
+    log("moment.append", { objectId: "object-notes", path: ".env" });
+    held.release();
+    expect(await feed(await reading)).toEqual({ ok: true, cursor: head, threads: [] });
   });
 
   it("answers a held wake read as missing once the sign-in, the owner, or Show on phone changed while it waited", async () => {

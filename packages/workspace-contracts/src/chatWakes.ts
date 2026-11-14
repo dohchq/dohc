@@ -131,6 +131,10 @@ export const ChatWakeQueuedReply = z.strictObject({ ok: z.literal(true), wake: C
 
 /** The most mention candidates one context read answers. */
 export const PHONE_MENTION_CANDIDATES_MAX = 256;
+/** The messages one context read covers at most: a stream's newest items, or a page of a thread's messages. */
+export const PHONE_CONTEXT_MESSAGES_MAX = 100;
+/** The wakes one context read answers at most. One message's targets name at most 64 computers' agents together. */
+export const PHONE_CONTEXT_WAKES_MAX = PHONE_CONTEXT_MESSAGES_MAX * 64;
 /** The thread IDs one wake-changes answer lists at most. */
 export const PHONE_WAKE_CHANGES_MAX = 1_000;
 const NAME_MAX_CHARS = 256;
@@ -140,7 +144,8 @@ const Name = z.string().min(1).max(NAME_MAX_CHARS);
 const Cursor = z.string().regex(SEQUENCE);
 
 /**
- * Someone the phone can mention. A person comes only from the conversation's own messages and reactions. An agent
+ * Someone the phone can mention. A person comes only from the messages a context covers, and a stream's reactions to
+ * them. An agent
  * runs on the account's computers, named by their labels; a personal agent reaches the workspace but no computer runs
  * it, so mentioning it wakes nothing there.
  */
@@ -175,10 +180,13 @@ export type PhoneChatWake = z.infer<typeof PhoneChatWake>;
 const PhoneGroupKind = z.enum(["group", "dm", "agent"]);
 
 /**
- * `POST /sync/:workspaceId/ops/chatContext` with `{ group }` or `{ threadId }`, each an engine ID. A stream says which
- * of its lanes take a post or a message; a thread takes replies, and names its group's kind, or null on a file.
- * `unmatched` lists the account's messages whose answered agent no computer ran when it was sent. `wakeCursor` is the
- * account's wake position when this was read, which `wakeChanges` takes as `since`.
+ * `POST /sync/:workspaceId/ops/chatContext` with `{ group }` or `{ threadId, before? }`, each an engine ID. A stream
+ * says which of its lanes take a post or a message, and covers its newest items as the phone's stream read does. A
+ * thread takes replies, names its group's kind, or null on a file, and covers its newest messages before the message
+ * order `before`, or its newest ones; `nextBefore` covers the older ones, and is null once the first is covered.
+ * `wakes` and `unmatched` are of covered messages only. `unmatched` lists the account's messages whose answered agent
+ * no computer ran when it was sent. `wakeCursor` is the account's wake position when this was read, which
+ * `wakeChanges` takes as `since`.
  */
 export const PhoneChatContext = z.strictObject({
   ok: z.literal(true),
@@ -194,11 +202,14 @@ export const PhoneChatContext = z.strictObject({
       kind: z.literal("thread"),
       threadId: Id,
       groupKind: PhoneGroupKind.nullable(),
+      nextBefore: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).nullable(),
     }),
   ]),
   mentions: z.array(PhoneMentionCandidate).max(PHONE_MENTION_CANDIDATES_MAX),
-  wakes: z.array(PhoneChatWake),
-  unmatched: z.array(z.strictObject({ messageId: Id, threadId: Id })),
+  wakes: z.array(PhoneChatWake).max(PHONE_CONTEXT_WAKES_MAX),
+  unmatched: z
+    .array(z.strictObject({ messageId: Id, threadId: Id }))
+    .max(PHONE_CONTEXT_MESSAGES_MAX),
   wakeCursor: Cursor,
 });
 export type PhoneChatContext = z.infer<typeof PhoneChatContext>;
@@ -206,7 +217,8 @@ export type PhoneChatContext = z.infer<typeof PhoneChatContext>;
 /**
  * `GET /sync/:workspaceId/ops/wakeChanges?since=&hold=`: the workspace's threads whose wakes changed after `since`,
  * after waiting up to `hold` ms when none has. An empty list moves the cursor only. `replace` asks the phone to read
- * every context again.
+ * every context again: for a `since` past the head, or a change in a thread whose place the relay can't judge, which it
+ * never names.
  */
 export const PhoneWakeChanges = z.union([
   z.strictObject({ ok: z.literal(true), cursor: Cursor, replace: z.literal(true) }),

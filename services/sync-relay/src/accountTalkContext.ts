@@ -1,14 +1,16 @@
 import { phoneChatContextArgsSchema } from "@dohc/cli/protocol";
 import { handleForName, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import {
+  PHONE_CONTEXT_MESSAGES_MAX,
   PHONE_MENTION_CANDIDATES_MAX,
   type PhoneChatContext,
   type PhoneMentionCandidate,
   type PhoneWakeChanges,
 } from "@dohc/workspace-contracts/chat-wakes";
 import type { ChatMessage, ChatReaction } from "@dohc/workspace-contracts/engine";
+import { ChatsLiveAdapter } from "@dohc/workspace-engine-client";
 import { cliGroupKind, failure, type ChatsHost } from "@dohc/workspace-operations/chats";
-import { currentAccountFeedCursor, threadShownByLog } from "./accountFeed";
+import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
 import { serverChats, type MissingResult } from "./accountOperations";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, RelayError } from "./errors";
@@ -17,13 +19,11 @@ import type { SyncRelayStorage } from "./storage";
 
 // What the phone needs beside a conversation it shows, read through the
 // owner's server copy: which lanes take a message, who it can mention, and the
-// latest wake of each target of its shown messages. The conversation is read
-// through the same secret-file filter as the phone's own reads, so a hidden
-// thread answers exactly as a missing one. A suggestion authorizes nothing: a
-// write resolves its wake targets again when it is recorded.
+// latest wake of each target of the messages it covers. The conversation is
+// read through the same secret-file filter as the phone's own reads, so a
+// hidden thread answers exactly as a missing one. A suggestion authorizes
+// nothing: a write resolves its wake targets again when it is recorded.
 
-/** The stream items a context covers: the phone's own stream read asks for this many. */
-const STREAM_ITEMS = 100;
 /** The people one context names at most, newest in the conversation first. */
 const PEOPLE_MAX = 100;
 const SEQUENCE = /^(?:0|[1-9]\d{0,15})$/u;
@@ -46,10 +46,17 @@ type Conversation = {
   reactions: ChatReaction[];
 };
 
-// The conversation as the phone's reads show it. A group is named by its exact engine ID; a thread the filtered store
-// doesn't list, which takes in one on a secret file, is missing.
+type ThreadPages = Pick<ChatsLiveAdapter, "getThread" | "listMessagesPage">;
+
+// The conversation as the phone's reads show it, its covered messages at most PHONE_CONTEXT_MESSAGES_MAX. A group is
+// named by its exact engine ID, and covers the newest items the phone's stream read shows. A thread the filtered store
+// doesn't list, which takes in one on a secret file, is missing. A listed thread covers one page of messages, read
+// from `pages` past the filter: only their IDs, authors and times are used, never their attachments. Its message
+// count gives where the page starts, since message orders count from zero. A thread's reactions list only whole, so
+// none are read, and its people come from its covered messages alone.
 async function readConversation(
   host: ChatsHost,
+  pages: ThreadPages,
   target: ChatContextTarget,
 ): Promise<Conversation | MissingResult> {
   const { store, workspaceId } = host;
@@ -61,7 +68,7 @@ async function readConversation(
     const page = await store.listGroupStream({
       workspaceId,
       channelId: channel.id,
-      limit: STREAM_ITEMS,
+      limit: PHONE_CONTEXT_MESSAGES_MAX,
     });
     return {
       // The lanes the write route admits (accountChatWrites.ts, visibleTargets).
@@ -81,10 +88,20 @@ async function readConversation(
   );
   if (thread === undefined)
     return { ok: false, reason: `chat thread not found: ${target.threadId}`, refusal: "missing" };
-  const [messages, reactions] = await Promise.all([
-    store.listMessages({ workspaceId, threadId: thread.id }),
-    store.listReactions({ workspaceId, threadId: thread.id }),
-  ]);
+  const { messageCount } = await pages.getThread({ workspaceId, threadId: thread.id });
+  const end = Math.min(target.before ?? messageCount, messageCount);
+  const start = Math.max(0, end - PHONE_CONTEXT_MESSAGES_MAX);
+  const messages =
+    end === start
+      ? []
+      : (
+          await pages.listMessagesPage({
+            workspaceId,
+            threadId: thread.id,
+            limit: end - start,
+            ...(start === 0 ? {} : { afterMessageOrder: start - 1 }),
+          })
+        ).messages;
   const channel =
     thread.channelId === undefined
       ? undefined
@@ -94,9 +111,10 @@ async function readConversation(
       kind: "thread",
       threadId: thread.id,
       groupKind: channel === undefined ? null : cliGroupKind(channel.kind),
+      nextBefore: start === 0 ? null : start,
     },
     messages,
-    reactions,
+    reactions: [],
   };
 }
 
@@ -159,9 +177,13 @@ function mentionCandidates(
  * account's copy of `workspaceId`, after the copy syncs. The caller
  * authenticates the account, checks that it owns the workspace and that the
  * workspace shows on the phone, and parses the target. `authorize` runs once
- * the copy is open, once it has synced, and once the conversation is read;
- * nothing is awaited from that last check to the answer, whose wakes and
- * mention candidates are read from storage in the same turn.
+ * the copy is open, once it has synced, and once the conversation is read.
+ * The relay log's head bounds what any sync of the copy can pull, so the
+ * read is judged against it: when the head is unchanged from before the copy
+ * synced through that last check, the read still holds, and nothing is
+ * awaited from the check to the answer, whose wakes and mention candidates
+ * are read from storage in the same turn. When the head moved, the copy syncs
+ * and reads once more; a second move answers a failed read.
  */
 export async function runAccountChatContext(
   server: { storage: SyncRelayStorage; copies: ServerCopies },
@@ -177,43 +199,60 @@ export async function runAccountChatContext(
   const { storage } = server;
   const { workspaceId, accountId } = input;
   const { signal } = input.visitor;
+  const logHead = () => storage.accountFeedStanding(workspaceId)?.log ?? null;
   return await server.copies.withServerCopy(accountId, workspaceId, input.visitor, async (copy) => {
     await input.authorize();
     const cursor = currentAccountFeedCursor(storage, workspaceId);
-    await copy.sync(signal);
-    await input.authorize();
-    let read: Conversation | MissingResult;
-    try {
-      read = await readConversation(serverChats(storage, copy, workspaceId), input.target);
-    } catch (error) {
-      if (error instanceof RelayError || signal.aborted) throw error;
+    const failed = async (error: unknown) => {
       await input.authorize();
       return { result: failure(error, "failed to read chat context", "operation-only"), cursor };
-    }
-    await input.authorize();
-    if (!("conversation" in read)) return { result: read, cursor };
-    const nowMs = input.nowMs();
-    // The cursor first: a change after it, even in this same turn, moves the head past it.
-    const wakeCursor = String(storage.chatWakeHead(accountId));
-    const shown = new Map(read.messages.map((message) => [message.id, message.threadId]));
-    const unmatched = storage.unmatchedWakeMessages({
-      accountId,
-      workspaceId,
-      messageIds: [...shown.keys()],
-    });
-    return {
-      result: {
-        ok: true,
-        conversation: read.conversation,
-        mentions: mentionCandidates(storage, { accountId, workspaceId, nowMs }, read),
-        wakes: storage.phoneChatWakes({ accountId, workspaceId, messages: shown, nowMs }),
-        unmatched: [...shown]
-          .filter(([messageId]) => unmatched.has(messageId))
-          .map(([messageId, threadId]) => ({ messageId, threadId })),
-        wakeCursor,
-      },
-      cursor,
     };
+    for (let attempt = 1; ; attempt += 1) {
+      const head = logHead();
+      await copy.sync(signal);
+      await input.authorize();
+      let read: Conversation | MissingResult;
+      try {
+        // A fresh host for each read, since a host keeps the places it judged.
+        read = await readConversation(
+          serverChats(storage, copy, workspaceId),
+          new ChatsLiveAdapter(copy.client, copy.workspace, { workspaceId }),
+          input.target,
+        );
+      } catch (error) {
+        if (error instanceof RelayError || signal.aborted) throw error;
+        return await failed(error);
+      }
+      await input.authorize();
+      if (logHead() !== head) {
+        if (attempt === 2) return await failed(null);
+        continue;
+      }
+      // Nothing is awaited from the check above to the answer.
+      if (!("conversation" in read)) return { result: read, cursor };
+      const nowMs = input.nowMs();
+      // The cursor first: a change after it, even in this same turn, moves the head past it.
+      const wakeCursor = String(storage.chatWakeHead(accountId));
+      const shown = new Map(read.messages.map((message) => [message.id, message.threadId]));
+      const unmatched = storage.unmatchedWakeMessages({
+        accountId,
+        workspaceId,
+        messageIds: [...shown.keys()],
+      });
+      return {
+        result: {
+          ok: true,
+          conversation: read.conversation,
+          mentions: mentionCandidates(storage, { accountId, workspaceId, nowMs }, read),
+          wakes: storage.phoneChatWakes({ accountId, workspaceId, messages: shown, nowMs }),
+          unmatched: [...shown]
+            .filter(([messageId]) => unmatched.has(messageId))
+            .map(([messageId, threadId]) => ({ messageId, threadId })),
+          wakeCursor,
+        },
+        cursor,
+      };
+    }
   });
 }
 
@@ -234,16 +273,34 @@ type WakeChangesStorage = Pick<
   "chatWakeHead" | "chatWakeChanges" | "accountFeedThreadPaths"
 >;
 
+// How a thread stands by the relay's log alone. Hidden as the feed judges it: its create names a hidden path, or the
+// log last put its file at one. Shown only when the log holds its create, and, for a thread on a file, last put that
+// file at a path that isn't hidden. Anything else, such as a thread whose create the log doesn't hold, is unknown.
+function threadStanding(
+  storage: Pick<SyncRelayStorage, "accountFeedThreadPaths">,
+  workspaceId: string,
+  threadId: string,
+): "shown" | "hidden" | "unknown" {
+  const paths = storage.accountFeedThreadPaths(workspaceId, threadId);
+  if (paths.named.some(hiddenFile) || hiddenFile(paths.lastKnownPath ?? undefined)) return "hidden";
+  return paths.created && (paths.linkedObjectId === null || paths.lastKnownPath !== null)
+    ? "shown"
+    : "unknown";
+}
+
 /**
  * Answers the threads of the workspace whose wakes changed after `since`,
  * waiting up to `holdMs` for a change when none has. Its cursor is the
  * account's wake head, apart from the workspace feed's. A change in a thread
  * the log puts on a hidden file never answers, and neither does one in
  * another workspace; each only moves the cursor while the read keeps
- * waiting. A gap longer than one page answers each page, changed or not. A
- * `since` past the head answers `replace`. `authorize` runs after every
- * wait; the caller runs it once more before it answers. The phone reads the
- * context of a thread named here again, which checks everything afresh.
+ * waiting. A change in a thread the log can't place answers `replace`,
+ * which names no thread. A gap longer than one page answers each page,
+ * changed or not. A `since` past the head answers `replace`. `authorize`
+ * runs after every wait and before every answer; the threads are judged
+ * after that last check, with nothing awaited before the answer. The phone
+ * reads the context of a thread named here again, which checks everything
+ * afresh.
  */
 export async function readWakeChanges(
   storage: WakeChangesStorage,
@@ -261,19 +318,28 @@ export async function readWakeChanges(
   const { workspaceId, accountId } = input;
   let since = parseSince(input.since);
   const deadlineAtMs = Date.now() + input.holdMs;
+  const standing = (threadId: string) => threadStanding(storage, workspaceId, threadId);
+  const answered = async (threadIds: readonly string[]): Promise<WakeChangesAnswer> => {
+    const cursor = String(since);
+    await input.authorize();
+    const standings = threadIds.map(standing);
+    if (standings.includes("unknown")) return { cursor, replace: true };
+    return { cursor, threads: threadIds.filter((_, index) => standings[index] === "shown") };
+  };
   for (;;) {
     const head = storage.chatWakeHead(accountId);
-    if (since > head) return { cursor: String(head), replace: true };
+    if (since > head) {
+      await input.authorize();
+      return { cursor: String(head), replace: true };
+    }
     if (since < head) {
       const page = storage.chatWakeChanges({ accountId, workspaceId, since, through: head });
       since = page.next;
-      const threads = page.threadIds.filter((threadId) =>
-        threadShownByLog(storage, workspaceId, threadId),
-      );
-      if (threads.length > 0 || since < head) return { cursor: String(since), threads };
+      if (since < head || page.threadIds.some((threadId) => standing(threadId) !== "hidden"))
+        return await answered(page.threadIds);
     }
     const holdMs = deadlineAtMs - Date.now();
-    if (holdMs <= 0 || input.signal.aborted) return { cursor: String(since), threads: [] };
+    if (holdMs <= 0 || input.signal.aborted) return await answered([]);
     const caughtUp = since;
     await waits.wait({
       accountId,

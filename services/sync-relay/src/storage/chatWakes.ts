@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   CHAT_WAKE_PAGE_MAX,
+  PHONE_CONTEXT_WAKES_MAX,
   type ChatWakeCandidate,
   type ChatWakeState,
   type ChatWakeView,
@@ -535,7 +536,8 @@ const placeholders = (count: number) => Array.from({ length: count }, () => "?")
  * phone: only rows of the account in a workspace it owns, whose thread is the
  * one the caller read each message in. A row whose wait ran out reads as the
  * state it ends in, before a sweep writes it. A swept row, or one never made,
- * has no hint. Nothing here names a computer's install ID or candidates.
+ * has no hint. Nothing here names a computer's install ID or candidates. At
+ * most PHONE_CONTEXT_WAKES_MAX hints answer.
  */
 export function phoneChatWakes(
   storage: StorageContext,
@@ -561,6 +563,7 @@ export function phoneChatWakes(
         )
         .all(input.accountId, input.workspaceId, ...batch);
       for (const row of rows) {
+        if (hints.length === PHONE_CONTEXT_WAKES_MAX) return hints;
         if (input.messages.get(String(row.message_id)) !== String(row.thread_id)) continue;
         const ended = expiredState(row, input.nowMs);
         const state = ended ?? (String(row.state) as ChatWakeState);
@@ -590,23 +593,23 @@ export function unmatchedWakeMessages(
   storage: StorageContext,
   input: { accountId: string; workspaceId: string; messageIds: readonly string[] },
 ): Set<string> {
-  return storage.readTx(() => {
-    const found = new Set<string>();
-    for (let start = 0; start < input.messageIds.length; start += MESSAGE_BATCH) {
-      const batch = input.messageIds.slice(start, start + MESSAGE_BATCH);
-      for (const row of storage.db
-        .prepare(
-          `SELECT json_extract(o.command_json, '$.write.messageId') AS message_id FROM sync_relay_account_operations o
-           JOIN sync_relay_workspaces w ON w.workspace_id = o.workspace_id AND w.owner_user_id = o.account_id
-           WHERE o.account_id = ? AND o.workspace_id = ? AND o.command_json IS NOT NULL
-             AND json_extract(o.command_json, '$.wakes.unmatched') = 1
-             AND json_extract(o.command_json, '$.write.messageId') IN (${placeholders(batch.length)})`,
-        )
-        .all(input.accountId, input.workspaceId, ...batch))
-        found.add(String(row.message_id));
-    }
-    return found;
-  });
+  const wanted = new Set(input.messageIds);
+  if (wanted.size === 0) return new Set();
+  // One pass over the account's retained commands in the workspace, however many messages are asked about. An index
+  // on the frozen message ID of unmatched commands would spare the pass; it needs a schema upgrade, so it waits.
+  const rows = storage.readTx(() =>
+    storage.db
+      .prepare(
+        `SELECT json_extract(o.command_json, '$.write.messageId') AS message_id FROM sync_relay_account_operations o
+         JOIN sync_relay_workspaces w ON w.workspace_id = o.workspace_id AND w.owner_user_id = o.account_id
+         WHERE o.account_id = ? AND o.workspace_id = ? AND o.command_json IS NOT NULL
+           AND json_extract(o.command_json, '$.wakes.unmatched') = 1`,
+      )
+      .all(input.accountId, input.workspaceId),
+  );
+  return new Set(
+    rows.map((row) => String(row.message_id)).filter((messageId) => wanted.has(messageId)),
+  );
 }
 
 /** The most changed rows one call of chatWakeChanges reads. */

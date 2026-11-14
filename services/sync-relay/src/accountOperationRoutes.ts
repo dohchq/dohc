@@ -160,6 +160,7 @@ export function createAccountOperationRoute(options: {
     if (wakeFeed) {
       const url = new URL(request.url);
       const hold = url.searchParams.get("hold");
+      // It checks access last, then judges the threads it answers, with nothing awaited between.
       const answer = await readWakeChanges(storage, options.wakeWaits, {
         workspaceId: route.workspaceId,
         accountId: caller.userId,
@@ -169,7 +170,6 @@ export function createAccountOperationRoute(options: {
         signal: request.signal,
         authorize,
       });
-      await authorize();
       return jsonResponse({ ok: true, ...answer });
     }
     let args: unknown;

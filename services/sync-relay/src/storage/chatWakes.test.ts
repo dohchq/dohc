@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import {
   closeTestStorage,
   closeTestStorages,
@@ -785,7 +785,27 @@ it("gives no hint once a wake's row or its write's command is gone, rather than 
     });
   expect(unmatched("ana", "trip")).toEqual(new Set(["message-unmatched"]));
   expect(unmatched("ana", "bens")).toEqual(new Set());
-  expect(storage.tombstoneSettledAccountOperations(NOW + OPERATION_KEEP_SETTLED_MS + 1)).toBe(3);
+
+  // Messages past what one statement once named take one pass over the commands all the same.
+  sent("op-late", "message-late", true);
+  const many = [
+    "message-unmatched",
+    ...Array.from({ length: 1_200 }, (_, index) => `message-${index}`),
+    "message-late",
+  ];
+  const prepare = vi.spyOn((storage as StorageContext).db, "prepare");
+  try {
+    expect(
+      storage.unmatchedWakeMessages({ accountId: "ana", workspaceId: "trip", messageIds: many }),
+    ).toEqual(new Set(["message-unmatched", "message-late"]));
+    expect(
+      prepare.mock.calls.filter(([sql]) => sql.includes("sync_relay_account_operations")),
+    ).toHaveLength(1);
+  } finally {
+    prepare.mockRestore();
+  }
+
+  expect(storage.tombstoneSettledAccountOperations(NOW + OPERATION_KEEP_SETTLED_MS + 1)).toBe(4);
   expect(unmatched("ana", "trip"), "a tombstone keeps no command").toEqual(new Set());
 });
 
