@@ -242,16 +242,6 @@
       "run_attempt": 1
     },
     {
-      "name": "Rust tests 7",
-      "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
-      "status": "completed",
-      "conclusion": "success",
-      "created_at": "2026-11-13T18:03:13Z",
-      "started_at": "2026-11-13T18:03:16Z",
-      "completed_at": "2026-11-13T18:06:01Z",
-      "run_attempt": 1
-    },
-    {
       "name": "Manual verification",
       "head_sha": "73eabb99756f1e9836a81c2f94817254309a4882",
       "status": "completed",
@@ -262,5 +252,5 @@
       "run_attempt": 1
     }
   ],
-  "adaptation": "Build and confinement jobs folded into the current graph; completion times retained. Rust worker starts retained to model delayed scheduling."
+  "adaptation": "Build and confinement jobs folded into the current graph; completion times retained. Rust worker starts retained to model delayed scheduling. Removed Rust test jobs above 6; retained all remaining timestamps."
 }

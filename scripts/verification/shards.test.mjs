@@ -26,6 +26,7 @@ import {
 import { JS_SHARDS } from "./cloud.mjs";
 import {
   RUST_ARCHIVE_PROOFS,
+  RUST_PARTITION_ZERO_DELAY_SECONDS,
   RUST_POLICY_STEPS,
   RUST_READER_SHARD,
   RUST_SHARDS,
@@ -514,6 +515,7 @@ test("Rust partitions use binary defaults for new tests and the global default f
       2,
       times,
       0,
+      0,
     ),
     [
       ["known slow", "constructor new", "new_crate new"],
@@ -526,11 +528,23 @@ test("Rust partitions use binary defaults for new tests and the global default f
 test("The reader shard takes less test time to leave room for the reader tests", () => {
   const times = { defaultSeconds: 10, binaries: {}, tests: {} };
   const inventory = Array.from({ length: 8 }, (_, i) => `crate t${i}`);
-  const partitions = partitionRustTests(inventory, 2, times, 20);
+  const partitions = partitionRustTests(inventory, 2, times, 20, 0);
   assert.equal(RUST_READER_SHARD, 1);
   assert.deepEqual(
     partitions.map((tests) => tests.length),
     [5, 3],
+  );
+});
+
+test("Rust partition zero takes less test time to allow for its later start", () => {
+  const times = { defaultSeconds: 1, binaries: {}, tests: {} };
+  // With 51 one-second tests, the 17 s reserve makes both partitions finish at 34 s.
+  const inventory = Array.from({ length: 51 }, (_, i) => `crate t${i}`);
+  const partitions = partitionRustTests(inventory, 2, times, 0);
+  assert.equal(RUST_PARTITION_ZERO_DELAY_SECONDS, 17);
+  assert.deepEqual(
+    partitions.map((tests) => tests.length),
+    [17, 34],
   );
 });
 

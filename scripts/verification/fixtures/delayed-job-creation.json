@@ -1,5 +1,5 @@
 {
-  "adaptation": "Build and confinement jobs folded into the current graph; completion times retained. Rust worker starts retained to model delayed scheduling.",
+  "adaptation": "Build and confinement jobs folded into the current graph; completion times retained. Rust worker starts retained to model delayed scheduling. Removed Rust test jobs above 6; retained all remaining timestamps.",
   "runId": 43235841741,
   "attempt": 2,
   "headSha": "d29fafc862619a1f12f8c7bb0aa7ad633f0833cb",
@@ -35,20 +35,7 @@
     ["Rust tests 5",633.0,660.0,812.0],
     ["Rust tests 2",633.0,659.0,790.0],
     ["Rust tests 1",633.0,659.0,843.0],
-    ["Rust tests 6",633.0,660.0,817.0],
-    ["Rust tests 11",633.0,660.0,841.0],
-    ["Rust tests 7",633.0,660.0,836.0],
-    ["Rust tests 12",633.0,660.0,797.0],
-    ["Rust tests 9",633.0,660.0,797.0],
-    ["Rust tests 17",633.0,660.0,802.0],
-    ["Rust tests 14",633.0,659.0,805.0],
-    ["Rust tests 15",633.0,660.0,839.0],
-    ["Rust tests 10",633.0,659.0,857.0],
-    ["Rust tests 16",633.0,659.0,844.0],
-    ["Rust tests 8",633.0,660.0,810.0],
-    ["Rust tests 18",633.0,660.0,826.0],
-    ["Rust tests 13",633.0,660.0,809.0],
-    ["Rust tests 19",634.0,660.0,843.0]
+    ["Rust tests 6",633.0,660.0,817.0]
   ],
   "reportingJobs": [
   {
