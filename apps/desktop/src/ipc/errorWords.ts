@@ -208,6 +208,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
       "Another copy of dohc has this workspace open. Close it there, then try again.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
+    "relay-server-busy": "The server is busy. Try again in a moment.",
     "*": null,
   },
   // dohc restarts its engine by itself, except while quitting or when this

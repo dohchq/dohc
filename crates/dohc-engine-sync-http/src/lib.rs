@@ -1553,7 +1553,7 @@ define_server_error_codes! {
     "quota_exceeded" => |_| RelayError::QuotaExceeded,
     "secret_path" => |_| RelayError::BadRequest,
     "self_share" => |_| RelayError::SelfShare,
-    "server_busy" => |_| RelayError::HttpStatus(503),
+    "server_busy" => |_| RelayError::ServerBusy,
     "server_copies_off" => unavailable,
     "share_op_rejected" => |_| RelayError::ShareOperationRejected,
     "share_read_only" => |_| RelayError::ShareReadOnly,

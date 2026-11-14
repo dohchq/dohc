@@ -372,6 +372,9 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::SettlementProofBudget) => {
             return WireError::new(ErrorCode::Overloaded, "settlement-proof-budget");
         }
+        RuntimeError::Relay(RelayError::ServerBusy) => {
+            return WireError::new(ErrorCode::Overloaded, "relay-server-busy");
+        }
         RuntimeError::Relay(RelayError::OriginDiverged) => {
             return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
         }
@@ -547,7 +550,8 @@ fn map_relay_code(error: &RelayError) -> ErrorCode {
         RelayError::DiscussionRateLimited
         | RelayError::LinkReadRateLimited
         | RelayError::ShareAccessRateLimited
-        | RelayError::SettlementProofBudget => ErrorCode::Overloaded,
+        | RelayError::SettlementProofBudget
+        | RelayError::ServerBusy => ErrorCode::Overloaded,
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,
         RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
@@ -1015,6 +1019,14 @@ mod tests {
             assert_eq!(wire.message, "document-too-dense");
             assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
         }
+    }
+
+    #[test]
+    fn a_busy_relay_reaches_the_desktop_as_busy() {
+        let wire = map_runtime(RuntimeError::Relay(RelayError::ServerBusy));
+        assert_eq!(wire.code, ErrorCode::Overloaded);
+        assert_eq!(wire.message, "relay-server-busy");
+        assert_eq!(wire.retry, dohc_engine_protocol::Retryability::AfterBackoff);
     }
 
     /// A busy SQLite handle is transient wherever it appears, and it appears

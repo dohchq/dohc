@@ -64,8 +64,8 @@ export class MixedRelayTransportError extends Error {
   }
 }
 
-// The server answered that it is busy. The engine already split the push
-// down to one change, so a later pass is all that is left to try.
+// The server answered that it is busy: it had no room for the request, or
+// for even one change's settlement proof. A later pass is all that is left.
 export class RelayBusyError extends Error {
   constructor() {
     super("The server is busy.");
@@ -475,7 +475,7 @@ function translateRelayError(method: string, error: unknown): never {
   if (
     SYNC_PASS_METHODS.has(method) &&
     error.wireCode === "OVERLOADED" &&
-    error.message === "settlement-proof-budget"
+    (error.message === "settlement-proof-budget" || error.message === "relay-server-busy")
   ) {
     throw new RelayBusyError();
   }
