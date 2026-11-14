@@ -544,7 +544,6 @@ const demoBridge = {
     rewriteAssetUrls(payload.relativePath, null);
     return { trashed: true };
   },
-  // The demo offers no Explorer menu.
   async readExplorerMenu() {
     return [];
   },

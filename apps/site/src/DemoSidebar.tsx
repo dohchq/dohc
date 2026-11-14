@@ -78,7 +78,6 @@ export function DemoSidebar(props: {
   visible: boolean;
   documents: DemoWorkspaceDocument[];
   folders?: string[];
-  // The document the editor shows, or null when no tab is open.
   activePath: string | null;
   openTabs: readonly string[];
   onOpenDocument: (path: string) => void;

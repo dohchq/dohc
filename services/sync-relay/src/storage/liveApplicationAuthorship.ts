@@ -293,7 +293,6 @@ export async function prepareLiveApplications(
         cancelledRestores: canonicalCancellations(record.cancelledRestores),
         contentCoordinate: { originId: coordinate.originId, originSeq: coordinate.originSeq },
       };
-      // Reject alternate key order, whitespace and extra top-level/metadata/source fields.
       require(bytes.equals(Buffer.from(JSON.stringify(canonical))));
       const authors = new Map<string, unknown>();
       for (const author of [

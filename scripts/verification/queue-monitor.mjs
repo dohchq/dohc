@@ -455,7 +455,6 @@ export function monitorState(
       .map((run) => run.awakeMs),
   );
   const line = runOrder(requests).filter((entry) => entry.status.state === "queued");
-  // How many requests each owner has waiting.
   const waitingFor = new Map();
   for (const { key } of line.map((entry) => ownerOf(entry.request)))
     waitingFor.set(key, (waitingFor.get(key) ?? 0) + 1);

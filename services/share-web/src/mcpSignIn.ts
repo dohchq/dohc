@@ -23,7 +23,6 @@ const AUTHORIZATION_SERVER_METADATA = "/.well-known/oauth-authorization-server";
 const REGISTER = "/oauth/register";
 const AUTHORIZE = "/oauth/authorize";
 const DECISION = "/oauth/authorize/decision";
-// A personal sign-in's own forms: the browser's account sign-in and sign-out, and the consent.
 const SIGN_IN = "/oauth/authorize/sign-in";
 const SIGN_OUT = "/oauth/authorize/sign-out";
 const PERSONAL_DECISION = "/oauth/authorize/agent";
@@ -280,7 +279,6 @@ const hueClass = (hue: AgentHue | null) => (hue ? ` hue-${hue}` : "");
 // dashed; one signing in again is solid, in its own color.
 type AgentTile = { name: string | null; hue: AgentHue | null; known: boolean };
 
-// What heads a page's card: the tiles, the title, and the line under it as markup.
 type PageHead = { title: string; line?: string; agent?: AgentTile };
 
 function tiles(agent: AgentTile | undefined): string {
@@ -426,7 +424,6 @@ function redirectTo(redirectUri: string, values: Record<string, string | null>):
 
 type RelayAnswer = { status: number; value: Record<string, unknown> | null; code: string | null };
 
-// An agent's sign-in request, as its authorize address names it.
 type AuthorizeRequest = {
   clientId: string;
   redirectUri: string;

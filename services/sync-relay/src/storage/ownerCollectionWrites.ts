@@ -15,7 +15,6 @@ export interface OwnerCollectionWriteFile {
   path: string;
   objectId: string;
   momentId: string;
-  /** The write created the file. */
   created: boolean;
   publicPrincipalId?: string;
 }

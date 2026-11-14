@@ -22,7 +22,6 @@ export async function firstFreeFolderName(
     );
     if (!taken) return candidate;
   }
-  // Past that, the name stays as the person sees it.
   return name;
 }
 

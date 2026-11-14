@@ -90,7 +90,6 @@ export function byName<Declaration, Name extends string>(
   return named as Record<Name, Declaration>;
 }
 
-// Gives each named entry one value, under the same name.
 export function mapNamed<Name extends string, Entry, Value>(
   named: Readonly<Record<Name, Entry>>,
   value: (entry: Entry, name: Name) => Value,

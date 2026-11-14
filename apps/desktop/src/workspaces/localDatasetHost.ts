@@ -1334,7 +1334,6 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
             after = page.nextCursor;
           }
         },
-        /** A dataset's approved revision now. */
         revision(datasetId: string): DatasetRevision {
           assertCurrent();
           return host.approvedRevision(owner, { workspaceId, datasetId });

@@ -110,7 +110,6 @@ export interface StopAndRestoreDependencies {
   stopLiveEditing?(path: string, objectId: string): Promise<"stopped" | "kept" | "waiting">;
   /** The names in a workspace folder, or none when it is gone. */
   folderEntries(path: string): Promise<string[]>;
-  /** Removes a workspace folder only when it is empty. */
   removeEmptyFolder(path: string): Promise<void>;
   /** Runs undone and left, and fields kept at a later value or on records that left their Collection. */
   undoRuns(

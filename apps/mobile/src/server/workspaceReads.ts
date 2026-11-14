@@ -89,7 +89,6 @@ export interface ChatGroup {
   readonly threadIds: readonly string[];
   /** The account's unread messages across its threads. */
   readonly unreadCount: number;
-  /** Its threads with a message the account hasn't read. */
   readonly unreadThreadIds: readonly string[];
 }
 
@@ -276,7 +275,6 @@ const missingChat = (result: unknown): MissingChat | null =>
     ? { kind: "missing" }
     : null;
 
-/** Where an item sits in a chat's stream. */
 interface StreamPosition {
   readonly createdAtMs: number;
   readonly lane: "posts" | "chat";

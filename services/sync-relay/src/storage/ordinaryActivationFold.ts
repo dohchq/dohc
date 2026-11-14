@@ -131,7 +131,6 @@ export function readOrdinaryFoldPage(
       )
       .get(document.workspaceId)!.cursor,
   );
-  // The note's rows in relay order, with their payload sizes.
   const sizes = storage.db
     .prepare(`SELECT relay_seq,octet_length(payload_json) AS payload_bytes
     FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page

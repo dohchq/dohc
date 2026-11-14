@@ -78,7 +78,6 @@ export function createNoticeFiles(
     return next;
   }
 
-  /** The file's fields when it parses and is of this format and for `scope`, or null. */
   async function parsed(file: File, scope: string, format: number) {
     if (!file.exists) return null;
     try {

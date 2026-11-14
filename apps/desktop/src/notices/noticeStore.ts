@@ -245,8 +245,6 @@ function unattributedTitle(path: string | null | undefined): string {
   return isNoticeLine(title, NOTICE_TITLE_MAX_CHARS) ? title : lead;
 }
 
-// What dohc did comes first and the note's name last, with no quotes, as in
-// "Couldn't save packing.md".
 function heldTitle(path: string | null | undefined): string {
   const lead = "Held a change to ";
   const name = path?.slice(path.lastIndexOf("/") + 1) ?? "";

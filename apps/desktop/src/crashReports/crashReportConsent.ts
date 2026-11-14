@@ -20,7 +20,6 @@ export async function confirmCrashReportSend(
       cancelId: number;
       noLink: boolean;
     }): Promise<{ response: number }>;
-    // Shows the text in the system's text editor.
     openText(text: string): Promise<void>;
   },
   request: CrashReportSendRequest,

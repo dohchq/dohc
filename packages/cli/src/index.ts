@@ -683,7 +683,6 @@ function buildCliRequest(
 // A verb that could not do what was asked exits with its reason. A refused
 // Try again for another computer's run adds the notice that names it.
 function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
-  // A Collections list this computer can't give fails, as it did when main threw the refusal.
   if (result !== null && "kind" in result && result.kind === "collections-refused") {
     const { refusal } = result;
     return refusal.kind === "server-unavailable"

@@ -37,7 +37,6 @@ const REACH_IDLE_MS = 10 * 60_000;
 
 type DocumentClaim = { objectId: unknown; versionId: unknown; path: unknown; workspaceId: unknown };
 
-// The document a row names, read where each kind states it.
 function claimedDocument(opKind: string, payload: Record<string, unknown>): DocumentClaim | null {
   if (opKind === "moment.append" || opKind === "ydoc.update") {
     return {

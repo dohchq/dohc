@@ -1235,7 +1235,6 @@ function liveJournalPersonalMarked(db: SqliteDb): boolean {
     .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
     .get(LIVE_JOURNAL_PERSONAL_MIGRATION);
 }
-/** The journal SQL `sql` with personal authority allowed, normalized. */
 function personalJournalSql(sql: string): string {
   let result = normalizedSchemaSql(sql);
   for (const [from, to] of LIVE_JOURNAL_PERSONAL_CHANGES) {

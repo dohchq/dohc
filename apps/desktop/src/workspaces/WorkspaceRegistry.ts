@@ -132,7 +132,6 @@ export function setWorkspaceAutomationHost(
   store().setAutomationHost(workspaceId, host);
 }
 
-// A new listing of the workspace's grants. See registryStore.setShareRoster.
 export function setWorkspaceShareRoster(
   workspaceId: string,
   listing: RosterListing,
@@ -171,7 +170,6 @@ export function reconcileWorkspaceRecipientShares(
   return store().reconcileRecipientShares(workspaceId, reconcile);
 }
 
-// Change the workspace's joined shared channels. See updateReceived.
 export function updateWorkspaceSharedChannels(
   workspaceId: string,
   update: (current: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
@@ -184,7 +182,6 @@ export function updateWorkspaceSharedChannels(
   );
 }
 
-// Share mounts: change the workspace's mounted shares. See updateReceived.
 export function updateWorkspaceShareMounts(
   workspaceId: string,
   update: (current: readonly ShareMountRecord[]) => readonly ShareMountRecord[],

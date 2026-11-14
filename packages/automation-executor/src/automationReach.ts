@@ -223,7 +223,6 @@ function isCanonical(path: string): boolean {
   );
 }
 
-// Why dohc cannot use a path a step names, or null.
 function pathProblem(path: string, name: string, role: "source" | "target"): string | null {
   if (isSharedWithMePath(path)) {
     return role === "source"

@@ -213,7 +213,6 @@ export class DatasetReopenWaitError extends Error {
     this.name = "DatasetReopenWaitError";
   }
 }
-// A worker that ran out of CPU or time, stopped, could not save its replay, or could not be reopened.
 const WORKER_FAILURES = new Set([
   "worker_budget",
   "worker_stalled",

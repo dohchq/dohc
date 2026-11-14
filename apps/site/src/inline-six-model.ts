@@ -340,7 +340,6 @@ export function createInlineSixEngine() {
   camCover(-0.51, 1.02, 5.38, 0);
   cylinder(0.17, 0.07, [0, 0.42, -1.95], chrome, intakeCover, "y");
   box([0.23, 0.045, 0.06], [0, 0.48, -1.95], steel, intakeCover, 0.012);
-  // Fine red enamel inset, shared with the small ignition details.
   box([0.23, 0.012, 0.72], [0, 0.362, 0.1], red, intakeCover, 0.025);
   const badgeCanvas = new OffscreenCanvas(512, 128);
   const badgeContext = badgeCanvas.getContext("2d")!;
@@ -563,7 +562,6 @@ export function createInlineSixEngine() {
     for (const dy of [-0.12, 0.12]) fastener([side * 0.51, 1.14 + dy, 2.924], engine, "z", 0.03);
     for (const y of [0.56, 0.94]) fastener([side * 0.77, y, 2.895], engine, "z", 0.035);
   }
-  // Water pump, crank pulley and period generator with a single accessory belt.
   function pulley(x: number, y: number, radius: number) {
     cylinder(radius, 0.16, [x, y, 3.06], graphite);
     for (const z of [2.99, 3.13]) ring(radius, 0.022, [x, y, z], chrome);
@@ -720,7 +718,6 @@ export function createInlineSixEngine() {
     }
   }
 
-  // Oil filter canister, housing, pressure sender and metal oil line.
   box([0.26, 0.22, 0.4], [0.87, -0.11, 0.5], castAlloy);
   cylinder(0.23, 0.08, [1.02, -0.2, 0.5], castAlloy, engine, "y");
   cylinder(0.205, 0.58, [1.02, -0.53, 0.5], graphite, engine, "y");
@@ -754,7 +751,6 @@ export function createInlineSixEngine() {
   );
   for (const y of [-0.47, 0.77]) cylinder(0.058, 0.065, [-0.83, y, -2.4], copper, engine, "y", 6);
 
-  // Cooling rail and formed rubber hose, with slotted stainless clamps.
   function hoseClamp(position: number[], radius: number, axis: "x" | "y" | "z") {
     ring(radius, 0.019, position, steel, engine, axis);
     const screw = [...position];
@@ -811,7 +807,6 @@ export function createInlineSixEngine() {
   ring(0.108, 0.017, [1.1, 1.54, 2.69], rubber);
   cylinder(0.09, 0.008, [1.1, 1.54, 2.66], black);
 
-  // Dashpot screws, bowl seams, jets, throttle levers and return springs.
   for (const z of [-1.68, 0, 1.68]) {
     for (let i = 0; i < 3; i++) {
       const a = (i * Math.PI * 2) / 3;
@@ -863,7 +858,6 @@ export function createInlineSixEngine() {
       cylinder(0.016, 0.02, [2.11, 0.7 + dy, z], steel, engine, "x", 12);
   }
 
-  // Distributor towers, retaining clips, coil terminals and restrained wire routing.
   for (let i = 0; i < 6; i++) {
     const a = (i * Math.PI) / 3;
     const x = 0.98 + Math.cos(a) * 0.17;
@@ -899,7 +893,6 @@ export function createInlineSixEngine() {
     for (const x of [-0.12, 0.12]) cylinder(0.018, 0.56, [x, 1.18, z], metal, engine, "y", 12);
   }
 
-  // Machined joints, weld seams and cast ribs around the accessory and rear housings.
   for (const z of [1.88, 2.6]) ring(0.327, 0.022, [1.13, -0.48, z], metal);
   for (const dx of [-0.21, 0.21]) {
     cylinder(0.025, 0.99, [1.13 + dx, -0.26, 2.25], steel, engine, "z", 12);

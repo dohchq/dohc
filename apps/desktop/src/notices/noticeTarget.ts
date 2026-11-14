@@ -99,7 +99,6 @@ export function sentNoticeTarget(
   controls: boolean,
 ): SentNoticeTarget | null {
   const { thread, message, run } = notice.target ?? {};
-  // A run's notice, or one that names a conversation here and no file.
   if (
     thread !== undefined &&
     (notice.kind === "agent-run" || (place.path === null && place.mount === null))

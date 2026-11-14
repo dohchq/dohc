@@ -1390,7 +1390,6 @@ async function runRenameRepro(
       expect
         .soft(control, `${kind}: the relay's session host runs in the self-host default mode`)
         .toMatchObject([{ mode: "service" }]);
-      // The owner edits A in its editor, and delivery carries the edit to the session host.
       await editPage(oldPath, "a-live", false);
       await expect
         .poll(
@@ -2383,7 +2382,6 @@ async function runDeleteRepro(
         stopNotice,
       });
 
-      // Step 3: delete A in Explorer, then B and C.
       step = "3-delete";
       const deleted = await appDelete(oldPath);
       observe({ deleted, onDisk: await onDisk(), ownerA: ownerRowsOfA() });
@@ -2509,7 +2507,6 @@ async function runDeleteRepro(
       };
       observe({ atStop, onDisk: await onDisk() });
 
-      // Step 3: Stop live editing on A's row, as its Stop button does.
       step = "3-stop";
       const stopped = await stopViaApp({ path: oldPath, objectId: objectIdA }).then(
         (result) => ({ ok: true as const, result }),
@@ -2522,7 +2519,6 @@ async function runDeleteRepro(
         owedStops: await owedStopsOfA(),
       };
       observe({ stopped, ...after });
-      // Live editing stops for A, and Stop says so.
       expect(
         {
           stopped,
@@ -2674,7 +2670,6 @@ async function runDeleteRepro(
       ).toEqual({ ok: true, onDisk: false });
     }
 
-    // Step 3: a new page B, and an ordinary saved change to the file C.
     await newAndChanged();
     expectPublished(
       "after B and C",

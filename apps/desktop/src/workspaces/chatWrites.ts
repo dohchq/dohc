@@ -151,7 +151,6 @@ export function createChatWrites(dependencies: {
   // Changes whenever the credential cache sets, clears, or reloads a session.
   currentCredentialGeneration(): number;
   localUserDisplayName(): string;
-  // The name of the person's agent with this id.
   agentDisplayName(agentId: string): Promise<string>;
   // The agents a person's message wakes, from its body, its DM's agent and
   // the agent it answers.

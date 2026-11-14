@@ -285,7 +285,6 @@ function grantedListing(
     if (!where.success || where.data.workspaceId !== workspaceId) {
       return { grants: null, problem: { kind: "unusable-listing" } };
     }
-    // A relay from before grants reported their automations writes.
     if (row !== null && typeof row === "object" && !("automationsGeneration" in row)) {
       return { grants: null, problem: { kind: "outdated-server" } };
     }

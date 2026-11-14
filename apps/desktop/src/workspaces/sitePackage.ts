@@ -2207,8 +2207,6 @@ function jsReferencesFromCode(
   return references;
 }
 
-// ---- HTML: parse once with parse5 and walk the real tree.
-
 interface HtmlDocumentReferences {
   references: BrowserTextReference[];
   // The document's own active import map, if it declared one — undefined

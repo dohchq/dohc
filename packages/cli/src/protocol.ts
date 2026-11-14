@@ -296,7 +296,6 @@ export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: tr
   })
   .strict();
 
-// The operations declared in workspace-contracts, by the socket verb each answers.
 type Families = typeof DECLARATION_FAMILIES;
 export type DeclaredOperation = {
   [Family in keyof Families]: Families[Family][keyof Families[Family]];
@@ -1595,7 +1594,6 @@ const replyResultSchema = z
     warning: z.string().min(1).optional(),
   })
   .strict();
-// Try again for a conversation's stopped agent request: queued, or why not.
 const chatRetryResultSchema = z.union([
   z
     .object({ ok: z.literal(true), status: z.literal("queued"), threadId: z.string().min(1) })
@@ -1895,7 +1893,6 @@ const groupsFullResultSchema = z.discriminatedUnion("ok", [
                   title: z.string(),
                   lane: z.enum(["posts", "chat"]).optional(),
                   messageCount: z.number().int().nonnegative(),
-                  // The person's unread messages in the thread.
                   unreadCount: z.number().int().nonnegative(),
                   updatedAtMs: z.number().int().nonnegative(),
                 })
@@ -2574,7 +2571,6 @@ const automationRunFields = {
   createdAtMs: z.number().int().nonnegative(),
   updatedAtMs: z.number().int().nonnegative(),
   trigger: automationTriggerSchema,
-  // The run began under another version of the automation.
   definitionChanged: z.boolean(),
   // It failed before it started, as a chain stop or a change too large to
   // start automations for, so it cannot run again.

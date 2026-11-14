@@ -25,7 +25,6 @@ export type AccountOperationRoute = {
   operation: string;
 };
 
-/** The most an operation's arguments take. */
 const ACCOUNT_OPERATION_MAX_BODY_BYTES = 256 * 1024;
 // How long the arguments take to arrive.
 const BODY_RECEIPT_MS = 10_000;

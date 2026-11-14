@@ -23,7 +23,6 @@ export interface ToastMessage {
   /** Fewer title lines than the usual 4, for a title written to fit them. */
   readonly titleLines?: number;
   readonly body?: string;
-  /** One worded action under the text: Try again, Undo. */
   readonly action?: { readonly label: string; onPress?(): void };
   /** A sent notice's toast carries its row's sender mark; without one, a failure is held on this phone. */
   readonly sender?: SenderKind;

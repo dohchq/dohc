@@ -1466,7 +1466,6 @@ function makeRoom(
   const freed = removeRows(storage, recipientUserId, null, senderUserId, excess, nowMs);
   if (freed < excess) throw relayError("notice_list_full");
   if (removed + freed === 0) return;
-  // Past its tombstone limit, a list deletes its oldest tombstones.
   raiseFloors(
     storage,
     storage.db
@@ -1558,7 +1557,6 @@ function sweepExpiredNotices(
   );
 }
 
-// Each list's floor rises to the newest change among its deleted rows.
 function raiseFloors(storage: StorageContext, deleted: readonly Record<string, unknown>[]): void {
   const floors = new Map<string, number>();
   for (const row of deleted) {

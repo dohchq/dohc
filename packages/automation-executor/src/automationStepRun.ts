@@ -317,7 +317,6 @@ export async function runSteps(
   return outcome.kind === "done" ? outcome : outcome.outcome;
 }
 
-/** What running steps needs besides a backend. */
 type StepRunDependencies = Pick<
   CollectionAutomationRunDependencies,
   | "makeDurable"

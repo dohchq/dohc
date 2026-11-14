@@ -63,7 +63,6 @@ export interface PresenceHubOptions {
   // misbehaving client spraying clientIds. Updates to existing entries are
   // always allowed; only new distinct entries past the cap are refused.
   maxEntriesPerScope?: number;
-  // Global caps across all scopes: total scope count and total entry count.
   maxScopes?: number;
   maxTotalEntries?: number;
   // Per-workspace (scope group) caps, so one workspace spraying topics cannot

@@ -58,7 +58,6 @@ export function localCollectionEngine(input: {
           },
         );
       } catch (error) {
-        // The saved version is no longer writable, another file holds the path, or policy refuses it.
         if (
           (error instanceof VersionedTextStoreError &&
             (error.code === "invalid-version" || error.code === "target-path-exists")) ||

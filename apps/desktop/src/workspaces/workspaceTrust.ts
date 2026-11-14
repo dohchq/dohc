@@ -60,7 +60,6 @@ export function identityOf(folder: Pick<BigIntStats, "dev" | "ino">): string | n
   return folder.ino === 0n ? null : `${folder.dev}:${folder.ino}`;
 }
 
-// The folder now at a path.
 export async function folderIdentity(rootPath: string): Promise<string | null> {
   const folder = await stat(rootPath, { bigint: true });
   if (!folder.isDirectory()) throw new Error(`Not a folder: ${rootPath}`);
@@ -191,7 +190,6 @@ export function createWorkspaceTrust(dependencies: {
     });
 
   return {
-    // Throws when the file cannot be read, so the caller can say so.
     isTrusted: async (workspace: TrustedFolder): Promise<boolean> =>
       (await grantFor(workspace)) !== null,
     /**
@@ -241,7 +239,6 @@ export function createWorkspaceTrust(dependencies: {
     persistRevocation,
     // Whether this run restricted the workspace and nobody trusted it since.
     isRevoked: (workspaceId: string): boolean => restricted.has(workspaceId),
-    // Both, for a caller with nothing to do in between.
     restrict(workspaceId: string): Promise<void> {
       revoke(workspaceId);
       return persistRevocation(workspaceId);

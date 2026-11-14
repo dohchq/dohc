@@ -12,7 +12,6 @@ export default function Home() {
   return sampleBuild ? <SampleHome /> : <ServerHome />;
 }
 
-// The sample has no Home yet.
 function SampleHome() {
   const theme = useTheme();
   return (

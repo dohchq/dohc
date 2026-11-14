@@ -141,7 +141,6 @@ export interface KillProcessTreePosixOptions {
   alsoSignal?: readonly number[];
   /** When present, a fresh process-table row must match before reuse. */
   alsoSignalIdentities?: readonly ProcessIdentity[];
-  /** Bounds this round's process-table read. */
   readTimeoutMs?: number;
 }
 
@@ -309,7 +308,6 @@ async function signalProcessTreePosix(
   const capturedIdentities = new Map(
     options.alsoSignalIdentities?.map((identity) => [identity.pid, identity]),
   );
-  // capturedIdentities is empty on the non-force path, so the filter was a no-op.
   const initialPids = isForceRound ? [] : [...new Set([rootPid, ...(options.alsoSignal ?? [])])];
 
   let pids = initialPids;

@@ -252,7 +252,6 @@ export async function readOwnedLocalState<T>(
   return found;
 }
 
-// The folder for readOwnedLocalState.
 async function ownedLocalStateDir(rootPath: string): Promise<string | null> {
   const dohc = await folderProblem(join(rootPath, ".dohc"));
   if (dohc === "missing") return null;

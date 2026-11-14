@@ -42,7 +42,6 @@ export interface PersonalMcpOptions {
   signal: AbortSignal;
   /** When `signal` aborts on its own, so a wait answers before it does. */
   deadlineAtMs: number;
-  /** The agent's live documents, on a server that edits them live. */
   live?: { client: PersonalLiveClient; limits: NamedLiveBrowserLimits };
 }
 
@@ -301,7 +300,6 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     personal_agent_edit_needed: editNeeded(reach.agent.name),
     personal_agent_not_collection: notCollection(reach.agent.name),
   };
-  // A write's refusals name a write where the chat tools' name a message.
   const writeRefusals: Readonly<Record<string, Refused>> = {
     ...refusals,
     conflict: {
@@ -316,8 +314,6 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     },
   };
 
-  // A relay refusal as a tool's answer: a known code in this server's words,
-  // or the tool's own words for nothing found and refused input.
   const refused = async (response: Response, words: Words): Promise<CallToolResult> => {
     const value = await readBoundedJson(response, 4096, signal).catch(() => null);
     await response.body?.cancel().catch(() => undefined);
@@ -333,7 +329,6 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
     if (response.status === 429) return toolResult(RATE_LIMITED);
     return toolResult(words.failed ?? UNAVAILABLE);
   };
-  // The relay's answer, read in full; a refusal throws as the tool's answer.
   const answered = async <S extends z.ZodType>(
     response: Response,
     schema: S,

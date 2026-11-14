@@ -238,7 +238,6 @@ function parseScalar(value: unknown, columnName?: string): unknown {
   if (columnName === "id") return value;
   if (trimmed === "") return null;
   if (/^(true|false)$/i.test(trimmed)) return /^true$/i.test(trimmed);
-  // Text formats infer scalars, but leading zeros and unsafe numbers stay text.
   if (NUMERIC_TEXT.test(trimmed) && !/^-?0\d/.test(trimmed) && !unsafeNumericText(trimmed))
     return Number(trimmed);
   return value;
@@ -295,7 +294,6 @@ function rowsFromDelimitedRecords(records: string[][]): Array<Record<string, unk
   if (records.slice(1).some((row) => row.length > headers.length)) {
     throw new Error("Import row contains more cells than its header.");
   }
-  // Missing trailing cells are empty; completely blank records are ignored.
   const dataRecords = records.slice(1).filter((row) => row.some((cell) => cell.trim() !== ""));
   const rows = dataRecords.map((row, rowIndex) => {
     const out: Record<string, unknown> = {};
@@ -308,7 +306,6 @@ function rowsFromDelimitedRecords(records: string[][]): Array<Record<string, unk
     }
     return out;
   });
-  // Only uniform numeric or boolean columns infer scalars; mixed kinds keep text.
   headers.forEach((column, columnIndex) => {
     if (column === "id") return;
     const kinds = new Set<string>();

@@ -513,8 +513,6 @@ export function createShareMountCommands<WorkspaceSummary>(
               const setAsideRow = setAside ? { collisionRecordQuarantined: true as const } : {};
               const verdict = classifyShareMountRefreshError(error);
               if (verdict.kind === "abort") {
-                // The refresh stops here, and its rows still say which
-                // records it set aside.
                 pushResult(mount, "failed", 0, setAsideRow);
                 return { results, abortMessage: verdict.message };
               }

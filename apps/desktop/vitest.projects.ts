@@ -59,7 +59,6 @@ const JSDOM = "@vitest-environment jsdom";
 export interface DesktopTestFiles {
   /** Each file runs in a worker of its own. */
   isolated: string[];
-  /** jsdom files that share workers. */
   sharedDom: string[];
   sharedNode: string[];
 }

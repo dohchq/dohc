@@ -25,7 +25,6 @@ export function isDatabaseFile(path: string): boolean {
   return DB_EXT.test(path);
 }
 
-// Strip a sidecar suffix back to its base database path; null for non-sidecars.
 export function sidecarBasePath(path: string): string | null {
   const match = SIDECAR.exec(path);
   return match ? match[1] : null;

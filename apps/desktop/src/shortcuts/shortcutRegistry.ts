@@ -72,7 +72,6 @@ interface ShortcutDefinition extends ShortcutKeys {
   // Я for Z on a Russian layout. The row answers them; Settings does not list them.
   layoutAliases?: readonly string[];
   macOptionCode?: string;
-  // The row exists only on these platforms.
   platforms?: readonly ("darwin" | "linux" | "win32")[];
 }
 type ShortcutEvent = Pick<

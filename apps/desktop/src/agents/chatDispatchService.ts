@@ -280,7 +280,6 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   dispatchStoreFor(workspace: ChatDispatchWorkspace): AwaitableAgentDispatchStore;
   // The person's agents, in the order the settings file lists them.
   readDispatchAgents(): Promise<Agent[]>;
-  // How long the settings file keeps a finished run's log.
   readRunLogKeepDays?(): Promise<AgentRunLogsSettings["keepDays"]>;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
   prepareRunWorkspace?(workspace: ChatDispatchWorkspace): Promise<void | (() => Promise<void>)>;

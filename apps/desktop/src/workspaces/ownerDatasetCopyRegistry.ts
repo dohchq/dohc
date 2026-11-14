@@ -340,7 +340,6 @@ export function createOwnerDatasetCopyRegistry(options: {
       barrier = barrier.catch(() => undefined).then(() => sweep(prior, roots, leaving, arriving));
       return barrier;
     },
-    // Tries again to remove the folders an account change left, as Try again asks.
     removeLeftover(): Promise<void> {
       barrier = barrier.catch(() => undefined).then(() => sweep([], []));
       return barrier;

@@ -255,7 +255,6 @@ function readHeadReflog(capture, hasHeadLog) {
   return { present: true, count: entries, top: top.trim() };
 }
 
-/** A command's stdout as non-blank lines, or null when it did not answer. */
 function lines(stdout) {
   return stdout === null ? null : stdout.split(/\r?\n/).filter((line) => line.trim() !== "");
 }

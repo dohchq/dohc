@@ -2566,7 +2566,6 @@ const automationEvaluator = createAutomationFormulaEvaluator(() =>
   }),
 );
 
-// The Collection automation executor of an open workspace, or undefined.
 function collectionAutomationsOf(workspaceId: string): CollectionAutomations | undefined {
   return withWorkspaceAttachment({ workspaceId }, (lease) => lease.state.collectionAutomations);
 }

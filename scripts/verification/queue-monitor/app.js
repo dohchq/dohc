@@ -35,7 +35,6 @@ const stopwatch = (ms) => {
     : `${m}:${String(r).padStart(2, "0")}`;
 };
 const ago = (t) => `${dur(Date.now() - t)} ago`;
-// How fresh a log is: seconds while it is recent, then minutes.
 const freshness = (t) => {
   const s = Math.max(0, Math.round((Date.now() - t) / 1000));
   return s < 5 ? "just now" : s < 60 ? `${s} s ago` : ago(t);
@@ -231,7 +230,6 @@ function derived() {
   return { data, runs, running, finished, starts: startTimes(data, running) };
 }
 
-/* Header, banners, and the key numbers. */
 function renderHeader({ data }) {
   const svc = data.service;
   const beat = svc ? Date.parse(svc.heartbeatAt) : null;
@@ -249,7 +247,6 @@ function renderHeader({ data }) {
   $("#queue-count").textContent = data.queued.length || "";
 }
 
-// A time today as its clock time, an earlier one with its day.
 const when = (t) =>
   new Date(t).toDateString() === new Date().toDateString()
     ? at(t)
@@ -1022,7 +1019,6 @@ function renderHistory(d) {
   $("#history-title").textContent = ui.range === 1 ? "Last 24 hours" : "Last 7 days";
   renderTrack($("#track-history"), d, ui.range, { matches: historyMatch, tall: true });
   patch($("#legend-history"), legendHtml);
-  // Runs per day, for the week.
   const today = new Date(data.now);
   today.setHours(0, 0, 0, 0);
   const days = [];

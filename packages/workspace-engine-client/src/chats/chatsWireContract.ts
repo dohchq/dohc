@@ -552,7 +552,6 @@ const NonnegativeInt = Schema.Natural;
 const AnyInt = Schema.Int;
 const NullableString = Schema.NullOr(Schema.String);
 const NullableNonnegativeInt = Schema.NullOr(NonnegativeInt);
-// Message and mention authors. Reaction authors stay human or agent.
 const MessageAuthorKindSchema = Schema.Literals(["human", "agent", "automation", "link"]);
 const ReactorKindSchema = Schema.Literals(["human", "agent"]);
 const ChannelKindSchema = Schema.Literals(["channel", "dm", "agent"]);

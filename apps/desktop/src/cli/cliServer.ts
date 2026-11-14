@@ -592,7 +592,6 @@ export interface CliRunMessageLink {
   messageId: string;
 }
 
-// A reader for each declared verb, given the request's workspace and input.
 export type DeclaredReaders<Workspace> = {
   [Verb in DeclaredVerb]: (
     workspace: Workspace,

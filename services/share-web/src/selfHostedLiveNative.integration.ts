@@ -2424,7 +2424,6 @@ async function openSelfHostProof(name: string) {
               )
               .get(object) as { state: string; reason: string | null } | undefined,
         ),
-      /** Engine RPCs the service host started. */
       started: (method: string) =>
         harness.calls.filter((call) => call.method === method && call.status === "started").length,
       /**
@@ -3185,7 +3184,6 @@ it(
         fullStateByteLength: successor.fullState.byteLength,
         predecessorActivationId: P,
       });
-      // One capture, which asked for no activation of its own.
       expect(harness.captures.slice(captures)).toEqual([
         { activationId: S, requestedActivationId: undefined, source: successor.source },
       ]);
@@ -3857,7 +3855,6 @@ it(
       expect(S).not.toBe(P);
       expect(successor.completed).toBe(true);
       expect(successor.source.predecessorActivationId).toBe(P);
-      // Its full state holds the owner's edit.
       const full = new Y.Doc();
       try {
         Y.applyUpdate(full, successor.fullState);
@@ -4071,7 +4068,6 @@ it(
           ),
         { timeout: 60000 },
       );
-      // No settle of it was refused on the way.
       const refusedSettles = harness.calls
         .slice(from)
         .filter((call) => call.method === "liveApplication.settle" && call.status === "failed")

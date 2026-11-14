@@ -787,7 +787,6 @@ async function createRecordFile(
       throw readError;
     });
     if (committed && existing !== recordId) throw new AutomationCreationSkipped();
-    // Nothing is there: the create itself failed.
     if (existing === undefined) throw error;
     if (existing === recordId) return requestedPath;
   }
@@ -813,7 +812,6 @@ async function fileRecordId(
   return typeof id === "string" && isRecordId(id) ? id : null;
 }
 
-/** Where the record with `recordId` lives in the Collection, or null when no record has it. */
 async function recordPathFor(
   context: CollectionRecordEditContext,
   collectionPath: string,

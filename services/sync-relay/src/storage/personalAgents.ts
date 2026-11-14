@@ -421,8 +421,6 @@ function reachWorkspaces(storage: StorageContext, agentIds: readonly string[]): 
   return [...workspaces];
 }
 
-// --- sign-in -----------------------------------------------------------------
-
 export function beginPersonalAuthorization(
   storage: StorageContext,
   input: {
@@ -918,8 +916,6 @@ export function readPersonalAuthority(
   return rowToConnection(row);
 }
 
-// --- the owner's controls ------------------------------------------------------
-
 export interface PersonalRoster {
   revision: number;
   agents: PersonalAgentRow[];
@@ -1071,8 +1067,6 @@ export function changePersonalAgent(
   });
 }
 
-// --- revocation ----------------------------------------------------------------
-
 function signOutAgentsWithoutConnections(storage: StorageContext, ownerUserId: string): void {
   const signedOut = storage.db
     .prepare(`UPDATE sync_relay_personal_agents SET status = 'signed_out'
@@ -1159,8 +1153,6 @@ export function advanceCredentialFencePosition(storage: StorageContext, changedA
   });
 }
 
-// --- workspace names -------------------------------------------------------------
-
 export function initializeWorkspaceDisplayName(db: SqliteDb): void {
   const marker = "workspace-display-name-v1";
   if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(marker)) return;
@@ -1179,8 +1171,6 @@ export function initializeWorkspaceDisplayName(db: SqliteDb): void {
     Date.now(),
   );
 }
-
-// --- activity --------------------------------------------------------------------
 
 export function initializePersonalAgentActivity(db: SqliteDb): void {
   const marker = "personal-agent-activity-v1";

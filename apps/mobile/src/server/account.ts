@@ -74,7 +74,6 @@ export interface Account {
    * session on the server, which may fail. It never rejects: a failed delete shows as `forgetFailed`.
    */
   signOut(): Promise<void>;
-  /** Tries again to delete the tokens whose delete failed. */
   retryForget(): Promise<void>;
 }
 

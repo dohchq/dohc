@@ -1393,7 +1393,6 @@ export interface SyncRelayStorage {
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
-  /** The user who owns the workspace, or null when the relay has no such workspace. */
   workspaceOwner(workspaceId: string): string | null;
   discardReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
   releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
