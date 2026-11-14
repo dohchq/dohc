@@ -69,3 +69,32 @@ it("refuses an answer for another page or a malformed refusal", async () => {
   expect((await client(() => Response.json({ ...admitted, path: "other.md" })).handle(open())).status).toBe(404);
   expect((await client(() => Response.json({ ok: false, code: "<script>" }, { status: 409 })).handle(open())).status).toBe(404);
 });
+
+// A readiness wait holds its relay call until the host is ready, so waits
+// take their own pool, a few per account, and never hold up an open.
+it("waits for readiness in its own pool, a few per account, beside the opens", async () => {
+  const held: Array<() => void> = [];
+  const fetchRelay = vi.fn((request: Request) => new URL(request.url).pathname === "/sync/live/member-ready"
+    ? new Promise<Response>(resolve => { held.push(() => resolve(new Response("waiting\nready\n", { headers: { "content-type": "text/plain" } }))); })
+    : Promise.resolve(Response.json(admitted)));
+  const handle = createMemberLiveClient({ relayUrl: "https://relay.test", publicOrigin: origin, exchangeKey, limits,
+    readiness: { maxPendingRequests: 3, maxPendingPerUser: 2 }, fetchRelay });
+  const as = (user: string) => ({ cookie: `${cookieName}=${user}` });
+  const waits = [handle(open("ready")), handle(open("ready"))];
+  // Two waits fill this account's share, and the open pool still has room.
+  expect((await handle(open("ready"))).status).toBe(404);
+  expect((await handle(open())).status).toBe(200);
+  expect((await handle(open())).status).toBe(200);
+  waits.push(handle(open("ready", as("ana"))));
+  // The waits' pool is full for every account.
+  expect((await handle(open("ready", as("bo")))).status).toBe(404);
+  await vi.waitFor(() => expect(held).toHaveLength(3));
+  for (const release of held.splice(0)) release();
+  for (const wait of waits) expect(await (await wait).json()).toEqual({ ready: true });
+  // A finished wait gives its place back.
+  const again = handle(open("ready"));
+  await vi.waitFor(() => expect(held).toHaveLength(1));
+  held[0]!();
+  expect(await (await again).json()).toEqual({ ready: true });
+  expect(fetchRelay.mock.calls.filter(([request]) => new URL(request.url).pathname === "/sync/live/member-ready")).toHaveLength(4);
+});
