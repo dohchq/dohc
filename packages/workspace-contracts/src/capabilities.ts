@@ -608,6 +608,14 @@ const LISTED_CAPABILITIES = {
   "agent.thread.open": capability("Open one of your agents' threads in its own tool.", {
     ipc: ["openAgentThread"],
   }),
+  "agent.thread.question.answer": capability(
+    "Answer a question one of your agents' threads asks you in its own tool.",
+    { ipc: ["answerAgentThreadQuestion"] },
+  ),
+  "agent.thread.question.read": capability(
+    "Read a question one of your agents' threads asks you in its own tool.",
+    { ipc: ["readAgentThreadQuestion"] },
+  ),
   "agent.thread.t3code.allow": capability("Allow dohc in T3 Code on this computer.", {
     ipc: ["allowDohcInT3Code", "cancelAllowDohcInT3Code"],
   }),

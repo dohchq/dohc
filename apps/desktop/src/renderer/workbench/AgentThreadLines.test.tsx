@@ -33,6 +33,7 @@ const line = (more: Partial<AgentThreadLine> = {}): AgentThreadLine => ({
   agentId: "nova",
   chatThreadId: "thread-1",
   forwardedAtMs: 0,
+  questionId: null,
   state: "working",
   sinceMs: NOW - 4_000,
   ...more,

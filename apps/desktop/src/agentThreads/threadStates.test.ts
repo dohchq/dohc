@@ -32,6 +32,7 @@ const thread = (runs: T3CodeRun[], over: Partial<T3CodeThreadState> = {}): T3Cod
   working: runs.some((entry) => entry.state === "working"),
   activeRunId: runs.find((entry) => entry.state === "working")?.id ?? null,
   waitingOnPerson: false,
+  questionId: null,
   closed: false,
   runs,
   ...over,
@@ -148,6 +149,7 @@ describe("what an agent thread is doing with a forwarded message", () => {
       state: "in-line",
       sinceMs: 1_100,
       forwardedAtMs: 1_000,
+      questionId: null,
     });
 
     tool(thread([run("run-1", "working")]));
@@ -163,6 +165,41 @@ describe("what an agent thread is doing with a forwarded message", () => {
     await states.check();
     expect(line(states)).toMatchObject({ state: "waiting-in-tool", sinceMs: 7_000 });
     expect(changes.every((workspaceId) => workspaceId === WORKSPACE)).toBe(true);
+    states.stop();
+  });
+
+  it("carries the id of the question the thread waits on, and nothing of the question", async () => {
+    const { states, tool, at, changes, rows } = setup();
+    states.forwarded(forwarded());
+    at(7_000);
+    // Something waits on the person, and it is not a question: an approval, say.
+    tool(thread([run("run-1", "working")], { waitingOnPerson: true }));
+    await states.check();
+    expect(line(states)).toMatchObject({ state: "waiting-in-tool", questionId: null });
+
+    // Now a question waits.
+    tool(thread([run("run-1", "working")], { waitingOnPerson: true, questionId: "q-1" }));
+    const before = changes.length;
+    await states.check();
+    expect(line(states)).toMatchObject({
+      state: "waiting-in-tool",
+      sinceMs: 7_000,
+      questionId: "q-1",
+    });
+    // The chat is told, though the state is the same.
+    expect(changes.length).toBe(before + 1);
+
+    // It was answered and the thread asked another.
+    tool(thread([run("run-1", "working")], { waitingOnPerson: true, questionId: "q-2" }));
+    await states.check();
+    expect(line(states)).toMatchObject({ state: "waiting-in-tool", questionId: "q-2" });
+
+    // The thread works again: no question goes with the line.
+    tool(thread([run("run-1", "working")]));
+    await states.check();
+    expect(line(states)).toMatchObject({ state: "working", questionId: null });
+    // The saved row holds ids and times only.
+    expect(JSON.stringify(rows())).not.toContain("q-");
     states.stop();
   });
 

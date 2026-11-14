@@ -192,6 +192,10 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     },
     /** What each agent thread is doing with the last message forwarded from each of the workspace's chat threads. */
     lines: (workspaceId: string): AgentThreadLine[] => states.lines(workspaceId),
+    /** Asks the tool now what a workspace's agent threads are doing, as after the person answered a thread's question. */
+    look(workspaceId: string): void {
+      void states.check(workspaceId);
+    },
     /** Stops forwarding a workspace's messages. Call it when the workspace leaves this computer. */
     unwatch(workspaceId: string): void {
       watched.get(workspaceId)?.();

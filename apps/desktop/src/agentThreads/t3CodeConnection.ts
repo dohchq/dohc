@@ -1,16 +1,20 @@
 import type { AgentThreadTool } from "./forwarding";
 import {
   T3CodeError,
+  answerT3CodeQuestion,
   listT3CodeProjects,
   listT3CodeThreads,
   openT3CodeSession,
   readT3CodeAddress,
+  readT3CodeQuestion,
   readT3CodeRun,
   readT3CodeThread,
   sendToT3CodeThread,
   signInToT3Code,
   t3CodeThreadLink,
+  type T3CodeAnswers,
   type T3CodeProject,
+  type T3CodeQuestionBox,
   type T3CodeRun,
   type T3CodeSession,
   type T3CodeThread,
@@ -43,6 +47,14 @@ export interface T3CodeConnection extends AgentThreadTool {
   thread(threadId: string): Promise<T3CodeThreadState>;
   /** Where one run of a thread stands, asked by its id. */
   run(threadId: string, runId: string): Promise<T3CodeRun["state"]>;
+  /** The question box that waits on the person in a thread. */
+  question(threadId: string, requestId: string): Promise<T3CodeQuestionBox>;
+  /** Answers it. The first answer wins, here or in T3 Code. */
+  answer(
+    threadId: string,
+    requestId: string,
+    answers: T3CodeAnswers,
+  ): Promise<"answered" | "already-answered" | "closed">;
   /** The link that opens a thread in T3 Code's own window. It needs no sign-in. */
   threadLink(threadId: string): Promise<string>;
   /**
@@ -132,6 +144,10 @@ export function createT3CodeConnection(dependencies: {
     threads: (input) => use((session) => listT3CodeThreads(session, input)),
     thread: (threadId) => use((session) => readT3CodeThread(session, threadId)),
     run: (threadId, runId) => use((session) => readT3CodeRun(session, { threadId, runId })),
+    question: (threadId, requestId) =>
+      use((session) => readT3CodeQuestion(session, { threadId, requestId })),
+    answer: (threadId, requestId, answers) =>
+      use((session) => answerT3CodeQuestion(session, { threadId, requestId, answers })),
     threadLink: async (threadId) =>
       t3CodeThreadLink({ origin: (await address()).origin, threadId, fetch: dependencies.fetch }),
     forget: () => change(() => store.clear()),

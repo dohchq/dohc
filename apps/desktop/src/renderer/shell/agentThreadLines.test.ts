@@ -7,6 +7,7 @@ import { createAgentThreadLinesStore } from "./agentThreadLines";
 const line = (state: AgentThreadLine["state"], chatThreadId = "thread-1"): AgentThreadLine => ({
   agentId: "nova",
   chatThreadId,
+  questionId: null,
   forwardedAtMs: 0,
   state,
   sinceMs: 1_000,

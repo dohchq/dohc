@@ -10745,14 +10745,32 @@ function registerIpcHandlers(): void {
     canKeep: t3Code().canKeep(),
     signedInUntilMs: await t3Code().signedInUntil(),
   });
+  // The thread of an agent that serves the workspace a window has open. A
+  // window names the agent, and never the thread.
+  const agentThreadFor = async (workspaceId: string, agentId: string): Promise<string> => {
+    const { settings } = await readCachedUserSettingsFile(stateDir());
+    const agent = forwardingAgents(settings, workspaceId).find(({ id }) => id === agentId);
+    if (!agent) throw new Error("This agent has no thread for this workspace.");
+    return agent.thread.id;
+  };
   registerOperations(operationBoundary, agentThreadOperations, {
     readAgentThreadLines: ({ workspaceId }) => agentThreadLinesOf(workspaceId),
     openAgentThread: async ({ workspaceId, agentId }) => {
-      // Only a thread whose agent serves the workspace this window has open.
-      const { settings } = await readCachedUserSettingsFile(stateDir());
-      const agent = forwardingAgents(settings, workspaceId).find(({ id }) => id === agentId);
-      if (!agent) throw new Error("This agent has no thread for this workspace.");
-      await shell.openExternal(await t3Code().threadLink(agent.thread.id));
+      await shell.openExternal(
+        await t3Code().threadLink(await agentThreadFor(workspaceId, agentId)),
+      );
+    },
+    readAgentThreadQuestion: async ({ workspaceId, agentId, requestId }) =>
+      t3Code().question(await agentThreadFor(workspaceId, agentId), requestId),
+    answerAgentThreadQuestion: async ({ workspaceId, agentId, requestId, answers }) => {
+      const status = await t3Code().answer(
+        await agentThreadFor(workspaceId, agentId),
+        requestId,
+        answers,
+      );
+      // The thread goes on, or someone answered first: the line is looked at again now.
+      agentThreads().look(workspaceId);
+      return { status };
     },
     readT3CodeConnection: t3CodeConnectionState,
     allowDohcInT3Code: async () => {
