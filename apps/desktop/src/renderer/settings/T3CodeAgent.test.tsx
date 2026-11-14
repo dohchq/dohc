@@ -82,7 +82,8 @@ const bridgeMock = {
     async (_payload: {
       workspaceId: string;
       agentId: string;
-    }): Promise<{ title: string; closed: boolean }> => ({
+    }): Promise<{ threadId: string; title: string; closed: boolean }> => ({
+      threadId: "t-chief",
       title: "Chief of Staff: dohc",
       closed: false,
     }),
@@ -463,7 +464,11 @@ async function openChangeDialog(settings?: DesktopUserSettings) {
 }
 
 it("names the agent's thread by its title, and says when T3 Code has closed it", async () => {
-  bridgeMock.readAgentThread.mockResolvedValueOnce({ title: "Release owner", closed: true });
+  bridgeMock.readAgentThread.mockResolvedValueOnce({
+    threadId: "t-chief",
+    title: "Release owner",
+    closed: true,
+  });
   // The thread is read for an agent that is off too.
   const { page, row } = await openChiefPage(withChief({ enabled: false }));
   expect(await row.findByText("Release owner")).toBeTruthy();
@@ -498,15 +503,37 @@ it("reads the thread again when the agent is saved with another one, and only th
   rerender(withChief({ whileBusy: "steer" }));
   expect(bridgeMock.readAgentThread).toHaveBeenCalledOnce();
 
-  const reading = deferred<{ title: string; closed: boolean }>();
+  const reading = deferred<{ threadId: string; title: string; closed: boolean }>();
   bridgeMock.readAgentThread.mockReturnValueOnce(reading.promise);
   rerender(withChief({ thread: { tool: "t3-code", id: "t-issue" } }));
   // The thread it left is not shown as the one it has.
   expect(row.queryByText("Chief of Staff: dohc")).toBeNull();
   expect(row.getByLabelText("Reading the thread")).toBeTruthy();
-  await act(async () => reading.resolve({ title: "Issue owner", closed: false }));
+  await act(async () =>
+    reading.resolve({ threadId: "t-issue", title: "Issue owner", closed: false }),
+  );
   expect(row.getByText("Issue owner")).toBeTruthy();
   expect(bridgeMock.readAgentThread).toHaveBeenCalledTimes(2);
+});
+
+it("does not name the thread the agent left while its save is still on its way", async () => {
+  const { row, rerender } = await openChiefPage();
+  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
+  // Settings show the new thread at once. The save has not landed, so the
+  // first answer is still for the thread the agent had.
+  bridgeMock.readAgentThread
+    .mockResolvedValueOnce({ threadId: "t-chief", title: "Chief of Staff: dohc", closed: true })
+    .mockResolvedValueOnce({ threadId: "t-issue", title: "Issue owner", closed: false });
+  rerender(withChief({ thread: { tool: "t3-code", id: "t-issue" } }));
+
+  await waitFor(() => expect(bridgeMock.readAgentThread).toHaveBeenCalledTimes(2));
+  // Neither the old title nor what was said of the old thread is shown for the new one.
+  expect(row.queryByText("Chief of Staff: dohc")).toBeNull();
+  expect(screen.queryByTestId("agent-page-thread-closed")).toBeNull();
+  expect(row.getByLabelText("Reading the thread")).toBeTruthy();
+
+  expect(await row.findByText("Issue owner", undefined, { timeout: 3_000 })).toBeTruthy();
+  expect(bridgeMock.readAgentThread).toHaveBeenCalledTimes(3);
 });
 
 it("reads the thread once T3 Code allows dohc, and says nothing of it before", async () => {
@@ -593,7 +620,11 @@ it("changes the thread: readies the picked one, then saves the agent with it and
   await waitFor(() => expect(document.activeElement).toBe(opener));
 
   // The saved agent's row names the new thread.
-  bridgeMock.readAgentThread.mockResolvedValueOnce({ title: "Issue owner", closed: false });
+  bridgeMock.readAgentThread.mockResolvedValueOnce({
+    threadId: "t-issue",
+    title: "Issue owner",
+    closed: false,
+  });
   rerender(saved);
   expect(await row.findByText("Issue owner")).toBeTruthy();
 });

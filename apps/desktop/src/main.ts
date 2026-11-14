@@ -10814,7 +10814,7 @@ function registerIpcHandlers(): void {
     readAgentThread: async ({ workspaceId, agentId }) => {
       const agent = await agentWithThreadFor(workspaceId, agentId);
       const { title, closed } = await t3Code().thread(agent.thread.id);
-      return { title, closed };
+      return { threadId: agent.thread.id, title, closed };
     },
     changeAgentThread: async ({ workspaceId, agentId, threadId }) => {
       const agent = await agentWithThreadFor(workspaceId, agentId);

@@ -338,6 +338,16 @@ function ThreadRow(props: {
     load: () => bridge().readAgentThread({ workspaceId, agentId: agent.id }),
   });
   const { error, retry } = read;
+  // Settings show a save before it lands, so the answer may be for the thread
+  // the agent had until now. It is not shown, and the thread is read again
+  // until the answer is for the thread the agent has here.
+  const answered = read.value;
+  const value = answered?.threadId === thread.id ? answered : undefined;
+  useEffect(() => {
+    if (answered === undefined || answered.threadId === thread.id) return;
+    const timer = setTimeout(() => void retry(), 300);
+    return () => clearTimeout(timer);
+  }, [answered, thread.id, retry]);
   // A failed read says why once, in Notices, with its Try again.
   useEffect(() => {
     if (error !== null) report.current?.(ipcErrorMessage(error, THREAD_READ_FAILED), error, retry);
@@ -375,18 +385,18 @@ function ThreadRow(props: {
           </div>
         ) : (
           <span data-testid="agent-page-thread-title" className={VALUE}>
-            {read.value === undefined ? (
+            {value === undefined ? (
               <LoaderCircle size={12} aria-label="Reading the thread" className="animate-spin" />
             ) : (
-              <span className="min-w-0 truncate text-ink" title={read.value.title}>
-                {read.value.title}
+              <span className="min-w-0 truncate text-ink" title={value.title}>
+                {value.title}
               </span>
             )}
           </span>
         )}
       </PageRow>
       <div className="flex min-h-11 flex-wrap items-center justify-end gap-x-2 gap-y-1 border-b border-line px-3 py-2 text-[12px]">
-        {error === null && read.value?.closed ? (
+        {error === null && value?.closed ? (
           // T3 Code says which of the two only together. dohc still forwards to
           // the thread, so this claims nothing about what the thread then does.
           <p data-testid="agent-page-thread-closed" className="m-0 mr-auto min-w-0 text-muted">

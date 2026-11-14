@@ -8321,6 +8321,9 @@ export const agentThreadOperations = {
     channel: "desktop:read-agent-thread",
     payload: z.strictObject({ workspaceId: z.string().min(1), agentId: AgentId }),
     result: z.strictObject({
+      // The thread the agent is saved with, which the title is of. A window
+      // shows a save before it lands, so it checks this against the thread it shows.
+      threadId: AgentThread.shape.id,
       title: z.string(),
       // The thread was archived or settled in its tool.
       closed: z.boolean(),
