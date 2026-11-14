@@ -2409,7 +2409,12 @@ async function openSelfHostProof(name: string) {
           markdown: yDocToMarkdown(doc),
         })),
       documents: async () =>
-        (await route("GET")).body.documents as { path: string; status: string; reason?: string }[],
+        (await route("GET")).body.documents as {
+          path: string;
+          status: string;
+          reason?: string;
+          head?: number;
+        }[],
       hosted: (object = objectId) =>
         serviceRead(
           (engine) =>
@@ -3252,7 +3257,13 @@ it(
         { timeout: 10000 },
       );
       expect(proof.activations()).toEqual([retired, current]);
-      expect(await proof.documents()).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]);
+      const listed = await proof.documents();
+      expect(listed).toEqual([proof.ready("docs/a.md"), proof.ready("docs/b.md")]);
+      // Each note's `head` is the position its last live edit was given, not only what a query says.
+      expect(listed.map((row) => row.head)).toEqual([
+        collaborated.journalCursor,
+        afterRestart.journalCursor,
+      ]);
       // docs/b.md holds exactly its own live edits.
       expect(proof.journal(second.objectId)).toEqual([
         ...secondJournal,
