@@ -1148,21 +1148,24 @@ export function createOutbox(options: {
         observed.messages.delete(id);
       }
       // A saved reaction this read shows otherwise may have changed on another device since. It needs the person.
+      // The latest read of its message decides, whether or not its record can be deleted yet.
       const read = new Set(messages.map((message) => message.id));
-      let contradicted = false;
-      for (const record of records.values())
+      let flagged = false;
+      for (const record of records.values()) {
         if (
-          record.stage === "saved" &&
-          record.write.operation === "react" &&
-          scopeOf(record) === scope &&
-          read.has(record.write.args.messageId) &&
-          !unconfirmed.has(record.sequence) &&
-          !shows(record, observed.messages)
-        ) {
-          unconfirmed.add(record.sequence);
-          contradicted = true;
-        }
-      if (contradicted) changed();
+          record.stage !== "saved" ||
+          record.write.operation !== "react" ||
+          scopeOf(record) !== scope ||
+          !read.has(record.write.args.messageId)
+        )
+          continue;
+        const contradicts = !shows(record, observed.messages);
+        if (contradicts === unconfirmed.has(record.sequence)) continue;
+        if (contradicts) unconfirmed.add(record.sequence);
+        else unconfirmed.delete(record.sequence);
+        flagged = true;
+      }
+      if (flagged) changed();
       reconcile();
       pump();
     },

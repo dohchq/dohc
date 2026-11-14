@@ -1181,6 +1181,34 @@ describe("the handoff to reads", () => {
     relaunch.stop();
   });
 
+  it.each([
+    { state: "added" as const, contradicting: [], confirming: [MY_THUMB] },
+    { state: "removed" as const, contradicting: [MY_THUMB], confirming: [] },
+  ])(
+    "unmarks a saved $state reaction once a read shows it, even when its record can't be deleted",
+    async ({ state, contradicting, confirming }) => {
+      const disk = durableDisk();
+      savedReaction(disk, 1, state);
+      const { outbox, stop } = launch(disk, testServer());
+      await ready(outbox);
+      outbox.handoff(ME, "ws-1", [message("message-x", { reactions: contradicting })]);
+      expect(outbox.state().unconfirmed).toEqual(["op-1"]);
+
+      disk.failRemoves = "unlink";
+      const seen: string[][] = [];
+      const unsubscribe = outbox.subscribe(() => seen.push([...outbox.state().unconfirmed]));
+      outbox.handoff(ME, "ws-1", [message("message-x", { reactions: confirming })]);
+      expect(seen).toContainEqual([]);
+      await vi.waitFor(() => expect(disk.log).toContain("remove m-000000000001"));
+      await settled();
+      unsubscribe();
+      expect(sequences(outbox)).toEqual([1]);
+      expect(records(disk)).toEqual(["m-000000000001"]);
+      expect(outbox.state().unconfirmed).toEqual([]);
+      stop();
+    },
+  );
+
   it("matches a reaction by its emoji as the relay stores it, trimmed and in NFC, and sends the arguments as given", async () => {
     const disk = durableDisk();
     const server = testServer();
