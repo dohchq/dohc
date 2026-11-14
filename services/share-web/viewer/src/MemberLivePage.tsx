@@ -131,7 +131,7 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
       {phase.kind === "refused" && <button type="button" onClick={open}>Try again</button>}
     </>, bandSlot)}
     {!live && readView}
-    {editing && <NamedDocumentEditor key={editing.session.doc.guid} session={editing.session} path={path} link statusSlot={statusSlot}
+    {editing && <NamedDocumentEditor key={editing.session.doc.guid} session={editing.session} path={path} link statusSlot={statusSlot} quietWhenSaved
       bodyHidden={!live} onState={receive}/>}
     {pending && <aside className="draft-recovery" aria-label="Draft recovery"><h2>Review your draft</h2>
       <p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>

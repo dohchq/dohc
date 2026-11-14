@@ -275,7 +275,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
         </div>
         <div className="header-actions">
           <div className="workspace-status" ref={setStatusSlot}/>
-          {!live && <span className="badge">{BADGE[access]}</span>}
+          <span className="badge">{BADGE[access]}</span>
         </div>
       </header>
       <div className="page-band" ref={setBandSlot}/>

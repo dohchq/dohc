@@ -97,8 +97,7 @@ export function MemberChats({found, onRetry, shown, onEnded, onUnread}: {
     </> : <>
       <div className="chats-head"><h2>Chats</h2></div>
       {found === "loading" ? <p className="chat-state">Loading Groups…</p> :
-        found === "failed" ? <div className="chat-state" role="alert"><p>Groups didn't load.</p>
-          <button type="button" className="handoff-button secondary" onClick={onRetry}>Try again</button></div> :
+        found === "failed" ? <LoadFailed what="Groups" onRetry={onRetry}/> :
         !found.groups.length ? <p className="chat-state">No Groups in this workspace yet.</p> :
         <ul className="group-list">{found.groups.map(item => {
           const count = unread.get(item.channelWireId) ?? 0;
@@ -112,6 +111,12 @@ export function MemberChats({found, onRetry, shown, onEnded, onUnread}: {
         })}</ul>}
     </>}
   </section>;
+}
+
+// A list that could not load keeps one line in its place, beside its Try again. The toast says the rest.
+function LoadFailed({what, onRetry}: {what: string; onRetry(): void}) {
+  return <div className="load-failed" role="alert"><p>dohc could not load {what}.</p>
+    <button type="button" onClick={onRetry}>Try again</button></div>;
 }
 
 /**
@@ -130,8 +135,7 @@ export function MemberComments({found, onRetry, path, access, onEnded}: {
     {client && opened ? <ChannelView key={`${opened.shareId}\n${path}\n${access}`} client={client} name={`Comments on ${name}`}
       onEnded={onEnded} readOnlyNote={READ_ONLY} empty={NO_COMMENTS} messageLabel="Comment"
       placeholder="Comment on this file…" draftKey={`${opened.shareId}\nfile\n${path}`}/> :
-      found === "failed" ? <div className="chat-state" role="alert"><p>Comments didn't load.</p>
-        <button type="button" className="handoff-button secondary" onClick={onRetry}>Try again</button></div> :
+      found === "failed" ? <LoadFailed what="Comments" onRetry={onRetry}/> :
       <p className="chat-state">Loading comments…</p>}
   </section>;
 }

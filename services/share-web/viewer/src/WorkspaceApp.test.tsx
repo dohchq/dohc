@@ -179,7 +179,13 @@ it("moves through the file tree with the arrow keys, folds a folder, and opens a
 
 it("raises a toast with Try again and copy when the Groups don't load, and keeps one line in their place", async () => {
   server({groupsFail: 1}); await render();
-  await settle(() => text().includes("Leave at nine.") && groupPanel().textContent!.includes("Groups didn't load."));
+  await settle(() => text().includes("Leave at nine.") && groupPanel().textContent!.includes("dohc could not load Groups."));
+  // One line in their place: the words and Try again in a row.
+  const row = groupPanel().querySelector<HTMLElement>(".load-failed")!;
+  expect(row.textContent).toBe("dohc could not load Groups.Try again");
+  await click("Comments");
+  expect(container.querySelector<HTMLElement>("#workspace-comments .load-failed")?.textContent).toBe("dohc could not load Comments.Try again");
+  await click("Chats");
   const toast = () => container.querySelector<HTMLElement>(".toast-slot [role=alert]");
   expect(toast()?.querySelector(".edit-notice-title")?.textContent).toBe("dohc could not load Groups and comments");
   expect(toast()?.textContent).toContain("Check your connection.");
@@ -360,8 +366,11 @@ it("opens a page in the live editor at Edit, as the signed-in account", async ()
   expect(vi.mocked(openMemberPage)).toHaveBeenCalledWith(GRANT, "trip/plan.md", expect.any(AbortSignal));
   expect(vi.mocked(memberDocument)).toHaveBeenCalledWith(expect.objectContaining({grantId: GRANT, path: "trip/plan.md", accountId: "sam", admission: ADMITTED}));
   expect(container.querySelector('[role="textbox"]')?.textContent).toContain("Leave at nine.");
-  expect(container.querySelector("header .named-document-status")?.textContent).toBe("Ready to edit");
-  expect(container.querySelector(".workspace-page .badge")).toBeNull();
+  // The header names the level, as at View and Comment. Only a save on its way shows beside it.
+  expect(container.querySelector(".workspace-page .badge")?.textContent).toBe("Can edit");
+  expect(container.querySelector("header .named-document-status")).toBeNull();
+  await act(async () => session.type("Leave at ten."));
+  expect(container.querySelector("header .named-document-status")?.textContent).toBe("Saving changes…");
 });
 
 it("waits for the owner's dohc with the page readable, raises a toast after 15 seconds, and opens by itself once ready", async () => {

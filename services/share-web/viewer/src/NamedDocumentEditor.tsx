@@ -212,7 +212,8 @@ export function DraftReview({
  * A live document's editor. The link page draws the title and bar itself, so with `link` this
  * shows neither. Its saved state goes to `statusSlot`, in that bar, while editing works; a state
  * that stops editing stays above the text, where its sentence has room. `bodyHidden` keeps the
- * text out of view while the page still shows its own copy.
+ * text out of view while the page still shows its own copy. With `quietWhenSaved`, the bar shows
+ * nothing while every edit is saved, so the page's own level stays the only word there.
  */
 export function NamedDocumentEditor({
   session,
@@ -221,12 +222,14 @@ export function NamedDocumentEditor({
   link = false,
   statusSlot,
   bodyHidden = false,
+  quietWhenSaved = false,
 }: {
   session: NamedDocumentSession;
   path: string;
   link?: boolean;
   statusSlot?: HTMLElement | null;
   bodyHidden?: boolean;
+  quietWhenSaved?: boolean;
   onState(state: NamedLiveBrowserState): void;
 }) {
   const element = useRef<HTMLDivElement>(null),
@@ -267,7 +270,11 @@ export function NamedDocumentEditor({
       aria-label="Shared file"
     >
       {!link && <h1>{path}</h1>}
-      {statusSlot && working ? createPortal(status, statusSlot) : status}
+      {statusSlot && working
+        ? quietWhenSaved && state.status === "live" && !state.pendingUpdates
+          ? null
+          : createPortal(status, statusSlot)
+        : status}
       {state.status === "disconnected" && !FINAL.includes(state.reason ?? "") && (
         <button className="handoff-button secondary" onClick={() => void session.reconnect()}>
           {state.reason === "authority-unavailable" ||
