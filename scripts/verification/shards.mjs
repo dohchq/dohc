@@ -45,7 +45,8 @@ export function javascriptGroups(tasks) {
         kind: "vitest",
         pkg: files[0].package,
         native: Boolean(files[0].native),
-        // Measured desktop browser and projection groups cost more when they overlap.
+        // Desktop Vitest, projection, lint, and desktop typecheck slowed each other in measured
+        // runs. The simulator counts each as 2.5 of a worker's four CPUs, and browser proofs as 2.
         cpu:
           files[0].package === "@dohc/ydoc-projection" ||
           (files[0].package === "@dohc/desktop" && files[0].project === "desktop")
@@ -93,7 +94,6 @@ export function simulateJavascript(
     // Rounded medians from the same worker records as nativeReady.
     inventory = 8,
     postgres = 11,
-    duration = (group) => group.weight,
   } = {},
 ) {
   if (!groups.length) return { seconds: 0, steps: [] };
@@ -129,11 +129,10 @@ export function simulateJavascript(
       const [group] = pending.splice(index, 1);
       const step = { id: group.id, startedAt: seconds };
       steps.push(step);
-      active.push({ group, step, remaining: duration(group) });
+      active.push({ group, step, remaining: group.weight });
       slots += group.slots ?? 1;
     }
     if (!active.length && !pending.length) break;
-    // Balanced-run group steps put browser work at about 2.5 command units on four CPUs.
     const slowdown = Math.max(1, active.reduce((sum, work) => sum + (work.group.cpu ?? 1), 0) / 4);
     for (const work of active) work.finishedAt = seconds + work.remaining * slowdown;
     const next = Math.min(
@@ -150,8 +149,7 @@ export function simulateJavascript(
     seconds = next;
   }
   for (const group of runtime) {
-    if (group.native) seconds = Math.max(seconds, nativeReady);
-    const finish = seconds + duration(group);
+    const finish = seconds + group.weight;
     steps.push({ id: group.id, startedAt: seconds, finishedAt: finish });
     seconds = finish;
   }
@@ -164,6 +162,9 @@ export function partitionJavascript(groups, count = JS_SHARDS) {
     throw new Error("A shard count must be a positive integer.");
   if (new Set(groups.map((group) => group.id)).size !== groups.length)
     throw new Error("Duplicate verification task IDs.");
+  // The simulator never finishes with a NaN weight, so every worker would hang until timeout.
+  if (groups.some((group) => !Number.isFinite(group.weight) || group.weight < 0))
+    throw new Error("Verification task weights must be finite, non-negative numbers.");
   const shards = Array.from({ length: count }, () => []);
   const finishes = shards.map(() => 0);
   for (const group of groups.toSorted((a, b) => b.weight - a.weight || a.id.localeCompare(b.id))) {

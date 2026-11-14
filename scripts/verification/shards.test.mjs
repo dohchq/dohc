@@ -298,6 +298,7 @@ test("only browser groups reserve two slots without changing their wall time", (
     assert.equal(task.weight, 20);
   }
   const vitest = groups.find((group) => group.kind === "vitest");
+  assert.equal(vitest.weight, 24);
   assert.equal(vitest.slots, undefined);
 });
 
@@ -439,6 +440,11 @@ test("partitioning balances finish time when resources serialize work", () => {
   );
   assert.throws(() => partitionJavascript(groups, 0), /positive integer/u);
   assert.throws(() => partitionJavascript([groups[0], groups[0]], 2), /Duplicate/u);
+  for (const weight of [Number.NaN, Infinity, -1, "7", undefined])
+    assert.throws(
+      () => partitionJavascript([groups[0], { id: "bad", weight }], 2),
+      /finite, non-negative/u,
+    );
 });
 
 test("timing refresh uses measured medians, retains missing weights, and keeps planner keys", () => {
