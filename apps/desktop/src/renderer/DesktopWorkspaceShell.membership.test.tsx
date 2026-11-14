@@ -37,7 +37,8 @@ describe("a joined workspace", () => {
     expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
     expect(screen.getByTestId("activity-chats")).toBeTruthy();
     fireEvent.click(screen.getByTestId("workspace-switcher"));
-    expect(screen.getByTestId("workspace-switcher-level").textContent).toBe("You can comment");
+    const joinedRow = screen.getAllByTestId("workspace-switcher-option").find((row) => row.dataset.workspaceId === JOINED.workspaceId)!;
+    expect(within(joinedRow).getByTestId("workspace-switcher-level").textContent).toBe("You can comment");
     expect(screen.getAllByText("You can comment")).toHaveLength(1);
   });
 

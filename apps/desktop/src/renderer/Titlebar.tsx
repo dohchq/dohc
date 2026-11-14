@@ -100,7 +100,7 @@ export function Titlebar(props: {
   workspace?: WorkspaceSummary;
   workspaces?: WorkspaceSummary[];
   onOpenShare?: () => void;
-  // A joined workspace's level, said once at the top of the workspace menu.
+  // A joined workspace's level, said once on its own row in the workspace menu.
   level?: string;
   onManageWorkspaces?: () => void;
   onSwitchWorkspace?: (workspace: WorkspaceSummary) => void;
@@ -224,12 +224,6 @@ export function Titlebar(props: {
                 aria-label="Workspaces"
                 className="dohc-popover dohc-pop-in absolute left-0 top-full z-20 mt-1 m-0 w-64 list-none rounded-lg border border-line bg-panel p-1"
               >
-                {props.level ? (
-                  <li role="presentation" data-testid="workspace-switcher-level"
-                    className="mb-1 flex h-7 items-center border-b border-line px-2 pb-1 pl-7 text-[12px] text-subtle">
-                    {props.level}
-                  </li>
-                ) : null}
                 {props.workspaces.map((candidate) => (
                   <li
                     key={candidate.workspaceId}
@@ -253,7 +247,9 @@ export function Titlebar(props: {
                       )}
                       <span className="truncate">{workspaceName(candidate)}</span>
                       {candidate.shareView?.membership ? <JoinedWorkspaceMark /> : null}
-                      {candidate.kind === "shared" ? (
+                      {props.level && candidate.workspaceId === props.workspace?.workspaceId ? (
+                        <span data-testid="workspace-switcher-level" className="ml-auto shrink-0 text-[12px] text-subtle">{props.level}</span>
+                      ) : candidate.kind === "shared" ? (
                         <span className="ml-auto text-[12px] text-subtle">Shared</span>
                       ) : null}
                     </button>

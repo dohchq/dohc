@@ -339,7 +339,7 @@ describe("Titlebar", () => {
     expect(sharedRow!.textContent).toBe("tripShared");
   });
 
-  it("marks a joined workspace with the Users icon and says the level once, at the top of the menu", () => {
+  it("marks a joined workspace with the Users icon and says the level once, on that workspace's own row", () => {
     const joined: Workspace = { ...workspace, workspaceId: "ws-2", rootPath: "/dohc/Community",
       shareView: { shareId: "s", granterEmail: null, access: "comment", subjectName: "Community", membership: true } };
     render(
@@ -347,9 +347,11 @@ describe("Titlebar", () => {
     );
 
     fireEvent.click(screen.getByTestId("workspace-switcher"));
-    expect(screen.getByTestId("workspace-switcher-level").textContent).toBe("You can comment");
     expect(screen.getAllByText("You can comment")).toHaveLength(1);
     const [personalRow, joinedRow] = screen.getAllByTestId("workspace-switcher-option");
+    expect(within(joinedRow!).getByTestId("workspace-switcher-level").textContent).toBe("You can comment");
+    expect(within(personalRow!).queryByTestId("workspace-switcher-level")).toBeNull();
+    expect(screen.queryAllByRole("presentation").filter((item) => item.closest("[role=listbox]"))).toHaveLength(0);
     expect(within(personalRow!).queryByTestId("workspace-joined-mark")).toBeNull();
     expect(within(joinedRow!).getByTestId("workspace-joined-mark").getAttribute("aria-label")).toBe("Joined workspace");
   });
