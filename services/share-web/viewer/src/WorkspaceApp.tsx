@@ -2,7 +2,7 @@ import {lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardE
 import type {Ended} from "./ChatChannel";
 import {createPortal} from "react-dom";
 import {DohcMark, Icon} from "./icons";
-import {MemberChats, MemberComments, useMemberListing} from "./MemberChats";
+import {MemberChats, MemberComments, useMemberListing, LISTING_FAILED} from "./MemberChats";
 import {Toast} from "./Toast";
 import {memberSession} from "./memberWorkspace";
 import {filesFromAccumulator, isMarkdown, type FileAccumulator, type SharedFile, type ViewMeta} from "./model";
@@ -34,7 +34,7 @@ const BADGE = {view: "View only", comment: "Can comment", edit: "Can edit"} as c
 const SESSION_ENDED = "Your session ended. Sign in again to keep reading.";
 const CHECK_FAILED = "dohc could not open this workspace. Check your connection.";
 const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
-const LISTING_FAILED = "dohc could not load Groups and comments", CHECK_CONNECTION = "Check your connection.";
+const CHECK_CONNECTION = "Check your connection.";
 const refusedStatus = (error: unknown) => error instanceof ViewResponseError && [401, 403, 404].includes(error.status);
 
 /** Live text that never reached the workspace, from a page that closed while the person could not keep editing it. */

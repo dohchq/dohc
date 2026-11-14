@@ -211,12 +211,14 @@ it("moves through the file tree with the arrow keys, folds a folder, and opens a
 
 it("raises a toast with Try again and copy when the Groups don't load, and keeps one line in their place", async () => {
   server({groupsFail: 1}); await render();
-  await settle(() => text().includes("Leave at nine.") && groupPanel().textContent!.includes("dohc could not load Groups."));
-  // One line in their place: the words and Try again in a row.
+  await settle(() => text().includes("Leave at nine.") && groupPanel().querySelector(".load-failed") !== null);
+  // The list keeps its heading, as on the desktop.
+  expect(groupPanel().querySelector(".chats-head h2")?.textContent).toBe("Groups");
+  // One line in their place: the toast's words and Try again in a row. One read lists both, so both say so.
   const row = groupPanel().querySelector<HTMLElement>(".load-failed")!;
-  expect(row.textContent).toBe("dohc could not load Groups.Try again");
+  expect(row.textContent).toBe("dohc could not load Groups and comments.Try again");
   await click("Comments");
-  expect(container.querySelector<HTMLElement>("#workspace-comments .load-failed")?.textContent).toBe("dohc could not load Comments.Try again");
+  expect(container.querySelector<HTMLElement>("#workspace-comments .load-failed")?.textContent).toBe("dohc could not load Groups and comments.Try again");
   await click("Chats");
   const toast = () => container.querySelector<HTMLElement>(".toast-slot [role=alert]");
   expect(toast()?.querySelector(".edit-notice-title")?.textContent).toBe("dohc could not load Groups and comments");

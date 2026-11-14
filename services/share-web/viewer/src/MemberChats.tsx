@@ -9,6 +9,8 @@ import "./namedChat.css";
 const READ_ONLY = "Only people who can comment post here.";
 const EMPTY = "No messages yet.";
 const NO_COMMENTS = "No comments yet.";
+/** The membership's Groups and Comments come from one read, so its failure names both. */
+export const LISTING_FAILED = "dohc could not load Groups and comments";
 
 export type MemberListing = "loading" | "failed" | MemberGroups;
 
@@ -97,9 +99,9 @@ export function MemberChats({found, onRetry, access, shown, onEnded, onUnread}: 
         onEnded={reason => onEndedRef.current(reason)} readOnlyNote={READ_ONLY} empty={EMPTY} threads={group.type ?? "both"}
         draftKey={`${opened.shareId}\ngroup\n${group.channelWireId}`}/>
     </> : <>
-      <div className="chats-head"><h2>Chats</h2></div>
+      <div className="chats-head"><h2>Groups</h2></div>
       {found === "loading" ? <p className="chat-state">Loading Groups…</p> :
-        found === "failed" ? <LoadFailed what="Groups" onRetry={onRetry}/> :
+        found === "failed" ? <LoadFailed onRetry={onRetry}/> :
         !found.groups.length ? <p className="chat-state">No Groups in this workspace yet.</p> :
         <ul className="group-list">{found.groups.map(item => {
           const count = unread.get(item.channelWireId) ?? 0;
@@ -115,9 +117,10 @@ export function MemberChats({found, onRetry, access, shown, onEnded, onUnread}: 
   </section>;
 }
 
-// A list that could not load keeps one line in its place, beside its Try again. The toast says the rest.
-function LoadFailed({what, onRetry}: {what: string; onRetry(): void}) {
-  return <div className="load-failed" role="alert"><p>dohc could not load {what}.</p>
+// A list that could not load keeps one line in its place, beside its Try again. The toast says the same, and the rest.
+// One read lists the Groups and the membership that Comments use, so either list names both.
+function LoadFailed({onRetry}: {onRetry(): void}) {
+  return <div className="load-failed" role="alert"><p>{LISTING_FAILED}.</p>
     <button type="button" onClick={onRetry}>Try again</button></div>;
 }
 
@@ -137,7 +140,7 @@ export function MemberComments({found, onRetry, path, access, onEnded}: {
     {client && opened ? <ChannelView key={`${opened.shareId}\n${path}\n${access}`} client={client} name={`Comments on ${name}`}
       onEnded={onEnded} readOnlyNote={READ_ONLY} empty={NO_COMMENTS} messageLabel="Comment"
       placeholder="Comment on this file…" draftKey={`${opened.shareId}\nfile\n${path}`}/> :
-      found === "failed" ? <LoadFailed what="Comments" onRetry={onRetry}/> :
+      found === "failed" ? <LoadFailed onRetry={onRetry}/> :
       <p className="chat-state">Loading comments…</p>}
   </section>;
 }
