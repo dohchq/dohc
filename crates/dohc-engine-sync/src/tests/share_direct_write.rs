@@ -826,6 +826,7 @@ fn only_a_failure_that_may_pass_keeps_the_plan() {
         (RelayError::ServerInternal, true),
         (RelayError::HttpStatus(429), true),
         (RelayError::HttpStatus(503), true),
+        (RelayError::ServerBusy, true),
         (RelayError::BlobReferenceMissing, true),
     ] {
         let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2"]);

@@ -627,6 +627,7 @@ fn relay_refuses_the_lane(error: &RelayError) -> bool {
         error,
         RelayError::Partitioned
             | RelayError::ServerInternal
+            | RelayError::ServerBusy
             | RelayError::BlobMissing
             | RelayError::BlobReferenceMissing
             | RelayError::InvalidResponse
