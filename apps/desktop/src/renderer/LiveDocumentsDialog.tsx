@@ -1020,9 +1020,9 @@ export function LiveDocumentsDialog({
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
+                    // One copy at a time: a second would queue behind it and make another file.
                     disabled={
-                      (busy?.kind === "stop" && busy.objectId === row.objectId) ||
-                      copying === `${workspaceId}\n${row.path}`
+                      (busy?.kind === "stop" && busy.objectId === row.objectId) || copying !== null
                     }
                     aria-busy={copying === `${workspaceId}\n${row.path}` || undefined}
                     aria-label={`Make a copy of ${row.path}`}

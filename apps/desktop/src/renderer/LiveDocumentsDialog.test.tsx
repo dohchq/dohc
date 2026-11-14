@@ -519,19 +519,30 @@ describe("LiveDocumentsDialog", () => {
           reason: "conflict-parent-withheld",
           canResume: false,
         }),
+        row("docs/held-2.md", {
+          status: "unavailable",
+          reason: "conflict-parent-withheld",
+          canResume: false,
+        }),
         row("docs/held-stopped.md", { status: "retired", reason: "conflict-parent-withheld" }),
       ]),
     );
     render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
     const copy = await screen.findByRole("button", { name: "Make a copy of docs/held.md" });
+    const other = screen.getByRole("button", { name: "Make a copy of docs/held-2.md" });
 
     await userEvent.click(copy);
     expect(h.makeCopy).toHaveBeenCalledExactlyOnceWith("ws-1", "docs/held.md");
     expect(copy.textContent).toBe("Making a copy…");
     expect((copy as HTMLButtonElement).disabled).toBe(true);
+    // Another row's copy waits too, so the first row's button can't come back while its copy runs.
+    expect((other as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(other);
+    expect(h.makeCopy).toHaveBeenCalledTimes(1);
     await act(async () => made.resolve());
     expect(copy.textContent).toBe("Make a copy");
     expect((copy as HTMLButtonElement).disabled).toBe(false);
+    expect((other as HTMLButtonElement).disabled).toBe(false);
 
     expect(actions("docs/held-stopped.md")).not.toContain("Make a copy");
     expect(screen.getByTestId("live-document-row-docs/held-stopped.md").textContent).not.toContain(
