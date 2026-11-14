@@ -589,7 +589,7 @@ function captureLiveFrameHost(options: {
       }
       check(signal);
       // The engine's answer to the drain that applied this row, or else the ACK the engine kept for it. Either says the
-    // engine had applied the row when it answered, so a kept answer needs no second read.
+      // engine had applied the row when it answered, so a kept answer needs no second read.
       const applied = native.takeAppliedAck?.({ deliveryId, updateDigest });
       const ack =
         applied &&

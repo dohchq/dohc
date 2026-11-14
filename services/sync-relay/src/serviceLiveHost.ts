@@ -930,8 +930,10 @@ export async function startServiceLiveHost(options: {
       waiter,
     );
   };
-  // The drains of submissions that hold or wait for each document.
-  const applications = new Map<string, number>();
+  // The drains of submissions that hold or wait for each document, and the documents a pass left to them. The last
+  // drain's end wakes the pass that settles a document left to it.
+  const applications = new Map<string, number>(),
+    leftToDrain = new Set<string>();
   const drain = async (
     value: LiveDocumentKey,
     callerSignal?: AbortSignal,
@@ -950,7 +952,10 @@ export async function startServiceLiveHost(options: {
     } finally {
       const left = applications.get(key)! - 1;
       if (left) applications.set(key, left);
-      else applications.delete(key);
+      else {
+        applications.delete(key);
+        if (leftToDrain.delete(key)) wakePass();
+      }
     }
   };
   const startup = Effect.runPromise(
@@ -2964,8 +2969,12 @@ export async function startServiceLiveHost(options: {
             },
             runDocument: (document, signal, operation) =>
               runDocument(document, signal, operation, "pass"),
-            applying: (document) =>
-              applications.has(JSON.stringify(parseLiveDocumentKey(document))),
+            applying(document) {
+              const key = JSON.stringify(parseLiveDocumentKey(document));
+              if (!applications.has(key)) return false;
+              leftToDrain.add(key);
+              return true;
+            },
             lifetime: signal,
             wake: wakePass,
           });
