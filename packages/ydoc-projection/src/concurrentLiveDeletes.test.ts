@@ -6,6 +6,7 @@
 // One of the two is kept, the same for everyone, so those rows are accepted too.
 // Yjs's formatting cleanup also deletes content that no update names. Those rows stay refused here.
 import { createHash } from "node:crypto";
+import * as encoding from "lib0/encoding";
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "./import-export.js";
@@ -183,6 +184,32 @@ function undeclared(checkpoint: Uint8Array, rows: readonly Uint8Array[]): Undecl
   );
   replay.destroy();
   return found;
+}
+
+/** A row holding one item from `client`, at clock 0, with the origins given. */
+function oneItemRow(
+  client: number,
+  origin: Y.ID | null,
+  rightOrigin: Y.ID | null,
+  values: unknown[],
+) {
+  const encoder = new Y.UpdateEncoderV1();
+  encoding.writeVarUint(encoder.restEncoder, 1);
+  encoding.writeVarUint(encoder.restEncoder, 1);
+  encoder.writeClient(client);
+  encoding.writeVarUint(encoder.restEncoder, 0);
+  new Y.Item(
+    Y.createID(client, 0),
+    null,
+    origin,
+    null,
+    rightOrigin,
+    null,
+    null,
+    new Y.ContentAny(values),
+  ).write(encoder, 0);
+  encoding.writeVarUint(encoder.restEncoder, 0);
+  return encoder.toUint8Array();
 }
 
 /** What a refusal carries, and what only the replay deletes, for the failure message. */
@@ -515,6 +542,75 @@ describe("the same key set at once: one of the two is kept, the same for everyon
     for (const update of [baseline, ...rows]) Y.applyUpdate(replay, update);
     expect(replay.getMap("frontmatter").get("status")).toBe("review");
     replay.destroy();
+  });
+
+  it("refuses a value for a key that names an entry to its right, in every order", () => {
+    // Yjs sets a key with nothing to its right, so a value that names an entry to its right is refused in every order.
+    const { baseline, rows, open } = session("---\nstatus: draft\n---\n\nNotes\n");
+    open(2).getMap("frontmatter").set("status", "review");
+    open(3).getMap("frontmatter").set("status", "done");
+    const review = Y.decodeUpdate(rows[0]!).structs.find(
+      (struct): struct is Y.Item => struct instanceof Y.Item,
+    )!;
+    const named = oneItemRow(4, null, review.id, ["x"]);
+    for (const order of [
+      [rows[0]!, named],
+      [rows[0]!, rows[1]!, named],
+      [rows[0]!, named, rows[1]!],
+    ]) {
+      const admitted = admitRow(baseline, order, order.length - 1);
+      const activated = activate(baseline, order).result;
+      expect(
+        [admitted, activated].map((result) =>
+          result.kind === "refused" ? result.reason : result.kind,
+        ),
+      ).toEqual(["invalid-update", "invalid-update"]);
+    }
+  });
+
+  it("refuses a value for a key holding two values the row doesn't replace, in every order", () => {
+    // Yjs sets a key to one value, so an entry holding two values its row doesn't replace is refused in every order.
+    const { baseline, rows, open } = session("---\nstatus: draft\n---\n\nNotes\n");
+    const base = new Y.Doc({ gc: false });
+    Y.applyUpdate(base, baseline);
+    const draft = (base.getMap("frontmatter") as unknown as { _map: Map<string, Y.Item> })._map.get(
+      "status",
+    )!;
+    base.destroy();
+    const two = oneItemRow(4, draft.id, null, ["a", "b"]);
+    const split = oneItemRow(6, Y.createID(4, 0), null, ["m"]);
+    open(5).getMap("frontmatter").set("status", "set");
+    const rowsByName: Record<string, Uint8Array> = { two, split, set: rows[0]! };
+    for (const order of [
+      ["two", "split", "set"],
+      ["two", "set", "split"],
+      ["split", "two", "set"],
+      ["split", "set", "two"],
+      ["set", "two", "split"],
+      ["set", "split", "two"],
+    ]) {
+      const arrived = order.map((name) => rowsByName[name]!);
+      const admitted = admitRow(baseline, arrived, order.indexOf("two"));
+      const activated = activate(baseline, arrived).result;
+      expect(
+        [admitted, activated].map((result) =>
+          result.kind === "refused" ? result.reason : result.kind,
+        ),
+        order.join(", "),
+      ).toEqual(["invalid-update", "invalid-update"]);
+    }
+  });
+
+  it("accepts a row from saved state where one person's replaced values for a key are joined", () => {
+    // Yjs joins one client's deleted values into one entry, and a row from saved state carries its deletes with it.
+    const { baseline, open } = session("---\nstatus: draft\n---\n\nNotes\n");
+    const doc = open(2);
+    for (const value of ["review", "done", "parked"])
+      doc.getMap("frontmatter").set("status", value);
+    const saved = Y.encodeStateAsUpdate(doc, Y.encodeStateVectorFromUpdate(baseline));
+    expect(Y.decodeUpdate(saved).structs.map((struct) => struct.length)).toEqual([2, 1]);
+    expectAccepted(baseline, [saved], admitRow(baseline, [saved], 0));
+    expectAccepted(baseline, [saved], activate(baseline, [saved]).result);
   });
 });
 

@@ -3074,6 +3074,75 @@ function deletedByMerge(
   return true;
 }
 
+type KeyedValueEvidence = Pick<NormalizedInput, "ranges" | "integrationNodes" | "deleteRanges">;
+
+/** The index of the first of a client's structs that ends after `clock`. */
+function firstStructEndingAfter(
+  structs: readonly (Y.Item | Y.GC)[],
+  clock: number,
+  budget: ValidationBudget,
+  stage: OrderedLiveUpdateCutFailureStage,
+): number {
+  let low = 0;
+  let high = structs.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    budget.visitIndexOperation(stage);
+    const struct = structs[middle] as Y.Item | Y.GC;
+    if (struct.id.clock + struct.length <= clock) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+/**
+ * Whether a row holds a value for a key that Yjs would not write. Yjs sets a
+ * key to one value with nothing to its right, which is what lets
+ * `deletedByMerge` keep one of two values the same for everyone. A row from
+ * saved state holds several values for a key only where one client's replaced
+ * values were joined, and its deletes include every one of them but the last.
+ */
+function keyedValueYjsWouldNotWrite(
+  document: Y.Doc,
+  input: KeyedValueEvidence,
+  budget: ValidationBudget,
+  stage: OrderedLiveUpdateCutFailureStage,
+): boolean {
+  for (const range of input.ranges) {
+    budget.visitIndexOperation(stage);
+    const structs = document.store.clients.get(range.clientId);
+    if (structs === undefined) continue;
+    for (
+      let index = firstStructEndingAfter(structs, range.startClock, budget, stage);
+      index < structs.length;
+      index += 1
+    ) {
+      budget.visitIndexOperation(stage);
+      const struct = structs[index] as Y.Item | Y.GC;
+      if (struct.id.clock >= range.endClock) break;
+      if (struct instanceof Y.Item && struct.parentSub !== null && struct.rightOrigin !== null)
+        return true;
+    }
+  }
+  let ownDeletes: Map<number, NumericRange[]> | undefined;
+  for (const node of input.integrationNodes) {
+    budget.visitIndexOperation(stage);
+    if (node.placement === null || node.endClock - node.startClock < 2) continue;
+    const structs = document.store.clients.get(node.clientId);
+    if (structs === undefined) continue;
+    // A row may be split once applied, but its key is the same in every piece.
+    const index = firstStructEndingAfter(structs, node.startClock, budget, stage);
+    budget.visitIndexOperation(stage);
+    const struct = structs[index];
+    if (!(struct instanceof Y.Item) || struct.parentSub === null) continue;
+    ownDeletes ??= mapRanges(input.deleteRanges);
+    budget.visitIndexOperation(stage);
+    const deletes = ownDeletes.get(node.clientId) ?? [];
+    if (!rangeCovered(deletes, node.startClock, node.endClock - 1, budget, stage)) return true;
+  }
+  return false;
+}
+
 function rangeMapEquivalent(
   left: ReadonlyMap<number, readonly NumericRange[]>,
   right: ReadonlyMap<number, readonly NumericRange[]>,
@@ -3786,12 +3855,15 @@ function validateCut(
     const evidenceDeltas: CappedUsage[] = [];
     const applyForecasts: DecoderUsage[] = [];
     const prefixInputs: NormalizedInput[] = [];
+    const keyedValueEvidence: KeyedValueEvidence[] = [];
 
     for (let index = 0; index < snapshot.entries.length; index += 1) {
       const entry = snapshot.entries[index] as InputBytes;
       const before = budget.cappedSnapshot();
       const decoded = decodeOwnedInput(entry, budget, index === 0);
       if (prefixes !== undefined) prefixInputs.push(decoded.normalized);
+      const { ranges, integrationNodes, deleteRanges } = decoded.normalized;
+      keyedValueEvidence.push({ ranges, integrationNodes, deleteRanges });
       if (entry.stage.kind === "input" && entry.stage.role === "candidate")
         candidateCoverage = frontier.newCoverage(decoded.normalized, budget, entry.stage);
       frontier.apply(decoded.normalized, budget, entry.stage);
@@ -3876,6 +3948,12 @@ function validateCut(
       }
       if (mutated) fail("projection-mutated", entry.stage);
       if (reason !== undefined) fail(reason, entry.stage);
+    }
+    // The checkpoint is what was already accepted, so only rows are checked.
+    for (let index = 1; index < snapshot.entries.length; index += 1) {
+      const { stage } = snapshot.entries[index] as InputBytes;
+      const input = keyedValueEvidence[index] as KeyedValueEvidence;
+      if (keyedValueYjsWouldNotWrite(document, input, budget, stage)) fail("invalid-update", stage);
     }
 
     const topology: ProjectionTopologyCapture | undefined =
