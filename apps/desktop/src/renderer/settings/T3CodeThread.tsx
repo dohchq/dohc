@@ -1,12 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type KeyboardEvent,
-} from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ExternalLink, LoaderCircle, Search } from "lucide-react";
 import type {
   T3CodeAccess as T3CodeMode,
@@ -99,11 +91,27 @@ export function useT3CodeAccess(
   onFailure?: (message: string, cause: unknown, retry: () => Promise<void>) => void,
 ): T3CodeAccess {
   const session = useWorkspaceSession();
+  // How many answers T3 Code has given this one's asks.
+  const answers = useRef(0);
   const read = useWorkspaceQuery(session, {
     key: "t3-code-connection",
-    load: () => bridge().readT3CodeConnection({}),
+    // Each read says how many answers there were when it began.
+    load: async () => {
+      const after = answers.current;
+      return { state: await bridge().readT3CodeConnection({}), after };
+    },
   });
-  const [answered, setAnswered] = useState<T3CodeConnectionState | null>(null);
+  // T3 Code's latest answer to an ask made here, and which answer it was.
+  const [answered, setAnswered] = useState<{ state: T3CodeConnectionState; nth: number } | null>(
+    null,
+  );
+  // The answer stands over every read that began before it, however late that
+  // read comes in. A read that began after it is newer, and replaces it: the
+  // sign-in may have changed elsewhere, as in the Change thread dialog.
+  const held =
+    answered !== null && (read.value === undefined || read.value.after < answered.nth)
+      ? answered.state
+      : null;
   const [asking, setAsking] = useState<"here" | "page" | null>(null);
   const [allowError, setAllowError] = useState<string | null>(null);
   const [failedHere, setFailedHere] = useState(false);
@@ -111,8 +119,6 @@ export function useT3CodeAccess(
   // Leaving is going away or the window showing another workspace.
   const asks = useRequestSequence([session]);
   const open = useRef(false);
-  // How many answers T3 Code has given this one's asks.
-  const answers = useRef(0);
   const failed = useRef(onFailure);
   failed.current = onFailure;
   const endWait = () =>
@@ -140,7 +146,7 @@ export function useT3CodeAccess(
       const state = await bridge().allowDohcInT3Code({ access: mode });
       if (!asks.isCurrent(token)) return false;
       answers.current += 1;
-      setAnswered(state);
+      setAnswered({ state, nth: answers.current });
       setFailedHere(false);
       allowed = true;
     } catch (cause) {
@@ -161,20 +167,6 @@ export function useT3CodeAccess(
     setAsking(null);
     return allowed;
   };
-  // Reads again what dohc holds, which another surface may have changed
-  // since this one last asked.
-  const readAgain = read.retry;
-  // The answer this one holds stands until the new read is in, so the page
-  // never says dohc has less than it holds while it reads. An answer that
-  // arrives during the read is newer than the read, and stands after it.
-  const retryRead = useCallback(async () => {
-    const held = answers.current;
-    try {
-      await readAgain();
-    } finally {
-      if (answers.current === held) setAnswered(null);
-    }
-  }, [readAgain]);
   const cancel = () => {
     if (!open.current) return;
     open.current = false;
@@ -183,9 +175,9 @@ export function useT3CodeAccess(
     endWait();
   };
   return {
-    state: answered ?? read.value,
-    readError: answered ? null : read.error,
-    retryRead,
+    state: held ?? read.value?.state,
+    readError: held ? null : read.error,
+    retryRead: read.retry,
     asking,
     allowError,
     failedHere,

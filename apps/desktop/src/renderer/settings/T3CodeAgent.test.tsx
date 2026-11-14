@@ -1049,6 +1049,38 @@ it("keeps a newer answer on the agent's page when an older read comes in after i
   expect(access.queryByText(/^Allowed with Auto until /)).toBeNull();
 });
 
+it("keeps what the agent's page knows when one of two reads is dropped for the other", async () => {
+  // The page itself allowed dohc with Auto, over a first read that said it was not allowed.
+  bridgeMock.readT3CodeConnection.mockResolvedValue(HERE_SIGNED_OUT);
+  bridgeMock.allowDohcInT3Code.mockResolvedValueOnce(allowedHere("auto"));
+  const { page } = await openChiefPage();
+  const access = within(page.getByTestId("agent-thread-access"));
+  await userEvent.click(await page.findByRole("radio", { name: "Auto" }));
+  await userEvent.click(page.getByRole("button", { name: "Allow with Auto" }));
+  await access.findByText(/^Allowed with Auto until /);
+  bridgeMock.readT3CodeConnection.mockResolvedValue(allowedHere("auto"));
+
+  // Closing the dialog twice starts two reads, and the second replaces the first.
+  const closeDialog = async (reading: Promise<T3CodeConnectionState>, reads: number) => {
+    await userEvent.click(page.getByRole("button", { name: "Change thread" }));
+    await changeDialog().findByRole("button", { name: "Allow again" });
+    bridgeMock.readT3CodeConnection.mockReturnValueOnce(reading);
+    await userEvent.click(changeDialog().getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(bridgeMock.readT3CodeConnection).toHaveBeenCalledTimes(reads));
+  };
+  const first = deferred<T3CodeConnectionState>();
+  const second = deferred<T3CodeConnectionState>();
+  await closeDialog(first.promise, 3);
+  await closeDialog(second.promise, 5);
+
+  // The dropped read ends, and the page still says what it knew.
+  await act(async () => first.resolve(allowedHere("full-access")));
+  expect(access.getByText(/^Allowed with Auto until /)).toBeTruthy();
+  expect(page.queryByText("Not allowed")).toBeNull();
+  await act(async () => second.resolve(allowedHere("full-access")));
+  expect(await access.findByText(/^Allowed with Full access until /)).toBeTruthy();
+});
+
 it("says only until when, for a sign-in the person allowed on T3 Code's page", async () => {
   bridgeMock.readT3CodeConnection.mockResolvedValueOnce(allowedHere(null));
   const { page } = await openChiefPage();
