@@ -19,11 +19,12 @@ import type { ChatMessage } from "./workspaceReads";
 // doesn't touch it.
 //
 // Each write is one record file, named by its sequence number, written through the durable-file module
-// (durableFiles.ts). Enqueue resolves only once the record would survive a crash or power loss. A counter file, written
-// first, gives each record the next sequence, so order survives a relaunch. When the record landed but its folder sync
-// failed, enqueue can't say whether it was kept: the record is marked withheld, sent only after `retryEnqueue` with the
-// same operation ID, and a mark that couldn't be written is tried again until it is. Nothing here deletes a record
-// except a read that shows its result, and Sign out. A record that can't be read, and any other file, is kept aside.
+// (durableFiles.ts). A counter file, written first, gives each record the next sequence, so order survives a relaunch.
+// Enqueue writes the record withheld, then sendable, and resolves only once the record would survive a crash or power
+// loss. A record whose sendable version couldn't be written stays withheld, on disk and in memory, and is sent only
+// after `retryEnqueue` with the same operation ID, so a relaunch never sends a write the person may have given up on.
+// Nothing here deletes a record except a read that shows its result, and Sign out. A record that can't be read, and any
+// other file, is kept aside.
 //
 // Only a sign-in with the record's own server and account sends it. Within each account, workspace, and thread or
 // stream, only the oldest unfinished record runs, and none while another of that lane's records is running. A reaction
@@ -88,7 +89,10 @@ interface OutboxRecord {
    * can tell a message never sent from one that may still send.
    */
   readonly attempted: boolean;
-  /** Enqueue couldn't confirm the record was kept, so it's not sent until `retryEnqueue`. */
+  /**
+   * Enqueue writes the record withheld before sendable, and keeps it withheld when the sendable version couldn't be
+   * written. A withheld record isn't sent until `retryEnqueue`.
+   */
   readonly withheld: boolean;
   /** When the current run of `pending` answers began. A failed request ends the run. */
   readonly pendingSinceMs: number | null;
@@ -109,8 +113,8 @@ interface OutboxState {
 
 /**
  * Why enqueue didn't resolve, when it isn't a disk error: no account signed in or records not read yet, a write the
- * route would refuse, or `indeterminate`: the record may have been kept, so it's withheld under `operationId`, and
- * `retryEnqueue` sends it as that one operation. `not-deleted`: Sign out couldn't make its delete safe.
+ * route would refuse, or `indeterminate`: the record may be on disk, withheld under `operationId`, and `retryEnqueue`
+ * sends it as that one operation. `not-deleted`: Sign out couldn't make its delete safe.
  */
 export class OutboxError extends Error {
   constructor(
@@ -134,7 +138,7 @@ export interface Outbox {
   /**
    * Adds a write for the signed-in account, and resolves once its record is durable. A reply whose `threadId` is null
    * names, in `dependsOn`, the outbox post or send it replies to. A reaction names its message's `thread`. Rejects with
-   * a disk error when nothing was kept, and as `indeterminate` when the record may have been.
+   * a disk error when nothing was kept, and as `indeterminate` when the record may be kept, withheld.
    */
   enqueue(input: {
     readonly workspaceId: string;
@@ -162,7 +166,7 @@ export interface Outbox {
    * paused, until a later sign-in.
    */
   signOut(leave: () => Promise<void>): Promise<void>;
-  /** Tries again what failed: reading, a Sign out's delete, dependency changes and marks. Cuts every retry wait short. */
+  /** Tries again what failed: reading, a Sign out's delete, and dependency changes. Cuts every retry wait short. */
   wake(): void;
   /** Reads the records, then sends with each sign-in. A 401 only pauses. Returns a stop. */
   follow(account: {
@@ -270,10 +274,8 @@ export function createOutbox(options: {
   let paused = false;
   /** The sender of each record being sent, by sequence. */
   const running = new Map<number, AbortController>();
-  /** Records whose dependency change or withheld mark is being written. */
+  /** Records whose dependency change is being written. */
   const changing = new Set<number>();
-  /** Withheld records whose mark didn't reach the disk. */
-  const unmarked = new Set<number>();
   /** Workspaces, by scope, whose records wait after repeated 404s. */
   const unreachable = new Set<string>();
   /** The latest messages reads showed, for one account and workspace. */
@@ -356,7 +358,7 @@ export function createOutbox(options: {
     });
   }
 
-  /** A dependency change or a withheld mark, tried again with backoff, and at `wake`, until it's written. */
+  /** A dependency change, tried again with backoff, and at `wake`, until it's written. */
   function change(sequence: number, update: (record: OutboxRecord) => OutboxRecord | null) {
     changing.add(sequence);
     const at = epoch;
@@ -365,7 +367,6 @@ export function createOutbox(options: {
       if (epoch !== at) return;
       if (!written) return later();
       changeFailures = 0;
-      if (records.get(sequence)?.withheld) unmarked.delete(sequence);
       pump();
     });
   }
@@ -516,11 +517,6 @@ export function createOutbox(options: {
    */
   function pump() {
     if (status !== "ready") return;
-    for (const sequence of unmarked) {
-      if (!records.get(sequence)?.withheld) unmarked.delete(sequence);
-      else if (!changing.has(sequence))
-        change(sequence, (record) => (record.withheld ? { ...record } : null));
-    }
     const ordered = [...records.values()].sort((a, b) => a.sequence - b.sequence);
     const heads = new Map<string, OutboxRecord>();
     const busy = new Set<string>();
@@ -723,35 +719,37 @@ export function createOutbox(options: {
   }
 
   /**
-   * Writes a new or retried record as sendable. An `unsynced` write may have left it on disk, so it's withheld instead,
-   * and the mark is retried until it lands. Any other failure leaves the previous version: none, or the withheld one.
+   * Writes a new or retried record withheld, then sendable, so the disk never holds it sendable before enqueue can say
+   * it was kept. A failed withheld write rejects as the disk error, or as `indeterminate` once its rename may stand. A
+   * failed sendable write leaves the withheld record and rejects as `indeterminate`.
    */
   async function place(record: OutboxRecord, at: number): Promise<OutboxRecord> {
+    const name = nameOf(record.sequence);
+    const withheld = { ...record, withheld: true };
     const sendable = { ...record, withheld: false };
+    const unsynced = (error: unknown) =>
+      error instanceof DurableFileError && error.kind === "unsynced";
+    const keepWithheld = () => {
+      // Signed out meanwhile: the delete queued behind this write removes it.
+      if (epoch !== at) return new OutboxError("closed");
+      records.set(record.sequence, withheld);
+      changed();
+      return new OutboxError("indeterminate", record.operationId);
+    };
     try {
-      await files.write(nameOf(record.sequence), serialize(sendable));
+      await files.write(name, serialize(withheld));
     } catch (error) {
-      if (!(error instanceof DurableFileError && error.kind === "unsynced")) throw error;
-      const withheld = { ...record, withheld: true };
-      const markedOnDisk = await files.write(nameOf(record.sequence), serialize(withheld)).then(
-        () => true,
-        () => false,
-      );
-      if (epoch === at) {
-        records.set(record.sequence, withheld);
-        if (!markedOnDisk) {
-          unmarked.add(record.sequence);
-          later();
-        }
-        changed();
-      }
-      throw epoch === at
-        ? new OutboxError("indeterminate", record.operationId)
-        : new OutboxError("closed");
+      if (!unsynced(error)) throw error;
+      throw keepWithheld();
     }
-    // Signed out meanwhile: the delete queued behind this write removes it.
     if (epoch !== at) throw new OutboxError("closed");
-    unmarked.delete(record.sequence);
+    try {
+      await files.write(name, serialize(sendable));
+    } catch (error) {
+      // An unsynced write was renamed: the disk holds the sendable record, or the withheld one if a crash reverts it.
+      if (!unsynced(error)) throw keepWithheld();
+    }
+    if (epoch !== at) throw new OutboxError("closed");
     records.set(record.sequence, sendable);
     changed();
     pump();
@@ -896,7 +894,6 @@ export function createOutbox(options: {
       aside = [];
       observed = null;
       unreachable.clear();
-      unmarked.clear();
       paused = false;
       status = "loading";
       changed();

@@ -9,7 +9,7 @@ import {
 } from "./account";
 import { derivedMessageId, type ChatWrite } from "./chatWrites";
 import { createServerClient } from "./client";
-import { createDurableFiles, DurableFileError } from "./durableFiles";
+import { createDurableFiles, DurableFileError, type DurableFiles } from "./durableFiles";
 import { createOutbox, OutboxError, type Outbox } from "./outbox";
 import { durableDisk } from "./testDurableDisk";
 import { deferred, memoryStore, testServer, type Answer } from "./testServer";
@@ -158,6 +158,7 @@ function launch(
   disk: Disk,
   server?: Server,
   options: {
+    files?: DurableFiles;
     now?: () => number;
     stalledAfterMs?: number;
     stalledRetryMs?: number;
@@ -165,11 +166,8 @@ function launch(
   } = {},
 ) {
   const wait = waits();
-  const outbox = createOutbox({
-    files: createDurableFiles(disk.launch()),
-    sleep: wait.sleep,
-    ...options,
-  });
+  const { files = createDurableFiles(disk.launch()), ...rest } = options;
+  const outbox = createOutbox({ files, sleep: wait.sleep, ...rest });
   const account = fakeAccount((leave) => outbox.signOut(leave));
   const stop = outbox.follow(account);
   if (server) account.signIn(server);
@@ -235,30 +233,31 @@ const message = (id: string, extra: Partial<ChatMessage> = {}): ChatMessage => (
 });
 
 /**
- * Holds the record write of an enqueue until its rename has landed, then makes that write fail its folder sync, and
- * holds the next write. Resolves the release for that next write and the enqueue's outcome.
+ * One run's files over `disk`, failing the first record write that saves it `which`, as `mode` does: before its rename,
+ * or after it, at the folder sync.
  */
-async function unsyncedEnqueue(disk: Disk, outbox: Outbox, write: ChatWrite) {
-  const releaseCounter = disk.holdWrites();
-  const outcome = outbox.enqueue({ workspaceId: "ws-1", write }).catch((error: unknown) => error);
-  await vi.waitFor(() =>
-    expect(temporaries(disk).some((name) => name.startsWith("counter."))).toBe(true),
-  );
-  releaseCounter();
-  const releaseRecord = disk.holdWrites();
-  await vi.waitFor(() =>
-    expect(temporaries(disk).some((name) => name.startsWith("m-"))).toBe(true),
-  );
-  disk.failWrites = "sync-folder";
-  releaseRecord();
-  const releaseNext = disk.holdWrites();
-  // The record's rename landed, and the write after it, the withheld mark, has begun.
-  await vi.waitFor(() =>
-    expect(
-      records(disk).length === 1 && temporaries(disk).some((name) => name.startsWith("m-")),
-    ).toBe(true),
-  );
-  return { releaseNext, outcome };
+function failingOnce(
+  disk: Disk,
+  which: "withheld" | "sendable",
+  mode: "write" | "sync-folder",
+): DurableFiles {
+  const files = createDurableFiles(disk.launch());
+  let armed = true;
+  return {
+    ...files,
+    async write(name, text) {
+      const fail =
+        armed && name.startsWith("m-") && text.includes(`"withheld":${which === "withheld"}`);
+      if (!fail) return files.write(name, text);
+      armed = false;
+      disk.failWrites = mode;
+      try {
+        await files.write(name, text);
+      } finally {
+        disk.failWrites = null;
+      }
+    },
+  };
 }
 
 describe("enqueue", () => {
@@ -316,29 +315,42 @@ describe("enqueue", () => {
     expect(outbox.state().records).toEqual([]);
     expect(records(disk)).toEqual([]);
     stop();
+
+    // The counter lands, and the record's withheld write fails before its rename.
+    const other = durableDisk();
+    const second = launch(other, server, { files: failingOnce(other, "withheld", "write") });
+    await ready(second.outbox);
+    const lost = await second.outbox
+      .enqueue({ workspaceId: "ws-1", write: post("Lost") })
+      .catch((error: unknown) => error);
+    expect(lost instanceof DurableFileError && lost.kind).toBe("failed");
+    expect(second.outbox.state().records).toEqual([]);
+    expect(records(other)).toEqual([]);
+    second.stop();
   });
 
-  it("calls a record that didn't sync indeterminate, withholds it across a relaunch, and sends it as one operation on retry", async () => {
+  it("calls a record whose withheld write didn't sync indeterminate, withholds it across a relaunch, and sends it as one operation on retry", async () => {
     const disk = durableDisk();
     const server = testServer();
     server.on("POST", path("post"), SAVED("thread-p"));
-    const first = launch(disk, server);
+    const first = launch(disk, server, { files: failingOnce(disk, "withheld", "sync-folder") });
     await ready(first.outbox);
-    const { releaseNext, outcome } = await unsyncedEnqueue(disk, first.outbox, post("Maybe"));
-    disk.failWrites = null;
-    releaseNext();
-    const error = await outcome;
+    const error = await first.outbox
+      .enqueue({ workspaceId: "ws-1", write: post("Maybe") })
+      .catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(OutboxError);
     const operationId = error instanceof OutboxError ? error.operationId : null;
     expect(error instanceof OutboxError && error.kind).toBe("indeterminate");
     expect(first.outbox.state().records).toEqual([
       expect.objectContaining({ operationId, withheld: true, stage: "queued" }),
     ]);
+    // The sendable version is never written.
+    expect(disk.log.filter((entry) => entry === "write m-000000000001")).toHaveLength(1);
     expect(onDisk(disk, 1)).toMatchObject({ operationId, withheld: true });
     expect(first.outbox.signOutCounts()).toEqual({ unsent: 1, maySend: 0 });
     await settled();
     expect(requests(server, "post")).toHaveLength(0);
-    first.stop();
+    disk.crash();
 
     const second = launch(disk, server);
     await ready(second.outbox);
@@ -357,32 +369,57 @@ describe("enqueue", () => {
     second.stop();
   });
 
-  it("keeps trying to mark an indeterminate record withheld until the mark is on disk", async () => {
+  it("keeps a record withheld when its sendable write fails, so a relaunch sends it only after retry, as one operation", async () => {
     const disk = durableDisk();
     const server = testServer();
     server.on("POST", path("post"), SAVED("thread-p"));
-    const first = launch(disk, server);
+    const first = launch(disk, server, { files: failingOnce(disk, "sendable", "write") });
     await ready(first.outbox);
-    const { releaseNext, outcome } = await unsyncedEnqueue(disk, first.outbox, post("Maybe"));
-    disk.failWrites = "write";
-    releaseNext();
-    const error = await outcome;
+    const error = await first.outbox
+      .enqueue({ workspaceId: "ws-1", write: post("Maybe") })
+      .catch((reason: unknown) => reason);
     expect(error instanceof OutboxError && error.kind).toBe("indeterminate");
-    // The mark failed: the disk still holds the sendable record, so this run withholds it and tries again.
-    expect(onDisk(disk, 1)).toMatchObject({ withheld: false });
-    expect(record(first.outbox, 1)?.withheld).toBe(true);
-    await vi.waitFor(() => expect(first.wait.pending).toHaveLength(1));
+    const operationId = error instanceof OutboxError ? error.operationId : null;
+    expect(record(first.outbox, 1)).toMatchObject({ operationId, withheld: true, stage: "queued" });
+    expect(onDisk(disk, 1)).toMatchObject({ operationId, withheld: true });
+    await settled();
+    // The disk already holds it withheld, so nothing is left to try again.
+    expect(first.wait.pending).toHaveLength(0);
+    expect(requests(server, "post")).toHaveLength(0);
+    disk.crash();
 
-    disk.failWrites = null;
-    first.outbox.wake();
-    await vi.waitFor(() => expect(onDisk(disk, 1)).toMatchObject({ withheld: true }));
-    first.stop();
     const second = launch(disk, server);
     await ready(second.outbox);
     await settled();
-    expect(record(second.outbox, 1)?.withheld).toBe(true);
+    expect(record(second.outbox, 1)).toMatchObject({ operationId, withheld: true });
     expect(requests(server, "post")).toHaveLength(0);
+    await expect(second.outbox.retryEnqueue(operationId ?? "")).resolves.toMatchObject({
+      operationId,
+      withheld: false,
+    });
+    await vi.waitFor(() => expect(record(second.outbox, 1)?.stage).toBe("saved"));
+    second.outbox.wake();
+    await settled();
+    expect(requests(server, "post")).toEqual([{ operationId, groupId: "group-1", body: "Maybe" }]);
     second.stop();
+  });
+
+  it("resolves a record whose sendable write landed but didn't sync, and sends it", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("post"), SAVED("thread-p"));
+    const { outbox, stop } = launch(disk, server, {
+      files: failingOnce(disk, "sendable", "sync-folder"),
+    });
+    await ready(outbox);
+    const queued = await outbox.enqueue({ workspaceId: "ws-1", write: post("Hi") });
+    expect(queued).toMatchObject({ withheld: false, stage: "queued" });
+    await vi.waitFor(() => expect(record(outbox, 1)?.stage).toBe("saved"));
+    expect(onDisk(disk, 1)).toMatchObject({ withheld: false, stage: "saved" });
+    expect(requests(server, "post")).toEqual([
+      { operationId: queued.operationId, groupId: "group-1", body: "Hi" },
+    ]);
+    stop();
   });
 
   it("refuses with nothing written when no account is signed in, and a reaction without its thread", async () => {
