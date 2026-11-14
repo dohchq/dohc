@@ -27,7 +27,8 @@
 .page-band button:hover { color: var(--viewer-ink); }
 
 /* Errors land at the bottom right of the page, over its text. */
-.toast-slot { position: absolute; right: 16px; bottom: 16px; z-index: 25; width: 360px; max-width: calc(100% - 32px); display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.link-page.workspace-page { position: relative; }
+.toast-slot { position: absolute; right: calc(344px + 16px); bottom: 16px; z-index: 25; width: 360px; max-width: calc(100% - 32px); display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
 .link-page .toast-slot .edit-notice { position: static; width: auto; max-width: none; pointer-events: auto; animation: workspace-toast 160ms ease-out both; }
 .toast-slot .edit-notice > div { min-width: 0; flex: 1; }
 /* Copy sits beside the text it copies. */
@@ -74,7 +75,8 @@
   /* A tab fills the screen, so its rows take a finger. */
   .link-page.workspace-page > nav :is(.folder, .file), .group-row { height: 40px; }
   .narrow-mark { display: grid; }
-  .toast-slot { right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; }
+  /* Above the tabs. */
+  .toast-slot { right: 8px; bottom: calc(56px + env(safe-area-inset-bottom)); left: 8px; width: auto; max-width: none; }
   .link-page .toast-slot .edit-notice { border-radius: 12px; }
   .workspace-tabs { display: flex; grid-area: 2 / 1; border-top: 1px solid var(--viewer-line); padding-bottom: env(safe-area-inset-bottom); background: var(--viewer-panel); }
   .workspace-tabs [role="tab"] { display: inline-flex; height: 48px; flex: 1; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; font-weight: 500; }

@@ -254,10 +254,6 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
           </div>
         </div>
       </div>
-      <div className="toast-slot" ref={setToastSlot}>
-        {listing.found === "failed" && !listingDismissed && <Toast title={LISTING_FAILED} body={CHECK_CONNECTION} onRetry={listing.retry}
-          onDismiss={() => setListingDismissed(true)}/>}
-      </div>
     </div>
     <div className="side-panel workspace-side" {...(narrow ? {inert: showing === null, "data-shown": showing !== null} : {})}>
       {!narrow && <div className="side-tabs" role="tablist" aria-label="Beside the page" onKeyDown={moveTab(SIDES, side, setSide)}>
@@ -278,5 +274,10 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
       {TABS.map(item => <button key={item.id} ref={node => {if (node) tabs.current.set(item.id, node);}} id={`workspace-tab-${item.id}`} role="tab" type="button"
         aria-selected={tab === item.id} aria-controls={item.panel} tabIndex={tab === item.id ? 0 : -1} onClick={() => setTab(item.id)}>{tabLabel(item)}</button>)}
     </div>}
+    {/* Outside the tab panels, so a phone shows a toast whichever tab is open. */}
+    <div className="toast-slot" ref={setToastSlot}>
+      {listing.found === "failed" && !listingDismissed && <Toast title={LISTING_FAILED} body={CHECK_CONNECTION} onRetry={listing.retry}
+        onDismiss={() => setListingDismissed(true)}/>}
+    </div>
   </div>;
 }
