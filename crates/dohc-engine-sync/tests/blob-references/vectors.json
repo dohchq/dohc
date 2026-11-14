@@ -1,4 +1,5 @@
 {
+  "scope": "Each vector is an op both sides accept. Out of scope: a sha that is not 64 lowercase hex characters, which the engine refuses and the relay accepts; a conflict.resolve either side refuses; and an op whose settlement admission is refused, which the engine skips and the relay function never sees.",
   "vectors": [
     {
       "name": "a moment that replaces text with a binary file",
@@ -19,10 +20,18 @@
         }
       },
       "blobs": {
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["text"],
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": ["binary"],
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": ["text"],
-        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd": ["ydoc"]
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "text"
+        ],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "binary"
+        ],
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": [
+          "text"
+        ],
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd": [
+          "ydoc"
+        ]
       }
     },
     {
@@ -38,8 +47,13 @@
         "beforeContentKind": "binary"
       },
       "blobs": {
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["text", "binary"],
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": ["binary"]
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "text",
+          "binary"
+        ],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "binary"
+        ]
       }
     },
     {
@@ -51,7 +65,11 @@
         "payloadBeforeBlobSha256": "",
         "payloadAfterBlobSha256": "",
         "beforeBlobSha256": "",
-        "settlementReference": { "record": { "acceptedStateBlobSha256": "" } }
+        "settlementReference": {
+          "record": {
+            "acceptedStateBlobSha256": ""
+          }
+        }
       },
       "blobs": {}
     },
@@ -63,7 +81,9 @@
       "payload": {
         "payloadBeforeBlobSha256": null,
         "payloadAfterBlobSha256": 7,
-        "settlementReference": { "record": null }
+        "settlementReference": {
+          "record": null
+        }
       },
       "blobs": {}
     },
@@ -91,8 +111,12 @@
         }
       },
       "blobs": {
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": ["binary"],
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": ["binary"]
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "binary"
+        ],
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": [
+          "binary"
+        ]
       }
     },
     {
@@ -118,7 +142,9 @@
         }
       },
       "blobs": {
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["binary"]
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "binary"
+        ]
       }
     },
     {
@@ -127,9 +153,16 @@
       "workspaceId": "workspace",
       "recordedAtMs": 0,
       "payload": {
-        "base": { "exists": true, "contentKind": "binary", "sha256": "" },
+        "base": {
+          "exists": true,
+          "contentKind": "binary",
+          "sha256": ""
+        },
         "current": null,
-        "incoming": { "exists": "true", "contentKind": "binary" }
+        "incoming": {
+          "exists": "true",
+          "contentKind": "binary"
+        }
       },
       "blobs": {}
     },
@@ -140,17 +173,31 @@
       "recordedAtMs": 0,
       "payload": {
         "forkSnapshots": [
-          { "blobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "contentKind": "text" },
-          { "blobSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "contentKind": "binary" },
-          { "blobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-          { "blobSha256": "" },
+          {
+            "blobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "contentKind": "text"
+          },
+          {
+            "blobSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "contentKind": "binary"
+          },
+          {
+            "blobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "blobSha256": ""
+          },
           null,
           {}
         ]
       },
       "blobs": {
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["text"],
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": ["binary"]
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "text"
+        ],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "binary"
+        ]
       }
     },
     {
@@ -158,7 +205,9 @@
       "opKind": "version.create",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "forkSnapshots": {} },
+      "payload": {
+        "forkSnapshots": {}
+      },
       "blobs": {}
     },
     {
@@ -166,15 +215,23 @@
       "opKind": "ydoc.update",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "updateBlobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-      "blobs": { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["ydoc"] }
+      "payload": {
+        "updateBlobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "blobs": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "ydoc"
+        ]
+      }
     },
     {
       "name": "a Y.Doc update with an empty sha names no blobs",
       "opKind": "ydoc.update",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "updateBlobSha256": "" },
+      "payload": {
+        "updateBlobSha256": ""
+      },
       "blobs": {}
     },
     {
@@ -186,19 +243,33 @@
         "updateBlobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "manifest": {
           "chunks": [
-            { "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-            { "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-            { "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
-            { "sha256": "" },
+            {
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            {
+              "sha256": ""
+            },
             null,
             {}
           ]
         }
       },
       "blobs": {
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["ydoc"],
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": ["binary"],
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": ["binary"]
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "ydoc"
+        ],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "binary"
+        ],
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": [
+          "binary"
+        ]
       }
     },
     {
@@ -206,7 +277,12 @@
       "opKind": "live.audit.application",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "updateBlobSha256": "", "manifest": { "chunks": {} } },
+      "payload": {
+        "updateBlobSha256": "",
+        "manifest": {
+          "chunks": {}
+        }
+      },
       "blobs": {}
     },
     {
@@ -221,8 +297,12 @@
         }
       },
       "blobs": {
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["text"],
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": ["ydoc"]
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "text"
+        ],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "ydoc"
+        ]
       }
     },
     {
@@ -230,7 +310,12 @@
       "opKind": "live.audit.settlement",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "record": { "markdownDigest": "", "acceptedStateBlobSha256": "" } },
+      "payload": {
+        "record": {
+          "markdownDigest": "",
+          "acceptedStateBlobSha256": ""
+        }
+      },
       "blobs": {}
     },
     {
@@ -238,15 +323,31 @@
       "opKind": "live.audit.base",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "record": { "checkpoint": { "stateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } } },
-      "blobs": { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["ydoc"] }
+      "payload": {
+        "record": {
+          "checkpoint": {
+            "stateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      },
+      "blobs": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "ydoc"
+        ]
+      }
     },
     {
       "name": "a live base audit with an empty state digest names no blobs",
       "opKind": "live.audit.base",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "record": { "checkpoint": { "stateDigest": "" } } },
+      "payload": {
+        "record": {
+          "checkpoint": {
+            "stateDigest": ""
+          }
+        }
+      },
       "blobs": {}
     },
     {
@@ -254,15 +355,23 @@
       "opKind": "secret.file.put",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "ciphertextSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-      "blobs": { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["binary"] }
+      "payload": {
+        "ciphertextSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "blobs": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "binary"
+        ]
+      }
     },
     {
       "name": "a secret file put with an empty ciphertext sha names no blobs",
       "opKind": "secret.file.put",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "ciphertextSha256": "" },
+      "payload": {
+        "ciphertextSha256": ""
+      },
       "blobs": {}
     },
     {
@@ -272,17 +381,29 @@
       "recordedAtMs": 0,
       "payload": {
         "rows": [
-          { "ciphertextSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-          { "ciphertextSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-          { "ciphertextSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-          { "ciphertextSha256": "" },
+          {
+            "ciphertextSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "ciphertextSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          {
+            "ciphertextSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "ciphertextSha256": ""
+          },
           null,
           {}
         ]
       },
       "blobs": {
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["binary"],
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": ["binary"]
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "binary"
+        ],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "binary"
+        ]
       }
     },
     {
@@ -290,7 +411,9 @@
       "opKind": "secret.version.fork",
       "workspaceId": "workspace",
       "recordedAtMs": 0,
-      "payload": { "rows": null },
+      "payload": {
+        "rows": null
+      },
       "blobs": {}
     },
     {
@@ -307,7 +430,10 @@
         "resolution": "kept-current",
         "targetVersionId": "main",
         "sourceVersionId": "peer-main",
-        "paths": ["notes/current.md", "notes/incoming.bin"],
+        "paths": [
+          "notes/current.md",
+          "notes/incoming.bin"
+        ],
         "transition": {
           "current": {
             "present": true,
@@ -342,7 +468,11 @@
         },
         "effectContext": {
           "recordedAtMs": 12,
-          "metadata": { "origin": "api", "summary": null, "correlationId": null },
+          "metadata": {
+            "origin": "api",
+            "summary": null,
+            "correlationId": null
+          },
           "author": null,
           "currentObjectCreatedAtMs": 1,
           "resultObjectCreatedAtMs": 1
@@ -364,10 +494,18 @@
         }
       },
       "blobs": {
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["text"],
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": ["binary"],
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": ["ydoc"],
-        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd": ["ydoc"]
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "text"
+        ],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "binary"
+        ],
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc": [
+          "ydoc"
+        ],
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd": [
+          "ydoc"
+        ]
       }
     },
     {
@@ -384,7 +522,10 @@
         "resolution": "kept-current",
         "targetVersionId": "main",
         "sourceVersionId": "peer-main",
-        "paths": ["notes/current.bin", "notes/exported.md"],
+        "paths": [
+          "notes/current.bin",
+          "notes/exported.md"
+        ],
         "transition": {
           "current": {
             "present": true,
@@ -396,7 +537,10 @@
             "byteLength": 12,
             "updatedAtMs": 10
           },
-          "incoming": { "present": false, "pathRef": 0 },
+          "incoming": {
+            "present": false,
+            "pathRef": 0
+          },
           "result": {
             "present": true,
             "pathRef": 0,
@@ -420,7 +564,11 @@
         },
         "effectContext": {
           "recordedAtMs": 12,
-          "metadata": { "origin": "api", "summary": null, "correlationId": null },
+          "metadata": {
+            "origin": "api",
+            "summary": null,
+            "correlationId": null
+          },
           "author": null,
           "currentObjectCreatedAtMs": 1,
           "resultObjectCreatedAtMs": 1
@@ -429,8 +577,81 @@
         "lineageTransition": null
       },
       "blobs": {
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": ["binary"],
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": ["text"]
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "binary"
+        ],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "a resolution keeps current binary and archives its lineage without a successor",
+      "opKind": "conflict.resolve",
+      "workspaceId": "workspace",
+      "recordedAtMs": 12,
+      "payload": {
+        "formatVersion": 1,
+        "workspaceId": "workspace",
+        "conflictId": "conflict",
+        "status": "resolved",
+        "chosenFrom": "current",
+        "resolution": "kept-current",
+        "targetVersionId": "main",
+        "sourceVersionId": "peer-main",
+        "paths": [
+          "notes/current.bin"
+        ],
+        "transition": {
+          "current": {
+            "present": true,
+            "pathRef": 0,
+            "objectId": "object-current",
+            "latestMomentId": "moment-current",
+            "contentKind": "binary",
+            "blobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "byteLength": 12,
+            "updatedAtMs": 10
+          },
+          "incoming": {
+            "present": false,
+            "pathRef": 0
+          },
+          "result": {
+            "present": true,
+            "pathRef": 0,
+            "objectId": "object-current",
+            "latestMomentId": "moment-current",
+            "contentKind": "binary",
+            "blobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "byteLength": 12,
+            "updatedAtMs": 10
+          }
+        },
+        "effectContext": {
+          "recordedAtMs": 12,
+          "metadata": {
+            "origin": "api",
+            "summary": null,
+            "correlationId": null
+          },
+          "author": null,
+          "currentObjectCreatedAtMs": 1,
+          "resultObjectCreatedAtMs": 1
+        },
+        "effects": [],
+        "lineageTransition": {
+          "predecessorClaimId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "predecessorStateVectorSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "predecessorDeleteSetSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "artifactPreimageSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "successor": null
+        }
+      },
+      "blobs": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [
+          "binary"
+        ]
       }
     },
     {
@@ -447,15 +668,30 @@
         "resolution": "kept-current",
         "targetVersionId": "main",
         "sourceVersionId": "peer-main",
-        "paths": ["notes/absent.md"],
+        "paths": [
+          "notes/absent.md"
+        ],
         "transition": {
-          "current": { "present": false, "pathRef": 0 },
-          "incoming": { "present": false, "pathRef": 0 },
-          "result": { "present": false, "pathRef": 0 }
+          "current": {
+            "present": false,
+            "pathRef": 0
+          },
+          "incoming": {
+            "present": false,
+            "pathRef": 0
+          },
+          "result": {
+            "present": false,
+            "pathRef": 0
+          }
         },
         "effectContext": {
           "recordedAtMs": 0,
-          "metadata": { "origin": "api", "summary": null, "correlationId": null },
+          "metadata": {
+            "origin": "api",
+            "summary": null,
+            "correlationId": null
+          },
           "author": null,
           "currentObjectCreatedAtMs": null,
           "resultObjectCreatedAtMs": null
@@ -465,19 +701,119 @@
       },
       "blobs": {}
     },
-    { "name": "workspace initialization names no blobs", "opKind": "workspace.init", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "secret file deletion names no blobs", "opKind": "secret.file.delete", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "chat channel creation names no blobs", "opKind": "chat.channel.create", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "chat thread creation names no blobs", "opKind": "chat.thread.create", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "chat message append names no blobs", "opKind": "chat.message.append", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "chat decision set names no blobs", "opKind": "chat.decision.set", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "chat attachment add names no blobs", "opKind": "chat.attachment.add", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "chat reaction set names no blobs", "opKind": "chat.reaction.set", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "chat follow set names no blobs", "opKind": "chat.follow.set", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "chat feed read set names no blobs", "opKind": "chat.feed.read.set", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "chat thread read set names no blobs", "opKind": "chat.thread.read.set", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "relay refusal names no blobs", "opKind": "relay.refused", "workspaceId": "workspace", "recordedAtMs": 0, "payload": {}, "blobs": {} },
-    { "name": "an opaque operation ignores blob-looking fields", "opKind": "future.opaque", "workspaceId": "workspace", "recordedAtMs": 0, "payload": { "updateBlobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "blobs": {} },
-    { "name": "a non-object moment payload names no blobs", "opKind": "moment.append", "workspaceId": "workspace", "recordedAtMs": 0, "payload": null, "blobs": {} }
+    {
+      "name": "workspace initialization names no blobs",
+      "opKind": "workspace.init",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "secret file deletion names no blobs",
+      "opKind": "secret.file.delete",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat channel creation names no blobs",
+      "opKind": "chat.channel.create",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat thread creation names no blobs",
+      "opKind": "chat.thread.create",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat message append names no blobs",
+      "opKind": "chat.message.append",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat decision set names no blobs",
+      "opKind": "chat.decision.set",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat attachment add names no blobs",
+      "opKind": "chat.attachment.add",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat reaction set names no blobs",
+      "opKind": "chat.reaction.set",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat follow set names no blobs",
+      "opKind": "chat.follow.set",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat feed read set names no blobs",
+      "opKind": "chat.feed.read.set",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "chat thread read set names no blobs",
+      "opKind": "chat.thread.read.set",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "relay refusal names no blobs",
+      "opKind": "relay.refused",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {},
+      "blobs": {}
+    },
+    {
+      "name": "an opaque operation ignores blob-looking fields",
+      "opKind": "future.opaque",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": {
+        "updateBlobSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "blobs": {}
+    },
+    {
+      "name": "a non-object moment payload names no blobs",
+      "opKind": "moment.append",
+      "workspaceId": "workspace",
+      "recordedAtMs": 0,
+      "payload": null,
+      "blobs": {}
+    }
   ]
 }

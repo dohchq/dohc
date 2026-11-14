@@ -18,7 +18,7 @@ export function versionIdFromVersionCreatePayload(payloadJson: string): string |
 // held to crates/dohc-engine-sync/tests/blob-references/vectors.json, here by
 // blobReferences.vectors.test.ts and there by
 // shared_blob_reference_vectors_match_every_owned_op.
-// The push client uploads precisely this set (text + binary) before
+// The push client uploads precisely this set (text, binary and Y.Doc) before
 // POST /log, so validating the same set neither rejects an honest push nor
 // lets a referencing op slip through unvalidated. Enumerated by op kind:
 //   - moment.append:      payloadBefore/After/before blob shas (both content
@@ -29,6 +29,10 @@ export function versionIdFromVersionCreatePayload(payloadJson: string): string |
 //                         bytes INLINE in the payload and are never uploaded,
 //                         so requiring them would wrongly reject a valid op.
 //   - version.create:     every forkSnapshot blob sha (both content kinds).
+//   - ydoc.update:        the update blob.
+//   - live.audit.application: the update blob and every manifest chunk.
+//   - live.audit.settlement:  the Markdown projection and the accepted state.
+//   - live.audit.base:    the checkpoint's state.
 //   - secret.file.put:    the ciphertext blob sha.
 //   - secret.version.fork: every row's ciphertext blob sha.
 // conflict.resolve formatVersion 1 is the narrow exception to opaque payload
