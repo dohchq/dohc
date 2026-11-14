@@ -373,6 +373,17 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
   );
 }
 
+// Main checked less than a minute ago and checks again when the minute ends.
+// Until then a fresh answer is the earlier check's: May be out of date.
+export const awaitingCheck = (answer: AccessAnswer): AccessAnswer =>
+  answer.freshness === "fresh" ? { ...answer, freshness: "stale" } : answer;
+
+// A later page keeps an earlier page's stale mark, since its rows are older.
+export const appendAccessPage = (after: AccessAnswer, answer: AccessAnswer): AccessAnswer => ({
+  ...(after.freshness === "stale" ? awaitingCheck(answer) : answer),
+  rows: [...after.rows, ...answer.rows],
+});
+
 // The answer for one workspace and file. A key that is not the current one is
 // still loading, so the first render after a switch shows nothing stale.
 type Keyed<View> = { key: string; view: View };
@@ -1520,11 +1531,12 @@ export function AboutAccess(props: {
         request.settle({
           status: "ready",
           answer: options.after
-            ? { ...answer, rows: [...options.after.rows, ...answer.rows] }
-            : answer,
+            ? appendAccessPage(options.after, answer)
+            : paced
+              ? awaitingCheck(answer)
+              : answer,
         });
-        // Main checked less than a minute ago, so this answer is that check's.
-        // When the next check ends, read again in place.
+        // When main's next check ends, read again in place.
         if (paced) {
           const checked = await bridge()
             .requestAccessRefresh({ workspaceId, reason: "access-expand", wait: true })

@@ -242,6 +242,134 @@ describe("About Access", () => {
     expect(screen.queryByText("Only you")).toBeNull();
   });
 
+<<<<<<< HEAD
+=======
+  // Sam joins less than a minute after the owner's last listing, and the owner
+  // opens Access inside that minute. Main paces the refresh and lists again
+  // when the minute ends; Access reads that listing with no reopen. Until
+  // then, the answer is marked as possibly out of date.
+  it("shows a member who joined inside the pacing window once the paced retry lists them", async () => {
+    vi.useFakeTimers();
+    try {
+      let listed = answer();
+      const sam = share({
+        shareId: "membership",
+        grantId: "sam",
+        selector: { kind: "workspace" },
+        access: "comment",
+      });
+      bridgeMock.requestAccessRefresh.mockImplementation(async (input: { wait?: true }) => {
+        if (!input.wait) return { status: "paced" };
+        // Main's scheduled retry, a minute after the last listing.
+        await new Promise((resolve) => setTimeout(resolve, 60_000));
+        listed = answer({ rows: [sam] });
+        return { status: "joined" };
+      });
+      bridgeMock.getObjectAccess.mockImplementation(async () => listed);
+      render(<Access />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByTestId("about-access-empty").textContent).toBe("Only you");
+      const pending = screen.getByTestId("about-access-freshness");
+      expect(pending.getAttribute("data-state")).toBe("stale");
+      expect(pending.textContent).toContain("May be out of date");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(59_999);
+      });
+      expect(screen.getByTestId("about-access-freshness").getAttribute("data-state")).toBe("stale");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual([
+        "Ssam@example.comCan comment",
+      ]);
+      expect(screen.queryByTestId("about-access-empty")).toBeNull();
+      expect(screen.queryByTestId("about-access-freshness")).toBeNull();
+      expect(bridgeMock.requestAccessRefresh.mock.calls).toEqual([
+        [{ workspaceId: "workspace-a", reason: "access-expand" }],
+        [{ workspaceId: "workspace-a", reason: "access-expand", wait: true }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("claims nothing for a listing that did not finish, and shows only its freshness", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({ coverage: { kind: "granted", complete: false, observation: "interval" } }),
+    );
+    render(<Access />);
+    expect(await screen.findByTestId("about-access-freshness")).toBeTruthy();
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
+    expect(screen.queryByTestId("about-access-row")).toBeNull();
+  });
+
+  it("says no share to you includes a received file it finds nothing for", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({
+        unknownReason: null,
+        coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+      }),
+    );
+    render(<Access />);
+    expect((await screen.findByTestId("about-access-empty")).textContent).toBe(
+      "No share to you includes this file.",
+    );
+  });
+
+  it("names a received file's own grant within its coverage", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({
+        unknownReason: null,
+        coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+        rows: [share({ via: "received", sharerName: "Ice de Vera", access: "comment" })],
+      }),
+    );
+    render(<Access />);
+    const row = await screen.findByTestId("about-access-row");
+    expect(row.textContent).toContain("You");
+    expect(row.getAttribute("title")).toBe("Shared by Ice de Vera");
+    expect(within(row).getByText("Can comment")).toBeTruthy();
+  });
+
+  it("names the membership that reaches a file in a joined workspace", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({
+        unknownReason: null,
+        coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+        rows: [
+          share({
+            via: "received",
+            sharerName: "Sam",
+            subjectName: "Community",
+            access: "comment",
+            selector: { kind: "workspace", role: "member" },
+          }),
+        ],
+      }),
+    );
+    render(<Access />);
+    const row = await screen.findByTestId("about-access-row");
+    expect(row.textContent).toContain("You");
+    expect(within(row).getByText("Can comment")).toBeTruthy();
+    expect(screen.queryByText("No share to you includes this file.")).toBeNull();
+  });
+
+  it("keeps a stale list and marks it settled but old", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(answer({ freshness: "stale", rows: [share()] }));
+    render(<Access />);
+    const result = await screen.findByTestId("about-access-answer");
+    expect(result.dataset.freshness).toBe("stale");
+    const mark = screen.getByTestId("about-access-freshness");
+    expect(mark.textContent).toBe("May be out of date");
+    expect(mark.getAttribute("data-state")).toBe("stale");
+    expect(mark.querySelector(".lucide-clock")).toBeTruthy();
+    expect(screen.getAllByTestId("about-access-row")).toHaveLength(1);
+    expect(screen.getByTestId("about-access-count").textContent).toBe("1");
+  });
+
+>>>>>>> stack
   it("tells a cause it cannot name apart from no access, and checks again on Try again", async () => {
     bridgeMock.getObjectAccess.mockResolvedValueOnce(UNKNOWN).mockResolvedValue(answer());
     render(<Access />);
@@ -846,30 +974,41 @@ it("names the membership that reaches a file in a joined workspace", async () =>
   expect(screen.queryByText("No share to you includes this file.")).toBeNull();
 });
 
-  it("shows a member who joined inside the pacing window once the paced retry lists them", async () => {
-    vi.useFakeTimers();
-    try {
-      let listed = answer();
-      const sam = share({ shareId: "membership", grantId: "sam", selector: { kind: "workspace" }, access: "comment" });
-      bridgeMock.requestAccessRefresh.mockImplementation(async (input: { wait?: true }) => {
-        if (!input.wait) return { status: "paced" };
-        // Main's scheduled retry, a minute after the last listing.
-        await new Promise((resolve) => setTimeout(resolve, 60_000));
-        listed = answer({ rows: [sam] });
-        return { status: "joined" };
-      });
-      bridgeMock.getObjectAccess.mockImplementation(async () => listed);
-      render(<Access />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-      expect(screen.getByTestId("about-access-empty").textContent).toBe("Only you");
-      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-      expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual(["Ssam@example.comCan comment"]);
-      expect(screen.queryByTestId("about-access-empty")).toBeNull();
-      expect(bridgeMock.requestAccessRefresh.mock.calls).toEqual([
-        [{ workspaceId: "workspace-a", reason: "access-expand" }],
-        [{ workspaceId: "workspace-a", reason: "access-expand", wait: true }],
-      ]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+it("shows a member who joined inside the pacing window once the paced retry lists them", async () => {
+  vi.useFakeTimers();
+  try {
+    let listed = answer();
+    const sam = share({
+      shareId: "membership",
+      grantId: "sam",
+      selector: { kind: "workspace" },
+      access: "comment",
+    });
+    bridgeMock.requestAccessRefresh.mockImplementation(async (input: { wait?: true }) => {
+      if (!input.wait) return { status: "paced" };
+      // Main's scheduled retry, a minute after the last listing.
+      await new Promise((resolve) => setTimeout(resolve, 60_000));
+      listed = answer({ rows: [sam] });
+      return { status: "joined" };
+    });
+    bridgeMock.getObjectAccess.mockImplementation(async () => listed);
+    render(<Access />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("about-access-empty").textContent).toBe("Only you");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual([
+      "Ssam@example.comCan comment",
+    ]);
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
+    expect(bridgeMock.requestAccessRefresh.mock.calls).toEqual([
+      [{ workspaceId: "workspace-a", reason: "access-expand" }],
+      [{ workspaceId: "workspace-a", reason: "access-expand", wait: true }],
+    ]);
+  } finally {
+    vi.useRealTimers();
+  }
+});

@@ -52,31 +52,29 @@ export function useSharingSearch(
   sharedView: boolean,
   query: string,
 ): SharingResult[] {
-  const read = useWorkspaceQuery(useWorkspaceSession(), {
+  const session = useWorkspaceSession();
+  const readAll = async (signal: AbortSignal) => {
+    const lanes: SharingLane[] = sharedView ? ["received"] : ["granted", "received"];
+    const answers = await Promise.all(lanes.map(lane => readLane(lane, cursor => bridge().listSharingAccess({workspaceId, lane, ...(cursor ? {cursor} : {})}), signal)));
+    if (answers.every(answer => answer === null)) throw new Error("No sharing list could be read.");
+    return answers.flatMap(answer => answer ?? []);
+  };
+  const follow = useWorkspaceQuery(session, {key: workspaceId, manual: true, load: async signal => {
+    await bridge().requestAccessRefresh({workspaceId, reason: "sharing-open", wait: true});
+    signal.throwIfAborted();
+    return readAll(signal);
+  }});
+  const read = useWorkspaceQuery(session, {
     key: workspaceId,
     manual: true,
     load: async (signal) => {
-      // Someone else's shared workspace grants nothing from here.
-      const lanes: SharingLane[] = sharedView ? ["received"] : ["granted", "received"];
-      await bridge()
-        .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
-        .catch(() => undefined);
-      const answers = await Promise.all(
-        lanes.map((lane) =>
-          readLane(
-            lane,
-            (cursor) =>
-              bridge().listSharingAccess({ workspaceId, lane, ...(cursor ? { cursor } : {}) }),
-            signal,
-          ),
-        ),
-      );
-      if (answers.every((answer) => answer === null))
-        throw new Error("No sharing list could be read.");
-      return answers.flatMap((answer) => answer ?? []);
+      const refreshed = await bridge().requestAccessRefresh({workspaceId, reason: "sharing-open"}).catch(() => undefined);
+      return { rows: await readAll(signal), paced: refreshed?.status === "paced" };
     },
   });
-  const found = read.value;
+  const { retry: followRetry } = follow;
+  useEffect(() => { if (read.value?.paced) void followRetry(); }, [read.value, followRetry]);
+  const found = follow.value ?? read.value?.rows;
   const asked = read.pending || (found !== undefined && read.error === null);
   const { retry } = read;
   const q = query.trim().toLowerCase();

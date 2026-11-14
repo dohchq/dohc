@@ -15,7 +15,14 @@ type Lane = "granted" | "received";
 const bridgeMock = {
   listSharingAccess:
     vi.fn<(input: { workspaceId: string; lane: Lane; cursor?: string }) => Promise<AccessAnswer>>(),
-  requestAccessRefresh: vi.fn<(input: { workspaceId: string; reason: string }) => Promise<void>>(),
+  requestAccessRefresh:
+    vi.fn<
+      (input: {
+        workspaceId: string;
+        reason: string;
+        wait?: true;
+      }) => Promise<{ status: string } | undefined>
+    >(),
   revokeRelayShare:
     vi.fn<
       (input: { shareId: string }) => Promise<{ undo?: { undoId: string; expiresAtMs: number } }>
@@ -303,6 +310,156 @@ describe("the Sharing view's two lists", () => {
     expect(note("share-4")).toBeNull();
   });
 
+<<<<<<< HEAD
+=======
+  it("shows loading lines until each list answers", async () => {
+    const pending = deferred<AccessAnswer>();
+    bridgeMock.listSharingAccess.mockReturnValue(pending.promise);
+    render(<View />);
+    await waitFor(() => expect(bridgeMock.listSharingAccess).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("sharing-granted-answer")).toBeNull();
+    expect(screen.queryByTestId("sharing-received-answer")).toBeNull();
+    pending.resolve(answer("granted"));
+    expect(await screen.findByTestId("sharing-granted-empty")).toBeTruthy();
+  });
+
+  it("says an empty list holds no shares within its coverage, not that nothing is shared", async () => {
+    answerWith({});
+    render(<View />);
+    expect((await screen.findByTestId("sharing-granted-empty")).textContent).toBe(
+      "Nothing shared from this workspace yet.",
+    );
+    expect((await screen.findByTestId("sharing-received-empty")).textContent).toBe(
+      "Nothing shared with you yet.",
+    );
+    expect(screen.getByTestId("sharing-granted-count").textContent).toBe("0");
+  });
+
+  it("marks a stale list as possibly out of date and keeps its rows", async () => {
+    answerWith({ granted: answer("granted", { freshness: "stale", rows: [granted()] }) });
+    render(<View />);
+    const mark = await screen.findByTestId("sharing-granted-freshness");
+    expect(mark.getAttribute("data-state")).toBe("stale");
+    expect(mark.textContent).toContain("May be out of date");
+    expect(screen.getByTestId("sharing-granted-row")).toBeTruthy();
+  });
+
+  // Main listed less than a minute ago, so it paces the refresh and lists
+  // again when the minute ends. Until then each list says it may be out of
+  // date; then both read again in place.
+  it("marks both lists as possibly out of date while a paced check waits, then reads them again", async () => {
+    vi.useFakeTimers();
+    try {
+      let rows: AccessShareRow[] = [];
+      bridgeMock.requestAccessRefresh.mockImplementation(async (input) => {
+        if (!input.wait) return { status: "paced" };
+        await new Promise((resolve) => setTimeout(resolve, 60_000));
+        rows = [granted()];
+        return { status: "joined" };
+      });
+      bridgeMock.listSharingAccess.mockImplementation(async ({ lane }) =>
+        lane === "granted" ? answer("granted", { rows }) : answer("received"),
+      );
+      render(<View />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      for (const lane of ["granted", "received"]) {
+        const mark = screen.getByTestId(`sharing-${lane}-freshness`);
+        expect(mark.getAttribute("data-state")).toBe("stale");
+        expect(mark.textContent).toContain("May be out of date");
+      }
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      for (const lane of ["granted", "received"])
+        expect(screen.getByTestId(`sharing-${lane}-freshness`).getAttribute("data-state")).toBe(
+          "fresh",
+        );
+      expect(screen.getAllByTestId("sharing-granted-row")).toHaveLength(1);
+      expect(
+        bridgeMock.requestAccessRefresh.mock.calls.filter(([input]) => input.wait),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("explains an unknown list in About's words, with no count and no empty claim", async () => {
+    answerWith({ granted: UNKNOWN("granted"), received: UNKNOWN("received") });
+    render(<View />);
+    const unknown = await screen.findByTestId("sharing-granted-unknown");
+    expect(unknown.getAttribute("data-reason")).toBe("unexplained");
+    expect(unknown.textContent).toContain("This does not mean that nothing is shared.");
+    expect(screen.queryByTestId("sharing-granted-count")).toBeNull();
+    expect(screen.queryByTestId("sharing-granted-empty")).toBeNull();
+    await userEvent.click(within(unknown).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridgeMock.requestAccessRefresh).toHaveBeenCalledTimes(2));
+  });
+
+  // Shared with me lists what others share with the account, so it says what
+  // signing in shows. Shared by me keeps About's words for who has access.
+  const SHARED_WITH_ME = "Connect a server to get what others share with you.";
+  it.each([
+    [
+      "signed out",
+      "granted",
+      SIGNED_OUT,
+      "signed-out",
+      "Connect your server to check who has access.",
+      "Connect server",
+      "connect",
+    ],
+    [
+      "signed out",
+      "received",
+      SIGNED_OUT,
+      "signed-out",
+      SHARED_WITH_ME,
+      "Connect server",
+      "connect",
+    ],
+    [
+      "not synced",
+      "granted",
+      NOT_SYNCED,
+      "not-synced",
+      "Shares need sync, and this workspace does not sync.",
+      "Sync and sharing",
+      "openSyncSettings",
+    ],
+    [
+      "not synced",
+      "received",
+      NOT_SYNCED,
+      "signed-out",
+      SHARED_WITH_ME,
+      "Connect server",
+      "connect",
+    ],
+    [
+      "signed in",
+      "received",
+      SYNCED,
+      "unexplained",
+      "Access information is unavailable for your account. This does not mean that nothing is shared with you.",
+      "Try again",
+      null,
+    ],
+  ] as const)(
+    "when %s, the %s list says why it is unknown in its own words",
+    async (_, lane, facts, reason, words, label, action) => {
+      answerWith({ granted: UNKNOWN("granted"), received: UNKNOWN("received") });
+      render(<View facts={facts} />);
+      const unknown = await screen.findByTestId(`sharing-${lane}-unknown`);
+      expect(unknown.getAttribute("data-reason")).toBe(reason);
+      expect(unknown.querySelector("p")?.textContent).toBe(words);
+      await userEvent.click(within(unknown).getByRole("button", { name: label }));
+      if (action) expect(callbacks[action]).toHaveBeenCalledOnce();
+    },
+  );
+
+>>>>>>> stack
   it("files a failed read in Notices and reads again from Try again", async () => {
     answerWith({ received: new Error("offline") });
     render(<View />);
@@ -339,6 +496,22 @@ describe("the Sharing view's two lists", () => {
       cursor: "page-2",
     });
     expect(screen.queryByTestId("sharing-granted-more")).toBeNull();
+  });
+
+  it("keeps an earlier page's out-of-date mark after the next page reads fresh", async () => {
+    bridgeMock.listSharingAccess.mockImplementation(async ({ lane, cursor }) =>
+      lane === "received"
+        ? answer("received")
+        : cursor === "page-2"
+          ? answer("granted", { rows: [granted({ shareId: "share-2", grantId: "grant-2" })] })
+          : answer("granted", { rows: [granted()], nextCursor: "page-2", freshness: "stale" }),
+    );
+    render(<View />);
+    await userEvent.click(await screen.findByTestId("sharing-granted-more"));
+    await waitFor(() => expect(screen.getAllByTestId("sharing-granted-row")).toHaveLength(2));
+    expect(screen.getByTestId("sharing-granted-freshness").getAttribute("data-state")).toBe(
+      "stale",
+    );
   });
 
   it("never paints a slow answer for one workspace into another", async () => {

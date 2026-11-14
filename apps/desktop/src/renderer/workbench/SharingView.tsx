@@ -49,6 +49,8 @@ import {
   type AboutNotices,
   type AccessSetup,
   type AccessView,
+  appendAccessPage,
+  awaitingCheck,
 } from "./About";
 import { accessReasonForLane, type AccessContext } from "./accessReason";
 import { EMPTY_ART } from "./EmptyArt";
@@ -1031,20 +1033,24 @@ export function SharingPanel(props: {
 }
 
 // One lane's read, held to the workspace it was asked for.
+// A paced refresh carries main's next check, which resolves true when it ends.
+type Refreshed = { checked: Promise<boolean> } | null;
+
 function useSharingLane(
   workspaceId: string,
   lane: SharingLane,
   notices: AboutNotices,
-  refresh: () => Promise<void>,
+  refresh: () => Promise<Refreshed>,
 ) {
   const read = useSectionRead<AccessView>(`${workspaceId}\0${lane}`, `sharing-${lane}`, notices);
   const { begin, cancel } = read;
   const load = useCallback(
-    async (options: { refreshed?: Promise<void>; after?: AccessAnswer }) => {
+    async (options: { refreshed?: Promise<Refreshed>; after?: AccessAnswer }) => {
       const request = begin();
       try {
+        let checked: Promise<boolean> | null = null;
         if (options.refreshed) {
-          await options.refreshed;
+          checked = (await options.refreshed)?.checked ?? null;
           if (!request.current()) return;
         }
         const cursor = options.after?.nextCursor ?? undefined;
@@ -1061,9 +1067,13 @@ function useSharingLane(
         request.settle({
           status: "ready",
           answer: options.after
-            ? { ...answer, rows: [...options.after.rows, ...answer.rows] }
-            : answer,
+            ? appendAccessPage(options.after, answer)
+            : checked
+              ? awaitingCheck(answer)
+              : answer,
         });
+        // As About's Access: when main's next check ends, read again in place.
+        if (checked && (await checked) && request.current()) void load({});
       } catch (error) {
         const retry = () => void load({ refreshed: refresh() });
         request.fail({ status: "failed" }, ipcErrorMessage(error, LANE[lane].failed), error, retry);
@@ -1100,10 +1110,20 @@ export function SharingView(props: {
 }) {
   const { workspaceId, context, focus, onFocused } = props;
   const { facts, openSyncSettings, connect } = context;
-  const refresh = useCallback(async () => {
-    await bridge()
+  const refresh = useCallback(async (): Promise<Refreshed> => {
+    const refreshed = await bridge()
       .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
       .catch(() => undefined);
+    if (refreshed?.status !== "paced") return null;
+    // One wait for both lists.
+    return {
+      checked: bridge()
+        .requestAccessRefresh({ workspaceId, reason: "sharing-open", wait: true })
+        .then(
+          () => true,
+          () => false,
+        ),
+    };
   }, [workspaceId]);
   const granted = useSharingLane(workspaceId, "granted", props.notices, refresh);
   const received = useSharingLane(workspaceId, "received", props.notices, refresh);
