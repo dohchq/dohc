@@ -545,7 +545,6 @@ describe("document save notices", () => {
   it("asks main to settle whatever session is open when Try again is clicked, even one that has sent nothing", async () => {
     const user = userEvent.setup();
     render(<Shell />);
-    // The old session's closing failure arrives before the reopened editor's session says anything.
     emit({ ...failed(), sessionId: "session-1", closing: true });
     await user.click(
       within(screen.getByTestId("workspace-shell-error")).getByRole("button", {

@@ -66,7 +66,6 @@ function fixture() {
     remote: { serverUrl: "https://cloud.test", ownerUserId: "user-1" },
   };
   const reactions: ChatReaction[] = [];
-  // The channel every target is in: a Group whose files live in Trip.
   const channel: ChatChannelSummary = {
     id: "channel",
     workspaceId: "workspace",
@@ -1504,7 +1503,6 @@ describe("chat writes", () => {
     expect(test.effects.scanChatDispatch).not.toHaveBeenCalled();
   });
 
-  // The owner's Group, shared with one person, through the relay's listing.
   const groupGrant = (
     paths: string[],
     fileScope: "served" | "not-served" = "served",

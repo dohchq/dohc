@@ -393,7 +393,6 @@ it("reads the baseline binding for owner and named alike, with exact named autho
         kind: "current",
         host: readHost,
         binding,
-        // An owner is shown the binding itself, a named recipient its own share's paths under a workspace ID naming the grant.
         view:
           actor.kind === "owner"
             ? binding

@@ -25,7 +25,6 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-// Each test's stand-in for T3 Code's server is closed when the test ends.
 async function fakeT3Code() {
   const fake = await startFakeT3Code();
   cleanups.push(fake.close);
@@ -125,7 +124,6 @@ describe("signing in to T3 Code", () => {
 
   it("stops every step when the person cancels, and when nobody answers while the browser is still opening", async () => {
     const t3 = await fakeT3Code();
-    // Cancelled before it began: nothing is asked of T3 Code.
     const cancelled = new AbortController();
     cancelled.abort();
     await expect(
@@ -135,7 +133,6 @@ describe("signing in to T3 Code", () => {
       message: "The sign-in to T3 Code was cancelled.",
     });
     expect(t3.registrations).toEqual([]);
-    // The step that opens the browser never returns, and the person cancels during it.
     const during = new AbortController();
     let entered = false;
     const open = () => {
@@ -184,7 +181,6 @@ describe("signing in to T3 Code", () => {
       origin: t3.origin,
       open: async (url) => {
         const redirect = new URL(new URL(url).searchParams.get("redirect_uri")!);
-        // Another page on this computer guesses the address but not the state.
         expect((await fetch(`${redirect.href}?code=stolen&state=guess`)).status).toBe(404);
         // A path that is not a URL is refused too, and the sign-in goes on.
         expect((await fetch(`${redirect.origin}//[`)).status).toBe(404);
@@ -469,7 +465,6 @@ describe("T3 Code's thread tools", () => {
 
     t3.refusals.t3_thread_wait = "run_not_found: Run r1 does not belong to thread t1.";
     await expect(readT3CodeRun(session, asked)).resolves.toBe("ended");
-    // Any other refusal is not an answer about the run.
     t3.refusals.t3_thread_wait = "thread_not_found: Thread t1 is no longer available.";
     await expect(readT3CodeRun(session, asked)).rejects.toMatchObject({ problem: "thread-gone" });
   });

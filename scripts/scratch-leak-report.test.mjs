@@ -138,7 +138,6 @@ test("a run root without the sentinel fails instead of reporting clean", async (
   const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
   const runRoot = join(parent, "run");
   try {
-    // A directory that exists and is empty, but is not the tree the run used.
     await mkdir(runRoot, { recursive: true });
 
     const report = await inspectScratchRun(runRoot);

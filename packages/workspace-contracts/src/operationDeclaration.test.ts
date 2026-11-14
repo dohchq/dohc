@@ -1,5 +1,3 @@
-// Each test changes one declaration or the family list in memory, as a
-// contributor would in linksDeclarations.ts or allDeclarations.ts.
 import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { LINKS_DECLARATIONS } from "./linksDeclarations";

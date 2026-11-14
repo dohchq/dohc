@@ -16,8 +16,6 @@ import {
   mentionRoster,
 } from "./ChatsView.testHarness";
 
-// --- Shared channels -------------------------------------------------------
-
 describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
     channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
@@ -30,9 +28,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
     bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
     renderView();
     await screen.findByTestId("chats-channel-name");
-    // Failing closed is about authority, not silence. A listing that did not
-    // answer at all locks every affordance below, and it says so instead of
-    // showing an unexplained blank surface with every channel read-only.
     expect((await screen.findByTestId("chats-shares-unreadable")).textContent).toContain(
       "dohc could not read your shares.",
     );

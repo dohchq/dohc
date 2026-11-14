@@ -76,8 +76,6 @@ type LiveEditingRead = {
   reason: string | null;
 };
 
-// Each stretch in which the owner's live editing was not active, from the
-// read that saw it leave to the read that saw it back, in ms from `from`.
 function departureWindows(reads: LiveEditingRead[], from: number) {
   const windows: {
     from: number;
@@ -268,9 +266,6 @@ async function noticesRows(page: Page): Promise<NoticesRow[]> {
   return rows;
 }
 
-// Notices holds no row the baseline did not hold as it is: a new ID, or a
-// changed kind, title, body or detail. The rows on both sides are attached,
-// and the checks after a new row still run.
 async function expectNoNewNotices(page: Page, side: string, baseline: NoticesRow[]): Promise<void> {
   const now = await noticesRows(page);
   const held = new Set(baseline.map((row) => JSON.stringify(row)));
@@ -347,8 +342,6 @@ test("a file from another person that the person can edit opens as a marked, rea
     const notices = await noticesRows(page);
 
     await openExternally(page, NOTE);
-    // The data file's view can't preview it, so it offers Open externally,
-    // with a lock and "Read-only copy" after it on the same line.
     await explorerRow(page, DATA).click();
     const control = page
       .getByTestId("view-binary")
@@ -590,7 +583,6 @@ test("a file from another person opens as a marked, read-only copy during a live
       read();
       Reflect.set(window, "ownerLiveEditing", { reads, pending });
     }, ownerWorkspaceId);
-    // Every read asked for so far, once each has answered, in the order asked.
     liveEditingReads = () =>
       ownerPage.evaluate(async () => {
         const { reads, pending } = Reflect.get(window, "ownerLiveEditing") as {

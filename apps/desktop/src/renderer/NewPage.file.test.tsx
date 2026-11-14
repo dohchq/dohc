@@ -43,7 +43,6 @@ function bridgeFor(open: Open) {
   return bridgeMock;
 }
 
-// The shell renders the page's file under it once the file exists.
 function renderNewPage() {
   const page = (withFile: boolean) => (
     <NewPage

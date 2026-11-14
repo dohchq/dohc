@@ -321,7 +321,6 @@ describe("workspace manager", () => {
     const change = await screen.findByRole("button", { name: "Change location" });
     await user.click(change);
     expect(await screen.findByText("Dialog unavailable")).toBeTruthy();
-    // The error changes Change's look, not the button, so keyboard focus stays on it.
     expect(screen.getByRole("button", { name: "Change location" })).toBe(change);
     expect(document.activeElement).toBe(change);
 
@@ -407,8 +406,6 @@ describe("workspace manager", () => {
       "dohc found no dohc server at https://dohc.example.test.",
     );
 
-    // Leaving the route takes the panel away. The failure is the manager's,
-    // so it stays on screen with its way forward.
     await user.click(screen.getByRole("button", { name: "Back" }));
     expect(screen.queryByTestId("join-synced-workspace")).toBeNull();
     expect(screen.getByTestId("workspace-shell-error")).toBeTruthy();

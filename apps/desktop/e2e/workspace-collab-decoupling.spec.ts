@@ -69,8 +69,6 @@ test("a local workspace edits a rich doc through the engine provider without a c
       timeout: 15_000,
     });
 
-    // The settle projected the edit onto disk through the engine (not a bridge
-    // text write).
     await expect
       .poll(
         async () => await readFile(join(temp.rootPath, "notes/solo.md"), "utf8").catch(() => ""),

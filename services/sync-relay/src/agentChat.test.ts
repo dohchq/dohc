@@ -243,7 +243,6 @@ function wait(
   );
 }
 
-// Counts each time a wait parks, so a test can act once it is held.
 function watchParks(f: Fixture) {
   let parked = 0;
   const waiting = new Map<number, () => void>();

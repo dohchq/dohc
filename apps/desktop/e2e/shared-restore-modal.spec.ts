@@ -68,9 +68,6 @@ test.describe("shared restore review with a notice toast", () => {
     if (output) await removeTestScratch(output);
   });
 
-  // Open the review with the toast already showing, then expand the removed
-  // changes, as a person does before choosing to restore. `beforeOpen` acts on
-  // the loaded page before the review opens.
   async function openReview(
     page: Page,
     setup: (typeof cases)[number],

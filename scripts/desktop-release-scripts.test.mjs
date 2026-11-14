@@ -804,7 +804,6 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
   assert.equal(fuseSmoke.if, "runner.os == 'Linux'");
   assert.equal(fuseSmoke.env.DOHC_E2E_NO_CHROMIUM_SANDBOX, "1");
   assert.equal(fuseSmoke.run, "xvfb-run -a pnpm smoke:fuses:desktop");
-  // Each packaged app runs once before anything uploads it.
   const windowsSmoke = releaseStep(
     jobs.build,
     "--binary apps/desktop/release/win-unpacked/dohc.exe",

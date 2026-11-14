@@ -1060,7 +1060,6 @@ it("admits a Collection request only once its body has arrived", async () => {
     input: { name: "Friend" },
     idempotencyKey: "submission",
   };
-  // A request that has sent part of its body, and is still being read.
   const stall = async (path: string, headers: Record<string, string>) => {
     let sender!: ReadableStreamDefaultController<Uint8Array>;
     let reading!: () => void;

@@ -16,8 +16,6 @@ import {
   type ToolContext,
 } from "./tools";
 
-// The two write tiers a share level decides between. A document write
-// changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
   "dohc_held_note_change",
   "dohc_stop_workspace_sync",
@@ -414,8 +412,6 @@ describe("share-level tool profiles", () => {
       name: "dohc_write_file",
       arguments: { path: "docs/a.md", content: "x" },
     })) as { isError?: boolean; content?: Array<{ text?: string }> };
-    // The tool does not exist on this server, so the call is refused (never
-    // reaching any filesystem write path).
     expect(result.isError).toBe(true);
     expect(result.content?.[0]?.text ?? "").toContain("not found");
   });

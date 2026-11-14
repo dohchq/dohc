@@ -322,7 +322,6 @@ describe("ChatsView expand-to-tab", () => {
         "half-typed reply",
       ),
     );
-    // A poll's choices come back with its question, so Send still asks it.
     expect(
       screen.getAllByTestId("chats-poll-choice").map((input) => (input as HTMLInputElement).value),
     ).toEqual(["Thursday", "Friday"]);

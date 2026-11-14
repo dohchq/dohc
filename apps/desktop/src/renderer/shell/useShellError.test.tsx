@@ -1050,7 +1050,6 @@ describe("useShellError", () => {
       expect(keepCollectionsHere).toHaveBeenCalledWith({ workspaceId: "ws-a" });
       expect(retry).toHaveBeenCalledOnce();
       expect(result.current.shellErrors).toEqual([]);
-      // Collections another computer keeps offer it too, behind main's question; a cancelled question retries nothing.
       keepCollectionsHere.mockResolvedValueOnce({ kept: false });
       act(() =>
         result.current.reportShellError(

@@ -56,7 +56,6 @@ vi.hoisted(() => {
   Object.assign(globalThis, { ResizeObserver: ObserverStub, IntersectionObserver: ObserverStub });
 });
 
-// A field write opens the record's live document. Here that is a real Y.Doc, so a write shows in its frontmatter.
 const docMock = vi.hoisted(() => ({ current: null as UseEngineDoc | null }));
 vi.mock("./collab/useEngineDoc", () => ({
   useEngineDoc: (): unknown => {
@@ -838,7 +837,6 @@ describe("a document record's panel", () => {
 
   it("keeps the record one copy of a tab still shows in the tab's saved entry when another copy closes its own, and never makes one copy follow the other", async () => {
     vi.stubGlobal("dohcDesktop", makeBridge([task("rec-1", "Plan"), task("rec-2", "Socks")]));
-    // Two editor groups show the Collection's tab. The tab has one saved entry, which both copies read and write.
     function TwoCopies() {
       const [kept, setKept] = useState<string | null>(null);
       return (
@@ -950,7 +948,6 @@ describe("a document record's panel", () => {
   });
 
   it("saves what the body holds before the record leaves the panel, and keeps the record when that save does not end", async () => {
-    // The shell saves the body's text, then runs what waited. A save that fails runs nothing.
     const waiting: Array<() => void> = [];
     const settleRecordBody = (then: () => void) => {
       waiting.push(then);
@@ -1015,7 +1012,6 @@ describe("a document record's panel", () => {
 });
 
 describe("text left in an editor that goes away with no press", () => {
-  // The window shows the page's workspace, whose shell takes its notices, unless a test closes it.
   beforeEach(() => void openCollectionChangeShell("ws-1", { onError: () => undefined }));
   afterEach(() => closeCollectionChangeShellsForTests());
   it("keeps text its field cannot take in the list of unsaved changes when the window shows another workspace by then, since no shell is left to take a notice", async () => {

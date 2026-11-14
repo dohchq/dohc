@@ -71,9 +71,6 @@ vi.hoisted(() => {
   });
 });
 
-// The record write path opens an engine doc session; these tests drive it
-// with a mocked session whose mirror doc is a real Y.Doc, so "the change
-// reached the frontmatter map" is asserted on actual CRDT state.
 const docMock = vi.hoisted(() => ({
   current: null as UseEngineDoc | ((input: unknown) => UseEngineDoc) | null,
   inputs: [] as unknown[],
@@ -1270,7 +1267,6 @@ describe("collection authoring", () => {
     ]);
     await waitFor(() => expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("By status"));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull());
-    // The tab shows once the page reads the schema again.
     expect(
       (await screen.findByRole("button", { name: "By status" })).getAttribute("aria-pressed"),
     ).toBe("true");
@@ -1498,9 +1494,6 @@ const CHECKBOX_SCHEMA: CollectionSchema = {
 
 describe("cell write queue", () => {
   it("keeps a queued edit and finishes it after the page unmounts", async () => {
-    // The queue lives outside the page and the shell hosts the writer:
-    // unmounting the page (a tab switch) with the head save pending must not
-    // drop the edit queued behind it.
     const withCheckbox = (id: string, title: string): CollectionRecord => {
       const base = record(id, title);
       return {
@@ -1839,7 +1832,6 @@ describe("record click-through", () => {
     const queries = bridge.queryCollectionRecords.mock.calls.length;
     onNewRecord.mock.calls[0]![1]!({ path: "tasks/Untitled.md", recordId: "rec-new" });
     await Promise.resolve();
-    // The value is with the write queue, which outlives the page. Nothing is read again, and nothing opens.
     expect(hasPendingCollectionFieldWrites()).toBe(true);
     expect(bridge.queryCollectionRecords.mock.calls.length).toBe(queries);
     expect(screen.queryByRole("complementary")).toBeNull();
@@ -2331,7 +2323,6 @@ describe("table pickers", () => {
       { field: "site", value: "website.example", ...valid },
     ],
   });
-  // Grace cannot get a direct message or a notice. A person field can still name her.
   const LISTED: ListAutomationPeopleResult = {
     status: "listed",
     people: [
@@ -2543,7 +2534,6 @@ describe("table pickers", () => {
     );
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
 
-    // A click beside the link text edits the url.
     fireEvent.click(within(fieldCell(2)).getByRole("button", { name: "Edit site" }));
     expect(screen.getByRole<HTMLInputElement>("textbox").value).toBe("website.example");
   });
@@ -2696,7 +2686,6 @@ describe("a new record in the table", () => {
       docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
       page.rerender(pageWithHost(onNewRecord, onOpenRecord));
     };
-    // The first write settles, and the next typed value follows it through the same queue.
     settle();
     await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("Doing"));
     await Promise.resolve();
@@ -2931,7 +2920,6 @@ describe("a new record in the table", () => {
         retry: null,
       }),
     ).toBe(true);
-    // The closed shell takes no notice. The list that outlives it keeps the row for its own workspace, with what was typed.
     expect(onError).not.toHaveBeenCalled();
     expect(
       collectionWriteFailures().map((failure) => ({

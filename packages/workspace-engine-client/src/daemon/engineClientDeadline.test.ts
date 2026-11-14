@@ -42,7 +42,6 @@ async function engine() {
   clients.push(client);
   return client;
 }
-// The relay's thread is busy, as during a long synchronous save or validation.
 const busy = (ms: number) => {
   const end = performance.now() + ms;
   while (performance.now() < end) {
@@ -53,8 +52,6 @@ let id = 0;
 const ask = (client: EngineClient, method = "answer", deadlineMs = 100) =>
   client.sendRequest({ id: ++id, method, params: {}, deadlineMs });
 
-// Proves: a reply the engine sent inside the deadline is read, though this thread was busy past the deadline and
-// its timer is due before the reply is read, whatever kind of callback kept the thread busy.
 it.each(["immediate", "timer", "reply"] as const)(
   "takes a reply the engine already sent when the thread was busy in a %s callback",
   async (where) => {
@@ -77,8 +74,6 @@ it.each(["immediate", "timer", "reply"] as const)(
   },
 );
 
-// Proves: a request queued behind a write that has not drained, and reached only after its deadline because this
-// thread was busy, fails as unsent, and the client keeps serving the next request.
 it("fails a request it could not write before its deadline as unsent", async () => {
   const client = await engine();
   await ask(client);

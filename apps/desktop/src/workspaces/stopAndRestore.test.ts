@@ -146,7 +146,6 @@ it("reports a keyed restore as restored only once its publication is confirmed",
   const original = moment("theirs", "object", "notes/file.txt", "old", "new");
   const key = restoreRequestId("saved-session", original.id);
   const e = engine([original]);
-  // The restore committed its moment; its publication did not reach disk.
   e.all.push({
     ...moment("back", "object", "notes/file.txt", "new", "old"),
     metadata: { origin: "restore", correlationId: key },

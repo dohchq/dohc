@@ -1,5 +1,3 @@
-// Each test changes one declaration in memory, as a contributor would in
-// linksDeclarations.ts, and expects the CLI to refuse it when it loads.
 import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { LINKS_DECLARATIONS } from "@dohc/workspace-contracts/links-declarations";

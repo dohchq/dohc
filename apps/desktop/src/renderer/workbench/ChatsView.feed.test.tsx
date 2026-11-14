@@ -526,9 +526,6 @@ describe("ChatsView hybrid feed", () => {
     const trigger = await screen.findByTestId("chats-feed-like");
     const pill = feedPill();
 
-    // Keyboard: the user leaves the open picker for the pill and activates it.
-    // The picker closes, since its choices would do nothing, and focus stays
-    // on the pill.
     await openPicker(trigger);
     pill.focus();
     await userEvent.keyboard("{Enter}");

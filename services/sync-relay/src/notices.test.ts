@@ -607,7 +607,6 @@ describe("notices for someone else", () => {
     );
     expect((await post(h, "owner", notice({ recipientUserId: "lee" }))).status).toBe(200);
     expect((await pull(h, "lee")).notices).toHaveLength(1);
-    // Posting to yourself always works.
     expect(
       (await post(h, "lee", notice({ kind: "agent-run", recipientUserId: "lee" }))).status,
     ).toBe(200);

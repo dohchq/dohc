@@ -545,7 +545,6 @@ describe("named browser HTTP bootstrap and private resolution", () => {
     expect(f.forwarded.at(-1)!.headers.get(NAMED_SESSION_CHECK_HEADER)).toBeNull();
     clock.now += 12 * 60 * 60 * 1000 - 1;
     expect(await f.web.resolveNamedBrowserSession(request(), checked)).not.toBeNull();
-    // A session no check reached is still released after its first window.
     expect(await f.web.resolveNamedBrowserSession(request(), unchecked)).toBeNull();
   });
 

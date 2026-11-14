@@ -93,7 +93,6 @@ async function relay(rows: number) {
       replaceOrdinaryCheckpoint(context, { scope: at, expected, checkpoint: next, nowMs: 5 }),
     );
   const read = (at = scope) => readOrdinaryCheckpoint(context, at);
-  /** Closes the relay database and reads the checkpoint through a new handle on the same file, as after a restart. */
   const reopened = () => {
     const path = storagePath(storage);
     closeTestStorage(storage);
@@ -130,7 +129,6 @@ it("a lineage keeps one checkpoint, advanced only from the position it was folde
   // A fold that started before the saved one, or from the base, lost the race and saves nothing.
   expect(r.save(null, checkpoint(6, "six"))).toBe(false);
   expect(r.save(3, checkpoint(6, "six"))).toBe(false);
-  // A fold must move forward.
   expect(r.save(4, checkpoint(4, "four again"))).toBe(false);
   expect(r.save(4, checkpoint(9, "nine longer"))).toBe(true);
   expect(r.read()).toEqual(checkpoint(9, "nine longer"));

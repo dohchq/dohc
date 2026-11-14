@@ -1895,7 +1895,6 @@ it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])(
           ? "Live editing is paused for this file."
           : "No answer after three attempts.",
     );
-    // The workspace notice hears which refusal paused the file.
     expect(paused).toEqual([kind === "frozen"]);
     expect(fixture.state.journalKeys).toContain("other-client");
     mirror.destroy();
@@ -2423,18 +2422,11 @@ async function lockedRebindCapture(
   options?: {
     monotonic?: () => number;
     teardownRetryMs?: WorkspaceEngineCaptureOptions["teardownRetryMs"];
-    // Wraps the base provider open for one test's own generation, so it
-    // can override a single method (e.g. `settleNow`'s timing) while
-    // reusing everything else — the shared `state`'s locking, failure
-    // injection, and bookkeeping all keep working unmodified.
     wrapProvider?: (
       base: (openOptions: EngineYdocProviderSessionOptions) => Promise<EngineYdocProviderSession>,
     ) => (openOptions: EngineYdocProviderSessionOptions) => Promise<EngineYdocProviderSession>;
   },
 ) {
-  // the scratch, like every other harness in this file: the run root is
-  // swept even when a test fails, and an unremovable tree fails the suite
-  // instead of being left behind under a green run.
   const rootPath = await createTestScratch(prefix);
   const workspaceId = prefix.replace(/-+$/, "");
   const loopback = new VersionedLoopbackEngine();
@@ -3254,8 +3246,6 @@ it("a delete refuses the open that could register a debt while disk work is in f
   state.replicated = true;
   await expect(first.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
-  // The delete starts: live sessions are vacated and the debt is suspended.
-  // The disk work has not finished, so the finisher has not been called.
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
 
   // The former second debt is refused before the daemon opens a generation.
@@ -3513,11 +3503,6 @@ it("refused renames never stack more than one retry ladder", async () => {
 }, 30_000);
 
 it("a failing active-version read re-arms instead of stranding the debt", async () => {
-  // The version read sat before the guarded block, so a
-  // rejection (reconnect ladder exhausted, engine refusing the read) left
-  // the debt in the registry with NO timer — stranded until an unrelated
-  // lifecycle action or a restart. Inside the block it re-arms like any
-  // other failure.
   const { capture, state, loopback } = await lockedRebindCapture("dohc-ydoc-version-read-fails-");
   const { session } = await openWithOneEdit(capture, "survives a failed read");
 
@@ -3704,9 +3689,6 @@ it("a settle that committed but wrote nothing stops the ladder and names the sym
     })
     .not.toHaveLength(0);
   const [stopMessage] = state.errorMessages.filter((message) => message.includes("symlink"));
-  // The blocking condition is named, with the path and the way back — not
-  // "the engine cannot write note.md (workspace operation failed)", which is
-  // what the generic terminal stop says one rung later.
   expect(stopMessage).toContain("note.md");
   expect(stopMessage).toContain("did not write");
   expect(stopMessage).toContain("history");

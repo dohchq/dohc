@@ -3309,9 +3309,6 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "csp-dedup-key",
     );
 
-    // page2.html has no CSP of its own, so its own scan of style.css must
-    // still approve shared.png even though index.html's img-src 'none'
-    // scan of the same file (same path, same directory) filtered it out.
     expect(manifestOf(site)?.assets).toContain("csp-dedup-key/shared.png");
   });
 
@@ -3376,10 +3373,6 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "xhr-ambiguous-open",
     );
 
-    // The hoisted send() runs before either open() textually, and the
-    // receiver opens two different targets elsewhere in the file — no
-    // walk-order bookkeeping proves which one this send() actually paired
-    // with at runtime, so neither is approved.
     expect(manifestOf(site)?.assets).not.toContain("xhr-ambiguous-open/public.json");
     expect(manifestOf(site)?.assets).not.toContain("xhr-ambiguous-open/private.json");
   });
@@ -3753,8 +3746,6 @@ describe("listSitePackages", () => {
     );
 
     expect(manifestOf(site)?.assets).toContain("srcdoc-own-csp/app.js");
-    // ...but its own fetch() is filtered by the srcdoc's connect-src
-    // 'none', not the (unrestricted) outer document's policy.
     expect(manifestOf(site)?.assets).not.toContain("srcdoc-own-csp/private.json");
   });
 
@@ -3799,9 +3790,6 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "meta-refresh-document",
     );
 
-    // style.css only gets discovered if page2.html is actually PARSED as a
-    // document (documentDestination: true), not just approved as an opaque
-    // leaf asset.
     expect(manifestOf(site)?.assets).toContain("meta-refresh-document/page2.html");
     expect(manifestOf(site)?.assets).toContain("meta-refresh-document/style.css");
   });
@@ -3886,8 +3874,6 @@ describe("listSitePackages", () => {
     );
     await writeFile(
       join(root, "unbound-script-chain", "app.js"),
-      // A bare chain, never bound to any variable, never inserted — there
-      // is no way to trace whether its result was ever attached anywhere.
       'document.createElement("script").src = "private.js";',
     );
     await writeFile(join(root, "unbound-script-chain", "private.js"), "console.log(1)");
@@ -3921,8 +3907,6 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "base-trim-external",
     );
 
-    // A correctly trimmed, correctly external base resolves NO relative
-    // reference locally at all — the bogus path is never even considered.
     expect(manifestOf(site)?.assets).not.toContain("base-trim-external/ /evil.example/app.js");
   });
 });

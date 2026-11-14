@@ -607,8 +607,6 @@ describe("share op filter", () => {
   });
 });
 
-// Shared channels: the chat selector + the chat branch of the
-// fail-closed filter.
 describe("chat share selector", () => {
   it("validates channelWireId and access separately", () => {
     expect(validateChatChannelShareSelector({ channelWireId: "wire-1" })).toEqual({
@@ -708,7 +706,6 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
 
   it("still admits the bare granted wire id (no regression) and a path share ignores threads", () => {
     expect(presenceTopicAllowedForShare(channelShare, "wire-1", threadResolver)).toBe(true);
-    // A path share never gains thread presence, resolver or not.
     expect(presenceTopicAllowedForShare(pathShare, "chat:thread:thread-in", threadResolver)).toBe(
       false,
     );
@@ -726,8 +723,6 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     // and an unbound thread is denied.
     expect(presenceTopicAllowedForShare(forged, topic, threadResolver)).toBe(false);
     expect(presenceTopicAllowedForShare(forged, topic)).toBe(false);
-    // Only a genuine earliest binding to this selector's channelWireId admits
-    // it — proving the resolver, not bare equality, is the sole authority.
     const boundResolver: ChatShareThreadResolver = {
       channelKind: (wireId) => (wireId === "chat:thread:thread-foreign" ? "channel" : undefined),
       ...NO_FILE_CHAT,
@@ -1077,7 +1072,6 @@ describe("chat share op filter", () => {
         atMs: 1,
       }).allowed,
     ).toBe(true);
-    // Chat ops are blob-free: no decision ever exposes a blob hash.
     const message = decide("chat.message.append", {
       messageId: "m1",
       threadId: "thread-in",
@@ -1348,7 +1342,6 @@ describe("chat share op filter", () => {
       status: `Wrote ${withheld}`,
       url: "https://example.test/x",
     });
-    // A share without files covers no file.
     const chatOnly = filterOpForShare(
       channelShare,
       "chat.message.append",
@@ -1356,7 +1349,6 @@ describe("chat share op filter", () => {
       resolver,
     );
     expect(chatOnly.allowed && (chatOnly.payload as { body: string }).body).toBe(withheld);
-    // Every field with words in it reads the same way.
     const linked = "@[finance/budget.md]";
     const served = [
       filterOpForShare(
@@ -1421,7 +1413,6 @@ describe("chat share op filter", () => {
       expect(decision.allowed).toBe(true);
       expect(JSON.stringify(decision.allowed && decision.payload)).not.toContain("finance");
     }
-    // What a member appends is stored whole; the owner reads it so.
     const append = filterOpForShareAppend(
       channelShare,
       "chat.message.append",
@@ -1652,8 +1643,6 @@ describe("chat share op filter", () => {
     expect(filterOpForShare(pathShare, "chat.message.append", message, resolver).allowed).toBe(
       false,
     );
-    // And file ops stay excluded from chat shares in the other direction —
-    // the two selector kinds can never widen each other.
     expect(filterOpForShare(channelShare, "moment.append", momentPayload(), resolver).allowed).toBe(
       false,
     );

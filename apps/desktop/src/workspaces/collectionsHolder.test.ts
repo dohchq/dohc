@@ -59,7 +59,6 @@ const exists = (path: string) =>
     () => true,
     () => false,
   );
-// Keep's steps: no store here to name, nobody else made the workspace, and the person confirms.
 const steps = (overrides: Partial<KeepSteps> = {}): KeepSteps => ({
   adoptStore: vi.fn(async () => {}),
   storeIdHere: vi.fn(async () => null),

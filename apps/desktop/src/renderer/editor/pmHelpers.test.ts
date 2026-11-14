@@ -4,8 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import { documentChange } from "./pmHelpers";
 import { doc, paragraph, schema } from "./testDocs";
 
-// Each paragraph("p0".."p999") is 4 or 5 positions wide; positions below come
-// from the built doc rather than by hand.
 function longState() {
   return EditorState.create({
     doc: doc(...Array.from({ length: 1_000 }, (_, index) => paragraph(`p${index}`))),

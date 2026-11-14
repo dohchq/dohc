@@ -101,7 +101,6 @@ function fakeLedger(pending: AutomationClaim[]) {
   return { ledger, calls };
 }
 
-/** The copy's engine answers through a daemon client; these tests answer it by method. */
 function copyClient(answers: Record<string, (params: Record<string, unknown>) => unknown>) {
   const methods: string[] = [];
   const client = {

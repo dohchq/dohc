@@ -188,7 +188,6 @@ describe("a Collection on the server, as the panel reads it", () => {
         throw new Error("offline");
       }),
     ).toMatchObject({ runs: null });
-    // A Collection the server no longer runs, such as an archived one, is not shown as the server's.
     data.approvedArtifacts.mockResolvedValueOnce({
       revision,
       schemaSql: "SQL",

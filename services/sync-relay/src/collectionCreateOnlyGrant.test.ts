@@ -1,5 +1,3 @@
-// The seam the create-only collection grant policy extends: the link-create
-// surface, the public access levels, and the grant wire shape.
 import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import {
@@ -30,8 +28,6 @@ async function newHandler(): Promise<SyncRelayHandler> {
   return testHandler(await testStorage(), { newShareId: () => "share-collection" });
 }
 
-// A named share over the collection folder: the topology the create-only
-// grant policy attaches to.
 async function seedCollectionShare(h: SyncRelayHandler): Promise<void> {
   await claimWorkspace(h, OWNER, WORKSPACE);
   await createShare(h, OWNER, WORKSPACE, { recipientUserId: RECIPIENT, paths: [COLLECTION_PATH] });

@@ -9,10 +9,6 @@ import {
   smtpSettingsFromEnv,
 } from "./smtp";
 
-// The wire behaviour is checked against a fake submission server: the test
-// asserts the transcript dohc sends, because that transcript is what a real
-// MTA judges. No sleeps — every step waits for the peer's reply.
-
 interface FakeServer {
   port: number;
   transcript: string[];

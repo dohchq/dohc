@@ -283,7 +283,6 @@ function controllable<T>() {
   return { promise, reject, resolve };
 }
 
-// The workspace's granted shares, as main lists them for Sharing.
 function sharingAccess(rows: unknown[], nextCursor: string | null = null) {
   return {
     ref: null,
@@ -485,7 +484,6 @@ async function openOwnerComments(user: ReturnType<typeof userEvent.setup>, share
   return group;
 }
 
-// The email form's level is chosen from the menu on the access itself.
 async function chooseEmailAccess(user: ReturnType<typeof userEvent.setup>, level: "view" | "edit") {
   await user.click(screen.getByTestId("share-access"));
   await user.click(await screen.findByTestId(`share-access-${level}`));
@@ -705,7 +703,6 @@ describe("RelayShareDialog", () => {
       view.rerender(<RelayShareDialog workspaceId="ws-1" target={equivalent} onClose={onClose} />);
       await act(async () => copy.resolve());
       expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
-      // The code stayed on screen, so its copy reports where the person sees it.
       await waitFor(() =>
         expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copied"),
       );
@@ -733,7 +730,6 @@ describe("RelayShareDialog", () => {
     expect(screen.getByLabelText("Invite by email")).toBe(screen.getByTestId("share-email"));
     expect(screen.getByRole("heading", { name: "Anyone with the link" })).toBeTruthy();
     expect(await screen.findByTestId("share-link-create")).toBeTruthy();
-    // Nobody has access yet, so there is no People list to read.
     expect(screen.queryByTestId("share-people")).toBeNull();
   });
 
@@ -961,7 +957,6 @@ describe("RelayShareDialog", () => {
       ),
     ).toBeTruthy();
     expect(within(rows[2]!).getByText(`Ended ${shortDate(endedAt)}`)).toBeTruthy();
-    // An ended link has nothing left to change.
     expect(within(rows[2]!).queryByRole("button", { name: "Link options" })).toBeNull();
     expect(
       within(rows[3]!).getByText("Unreadable link. dohc can't read what this link shares."),
@@ -1351,7 +1346,6 @@ codex mcp login dohc-share`);
     await act(async () => {});
     expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalledTimes(1);
 
-    // Changed links, as after Reset: the list reads again.
     bridgeMock.listRelayShareLinks.mockResolvedValue({
       links: [readableLink("grant-link-1", { lastUsedAtMs: CREATED_MS + 5 })],
     });
@@ -6090,7 +6084,6 @@ codex mcp login dohc-share`);
   });
 });
 
-// Share is one surface: who was invited, then the links.
 describe("people and links on one surface", () => {
   const PLAN: RelayShareTarget = { kind: "paths", paths: ["docs/plan.md"] };
 
@@ -6157,7 +6150,6 @@ describe("people and links on one surface", () => {
       lane: "granted",
       cursor: "page-2",
     });
-    // The bounded listing answers; the account's whole inventory is not read.
     expect(bridgeMock.listRelayShares).not.toHaveBeenCalled();
 
     await user.click(within(people).getByTestId("share-invited-options-ben"));
@@ -6300,14 +6292,12 @@ describe("people and links on one surface", () => {
     expect(more.textContent).toBe("2 more links");
     expect(more.getAttribute("aria-expanded")).toBe("true");
 
-    // The list still closes, and takes an open question on one of its links with it.
     await chooseLinkOption(user, screen.getByTestId("share-link-row-second"), "End link");
     expect(screen.getByTestId("share-link-confirmation")).toBeTruthy();
     await user.click(more);
     expect(more.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByTestId("share-link-group-share-made")).toBeNull();
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
-    // Nothing hidden holds the links that still show.
     const shown = screen.getByTestId("share-link-row-first");
     expect(
       (within(shown).getByRole("button", { name: "Link options" }) as HTMLButtonElement).disabled,
@@ -6391,7 +6381,6 @@ describe("people and links on one surface", () => {
     );
     expect(screen.queryByTestId("share-links-more")).toBeNull();
 
-    // A link ended afterwards still waits under a closed list.
     await chooseLinkOption(user, screen.getByTestId("share-link-row-only"), "End link");
     await user.click(
       within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
@@ -6461,7 +6450,6 @@ describe("people and links on one surface", () => {
       }),
     );
 
-    // Share A has no working link left, so share B shows and A waits in the list.
     expect(await screen.findByTestId("share-link-group-share-b")).toBeTruthy();
     expect(screen.queryByTestId("share-link-group-share-a")).toBeNull();
     await waitFor(() =>
@@ -6653,7 +6641,6 @@ describe("advertised public Edit release", () => {
 
 describe("sharing that cannot work yet", () => {
   const PLAN: RelayShareTarget = { kind: "paths", paths: ["docs/plan.md"] };
-  // The controls a person would fill in.
   const formControls = () => [
     screen.getByTestId("share-access"),
     screen.getByTestId("share-email"),
@@ -6706,7 +6693,6 @@ describe("sharing that cannot work yet", () => {
     expect(context[held.runs]).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
     expect(bridgeMock.createRelayShare).not.toHaveBeenCalled();
-    // Nothing is read from a server sharing cannot reach.
     expect(bridgeMock.listRelayShareLinks).not.toHaveBeenCalled();
     expect(bridgeMock.listSharingAccess).not.toHaveBeenCalled();
     expect(bridgeMock.requestAccessRefresh).not.toHaveBeenCalled();

@@ -66,7 +66,6 @@ function observedClient(
   return { client, calls };
 }
 
-// An abandoned install keeps its committed cursor and digest paired for the next pass.
 it.skipIf(engine.missing)(
   "an abandoned committed owner sync leaves a matched accepted state",
   async () => {

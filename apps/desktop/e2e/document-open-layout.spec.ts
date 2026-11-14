@@ -11,10 +11,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// While a document opens, MarkdownView draws a read body; when the engine
-// session binds, the editor replaces it. Every block must already sit where
-// the editor puts it, or the page jumps as the open finishes.
-
 // Enough properties to wrap onto several lines, a table wider than the
 // reading column, which scrolls in its frame, and a table with two resized
 // rows, whose heights the comment above it keeps.

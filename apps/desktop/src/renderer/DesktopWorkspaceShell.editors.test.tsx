@@ -253,7 +253,6 @@ describe("editor groups", () => {
       contentHash: "a".repeat(64),
     }));
     const undone = deferred<{ trashed: boolean }>();
-    // The database tabs still showing when Undo reaches main.
     const shownAtUndo: number[] = [];
     const undoDatabaseImport = vi.fn(() => {
       shownAtUndo.push(screen.queryAllByTestId("tab-data.sqlite").length);
@@ -423,7 +422,6 @@ describe("ui-state merge-on-load", () => {
     await copyDetails(row);
     checkRefusalCopy(await navigator.clipboard.readText(), refused.errorCause);
 
-    // Try again closes Notices and runs the refresh. The row stays while it runs.
     const refreshButton = () => screen.getByTestId("shared-view-refresh") as HTMLButtonElement;
     const refusalRow = async () => {
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -446,7 +444,6 @@ describe("ui-state merge-on-load", () => {
     const keptRow = await refusalRow();
     expect(keptRow).not.toBeNull();
 
-    // The refresh that completes ends the row.
     fireEvent.click(within(keptRow!).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(refreshButton().disabled).toBe(true));
     expect(refresh).toHaveBeenCalledTimes(3);
@@ -648,7 +645,6 @@ describe("ui-state merge-on-load", () => {
   // not clear it and a restart must not lose it.
   it("says so when a share's record holds ops its pulls skipped", async () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
-    // A refresh that finds nothing new. The warning must survive it.
     bridge.refreshSharedView = vi.fn(async () => ({
       ok: true as const,
       status: "unchanged" as const,
@@ -738,13 +734,11 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
     renderShell(bridge);
 
-    // Type into the restored tab's document without letting it settle.
     await screen.findByTestId("view-markdown");
     await user.type(await enterMarkdownSource(user), "Draft!");
     await screen.findByTestId("tab-dirty");
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
 
-    // The file disappears from the workspace while that draft is unsaved.
     bridge.listWorkspaceFiles = vi.fn(async () => listing("b.md"));
     await act(async () => {
       bridge.emitWorkspaceActivity();
@@ -755,7 +749,6 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
     expect(screen.getByTestId("tab-dirty")).toBeTruthy();
 
-    // Once the draft settles, the deferred close completes.
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     await waitFor(() => {
       expect(screen.queryByTestId("tab-a.md")).toBeNull();
@@ -807,7 +800,6 @@ describe("ui-state merge-on-load", () => {
     });
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
 
-    // The older listing commits, but a newer request is still in flight.
     await act(async () => {
       older.resolve({
         visibility: { status: "ready" as const, rules: [] },
@@ -818,17 +810,12 @@ describe("ui-state merge-on-load", () => {
     });
     expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
 
-    // The newer request fails. Everything has settled now, but that failure
-    // could have been the listing that would have shown the file pulled back
-    // in, so the older snapshot cannot authorise a close.
     await act(async () => {
       failNewer(new Error("listing failed"));
       await Promise.resolve();
     });
     expect(screen.getByTestId("tab-gone.md")).toBeTruthy();
 
-    // A listing issued after the failure answers, and still does not have the
-    // file. Now the close is authorised.
     act(() => {
       bridge.emitWorkspaceActivity();
     });
@@ -883,8 +870,6 @@ describe("ui-state merge-on-load", () => {
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
 
-    // Drag the sidebar edge. Its one release commit does not move the active
-    // tab.
     const panel = screen.getByTestId("side-panel");
     expect(panel.style.width).toBe("240px");
     const handle = screen.getByTestId("sidebar-resize");
@@ -964,7 +949,6 @@ describe("ui-state merge-on-load", () => {
     });
     renderShell(presence);
 
-    // Select a channel from the sidebar: presence engages in the editor.
     await screen.findByTestId("chats-personal-feed");
     await user.click(screen.getByTestId("activity-chats"));
     await user.click(await screen.findByTestId("chats-channel"));
@@ -983,8 +967,6 @@ describe("ui-state merge-on-load", () => {
     expect(new Set(channelPublishes.map((payload) => payload.incarnationId)).size).toBe(1);
     const statusQueries = bridge.cloudStatus.mock.calls.length;
 
-    // Sign out. The signal alone must tear presence down — the collaboration
-    // rebuilds dormant off the dropped status — and re-query the status.
     act(() => {
       for (const listener of sessionListeners) {
         listener({ sessionKey: null, phase: "ready" });
@@ -1107,12 +1089,10 @@ describe("ui-state merge-on-load", () => {
     const bridge = chatsPageBridge(CHATS_PAGE_STATE);
     renderShell(bridge);
 
-    // The page mounts on the Chats tab; go to the Feed.
     await screen.findByTestId("chats-personal-feed");
     const post = await screen.findByText("Feed update worth revisiting");
     const postButton = post.closest("button")!;
 
-    // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
     await waitFor(() =>
@@ -1142,7 +1122,6 @@ describe("ui-state merge-on-load", () => {
 
     expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-    // The feed click opens its channel once; the delayed DM opens no tab.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
     expect(
       screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`),

@@ -179,7 +179,6 @@ it("asks T3 Code to allow dohc, and Cancel or closing the sheet ends the wait", 
   renderList();
   await chooseT3Code();
   const allow = within(await sheet().findByTestId("t3-code-allow"));
-  // The way to a sign-in code, and what the mode picked there decides.
   expect(allow.getByText(/Sharing & access, then Authorized clients/)).toBeTruthy();
   expect(allow.getByText(/Copy code only/)).toBeTruthy();
   expect(allow.getByText(/A thread with full access needs Full access\./)).toBeTruthy();
@@ -189,11 +188,9 @@ it("asks T3 Code to allow dohc, and Cancel or closing the sheet ends the wait", 
   expect(allow.getByRole("status").textContent).toBe("Waiting for T3 Code");
   await userEvent.click(allow.getByRole("button", { name: "Cancel waiting for T3 Code" }));
   expect(bridgeMock.cancelAllowDohcInT3Code).toHaveBeenCalledOnce();
-  // The wait the person cancelled says nothing when it ends.
   await act(async () => first.reject(new Error("The wait was cancelled.")));
   expect(allow.queryByRole("alert")).toBeNull();
 
-  // An ask T3 Code turns down says why, above the button that asks again.
   bridgeMock.allowDohcInT3Code.mockRejectedValueOnce(new Error("You declined dohc in T3 Code."));
   await userEvent.click(allow.getByRole("button", { name: "Allow dohc in T3 Code" }));
   expect((await allow.findByRole("alert")).textContent).toBe("You declined dohc in T3 Code.");
@@ -219,12 +216,10 @@ it("connects the picked thread, named after it unless the person typed a name", 
   const { onSave } = renderList();
   await chooseT3Code();
   const chief = await sheet().findByRole("radio", { name: /^Chief of Staff: dohc/ });
-  // The row says T3 Code's own word for what the thread is doing.
   expect(within(chief).getByText("Working")).toBeTruthy();
   expect(bridgeMock.listT3CodeThreads).toHaveBeenCalledWith({ projectId: "p-dohc" });
   expect(nameField().value).toBe("Agent");
 
-  // Add with no thread chosen says so, and adds nothing.
   await userEvent.click(screen.getByTestId("agent-add-confirm"));
   expect(sheet().getByRole("alert").textContent).toBe("Choose a thread.");
   expect(bridgeMock.readyAgentThread).not.toHaveBeenCalled();
@@ -234,7 +229,6 @@ it("connects the picked thread, named after it unless the person typed a name", 
   expect(nameField().value).toBe("Chief of Staff: dohc");
   await userEvent.click(threadRow("Issue owner"));
   expect(nameField().value).toBe("Issue owner");
-  // A typed name stays when another thread is picked.
   await userEvent.clear(nameField());
   await userEvent.type(nameField(), "Chief");
   await userEvent.click(chief);
@@ -325,7 +319,6 @@ it("keeps an older search's late answer out of the list", async () => {
   expect(sheet().queryByRole("radio", { name: /^Host checks/ })).toBeNull();
   expect(sheet().getAllByRole("radio", { name: /owner/ })).toHaveLength(1);
 
-  // A search with no thread says which words found nothing.
   bridgeMock.listT3CodeThreads.mockResolvedValueOnce(onePage());
   await searchFor("z");
   expect((await sheet().findByTestId("t3-code-threads-empty")).textContent).toBe(
@@ -377,7 +370,6 @@ it("loads the next page of a project's threads, and another project's from its f
   expect(threadRow("First thread")).toBeTruthy();
   expect(sheet().queryByRole("button", { name: "Show more" })).toBeNull();
 
-  // A list that could not load says so in its place, and reads again.
   bridgeMock.listT3CodeThreads.mockRejectedValueOnce(new Error("T3 Code is not running."));
   await userEvent.selectOptions(sheet().getByRole("combobox", { name: "Project" }), "garage");
   const retry = within(await sheet().findByTestId("t3-code-threads-retry"));
@@ -434,14 +426,12 @@ it("saves the forwarding switch, what a message does while the thread works, and
   const note = page.getByRole<HTMLTextAreaElement>("textbox", { name: "Your note" });
   expect(note.maxLength).toBe(4000);
   await userEvent.type(note, "Post decisions here. ");
-  // The note saves when focus leaves it, not on each key.
   expect(saved().note).toBeUndefined();
   fireEvent.blur(note);
   expect(saved().note).toBe("Post decisions here.");
   rerender({ ...WITH_CHIEF, agents: { ...SETTINGS.agents, "t3-code": saved() } });
   expect(note.value).toBe("Post decisions here.");
 
-  // Escape keeps the note as it was, and an empty note removes the key.
   const saves = onSave.mock.calls.length;
   await userEvent.type(note, " More{Escape}");
   expect(note.value).toBe("Post decisions here.");

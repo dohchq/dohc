@@ -214,8 +214,6 @@ function described(error: unknown) {
 // Long arguments print as their length, so the recording stays readable.
 const shown = (value: string) => (value.length > 200 ? `<${value.length} characters>` : value);
 
-// ---- IPC: the operation rows the preload and main share. ----
-
 const IPC_ROWS = {
   chatLinks: chatOperations.chatLinks,
   chatFileMentionsPage: chatOperations.chatFileMentionsPage,
@@ -445,8 +443,6 @@ async function recordIpc() {
   };
 }
 
-// ---- The public command line, with the desktop app's answer injected. ----
-
 const CLI_CWD = "cli-workspace";
 
 async function cli(argv: string[], reply: Answer = page(null), env: Record<string, string> = {}) {
@@ -606,8 +602,6 @@ async function recordCli() {
   };
 }
 
-// ---- The CLI socket, as the desktop app answers it. ----
-
 const TOKEN = "a".repeat(64);
 const WORKSPACE_ID = "ws-1";
 
@@ -631,7 +625,6 @@ const CHANNELS = [
   channel("channel-design", "Design", "design"),
   channel("channel-deploys", "Deploys", "deploys"),
 ];
-// General has a wire id; Design has none yet; reading Deploys' fails.
 const WIRE_IDS: Record<string, string | null | Error> = {
   "channel-general": "wire-general",
   "channel-design": null,
@@ -642,7 +635,6 @@ type SocketRead = (
   verb: string,
 ) => (workspace: CliRegistryWorkspace, input: unknown) => Promise<unknown>;
 
-// The only place that knows how CliServerOptions names the five reads.
 function withReads(options: CliServerOptions, read: SocketRead): CliServerOptions {
   return {
     ...options,
@@ -676,7 +668,6 @@ afterAll(async () => {
 interface SocketCase {
   args: Record<string, unknown>;
   reply?: Answer;
-  // No read handlers at all, as when the desktop app has none to give.
   noReads?: boolean;
   readOnly?: boolean;
   cwd?: "workspace" | "received share" | "outside";
@@ -784,7 +775,6 @@ async function socket(verb: string, test: SocketCase) {
   };
 }
 
-// What every read shares at the socket: who may call it, and from where.
 async function refusals(verb: string, args: Record<string, unknown>, reply: Answer) {
   return [
     await socket(verb, { args, reply, token: "b".repeat(64) }),

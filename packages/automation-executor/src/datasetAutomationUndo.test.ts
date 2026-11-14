@@ -344,9 +344,6 @@ describe("undo of a dataset run", () => {
     expect(sent).toHaveLength(2);
   });
 
-  // Records in memory behind generated edit, read, and delete operations: a
-  // write at another version is refused as stale, a record that is not there
-  // is not found, and a key already used replays. `sent` lists every write.
   function recordsHost(
     records: Record<string, { version: number; values: Record<string, JsonValue> }>,
     options: { rules?: DatasetDefinition; grants?: ReachDatasetGrants } = {},
@@ -798,7 +795,6 @@ describe("undo of a dataset run", () => {
     expect(await undo(chained.host, [cleared, later])).toEqual({ ...none, reverted: 1 });
     // Paid goes back to the cleared value the later run found, not past the edit it could not read.
     expect(chained.writes).toEqual([{ [STATUS]: null }]);
-    // No approved read shows Status, so dohc cannot check whether the edit landed.
     const unread = recordsHost({ a: { version: 3, values: { [STATUS]: "Closed" } } });
     const withoutRead = {
       ...unread.host,
@@ -1222,7 +1218,6 @@ describe("undo of a dataset run's actions", () => {
       resolves: () => true,
       dataGrants: () => NO_GRANTS,
     };
-    // The start-over run began at an earlier clock reading, but committed revision 11 after the first run's 10.
     const runs = [
       runOf(5, [action(HOLD, "Hold", 10, { id: "a", status: "Open" })]),
       runOf(1, [
@@ -1344,7 +1339,6 @@ describe("undo of a dataset run's actions", () => {
       version: 1,
       deletes: [REMOVE],
     });
-    // Stop and restore undid the newer run alone, and saved its own calls.
     const older = runOf(1, [action(HOLD, "Hold", 10, { id: "a" }), created("b")]);
     const newer = {
       ...runOf(2, [action(HOLD, "Hold", 11, { id: "x" }), created("c")]),

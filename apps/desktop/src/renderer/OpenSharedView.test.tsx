@@ -431,7 +431,6 @@ describe("OpenSharedView defaults for a pasted code", () => {
       await act(async () => {});
       expect(bridgeMock.getRelayReceivedShare).not.toHaveBeenCalled();
 
-      // Open without a session asks for sign-in inline.
       fireEvent.click(screen.getByTestId("open-share-start"));
       await act(async () => {});
       fireEvent.click(screen.getByTestId("cloud-connect-start"));

@@ -964,8 +964,6 @@ describe("createCaptureLiveStores", () => {
       });
 
       if (result.kind !== "conflict") throw new Error("expected a conflict");
-      // Every side of the match carries its own body: the callers of this walk
-      // read them.
       for (const side of ["base", "current", "incoming"] as const) {
         expect(
           Buffer.from((result.conflict[side] as { text?: string }).text ?? "", "utf8"),

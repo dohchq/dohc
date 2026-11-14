@@ -266,8 +266,6 @@ async function appendThreadCreate(
   expect(r.status).toBe(200);
 }
 
-// Presence via the SHARE route (a participant's path). The relay resolves the
-// share to the GRANTER's workspace, so this lands in the owner's scope.
 async function sharePresenceRaw(
   baseUrl: string,
   userId: string,
@@ -356,9 +354,6 @@ describe("two-client presence over a real relay child", () => {
     expect(ownerView).toHaveLength(1);
     expect(ownerView[0]?.isSelf).toBe(true);
 
-    // PARTICIPANT publishes via the SHARE route on the same wireId topic. The
-    // relay maps the share to the granter's workspace, so this lands in the
-    // owner's scope — the participant's own response already shows both peers.
     const memberView = await sharePublish(baseUrl, "member", shareId, wireId, {
       clientId: "member-1",
       state: { displayName: "Member", typing: true },
@@ -423,9 +418,6 @@ describe("two-client presence over a real relay child", () => {
     expect(ownerView).toHaveLength(1);
     expect(ownerView[0]?.isSelf).toBe(true);
 
-    // PARTICIPANT publishes via the SHARE route on the same thread topic. The
-    // gate admits it because thread-in binds to the granted channel; the relay
-    // maps the share to the granter's workspace, so both land in one scope.
     const memberView = await sharePublish(baseUrl, "member", shareId, threadTopic, {
       clientId: "member-1",
       state: { displayName: "Member", typing: true },

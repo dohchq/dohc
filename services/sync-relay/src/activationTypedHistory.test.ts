@@ -49,7 +49,6 @@ function validation() {
   return pool.ordinaryActivation(ACTIVATION.validation);
 }
 
-/** The lineage the note's checkpoint belongs to under `validate`'s policy. */
 function lineageOf(note: TypedRelayNote, validate: Validate): OrdinaryCheckpointScope {
   const { source } = note.capture;
   return {
@@ -65,7 +64,6 @@ function lineageOf(note: TypedRelayNote, validate: Validate): OrdinaryCheckpoint
     policySha256: validate.policySha256!,
   };
 }
-/** The note's rows after its lineage's checkpoint, or after its base without one: the rows an activation's last read walks. */
 function rowsAfterCheckpoint(note: TypedRelayNote, validate: Validate) {
   const { source } = note.capture;
   const checkpoint = readOrdinaryCheckpoint(
@@ -79,7 +77,6 @@ function rowsAfterCheckpoint(note: TypedRelayNote, validate: Validate) {
       .rows,
   );
 }
-/** Folds the note's next page into its lineage's checkpoint, as an activation's fold does. */
 function foldOnePage(note: TypedRelayNote, validate: Validate) {
   const foldPage: OrdinaryFoldValidator = async (work, signal) => {
     const result = await validate(work, signal);
@@ -263,7 +260,6 @@ const STAGES = [
   "continuity sidecar commit",
   "validation send",
 ];
-/** Each stage's count, longest span and total, then the five longest holds split by the stages inside them. */
 function stageReport(label: string, run: { holds: Hold[]; spans: Span[] }) {
   const lines = STAGES.map((stage) => {
     const lengths = run.spans
@@ -611,7 +607,6 @@ async function crossedMarks(...crossings: { bold: number; crossed: number }[]) {
   const [boldOnly, codeOnly, both] = states as [Uint8Array, Uint8Array, Uint8Array];
   return { note, capture, boldOnly, codeOnly, both };
 }
-/** The origin row at which a typed note's first fold page ends. */
 async function firstPageEnd(validate: Validate) {
   const probe = await typedRelayNote(2_000);
   expect(await foldOnePage(probe, validate)).toMatchObject({
@@ -660,7 +655,6 @@ it.each([1, 4, 600])(
   },
 );
 
-// An earlier crossing in the same page does not hide the rows between it and the later one.
 it(
   "a note past today's entry limit whose devices formatted the same words at once twice in one fold page ends that page at the later bold, and activates",
   { timeout: 300_000 },

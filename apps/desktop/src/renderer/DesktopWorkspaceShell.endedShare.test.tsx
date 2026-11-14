@@ -184,7 +184,6 @@ function focusAfterMinimum() {
   fireEvent.focus(window);
 }
 
-/** Opens the Collection's actions menu, which holds Fields and Views, when it is closed. */
 function openCollectionActions() {
   if (!screen.queryByRole("menu", { name: "Collection actions" }))
     fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));

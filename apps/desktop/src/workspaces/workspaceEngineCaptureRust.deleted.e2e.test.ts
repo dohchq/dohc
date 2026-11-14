@@ -8,8 +8,6 @@ it.skipIf(engine.missing)(
   async () => {
     const deleted = await openDeletedDocument("recorded");
     try {
-      // The close is refused, so the session keeps the text, nothing is
-      // written, and the draft stays.
       await expect(deleted.session.close()).rejects.toThrow("conflict-stale-target");
       expect(existsSync(deleted.absolute)).toBe(false);
       expect(await deleted.drafts()).toEqual(["note.md: unsaved\nsaved\nbase\n"]);
@@ -19,7 +17,6 @@ it.skipIf(engine.missing)(
       await expect(deleted.session.close()).resolves.toBeUndefined();
       await vi.waitFor(async () => expect(await deleted.drafts()).toEqual([]));
 
-      // Nothing holds the document now, so nothing more is written.
       await rm(deleted.absolute);
       await expect(deleted.capture.saveDeletedFileAgain("note.md")).resolves.toBe(false);
       expect(existsSync(deleted.absolute)).toBe(false);

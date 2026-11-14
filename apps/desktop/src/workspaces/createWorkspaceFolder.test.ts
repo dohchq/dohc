@@ -62,7 +62,6 @@ afterEach(() => {
   for (const seam of [lstat, mkdir, readFile, stat]) vi.mocked(seam).mockReset();
 });
 
-// stat answers as the filesystem does, except a bigint stat of `path` reports `answer`'s.
 function statOf(
   path: string,
   answer: (real: import("node:fs").BigIntStats) => Promise<import("node:fs").BigIntStats>,

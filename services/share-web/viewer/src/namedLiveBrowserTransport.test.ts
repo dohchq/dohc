@@ -211,7 +211,6 @@ function fixture(
     account(id: string) {
       account = id;
     },
-    /** How many sessions the page has received. */
     issued: () => sessionCount,
     sessionLifetime(ms: number) {
       sessionMs = ms;
@@ -1086,7 +1085,6 @@ it("tells an invited editor that live editing stopped, keeps the edit, and sends
   const retry = await peer.submitted();
   expect(retry.bytes).toEqual(first.bytes);
 });
-// A page that can never open stops asking the server, even while the invitation names the file.
 it.each([false, true])(
   "keeps trying through refusals for five minutes after the file was last open, then stops; invitation readable=%s",
   async (readable) => {
@@ -1131,7 +1129,6 @@ it("names the server, and keeps trying, when the deadline passes while the page 
   await f.socketAt(1);
 });
 
-// A page that was open counts the new sessions it asks for over five minutes of retrying.
 describe("a retrying page keeps its session", () => {
   type Fixture = Awaited<ReturnType<typeof live>>;
   async function reopen(f: Fixture, index: number) {

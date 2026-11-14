@@ -1167,7 +1167,6 @@ describe("an app preview shown by more than one surface", () => {
       failNextPrepare: () => {
         failNextPrepare = true;
       },
-      // Settles once the first start reached preparation.
       prepared: () => firstPrepare.promise,
     };
   }

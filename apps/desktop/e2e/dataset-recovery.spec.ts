@@ -57,7 +57,6 @@ test("@dataset-recovery owner exports and restores records, files, history, and 
     await collection.getByRole("button", { name: "New record", exact: true }).first().click();
     const newRecord = newRecordPanel(collection);
     await fillNewRecordField(newRecord, "Name", "Before agent edit");
-    // The file's editor is the cell's: choose the file, wait for its upload, then Save puts it in the new record.
     await newRecord.getByRole("button", { name: "Add Receipt", exact: true }).click();
     const fileEditor = newRecord.locator("[data-cell-editor]");
     await fileEditor

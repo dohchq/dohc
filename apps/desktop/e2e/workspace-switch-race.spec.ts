@@ -52,7 +52,6 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
 
   try {
     await seedWorkspaceManifest(temp, WORKSPACE_A_ID);
-    // Seeded through the engine daemon over RPC.
     const diskWrites: Array<{ path: string; contents: string }> = [];
     await seedThroughDaemon(
       { workspaceId: WORKSPACE_A_ID, rootPath: temp.rootPath },

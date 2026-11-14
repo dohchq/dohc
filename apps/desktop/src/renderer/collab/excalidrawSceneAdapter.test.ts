@@ -387,8 +387,6 @@ describe("Excalidraw scene adapter", () => {
     });
     expect(confirming.changed).toBe(false);
 
-    // Another collaborator moves it to 20, then the local user intentionally
-    // reverts to 10. The reversion is a real local edit, not a replay.
     binding.apply({
       elements: [],
       appState: { gridSize: 20 },

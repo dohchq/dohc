@@ -39,10 +39,6 @@ async function readText(root: string, path: string): Promise<string> {
   return readFile(join(root, path), "utf8");
 }
 
-// The loopback holds real state and real sha256, and the fake daemon in
-// front of it ingests the folder on `capture.flush`, so the history these
-// tests read back is recorded state rather than a canned responder. Passing
-// `requests` is what lets a test prove the path it took.
 function capture(
   root: string,
   loopback: VersionedLoopbackEngine,

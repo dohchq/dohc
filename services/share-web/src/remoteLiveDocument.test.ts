@@ -51,7 +51,6 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const stop of cleanup.splice(0)) await stop();
 });
-// The agent's own token and MCP address, which go on every relay call and socket.
 const accessToken = "A".repeat(43),
   resource = `https://share.example.test/mcp/s/${"S".repeat(43)}`;
 

@@ -496,7 +496,6 @@ test("the app overlay refuses a partial configuration before any Docker action",
       JSON.stringify(domain),
     );
   }
-  // The wildcard site must never capture the server's own host.
   for (const domain of ["dohc.team.invalid", "team.invalid"]) {
     assert.ok(
       validateSettings({ ...apps(), DOHC_SHARE_WEB_APP_DOMAIN: domain }).some((error) =>

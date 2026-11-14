@@ -1237,8 +1237,6 @@ describe("the append gate accepts chat only", () => {
       const push = await pushOp(h, shareId, "moment.append", DELETE_MOMENT);
       refusals.push(`${push.status} ${await push.text()}`);
     }
-    // Equal is not enough: two identical SUCCESSES are also equal. Both must be
-    // the refusal, and then be the same refusal.
     for (const refusal of refusals) {
       expect(refusal, "identical is only meaningful if both refuse").toContain("403");
       expect(refusal).toContain("share_op_rejected");

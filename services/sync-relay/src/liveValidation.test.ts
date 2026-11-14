@@ -209,7 +209,6 @@ it("fails a job whose child exits abnormally, and replaces the child", async () 
   // The child cannot read a missing input and exits with an uncaught error.
   try {
     await expect(validate(null as never)).rejects.toThrow("exited");
-    // Its stack can name files, so the log counts its lines and shows none of them.
     await vi.waitFor(() =>
       expect(
         log.mock.calls.some(([line]) =>

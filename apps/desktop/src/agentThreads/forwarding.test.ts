@@ -92,7 +92,6 @@ ${threadId}`;
     failMarks: (fail: boolean) => {
       failMark = fail;
     },
-    /** Runs before each read of a chat thread settles. */
     holdThread: (hold: () => Promise<void>) => {
       beforeThread = hold;
     },
@@ -422,7 +421,6 @@ describe("forwarding", () => {
 
   it("keeps forwarding while chat writes keep coming", async () => {
     const { forwarding, sent, holdThread } = setup([request("m1", 10), request("m2", 20)]);
-    // Each read of a chat thread meets another chat write, twenty times over.
     let reads = 0;
     holdThread(async () => {
       reads += 1;
@@ -628,13 +626,11 @@ describe("forwarding", () => {
     fail(new Error("down"));
     await work;
 
-    // Nothing is reported, no other message goes out, and nothing waits to try again.
     expect(problems).toEqual([]);
     expect(tool.forward).toHaveBeenCalledTimes(1);
     expect(marks).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
 
-    // The workspace comes back: its messages go out as for any workspace.
     await forwarding.wake(WORKSPACE);
     expect(tool.forward).toHaveBeenCalledTimes(3);
     expect(marks).toEqual(["m1", "m2"]);

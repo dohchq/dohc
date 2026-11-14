@@ -50,8 +50,6 @@ function markOf(schedule: ScheduledAutomation, throughMs: number): AutomationSch
   return { automationId: schedule.automationId, scheduleHash: schedule.scheduleHash, throughMs };
 }
 
-// A clock whose wall time and monotonic time move together unless a test
-// jumps the wall clock, and whose one timer fires when the test says.
 function fakeClock(start: number) {
   let wall = start;
   let monotonic = 0;
@@ -491,7 +489,6 @@ describe("AutomationScheduler", () => {
       [markOf(hourly, NINE - 20 * MINUTE), markOf(daily, NINE - 20 * MINUTE)],
     );
     const marks = work.source.scheduleMarks;
-    // The clock is set two hours ahead while the step reads the marks.
     work.source.scheduleMarks = async () => {
       time.jumpWall(2 * HOUR);
       return await marks();
@@ -894,7 +891,6 @@ describe("AutomationScheduler with an automation host", () => {
     const work = fakeSource([hourly, daily], [markOf(hourly, NINE), markOf(daily, NINE)]);
     scheduler.add("ws", work.source, host);
     await idle(scheduler);
-    // Open through 150 hourly due times with no step between.
     time.advance(150 * HOUR);
     host.runs = false;
     expect(await scheduler.finishHere("ws")).toBe(NINE + 150 * HOUR);

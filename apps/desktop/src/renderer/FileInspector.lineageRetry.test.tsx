@@ -31,8 +31,6 @@ setupFileInspectorTests();
 const PATH = "notes/big.md";
 let harness: ReturnType<typeof harnessBridge>;
 
-// The shell's toast and Notices for the active workspace, beside an editor
-// that can belong to another one.
 function Shell(props: { workspaceId: string; children: ReactNode }) {
   const shell = useShellError(props.workspaceId);
   useDocumentSaveNotices({

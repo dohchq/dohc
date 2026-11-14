@@ -539,8 +539,6 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   });
 
   it("presents a binary->text transition honestly per side", () => {
-    // The binary preimage must never surface as beforeText "" (a false
-    // empty->text diff); it presents as bytes instead.
     const record = engineMomentDetailForIpc(
       detailWith({ before: binarySide(4), after: textSide("text again\n") }),
       names,

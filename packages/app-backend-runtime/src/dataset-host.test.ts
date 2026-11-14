@@ -1608,7 +1608,6 @@ it("names the person a commit is made for from the host's context, never the own
     userId: "user-ice",
   });
   agent = undefined;
-  // An automation's commit names the person whose change started its run.
   caller = "automation";
   expect(await commit("automation")).toEqual({
     kind: "automation",
@@ -1619,7 +1618,6 @@ it("names the person a commit is made for from the host's context, never the own
   caller = "owner";
   person = undefined;
   expect(await commit("nobody")).toEqual({ kind: "owner" });
-  // A named person is their own person, and a link names nobody: neither may name another.
   caller = "named";
   expect(await commit("named")).toEqual({ kind: "named", userId: "user-ana", appId: "form" });
   caller = "link";

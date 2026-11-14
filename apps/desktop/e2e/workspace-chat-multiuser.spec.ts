@@ -77,9 +77,6 @@ async function sharePresence(
   return { status: response.status, peers, raw };
 }
 
-// Discover the live chat grant the owner just created, from the real
-// app's own IPC surface (granted rows carry the shareId + cross-machine
-// channelWireId both sides key on).
 async function grantedShare(
   page: Page,
   workspaceId: string,
@@ -190,7 +187,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-thread-view")).toBeVisible();
     await expect(page.getByTestId("chats-message-body")).toContainText("Kickoff the launch plan.");
-    // Capture the thread id (its own cross-machine id → the thread presence topic).
     await page.getByTestId("chats-thread-back").click();
     await expect(page.getByTestId("chats-channel-view")).toBeVisible();
     const threadId = await page.getByTestId("chats-thread").first().getAttribute("data-thread-id");
@@ -201,7 +197,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
     await page.getByTestId("chats-share-email").fill(RECIPIENT_EMAIL);
     await page.getByTestId("chats-share-submit").click();
     await expect(page.getByTestId("chats-share-member")).toContainText(RECIPIENT_EMAIL);
-    // Members is a dialog; close it before working in the channel again.
     await page.getByTestId("chats-share-close").click();
     await expect(page.getByTestId("chats-share-panel")).toHaveCount(0);
 

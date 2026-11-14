@@ -24,13 +24,6 @@ function pushUpdate(nodeView: NodeView, node: ProseMirrorNode): void {
   nodeView.update?.(node, [], DecorationSet.empty);
 }
 
-// The math NodeView opens an editable source field on select and commits the
-// field value on blur/deselect. The regression under test: while the field is
-// open, a concurrent REMOTE tex change advances the node's attrs (update()),
-// and a naive commit-on-blur would overwrite that remote edit with the stale
-// field value even though the local user typed nothing. The commit must gate
-// on whether the field actually diverged from its edit-start baseline.
-
 type MarkupCall = { pos: number; attrs: { tex: string } };
 
 function makeFakeView(): { view: EditorView; dispatched: MarkupCall[] } {
@@ -83,7 +76,6 @@ describe("makeMathNodeView — concurrent remote edits while the source field is
     expect(sourceField(nodeView).value).toBe("a");
 
     pushUpdate(nodeView, mathNode("b"));
-    // The untouched field adopts the remote value so blur can't revert it.
     expect(sourceField(nodeView).value).toBe("b");
 
     nodeView.deselectNode?.();

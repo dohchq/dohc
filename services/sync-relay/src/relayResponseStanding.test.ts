@@ -105,7 +105,6 @@ describe("relay response cancellation lifetime", () => {
           return errorResponse(error);
         }
       };
-      // The route lets the close through, or answers it itself.
       expect((await send(throws, new ClientClosedRequest())).status).toBe(499);
       expect((await send(answers, new ClientClosedRequest())).status).toBe(499);
       expect(errors).not.toHaveBeenCalled();

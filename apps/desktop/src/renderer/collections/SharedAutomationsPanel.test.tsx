@@ -189,7 +189,6 @@ describe("the ⚡ panel of a Collection reached through a share", () => {
     expect(within(off).getByText("Off")).toBeTruthy();
     expect(within(off).getByText(PERSONAL)).toBeTruthy();
     expect(screen.getByTestId("count").textContent).toBe("2");
-    // Runs stay where they ran; the panel says so where the owner's shows them.
     expect(screen.getByText("Run history stays on the owner's computer.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /actions$/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "New automation" })).toBeNull();

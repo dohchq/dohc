@@ -279,7 +279,6 @@ describe.each(["owner", "bootstrap"] as const)(
     it("settles once through the last applied change, offers the identical declared change, then fences", async () => {
       const f = cut(kind, 2, (call) => call === 2);
       await expect(f.stopped).resolves.toEqual({ kind: "done", receipt });
-      // Only the registration and the applied terminal: no owner draft or authority is named.
       expect(f.settles()).toEqual([{ registrationId: 9, terminalReceipt: cutReceipt(1) }]);
       expect(f.offered()).toEqual([cutEvent(1), cutEvent(2), cutEvent(2)]);
       expect(f.store.completeStopRestoreCut).toHaveBeenCalledTimes(1);

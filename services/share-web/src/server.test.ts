@@ -2033,7 +2033,6 @@ describe("share-web relay call", () => {
       `POST LinkCapability ${first}`,
     ]);
 
-    // A link revoked during the hold has no session left to try again with.
     gated = true;
     revoked = true;
     expect((await renewWhileHeld(follow())).map((answer) => answer.status)).toEqual([404]);

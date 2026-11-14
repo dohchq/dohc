@@ -62,8 +62,6 @@ describe("ChatComposer Enter-to-send", () => {
   it("does not send on Enter during IME composition", () => {
     const { onSend } = renderComposer();
     const composer = screen.getByTestId("test-chat-composer");
-    // A CJK/IME user pressing Enter to confirm composed characters: the
-    // keydown arrives with isComposing = true and must never submit.
     fireEvent.keyDown(composer, { key: "Enter", isComposing: true });
     expect(onSend).not.toHaveBeenCalled();
     fireEvent.keyDown(composer, { key: "Enter", isComposing: false });
@@ -968,7 +966,6 @@ describe("message reactions (WS-MU-C2)", () => {
     const { onToggle } = renderList([], "you@x");
     const picker = openPicker();
     const search = within(picker).getByLabelText("Search emoji or paste any emoji");
-    // Opening focuses the search box so typing starts at once.
     expect(document.activeElement).toBe(search);
     await userEvent.paste("rocket");
     expect(choiceEmojis(picker)).toEqual(["🚀"]);

@@ -521,7 +521,6 @@ describe("CloudSyncSettings", () => {
     expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
     expect(bridgeMock.cloudStopSync).not.toHaveBeenCalled();
 
-    // A new sign-in rebuilt the engine: the switch reads on again.
     rerender(
       <CloudSyncSettings
         workspaceId="ws-1"

@@ -276,8 +276,6 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("offers a read-only source view for read-only markdown (truncated reads)", async () => {
-    // A read-only doc can't edit, but viewing raw source is still a view.
-    // The palette toggle opens the read-only source editor and never writes.
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Big\n",
       truncated: true,

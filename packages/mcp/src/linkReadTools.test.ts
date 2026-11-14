@@ -260,7 +260,6 @@ async function listed() {
     const names = tools.map((tool) => tool.name);
     levels.push({
       level: shareAccess ?? "owner",
-      // Where each read sits among all the level's tools, in the order the server lists them.
       positions: Object.fromEntries(TOOLS.map((name) => [name, names.indexOf(name)])),
       before: TOOLS.map((name) => names[names.indexOf(name) - 1] ?? null),
       tools: tools.filter((tool) => TOOLS.includes(tool.name)),

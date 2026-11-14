@@ -1127,7 +1127,6 @@ describe("pickers", () => {
       "doing",
       unchosen.getAttribute("aria-label")!.toLowerCase(),
     );
-    // The picker is still open, and a tags field's options take colors too.
     fireEvent.keyDown(search(), { key: "Escape" });
     press("ArrowRight");
     press("Enter");

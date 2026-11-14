@@ -56,12 +56,6 @@ import {
   testStorage,
 } from "./testing";
 
-// The server runs a workspace's automations in process: it follows the host
-// record through the real relay routes and storage, runs schedules with the
-// real scheduler on a clock the test sets, takes presses from shared views,
-// and posts its notices into the relay's list. The executor and the replica
-// are fakes at the engine's edge.
-
 const WORKSPACE = "workspace-trip";
 const OWNER = "owner";
 const HOUR = 3_600_000;
@@ -444,7 +438,6 @@ function payRun(options: CollectionAutomationsOptions, claimId: string, effects:
     change: { kind: "added" as const, fields: [], fieldsOmitted: 0 },
   };
   const run = newRun(claim, automation, `seed-${claimId}`, clock);
-  // Each save, as `outcome:durableEffects`.
   const saves: string[] = [];
   const backend: StepBackend = {
     step: (async () => ({

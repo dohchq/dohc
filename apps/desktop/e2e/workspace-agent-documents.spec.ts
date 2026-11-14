@@ -294,8 +294,6 @@ test("an agent's edit merges into a document the person is typing in", async ({}
     await page.keyboard.type(" Queued.");
     await expect(editor).toContainText("Typed before. Queued.");
 
-    // The agent edits the paragraph the person is typing in and the line
-    // below it. Main has not seen the queued typing.
     const during = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
     if (!during.ok) throw new Error(`documentRead failed: ${during.reason}`);
     expect(during.markdown).toContain("The person writes here. Typed before.");
@@ -374,8 +372,6 @@ test("an agent's edit merges into a document the person is typing in", async ({}
     expect(authors).toContainEqual({ actorOriginId: "dohc-mcp", actorKind: "agent" });
     expect(authors.some((author) => author.actorKind === "human")).toBe(true);
 
-    // With no editor open, the edit opens a session of its own, settles, and
-    // lands in the file before the call returns.
     const closed = await agentCli(temp, "documentEdit", {
       path: "notes/closed.md",
       replacement: "Added with no editor open.",

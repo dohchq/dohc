@@ -953,7 +953,6 @@ function countingFixture(relay: ReturnType<typeof countingRelay>, pushMs = 0) {
   };
 }
 
-// Types a character every 100 ms for `ms` while another device reads the file.
 async function typeFor(f: ReturnType<typeof countingFixture>, ms: number) {
   for (let t = 0; t < ms; t += 100) {
     f.edit();

@@ -1632,7 +1632,6 @@ describe("a Collection whose folder moved while its page was closed", () => {
       expect.any(String),
     ]);
     expect(queue.find(moved)?.state).toBe("unconfirmed");
-    // The Collection opens at its new folder. That page's requests reach it, and Try again sends the change through them.
     const reopened = host();
     open(reopened);
     queue.retry(moved);

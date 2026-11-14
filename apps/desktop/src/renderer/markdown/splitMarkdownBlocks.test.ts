@@ -42,7 +42,6 @@ describe("splitMarkdownBlocks", () => {
     const chunks = splitMarkdownBlocks(doc);
     const joined = chunks.join("\n\n");
     for (const p of paragraphs) expect(joined).toContain(p);
-    // And no chunk starts or ends mid-paragraph (always full lines from the set).
     for (const chunk of chunks) {
       const first = chunk.split("\n\n")[0];
       expect(first.startsWith("Paragraph number ")).toBe(true);

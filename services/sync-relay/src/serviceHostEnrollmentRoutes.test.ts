@@ -374,7 +374,6 @@ it("lets only the workspace's owner see, read, try again and confirm a copy of e
     expect((await f.handle(f.request("POST", shape, {}, "/kept-edits"))).status).toBe(400);
   }
   expect(held()).toBe(true);
-  // While the queue stays frozen at its seed, a copy of an older checkpoint holds the document, and one of the current checkpoint lets it go.
   f.storage.observeServiceKeptEditsCheckpoint(queue("outbox-1"), "b".repeat(64));
   expect(
     await (await act("copied", second, "outbox-1", { checkpointDigest: "a".repeat(64) })).json(),
@@ -732,8 +731,6 @@ it.each([0, 1] as const)(
   },
 );
 
-// Duplicate is the way out for a held note: its copy is a new object whose
-// one moment carries no conflict, so the server can host it if the share covers it.
 it.each([
   ["a share of the note's folder", ["docs"], true],
   ["a share of exactly the note", ["docs/a.md"], false],

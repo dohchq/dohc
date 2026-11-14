@@ -37,7 +37,6 @@ it("arms the kill guard before a stalled marker create and ends the step within 
   const kill = vi.fn();
   const create = vi.fn(() => {
     expect(guardArmed).toBe(true);
-    // File creation never finishes, as on a stalled disk.
     return new Promise(() => {});
   });
   const stop = watchBudget(state, () => 2_000_000n, create, kill, 50, 250);

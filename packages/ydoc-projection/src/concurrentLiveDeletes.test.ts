@@ -76,7 +76,6 @@ function textOf(element: Y.XmlElement): Y.XmlText {
 
 const append = (text: Y.XmlText, value: string) => text.insert(text.length, value);
 
-/** Whether `node` is, or holds, an element named `name`. */
 function holds(node: Y.XmlElement | Y.XmlText | Y.XmlHook, name: string): boolean {
   return (
     node instanceof Y.XmlElement &&
@@ -84,7 +83,6 @@ function holds(node: Y.XmlElement | Y.XmlText | Y.XmlHook, name: string): boolea
   );
 }
 
-/** Deletes the top-level block that is, or holds, the first element named `name`. */
 function deleteBlock(doc: Y.Doc, name: string) {
   const body = doc.getXmlFragment("body");
   const index = body.toArray().findIndex((node) => holds(node, name));
@@ -134,7 +132,6 @@ const SHAPES: Readonly<Record<string, Concurrent>> = {
   },
 };
 
-/** The rows of `shape` in the order given. Each is one row, from a client that had not received the other. */
 function concurrentRows(shape: Concurrent, order: "first, then second" | "second, then first") {
   const { baseline, rows, open } = session(shape.markdown);
   const one = open(2),
@@ -156,7 +153,6 @@ interface Undeclared {
   readonly kind: "format" | "gc" | "other";
 }
 
-/** What one replay of the rows deletes that no row's delete set names, by struct. */
 function undeclared(checkpoint: Uint8Array, rows: readonly Uint8Array[]): Undeclared[] {
   const replay = new Y.Doc({ gc: false });
   Y.applyUpdate(replay, checkpoint);
@@ -212,7 +208,6 @@ function oneItemRow(
   return encoder.toUint8Array();
 }
 
-/** What a refusal carries, and what only the replay deletes, for the failure message. */
 function detailOf(
   checkpoint: Uint8Array,
   rows: readonly Uint8Array[],
@@ -615,7 +610,6 @@ describe("the same key set at once: one of the two is kept, the same for everyon
 });
 
 describe("deletions no rule here accounts for stay refused", () => {
-  /** Client 3 bolds "Notes" first; client 2's row, made without seeing it, runs `edit`. */
   function boldedBoth(markdown: string, edit: (doc: Y.Doc, notes: Y.XmlText) => void) {
     const { baseline, rows, open } = session(markdown);
     const one = open(2),
@@ -678,7 +672,6 @@ describe("deletions no rule here accounts for stay refused", () => {
       textOf(elements(two, "paragraph")[0]!).format(0, 5, { bold: {} });
       two.getXmlFragment("body").delete(1, 1);
     });
-    // Client 2 types into "Shared", which client 3 deleted, then bolds "Notes" as client 3 did.
     one.transact(() => {
       append(textOf(elements(one, "paragraph")[1]!), "x");
       textOf(elements(one, "paragraph")[0]!).format(0, 5, { bold: {} });

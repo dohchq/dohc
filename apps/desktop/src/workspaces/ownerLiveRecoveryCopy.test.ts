@@ -33,11 +33,6 @@ const source = {
   storedOn: "this-computer" as const,
 };
 
-/**
- * A document typed in `count` edits after a base. The server accepted the
- * first `accepted` of them, so they left the queue and live only in the
- * checkpoint; each later edit builds on the one before it.
- */
 function queue(
   count: number,
   accepted = 0,

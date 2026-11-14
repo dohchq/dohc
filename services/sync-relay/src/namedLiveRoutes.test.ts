@@ -815,7 +815,6 @@ it.each([
   },
 );
 
-// Tabs that keep reconnecting fill a caller's share of tickets until those tickets expire.
 it.each([false, true])(
   "asks a link holder or agent to try again while its share of tickets is full; link=%s",
   async (link) => {
@@ -1040,7 +1039,6 @@ it("keeps a link socket through bearer refresh and closes it on revocation", asy
   ).toEqual({ link_session_id: old.sessionId });
 });
 
-/** Sends one ping and reports whether its pong or the socket's close came first. */
 async function pingOutcome(socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>) {
   const pong = once(socket.ws, "pong").then(
     () => "pong",
@@ -1109,8 +1107,6 @@ it.each<Record<string, string>>([
   },
 );
 
-// A connected agent opens the link's live documents through the same ticket
-// and socket routes, with its access token and the MCP address it signed in at.
 type LinkFixture = Awaited<ReturnType<typeof fixture>>;
 // The agent signed in nearly an hour ago: its token expires before a link holder's session (61 s).
 const agentExpiresAtMs = 2000;
@@ -2078,7 +2074,6 @@ describe("a desktop's opens while a host is away", () => {
       ).toEqual([200, 200, 200, 200]),
     );
     await vi.waitFor(() => expect(answers[other]).toBe(200));
-    // The desktop asks again for a refused note once its host is back.
     const again = refused.map((index) => open(notes[first.indexOf(index)]!));
     await vi.waitFor(() => expect(again.map((index) => answers[index])).toEqual([200, 200]));
   });

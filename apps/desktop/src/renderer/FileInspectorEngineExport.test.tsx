@@ -125,8 +125,6 @@ describe("engine-mode export with no mounted serializer", () => {
 
       render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-      // The engine header is up (the document bound); the editor beneath it
-      // failed to load, so there is nothing to serialize the Y.Doc.
       await screen.findByTestId("markdown-source-toggle");
       expect(screen.queryByTestId("markdown-editor")).toBeNull();
 
@@ -223,8 +221,6 @@ describe("engine-mode export with no mounted serializer", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    // No engine session: the file on disk IS the document, so the plain
-    // editor's own serializer answers and the export must still work.
     const toggle = await screen.findByTestId("markdown-edit-toggle");
     await vi.waitFor(() => expect(toggle.getAttribute("aria-disabled")).not.toBe("true"));
     await user.click(screen.getByTestId("document-menu-trigger"));

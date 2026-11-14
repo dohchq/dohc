@@ -735,8 +735,6 @@ describe("collectZipEntries", () => {
 
     const { entries } = await collectZipEntries(root);
     expect(entries.map((entry) => entry.path).sort()).toEqual(["b.md", "notes/a.md"]);
-    // The fd-based bounded read returns the full bytes (not a truncated/empty
-    // buffer) — guards the open→fstat→read loop against an off-by-one.
     const byPath = new Map(
       entries.map((entry) => [entry.path, Buffer.from(entry.data).toString("utf8")]),
     );

@@ -37,14 +37,6 @@ const NO_FILE_CHAT: ShareFileChatResolver = {
   objectIdAtPath: () => undefined,
 };
 
-// DM / chat grants over the relay, on the bidirectional shared-channel lane.
-// A DM is a `kind:"dm"` channel + one email-addressed chat grant per
-// participant, so a DM op is a strict subset of the shared-channel route: it
-// serves byte-identically to a regular channel op, binds by thread (never a
-// self-claimed channelWireId on the message payload), and every unauthorized
-// probe is indistinguishable from a share that never existed. These tests are
-// the adversarial isolation gate for that claim.
-
 afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
@@ -65,8 +57,6 @@ async function createWorkspace(h: SyncRelayHandler): Promise<void> {
 
 const chatOp = logOp;
 
-// A DM channel.create carries `kind:"dm"` — the only thing distinguishing it
-// from a regular channel op. Everything downstream is identical.
 function dmChannelCreate(wireId = DM_WIRE): ReturnType<typeof chatOp> {
   return chatOp(
     "chat.channel.create",
@@ -360,7 +350,6 @@ describe("DM grants over the relay", () => {
     await createWorkspace(h);
     const shareId = await createDmGrant(h);
 
-    // Invalid selectors fail closed with the shared-channel codes.
     const invalid = await h(
       request(
         OWNER,
@@ -456,8 +445,6 @@ describe("DM grants over the relay", () => {
       dmChannelCreate(),
       dmThreadCreate(),
       dmMessage("hello bob"),
-      // A PRIVATE channel + thread + message in the same bucket must never
-      // cross the DM grant.
       chatOp("chat.channel.create", {
         channelId: "channel-private",
         name: "private",

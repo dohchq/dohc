@@ -41,10 +41,8 @@ function folding(
     base: { relaySeq: note.capture.source.baseRelaySeq, originId: "typist", originSeq: 1 },
     policySha256: checkpointPolicySha256(ACTIVATION.validation),
   };
-  /** Folds a run of up to `pages` pages; one page by default. */
   const fold = (pages = 1) =>
     foldOrdinaryCheckpointPages(storage, { scope, bounds, pages, validate: check, nowMs: () => 7 });
-  /** Folds runs until the checkpoint is current or the fold stops, and returns the last outcome. */
   const all = async (pages = 1) => {
     for (let runs = 0; runs < 1_000; runs++) {
       const outcome = await fold(pages);
@@ -54,7 +52,6 @@ function folding(
   };
   return { storage, scope, fold, all, read: () => readOrdinaryCheckpoint(storage, scope) };
 }
-/** The projection and full state of the note's base and its first `typed` keystrokes, replayed in one document. */
 function replayed(note: TypedRelayNote, typed: number) {
   const doc = new Y.Doc({ gc: false });
   for (const update of [note.note.baseline, ...note.note.updates.slice(0, typed)])
@@ -195,7 +192,6 @@ it("a page validation refuses saves nothing, and the next fold refuses it again"
   expect(await f.fold()).toMatchObject({ kind: "refused" });
 });
 
-/** Records the largest string or byte value any statement returns from now on. */
 function largestRead(storage: StorageContext) {
   let largest = 0;
   const note = (value: unknown) => {
@@ -279,7 +275,6 @@ it("a fold another fold overtook saves nothing", async () => {
   expect(f.read()!.foldedEntries).toBe(65);
 });
 
-/** Counts the relay transactions the storage runs from now on. */
 function countSaves(storage: StorageContext) {
   let saves = 0;
   const tx = storage.tx.bind(storage);
@@ -387,7 +382,6 @@ it("a fold run lets the event loop turn before each page read and before its sav
   }
   const work = events.filter((event) => event !== "turn");
   expect(work).toEqual(["page", "page", "page", "page", "page", "save"]);
-  // Every page and the save start in a turn of their own.
   const order = events.join(" ");
   expect(order).not.toMatch(/(page|save) (page|save)/);
 });

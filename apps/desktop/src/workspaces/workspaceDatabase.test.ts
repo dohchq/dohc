@@ -224,7 +224,6 @@ describe("editing a database", () => {
       { table: "transactions", op: "delete", pkColumn: "id", rowId: "txn_002" },
       1_700_000_000_001,
     );
-    // Fresh read = fresh open of the file.
     const reopened = await readDatabaseSnapshot(root, "finance/wallet.sqlite");
     expect(reopened.tables.find((t) => t.name === "transactions")?.rows).toHaveLength(1);
   });

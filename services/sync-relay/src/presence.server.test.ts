@@ -54,7 +54,6 @@ describe("presence transport (workspace-owned)", () => {
     const storage = await testStorage();
     const h = makeHandler(storage, new PresenceHub());
     await claimWorkspace(h, "owner", "w");
-    // A different user cannot see or publish presence in someone else's ws.
     const r = await h(post("intruder", "/sync/w/presence?topic=general", { clientId: "c" }));
     expect(r.status).toBe(404);
   });
@@ -206,7 +205,6 @@ describe("presence is never journaled (ephemeral invariant)", () => {
     const page = storage.fetchLogPage({ workspaceId: "w", sinceRelaySeq: 0, limit: 500 });
     expect(page.rows).toHaveLength(0);
 
-    // The entire presence state lives in-memory in the hub only.
     expect(presence.stats().entries).toBe(1);
     await h(post("owner", "/sync/w/presence?topic=general", { clientId: "c", leave: true }));
     expect(presence.stats().entries).toBe(0);
@@ -308,7 +306,6 @@ describe("presence over a share (cross-user, gated)", () => {
         }),
       ),
     );
-    // Guest parks a long-poll at the current version (authorized at park time).
     const parked = h(
       req(
         "guest",

@@ -54,9 +54,6 @@ interface KilledSession {
   editor: ReturnType<Page["getByTestId"]>;
 }
 
-// Launches the app, warms a settled edit, types `preKill`, hard-kills the real
-// daemon before the debounced settle can run, keeps typing through the outage,
-// and waits for the supervisor's replacement. Returns with the app still open.
 async function killDaemonMidTyping(
   temp: Awaited<ReturnType<typeof createTempWorkspace>>,
   input: {
@@ -354,7 +351,6 @@ test("a document reopened after an app crash reads Saved only once its file has 
     expect(await saveMarks()).toEqual(["saving"]);
     expect(await diskText()).not.toContain(crashed);
 
-    // Released: the recovery settle writes the file, and only then Saved.
     await rm(gate);
     await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
     expect(await diskText()).toContain(crashed);

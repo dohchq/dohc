@@ -27,9 +27,7 @@ async function harness(
     stopAgents?: (workspaceId: string) => Promise<void>;
     onAsk?: (workspaceId: string) => void;
     onChange?: (workspaceId: string, trusted: boolean) => void;
-    // Keeps whether the dialog was shown, as dispatch does.
     asked?: Set<string>;
-    // Runs before each write of the trust file, to hold it.
     writeGate?: { hold: (() => Promise<void>) | null };
   } = {},
 ) {

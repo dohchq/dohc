@@ -43,9 +43,6 @@ import { PhoneWriteEngine, seedPhoneChats } from "./testing/phoneWriteEngine";
 import { PUBLICATION_DEADLINE_MS } from "./operationPublication";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
-// The reads run over the real server copies and operations, with each copy's
-// engine an in-memory stand-in for its chats and files.
-
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
@@ -2109,11 +2106,9 @@ describe("an account's chat writes through the server's copy", () => {
     };
     expect(await send("op-fresh", "@claude And?")).toEqual(["mention:claude"]);
     expect(await send("op-dm-fresh", "And?")).toEqual(["implicit:mac:default"]);
-    // The Mac quit, and three days pass with no declaration from it.
     now += CHAT_RUNNER_LEASE_MS;
     expect(await send("op-expired", "@claude And?")).toEqual([]);
     expect(await send("op-dm-expired", "And?")).toEqual([]);
-    // It comes back and declares the same list again.
     await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
     expect(await send("op-refreshed", "@claude And?")).toEqual(["mention:claude"]);
   });

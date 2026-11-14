@@ -539,8 +539,6 @@ it("settles a terminal again when its owner wants it, past the settlement an ord
   expect(settled).toEqual([receipt(2), receipt(2)]);
 });
 
-// Proves: a settle right after a done drain does not read the owner queue again, and one under a registration made
-// since that drain, here by a new connection, reads it first.
 it("settles after a done drain without draining again, unless its registration is new since", async () => {
   const f = fixture({ prefix: 1 }),
     settled = settlementRequired(f, () => false);

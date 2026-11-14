@@ -1007,8 +1007,6 @@ describe("CLI socket server", () => {
       return messages.find((row) => cliMessageId(row.id) === sent.messageId)?.authorAgentId;
     }
 
-    // The author of each Collection write and the origin of each document
-    // edit, in order.
     function recordWriteAuthors(): unknown[] {
       const authors: unknown[] = [];
       context.collections = {
@@ -1171,7 +1169,6 @@ describe("CLI socket server", () => {
         path: "notes/plan.md",
         replacement: "Done.",
       });
-      // The run's own write still names the run.
       await invoke("collectionSetFields", {
         cwd: workspaceRoot,
         actor: "agent",
@@ -1193,7 +1190,6 @@ describe("CLI socket server", () => {
         },
       ]);
 
-      // A reaction carries its author's name, not an agent id.
       await invoke("react", {
         ...terminalArgs(),
         message: cliMessageId(asked.message.id),
@@ -1394,7 +1390,6 @@ describe("CLI socket server", () => {
       { kind: "file", path: "plans/trip.md" },
     ]);
     await expect(link({ kind: "message", message: "no-such-message" })).rejects.toThrow();
-    // Only a path the engine cannot find is missing; another failure says what it is.
     await expect(link({ kind: "path", path: "missing.md" })).rejects.toThrow(
       "dohc could not find missing.md",
     );
@@ -1863,7 +1858,6 @@ describe("CLI socket server", () => {
     expect(deletePath).not.toHaveBeenCalled();
   });
 
-  // shared-with-me holds what others share with you, inside your own workspace.
   describe("from inside a folder others share with you", () => {
     const OWNER =
       "dohc: This command isn't available in a folder others share with you. Run it from your own workspace's folder.";
@@ -2691,7 +2685,6 @@ describe("CLI socket server", () => {
       next: "1:atc_1",
     });
     expect(context.automations!.runs).toHaveBeenCalledWith(AUTOMATION, undefined);
-    // The next page names where the last one ended.
     await invoke("automationRuns", { ...args, page: "1:atc_1" });
     expect(context.automations!.runs).toHaveBeenLastCalledWith(AUTOMATION, "1:atc_1");
     await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
@@ -2733,7 +2726,6 @@ describe("CLI socket server", () => {
       { automationId: AUTOMATION, claimId: "atc_1", startOver: false },
       { automationId: AUTOMATION, claimId: "atc_1", startOver: true },
     ]);
-    // Another computer's run is refused with the notice that names that computer.
     await expect(
       invoke("automationRetry", { ...args, run: "atc_1", startOver: false }),
     ).resolves.toEqual({
@@ -2820,7 +2812,6 @@ describe("CLI socket server", () => {
       reason: "Running for this record.",
     });
 
-    // The same request id answers the same press without pressing again, and refuses another request.
     const pressed = presses.length;
     const first = await invoke("automationPress", { ...args, requestId: "press-1" });
     await expect(invoke("automationPress", { ...args, requestId: "press-1" })).resolves.toEqual(
@@ -2856,12 +2847,10 @@ describe("CLI socket server", () => {
       ["tasks", "press-1"],
       ["billing", "press-1"],
     ]);
-    // A press with no request id gets a key of its own.
     await invoke("automationPress", args);
     await invoke("automationPress", args);
     const [one, two] = presses.slice(-2).map((press) => press.pressKey);
     expect(one).not.toBe(two);
-    // A press refused for its question is not remembered, so the same id can confirm it.
     await expect(
       invoke("automationPress", { ...args, field: "Send", requestId: "press-3" }),
     ).resolves.toMatchObject({ ok: false });
@@ -3324,8 +3313,6 @@ describe("CLI socket server", () => {
     await expect(
       invoke("documentRead", { cwd: workspaceRoot, actor: "agent", path: "notes.md" }),
     ).resolves.toEqual({ ok: true, path: "notes.md", markdown: "Root" });
-    // A request that names its workspace runs from that workspace's folder,
-    // wherever the caller stands: outside every workspace, or in a subfolder.
     const named = (workspaceId: string, from: string) =>
       rawRequest({
         token,
@@ -3340,12 +3327,10 @@ describe("CLI socket server", () => {
         result: { ok: true, path: "notes.md", markdown: "Root" },
       });
     }
-    // Only an id the registry lists selects a workspace.
     await expect(named("workspace-elsewhere", workspaceRoot)).resolves.toMatchObject({
       ok: false,
       error: "dohc: No workspace on this computer has this id.",
     });
-    // When two entries share a folder, a request runs only in the one it named.
     serverOptions.listWorkspaces = () => [
       registryWorkspace,
       { workspaceId: "twin", rootPath: workspaceRoot },
@@ -3355,7 +3340,6 @@ describe("CLI socket server", () => {
     expect(answers.find((answer) => !answer.ok)).toMatchObject({
       error: "dohc: This workspace's folder belongs to another workspace on this computer.",
     });
-    // A listed workspace whose folder is gone says so.
     serverOptions.listWorkspaces = () => [
       registryWorkspace,
       { workspaceId: "gone", rootPath: join(tempRoot, "no-such-folder") },
@@ -3524,7 +3508,6 @@ describe("CLI socket server", () => {
     await expect(invoke("reply", { ...args, cwd: nestedRoot, attachments: [] })).rejects.toThrow(
       "Agent runs cannot write in another workspace.",
     );
-    // Naming the other workspace by id is refused the same way as standing in it.
     await expect(
       rawRequest({
         token,
@@ -3590,7 +3573,6 @@ describe("CLI socket server", () => {
       };
     }
 
-    // In a run, both are the run's agent, whatever name the client gives.
     dispatchedRun = "codex";
     for (const name of ["Codex", "default"]) {
       const during = await writeAndReply(name);
@@ -3609,7 +3591,6 @@ describe("CLI socket server", () => {
     }
     callerRunSecret = RUN_SECRET;
 
-    // Outside a run, both are the unnamed agent's, and the reply shows the name given.
     dispatchedRun = null;
     for (const name of ["Codex", "default"]) {
       const outside = await writeAndReply(name);
@@ -3642,7 +3623,6 @@ describe("CLI socket server", () => {
       body: "Checks pass",
       reported: { product: "Claude Code" },
     });
-    // A person's write carries no report, even when the caller sends one.
     await invoke("reply", {
       cwd: workspaceRoot,
       actor: "human",
@@ -3709,8 +3689,6 @@ describe("CLI socket server", () => {
     if (!started.ok) throw new Error(started.reason);
     expect(started.path).toBe("tracked.md");
 
-    // The comment is the file's chat, authored as the agent under the name
-    // it gave, on behalf of the person.
     await expect(
       invoke("fileChats", {
         cwd: workspaceRoot,
@@ -3734,7 +3712,6 @@ describe("CLI socket server", () => {
       },
     ]);
 
-    // A file dohc does not track has no chats to start.
     await expect(
       invoke("fileChatStart", {
         cwd: workspaceRoot,
@@ -3748,7 +3725,6 @@ describe("CLI socket server", () => {
       reason: expect.stringContaining("does not track untracked.md"),
     });
 
-    // A comment through the socket is an agent's, whatever the caller claims.
     await expect(
       invoke("fileChatStart", {
         cwd: workspaceRoot,
@@ -3762,8 +3738,6 @@ describe("CLI socket server", () => {
       reason: 'a comment through the CLI socket is recorded as an agent\'s; send actor "agent"',
     });
 
-    // A retry with the same request id returns the first chat instead of
-    // starting a second; the id cannot be reused for a different comment.
     const once = {
       cwd: workspaceRoot,
       actor: "agent" as const,
@@ -3798,7 +3772,6 @@ describe("CLI socket server", () => {
     });
     if (!chats.ok) throw new Error(chats.reason);
     expect(chats.threads.filter((thread) => thread.title === "Once")).toHaveLength(1);
-    // An agent that gave no name is "Agent".
     await expect(
       store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }),
     ).resolves.toMatchObject([{ author: { kind: "agent", displayName: "Agent" } }]);
@@ -3815,7 +3788,6 @@ describe("CLI socket server", () => {
       expect(denied).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${reason}\n` });
     }
     const beforeReadOnly = calls.writes;
-    // A shared view refuses before the chat module is reached.
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;
     await expect(
@@ -4398,8 +4370,6 @@ describe("CLI socket server", () => {
     expect(shown.messages[1]?.body).toBe("Reply before access changed");
   });
 
-  // Grep hydrates only the FTS candidate threads (loadedThreadIds equals the
-  // matching thread alone), and falls back when the candidates saturate.
   it("uses daemon candidates for substring grep and falls back when they saturate", async () => {
     const matching = await post({
       actor: "human",

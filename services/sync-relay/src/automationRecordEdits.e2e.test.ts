@@ -55,12 +55,6 @@ import {
 } from "./serviceOrdinaryReplication";
 import { closeTestStorages, tempRoot, testStorage } from "./testing";
 
-// A server's automation writes records and posts in its own replica of the
-// owner's workspace, through the real engine: a plain daemon, a workspace
-// opened without capture, the relay route, and a join as the owner. The
-// owner's computer then receives each change with the automation as its
-// author.
-
 const engine = requireEngineBinaryOrSkip();
 const WORKSPACE = "workspace-trip";
 const AUTOMATION = {
@@ -97,7 +91,6 @@ const testActor: ResolveActor = (request, workspaceId) => {
   return { userId: match[1]!, workspaceId };
 };
 
-/** One computer's engine, with its workspace open on the relay route and ordinary replication. */
 async function computer(input: {
   root: string;
   relayUrl: string;
@@ -1057,7 +1050,6 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
         ],
       );
     };
-    // The relay-admitted settlement and the relay-checked live audit both retain the confirmed recipient.
     expect(imported).toContainEqual(
       expect.objectContaining({
         authors: [{ kind: "human", humanId: "reader", humanName: "Reader", relayConfirmed: true }],

@@ -65,7 +65,6 @@ const NOT_FOUND: Answer = {
   status: 404,
   body: { ok: false, error: "not found", code: "not_found" },
 };
-/** A feed request the test never answers: it waits until its signal aborts. */
 const held = () => new Promise<Answer>(() => {});
 
 /** Lets every answer already given reach the store: no timer, only the macrotask after the answers' callbacks. */
@@ -731,7 +730,6 @@ describe("a failing feed", () => {
     await pass(1);
     await vi.waitFor(() => expect(waits).toHaveLength(2));
     data.pause();
-    // The network went while the app was away, so the first request after it returns fails too.
     server.on("GET", feedPath("ws-a", "0.5.2"), "offline", held);
     data.resume();
     await vi.waitFor(() => expect(waits).toHaveLength(3));

@@ -1713,7 +1713,6 @@ describe("raw fileMove and fileDelete socket requests", () => {
   });
 });
 
-// Exercise both agent doors through desktop attachment admission and the real relay copy route.
 afterEach(closeTestStorages);
 async function shareCopyFixture() {
   const root = await createTestScratch("dohc-cli-share-copy-");
@@ -1873,8 +1872,6 @@ describe.each(["mcp"] as const)("share copy through %s", (door) => {
   });
 });
 
-// Both agent doors reach the Share dialog's Agents list and Disconnect through
-// desktop attachment admission. The relay stand-in records what main asks it.
 async function linkAgentsFixture() {
   const root = await createTestScratch("dohc-cli-link-agents-");
   const f = fixture(root);

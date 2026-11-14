@@ -120,9 +120,6 @@ describe("reconcileMermaidEntries", () => {
 
   it("drops the entry for a deleted fence (its id is no longer active)", () => {
     const previous = [entry("m0", 4), entry("m1", 40)];
-    // The second fence was deleted; the first is untouched, so only m0 survives
-    // and m1's id falls out of the active set (the plugin prunes its scheduler
-    // state).
     const blocks = [blockAt(4)];
     const next = reconcileMermaidEntries(
       previous,

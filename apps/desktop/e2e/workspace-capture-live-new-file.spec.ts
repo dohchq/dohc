@@ -14,11 +14,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// A person creates a file from the explorer and types into it. The editor's
-// live session holds the new document while capture first sees the file.
-// History, search, and a file's chats must each answer while the document is
-// open, and never refuse with "still updating".
-
 type FileChatsAnswer = { status?: string; fileObjectId?: string | null };
 
 async function listFileChats(

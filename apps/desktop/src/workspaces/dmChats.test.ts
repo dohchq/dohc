@@ -33,11 +33,6 @@ import { endJoinedChannel } from "./sharedChannels";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { createTestScratch } from "./testTemp";
 
-// The desktop DM orchestration: role derivation (owner vs
-// participant), display labels, and connected-state — all sourced from the
-// local chat store plus the JoinedSharedChannel registry. A DM is a
-// `kind:"dm"` channel; participant metadata rides the shared-channel grant.
-
 const WS = "workspace-a";
 const roots: string[] = [];
 
@@ -1434,15 +1429,10 @@ describe("withholdDmsInRequestLanes", () => {
   });
 });
 
-// The syncDms fallback + session-transition machinery, pure and
-// dependency-injected so it gets real executing coverage outside a main.ts
-// closure.
 describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", () => {
   const laneA = { pending: [{ shareId: "share-a", granterEmail: "a@x.com" }], declined: [] };
   const laneB = { pending: [{ shareId: "share-b", granterEmail: "b@x.com" }], declined: [] };
 
-  // A stable generation for tests that aren't exercising the mid-classify
-  // session-transition guard.
   const stableGeneration = () => 1;
 
   it("seeds from the cache on a classify failure (offline / relay error)", async () => {

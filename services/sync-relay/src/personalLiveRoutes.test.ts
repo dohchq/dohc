@@ -435,7 +435,6 @@ async function fixture() {
     changes.notify(binding);
     return updateBytes;
   }
-  /** The journal accepts each admission, so a test sees what the route committed. */
   function admitting() {
     vi.spyOn(storage, "readLiveUpdateJournalCut").mockReturnValue({
       kind: "cut",

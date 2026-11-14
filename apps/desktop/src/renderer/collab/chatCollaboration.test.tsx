@@ -8,9 +8,6 @@ import { buildChatCollaboration } from "./chatCollaboration";
 import { PresenceFaces } from "./PresenceIndicators";
 import { usePresence } from "./usePresence";
 
-// The collaboration construction and the workspace-switch no-repaint
-// invariant, exercised through the real IPC presence transport (mocked bridge).
-
 async function flush(): Promise<void> {
   await act(async () => {
     for (let i = 0; i < 20; i += 1) await Promise.resolve();
@@ -172,8 +169,6 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
     await flush();
     const pollIdA = pollIdForWorkspace("ws-a");
 
-    // Switch to workspace B: the collaboration is rebuilt per workspace, so the
-    // transport changes and usePresence tears the A channel down.
     const collabB = buildChatCollaboration({
       connected: true,
       relayUrl: "https://relay.example",

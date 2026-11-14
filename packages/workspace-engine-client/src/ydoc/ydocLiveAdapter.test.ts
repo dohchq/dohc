@@ -3895,9 +3895,7 @@ describe("YdocLiveAdapter", () => {
     await drain();
 
     expect(settleErrors[0]).toBe(settleFailure);
-    // A settle started, so a caller can show "saving" honestly...
     expect(settleStarts).toHaveLength(1);
-    // ...and it never reported success, so nothing may claim the file is saved.
     expect(settled).toEqual([]);
     // An ordinary settle failure is not retried: a refusal that trying again
     // cannot help (stale target, invalid input) would only repeat itself.
@@ -4015,9 +4013,6 @@ describe("YdocLiveAdapter", () => {
   });
 
   it("saves after reader recovery without another edit", async () => {
-    // The Markdown reader failed twice in a way that clears on its own, so the
-    // engine asks for a backoff. The provider asks again by itself, and the
-    // note saves once the reader is back, with no edit and no Try again.
     const { provider, blocked, refusal, settleErrors, settled, scheduler } =
       await openAgainstABlockedSettle("typed while the reader restarted", {
         blocker: "markdown-reader-retryable",
@@ -4624,9 +4619,6 @@ describe("YdocLiveAdapter", () => {
     { code: "OVERLOADED" as const, message: "engine-store-busy" },
     { code: "LIMIT_EXCEEDED" as const, message: "ydoc-author-capacity" },
   ])("evicts once resend clears $message debt", async ({ code, message }) => {
-    // The narrowness guard for the refusal above. A debt that can be paid is
-    // paid, and then the evict proceeds — otherwise the orphan this exit
-    // exists for would be wedged by a refusal that has already cleared.
     const engine = seedPlaintextEngine();
     const busy = new DaemonRefusalError(
       {
@@ -4819,9 +4811,6 @@ describe("YdocLiveAdapter", () => {
   });
 
   it("resets the ladder once a settle reaches disk, so the next lock starts over", async () => {
-    // The reset is what keeps a document that is locked twice in a session
-    // from inheriting the first lock's grown delay — the second lock must be
-    // retried as promptly as the first, not minutes later.
     const { provider, blocked, settled, delays, scheduler } = await openAgainstABlockedSettle(
       "typed against a locked file",
       {
@@ -4854,9 +4843,6 @@ describe("YdocLiveAdapter", () => {
   });
 
   it("caps the ladder so a long-held lock still retries on a bounded delay", async () => {
-    // The cap bounds how long the on-disk artifact stays stale after the lock
-    // releases. Without it the delay doubles without limit and a file locked
-    // for an afternoon is retried hours after the handle is gone.
     const { provider, delays, scheduler } = await openAgainstABlockedSettle(
       "typed against a long-held lock",
       { settleDebounceMs: 4000 },
@@ -4884,9 +4870,6 @@ describe("YdocLiveAdapter", () => {
   });
 
   it("lets an edit made during the backoff own the timer instead of adding one", async () => {
-    // An edit is the strongest retry trigger there is, so the settle it arms
-    // supersedes the ladder's. Arming a second timer alongside it would leave
-    // the edit's timer orphaned and settle the document twice.
     const { provider, delays, scheduler } = await openAgainstABlockedSettle(
       "typed against a locked file",
       { settleDebounceMs: 100 },
@@ -6486,13 +6469,10 @@ describe("the ydoc.open deadline", () => {
       contentKind: "plaintext",
     });
 
-    // No recordUpdate yet: there is no lineage row to promote.
     expect(() => engine.markSessionReplicated(session.sessionId)).toThrow(
       /markSessionReplicated requires a journaled lineage/,
     );
 
-    // A recorded update journals the lineage; promoting it now preserves
-    // the content already there.
     await session.applyLocalTextEdit({
       root: "plainText",
       index: 0,
@@ -6946,8 +6926,6 @@ describe("the ydoc.open deadline", () => {
     await expect(session.close({ settle: true })).rejects.toThrow();
     expect(materialized).toHaveLength(0);
 
-    // The session is still the daemon's: a non-settling close succeeds
-    // cleanly.
     await session.close({ settle: false });
     adapter.dispose();
   });
@@ -7115,7 +7093,6 @@ describe("the ydoc.open deadline", () => {
       methods,
       "route `evict` through the close ladder -> ydoc.settle and ydoc.close appear here, and the refusal the evict escapes comes back.",
     ).toEqual([YDOC_METHOD.evict]);
-    // The lease is gone, so the path binds again.
     const reopened = await openEngineYdocProviderSession({
       transport,
       workspace: WORKSPACE,

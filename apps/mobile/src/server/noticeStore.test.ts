@@ -22,7 +22,6 @@ import type { WorkspaceList } from "./workspaceList";
 
 const ORIGIN = "https://dohc.example.com";
 
-// A server whose every request waits until the test answers it, so each test steps the store one request at a time.
 interface Call {
   readonly path: string;
   readonly body: unknown;
@@ -57,14 +56,11 @@ function fakeServer() {
   };
   return {
     fetch,
-    /** The next read of the list. */
     read: () => next((call) => call.path.startsWith("/sync/notices?")),
-    /** The next request that sends marks. */
     marks: () => next((call) => call.path.startsWith("/sync/notices/marks")),
   };
 }
 
-/** The waits the store starts between tries, each ended by the test. */
 function fakeSleep() {
   interface Wait {
     readonly ms: number;
@@ -82,7 +78,6 @@ function fakeSleep() {
         take(wait);
       } else open.push(wait);
     });
-  /** The next wait the store starts. */
   const next = () =>
     open.length > 0
       ? Promise.resolve(open.shift()!)
@@ -95,7 +90,6 @@ function fakeSleep() {
 function fakeList(workspaces: readonly AccountWorkspace[]) {
   let state: WorkspaceList = { status: "ready", workspaces, problem: null, pending: new Set() };
   const listeners = new Set<() => void>();
-  /** Any state, such as a list not read yet or one that failed. */
   const replace = (next: WorkspaceList) => {
     state = next;
     for (const listener of listeners) listener();
@@ -113,7 +107,6 @@ function fakeList(workspaces: readonly AccountWorkspace[]) {
   };
 }
 
-/** A point a save stops at until the test releases it, as a closed app would stop it for good. */
 function gate() {
   let reach!: () => void;
   let release!: () => void;
@@ -126,7 +119,6 @@ function gate() {
   return {
     reached,
     release,
-    /** Where the save stops: says it got there, then waits. */
     pass() {
       reach();
       return released;
@@ -137,17 +129,13 @@ function gate() {
 type MemoryFiles = NoticeFiles & {
   readonly lists: Map<string, unknown>;
   readonly marks: Map<string, unknown>;
-  /** Stops an ordered save before its list lands, or between its list and its marks. */
   hold: { beforeList?: ReturnType<typeof gate>; beforeMarks?: ReturnType<typeof gate> };
-  /** An ordered save's list write fails. */
   failList: boolean;
-  /** Every save of the marks fails, as on a full disk. */
   failMarks: boolean;
   /** A list save waits for its debounce, which a closed app never lets run. */
   deferList: boolean;
 };
 
-/** Files in memory, where a write lands at once unless the test holds it. */
 function memoryFiles(): MemoryFiles {
   const lists = new Map<string, unknown>();
   const marks = new Map<string, unknown>();
@@ -168,7 +156,6 @@ function memoryFiles(): MemoryFiles {
       marks.set(scope, list);
       return true;
     },
-    // With nothing held, it all lands before the call returns.
     async writeListThenMarks(scope, rows, list) {
       if (files.hold.beforeList) await files.hold.beforeList.pass();
       if (files.failList) return "list-failed";
@@ -204,7 +191,6 @@ const OK = { ok: true, dismissed: [] };
 const scope = noticeScope({ origin: ORIGIN, userId: "u1" });
 /** The tests' clock: after the fixtures were made and before they expire (`relayRow`). */
 const NOW = 5_000_000;
-/** What Done, taken at NOW, left a fixture row as. */
 const DONE_RESULT = {
   readAtMs: null,
   dismissedAtMs: NOW,
@@ -259,7 +245,6 @@ function setup(
   });
   stores.push(store);
   const ids = () => store.state().notices.map((row) => row.noticeId);
-  /** Ends the sign-in; resolves when the store next checks it. */
   const signOut = () => {
     current = false;
     return new Promise<void>((done) => {
@@ -269,7 +254,6 @@ function setup(
   return { server, timers, files, list, store, ids, signIn, signOut };
 }
 
-/** Resolves once the store's state passes `check`. */
 function until(store: NoticeStore, check: (state: NoticeListState) => boolean) {
   return new Promise<void>((done) => {
     if (check(store.state())) return done();
@@ -338,7 +322,6 @@ describe("the account's Notices", () => {
       nextCursor: "2.3",
     });
     expect(ids()).toEqual(["old"]);
-    // A continuation page keeps what the new list's first page read.
     await reply(server, second, [relayRow("newer", { changeSeq: 3, createdAtMs: 2000 })], {
       nextCursor: "3",
     });
@@ -403,7 +386,6 @@ describe("the account's Notices", () => {
       { replace: true },
     );
     expect(ids()).toEqual(["a", "b"]);
-    // Offline and idle: no answer, list change, or mark comes.
     vi.advanceTimersByTime(99);
     expect(ids()).toEqual(["a", "b"]);
     vi.advanceTimersByTime(1);
@@ -439,7 +421,6 @@ describe("marks on the account's Notices", () => {
     expect(ids()).toEqual(["a"]);
     dismissal.offline();
     (await timers.next()).done();
-    // The next request sends both, in order, so the restore lands last.
     const retry = await server.marks();
     expect(retry.body).toEqual({
       marks: [
@@ -475,7 +456,6 @@ describe("marks on the account's Notices", () => {
     await reply(server, server.read(), [relayRow("a")], { replace: true });
     store.mark("a", "dismissed");
     const first = await server.marks();
-    // Undo, Mark read, then Done again, all before the first Done's answer.
     store.mark("a", "restore");
     store.mark("a", "read");
     store.mark("a", "dismissed");
@@ -546,7 +526,6 @@ describe("marks on the account's Notices", () => {
       files.hold[point] = stop;
       (await first.server.marks()).answer(200, { ok: true, dismissed: ["a"] });
       await stop.reached;
-      // The app closes here; the held save never finishes.
       first.store.stop();
       files.hold = {};
       expect(files.marks.get(scope)).toEqual([
@@ -557,7 +536,6 @@ describe("marks on the account's Notices", () => {
       second.store.resume();
       await second.server.read();
       expect(second.ids()).toEqual([]);
-      // A mark made now is the first one sent: the taken Done isn't sent again.
       second.store.mark("b", "read");
       expect((await second.server.marks()).body).toEqual({
         marks: [{ noticeId: "b", mark: "read" }],
@@ -764,7 +742,6 @@ describe("marks on the account's Notices", () => {
     first.store.mark("a", "dismissed");
     await shown;
     expect(first.store.state().marks).toEqual({ problem: "storage", failures: 1 });
-    // The app closes before any save lands, and before the relay answers.
     first.store.stop();
 
     // A disk that never takes a save can't keep the mark; the person was told while dohc was open.
@@ -809,7 +786,6 @@ describe("marks on the account's Notices", () => {
     await reply(server, server.read(), [relayRow("a")], { replace: true });
     store.mark("a", "dismissed");
     (await server.marks()).answer(400, { ok: false, code: "bad_request" });
-    // The list is read again, and the refusal shows.
     await server.read();
     expect(store.state().marks).toEqual({ problem: "refused", failures: 1 });
     expect(files.marks.get(scope)).toEqual([]);
@@ -819,7 +795,6 @@ describe("marks on the account's Notices", () => {
     const { server, timers, store } = setup();
     store.resume();
     await reply(server, server.read(), [relayRow("a"), relayRow("b")], { replace: true });
-    /** Fails the next requests until a failure is shown, and resolves with the wait after it. */
     const failUntilShown = async () => {
       for (let tries = 1; tries < NOTICE_FAILURES_SHOWN; tries += 1) {
         (await server.marks()).offline();
@@ -1041,7 +1016,6 @@ describe("a workspace that leaves the list and the account's Notices", () => {
     list.replace({ status: "failed", problem: "offline" });
     expect(ids()).toEqual(["a", "b"]);
     expect(files.lists.get(scope)).toHaveLength(2);
-    // Once read, the list rules out the workspace it lacks.
     list.set([trip]);
     expect(ids()).toEqual(["a"]);
     expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a" }]);
@@ -1057,7 +1031,6 @@ describe("a workspace that leaves the list and the account's Notices", () => {
   });
 });
 
-/** An account whose state the test sets, for `clearNoticesOnSignInChange`. */
 function fakeAccount(initial: AccountState) {
   let state = initial;
   const listeners = new Set<() => void>();

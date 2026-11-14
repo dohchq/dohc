@@ -643,7 +643,6 @@ describe("registry store", () => {
   });
 
   describe("on a Linux folder that ignores capitals", () => {
-    // /home/sam/fold ignores capitals; /srv tells them apart.
     const disk = caseFoldDisk(
       {
         "/home/sam/fold/Notes/a.md": "file",

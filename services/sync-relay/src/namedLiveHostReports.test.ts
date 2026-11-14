@@ -119,7 +119,6 @@ function addSecondDocumentAndEditor(f: Fixture) {
     .run(secondScope.grantId, scope.shareId, secondScope.userId);
 }
 
-// Durable standing that refuses before the native port is asked for a capture.
 const refusedBeforeCapture: Record<string, (f: Fixture) => void> = {
   "disconnected host": (f) => {
     expect(f.storage.disconnectLiveHost({ ...host, updatedAtMs: 3, guard: allow }).ok).toBe(true);

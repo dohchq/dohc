@@ -48,7 +48,6 @@ type AppViewEvent =
       metaKey: boolean;
     };
 
-// An owner app with no standalone preview: it opens through approval.
 const ownerApp: SitePackageInfo = {
   root: "preorders",
   title: "Preorders",

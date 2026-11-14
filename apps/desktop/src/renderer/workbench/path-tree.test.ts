@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildTree, type FileRow } from "./path-tree";
 
-// Ported + slimmed with path-tree.ts: the sort rule is folders before
-// leaves, then alphabetical (locale-aware). Empty folders still sort as
-// folders (file === null decides, never children.length).
-
 function row(path: string): FileRow {
   return { path, kind: "file" };
 }

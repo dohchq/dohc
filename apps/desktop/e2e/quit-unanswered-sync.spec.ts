@@ -29,11 +29,6 @@ interface HeldRequest {
 
 const REQUEST_LINE = /^(?:GET|POST|PUT|PATCH|DELETE) [^ \r\n]+ HTTP\/1\.[01]/gmu;
 
-// The app's sync server. In "pass" it passes each connection to the relay
-// and records its request lines. In "hold-reads" it does the same, except
-// that it keeps each automation host read open without an answer. In "hold"
-// it takes every new connection, records its request line and never answers.
-// Held requests record whether the app closed them.
 async function startSyncServer(
   relay: SyncRelayHandle,
   hostRead: string,

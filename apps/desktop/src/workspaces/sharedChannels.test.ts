@@ -32,11 +32,6 @@ import type { JoinedSharedChannel } from "./registryStore";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { createTestScratch } from "./testTemp";
 
-// The desktop's best-effort refresh pass over joined shared channels.
-// The engine client is injected; these tests pin the pass's containment
-// contract — one bad share never blocks the others, revocation reports ended,
-// a read-only downgrade keeps reads flowing.
-
 const RELAY = { baseUrl: "http://relay.test", token: "token" };
 
 async function makeChats(workspaceId: string): Promise<{
@@ -211,8 +206,6 @@ describe("syncJoinedSharedChannels", () => {
     });
     expect(first.resumeAfterChannelWireId).toBe("wire-16");
 
-    // wire-16's grant is revoked and re-granted under a new share id, through
-    // the registry's own merge — the same call the join flow makes.
     const afterRegrant = mergeJoinedChannel(
       rows,
       joined({ shareId: "share-16-regranted", channelWireId: "wire-16", access: "read-only" }),
@@ -628,9 +621,6 @@ describe("createPassCoverageReporter", () => {
     ]);
   });
 
-  // A write's channel is covered ON TOP of the rotation, so a pass can report 17
-  // covered against a limit of 16. The line has to name both numbers or it reads
-  // as a limit the pass just broke.
   it("names the additive row, so covering 17 against a limit of 16 still adds up", () => {
     const lines: string[] = [];
     const reportCoverage = createPassCoverageReporter((message) => lines.push(message));
