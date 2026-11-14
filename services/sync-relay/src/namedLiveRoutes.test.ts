@@ -408,10 +408,10 @@ async function fixture(
         limits: {
           maxSessions: 32,
           retentionMs: 60000,
-          maxPendingRequests: 4,
+          maxPendingRequests: 8,
           maxRequestBytes: 16384,
           maxResponseBytes: 16384,
-          timeoutMs: 1000,
+          timeoutMs: 5000,
         },
         editorLimits: {
           provider: {
@@ -1974,6 +1974,134 @@ describe("a desktop's session", () => {
     const discriminator = await open();
     clock.now += LIVE_TICKET_LIFETIME_MS;
     expect(await resolve(discriminator)).toBeNull();
+  });
+});
+
+describe("a desktop's opens while a host is away", () => {
+  const away = async () => {
+    const f = await fixture(limits, false, undefined, false, true);
+    f.storage.createShare({
+      share: {
+        shareId: "other-person-share",
+        workspaceId: scope.workspaceId,
+        granterUserId: "owner-1",
+        selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+        createdAtMs: 1,
+      },
+      grant: {
+        grantId: "other-person-grant",
+        shareId: "other-person-share",
+        principalKind: "user",
+        principalUserId: "other-user",
+        principalEmail: null,
+        access: "edit",
+        generation: 1,
+        status: "active",
+        revokedAtMs: null,
+        createdAtMs: 1,
+        parentGrantId: null,
+      },
+    });
+    const notes = Array.from({ length: 12 }, (_, index) => `docs/away-${index}.md`);
+    notes.forEach((path, index) =>
+      f.raw
+        .prepare(
+          `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+          VALUES (?, ?, ?, ?, 'main', ?, ?, 'text', 1, 1)`,
+        )
+        .run(
+          scope.workspaceId,
+          `away-${index}`,
+          200 + index,
+          `away-moment-${index}`,
+          path,
+          "c".repeat(64),
+        ),
+    );
+    const host = { away: true };
+    // A mint throws when the host is away, as it does when the host goes away while it runs.
+    const mint = vi.spyOn(f.tickets, "mint").mockImplementation(async () => {
+      if (host.away) throw new Error("The live host changed.");
+      return { token: "ticket", expiresAtMs: Date.now() + 60_000 };
+    });
+    const answers: (number | undefined)[] = [];
+    const open = (path: string, person: "reader" | "other" = "reader") => {
+      const index = answers.push(undefined) - 1;
+      void f
+        .post(
+          "/sync/live/desktop-open",
+          { shareId: person === "reader" ? scope.shareId : "other-person-share", path },
+          "",
+          person === "reader" ? {} : { authorization: "Bearer other-token" },
+        )
+        .then((response) => (answers[index] = response.status));
+      return index;
+    };
+    const returns = () => {
+      host.away = false;
+      f.changes.notifyHost([scope.workspaceId]);
+    };
+    return { f, notes, mint, open, answers, returns };
+  };
+
+  it("lets one account's opens wait for an away host up to its limit, and every note opens once the host returns", async () => {
+    const { notes, mint, open, answers, returns } = await away();
+    const first = notes.slice(0, 6).map((path) => open(path));
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(6));
+    await vi.waitFor(() => expect(answers.filter((status) => status === 404)).toHaveLength(2));
+    const refused = first.filter((index) => answers[index] === 404);
+    const other = open(notes[6]!, "other");
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(7));
+    expect(answers[other]).toBeUndefined();
+    returns();
+    await vi.waitFor(() =>
+      expect(
+        first.filter((index) => !refused.includes(index)).map((index) => answers[index]),
+      ).toEqual([200, 200, 200, 200]),
+    );
+    await vi.waitFor(() => expect(answers[other]).toBe(200));
+    // The desktop asks again for a refused note once its host is back.
+    const again = refused.map((index) => open(notes[first.indexOf(index)]!));
+    await vi.waitFor(() => expect(again.map((index) => answers[index])).toEqual([200, 200]));
+  });
+
+  it("never counts opens that a ready host accepts", async () => {
+    const { notes, open, answers, returns } = await away();
+    returns();
+    for (const batch of [notes.slice(0, 6), notes.slice(6)]) {
+      const opened = batch.map((path) => open(path));
+      await vi.waitFor(() =>
+        expect(opened.map((index) => answers[index])).toEqual(batch.map(() => 200)),
+      );
+    }
+  });
+
+  it("does not count an open whose ticket is refused while its host stays current", async () => {
+    const { f, mint, open, answers, returns } = await away();
+    // The fixture's note has a current host. A mint refused for it, as when the host's binding
+    // moves during the mint, waits uncounted.
+    mint.mockResolvedValue(null);
+    const waiting = Array.from({ length: 6 }, () => open(binding.currentPath));
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(6));
+    expect(waiting.map((index) => answers[index])).toEqual(waiting.map(() => undefined));
+    mint.mockResolvedValue({ token: "ticket", expiresAtMs: Date.now() + 60_000 });
+    returns();
+    f.changes.notify(binding);
+    await vi.waitFor(() =>
+      expect(waiting.map((index) => answers[index])).toEqual(waiting.map(() => 200)),
+    );
+  });
+
+  it("counts an open its account's ticket limit refuses", async () => {
+    const { mint, open, answers } = await away();
+    mint.mockRestore();
+    const first = open(binding.currentPath);
+    await vi.waitFor(() => expect(answers[first]).toBe(200));
+    // That ticket fills the fixture's tickets for this grant, so each of these waits for one to
+    // expire. Four wait; the rest are refused at once, well before the open timeout.
+    const over = Array.from({ length: 6 }, () => open(binding.currentPath));
+    await vi.waitFor(() => expect(over.filter((index) => answers[index] === 404)).toHaveLength(2));
+    expect(over.filter((index) => answers[index] === undefined)).toHaveLength(4);
   });
 });
 
