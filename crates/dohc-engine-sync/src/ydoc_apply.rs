@@ -56,9 +56,149 @@ struct YdocUpdatePayload {
     attribution: Option<dohc_engine_domain::ChangeAttribution>,
     #[serde(default)]
     is_base_state: bool,
+    /// The file change whose capture wrote this edit, when it came from one.
+    #[serde(default)]
+    moment_id: Option<String>,
 }
 
 pub(crate) const LIVE_UNADMITTED_UPDATE: &str = "ordinary update has no native live admission";
+/// An owner device's edit of a note this host holds live, queued for the relay as that device's edit.
+pub(crate) const LIVE_DEVICE_UPDATE_QUEUED: &str = "ydoc-live-device-update-queued";
+
+/// Queues `payload`, an owner device's edit of a note this host holds live,
+/// in the note's owner outbox as that device's edit. The relay then checks
+/// and commits it as it does every owner edit. An edit that names its file
+/// change records the entry it joined, for that file change to wait on.
+/// Writes nothing and returns false for any other origin, a note with no
+/// current activation here, or a queue a Stop froze, so today's hold applies.
+#[allow(clippy::too_many_arguments)]
+fn queue_device_update_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    payload: &YdocUpdatePayload,
+    update: &[u8],
+    origin_id: &str,
+    origin_seq: i64,
+    recorded_at_ms: i64,
+    preparations: &dohc_engine_collab::live_update_application::RetirementPreparations,
+) -> Result<bool, SyncError> {
+    if payload.is_base_state
+        || payload.content_kind != "richdoc"
+        || !crate::owner_private::owner_device_origin(origin_id)
+        || !crate::hosted::is_hosted(tx, &key.workspace_id)?
+    {
+        return Ok(false);
+    }
+    // A file change the owner queue can't record a wait for, because its id
+    // is out of bounds or already waits, takes today's path.
+    if let Some(moment_id) = &payload.moment_id {
+        let waits: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM live_device_update_covers \
+                   WHERE workspace_id=?1 AND update_origin_id=?2 AND moment_id=?3)",
+                params![key.workspace_id, origin_id, moment_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::persist)?;
+        if waits || moment_id.is_empty() || moment_id.len() > 512 {
+            return Ok(false);
+        }
+    }
+    tx.execute_batch("SAVEPOINT live_device_update")
+        .map_err(SyncError::persist)?;
+    match dohc_engine_collab::owner_outbox::queue_imported_device_update_in_tx(
+        tx,
+        key,
+        &payload.path,
+        update,
+        payload.actor_origin_id.as_deref(),
+        payload.attribution.as_ref(),
+        preparations,
+        recorded_at_ms,
+    ) {
+        Ok(None) => {
+            tx.execute_batch("RELEASE live_device_update")
+                .map_err(SyncError::persist)?;
+            Ok(false)
+        }
+        Ok(Some(entry)) => {
+            if let Some(moment_id) = &payload.moment_id {
+                tx.execute(
+                    "INSERT INTO live_device_update_covers (workspace_id,update_origin_id,moment_id, \
+                       update_origin_seq,version_id,object_id,delivery_id) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![
+                        key.workspace_id,
+                        origin_id,
+                        moment_id,
+                        origin_seq,
+                        key.version_id,
+                        key.object_id,
+                        entry.delivery_id
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            tx.execute_batch("RELEASE live_device_update")
+                .map_err(SyncError::persist)?;
+            Ok(true)
+        }
+        // An update the owner queue cannot take here takes today's path: the
+        // queue is frozen or fenced for a restore, as a local edit would find
+        // it, the update names an actor a local edit could not, or it brings
+        // one more author than a moment can name.
+        Err(error) => {
+            let refused = matches!(
+                error,
+                CollabError::OwnerOutboxFrozen
+                    | CollabError::RestoreFenced
+                    | CollabError::InvalidIdentifier { .. }
+            );
+            let mapped = map_collab_payload_error(
+                error,
+                "a device's ydoc.update could not join the owner queue",
+            );
+            if refused
+                || matches!(
+                    mapped,
+                    SyncError::InvalidInput { .. }
+                        | SyncError::CoordinateDiverged
+                        | SyncError::RetryableState {
+                            reason: "ydoc-author-capacity",
+                        }
+                )
+            {
+                tx.execute_batch("ROLLBACK TO live_device_update; RELEASE live_device_update")
+                    .map_err(SyncError::persist)?;
+                Ok(false)
+            } else {
+                Err(mapped)
+            }
+        }
+    }
+}
+
+/// [`queue_device_update_in_tx`] with no route in front of it.
+#[cfg(test)]
+pub(crate) fn queue_device_update_for_test(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    payload: serde_json::Value,
+    update: &[u8],
+    origin_id: &str,
+) -> Result<bool, SyncError> {
+    let payload: YdocUpdatePayload = serde_json::from_value(payload).expect("ydoc.update payload");
+    queue_device_update_in_tx(
+        tx,
+        key,
+        &payload,
+        update,
+        origin_id,
+        1,
+        1_000,
+        &Default::default(),
+    )
+}
 
 // Historical audit imports never populate either native binding table.
 // A `held` update is matched by lineage, not path: a recovery may have moved
@@ -353,6 +493,17 @@ fn owner_holds_full(conn: &Connection, key: &DocKey) -> Result<bool, SyncError> 
             OWNER_HOLDS_PER_NOTE,
             OWNER_HOLDS_PER_WORKSPACE
         ],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether any update of `key`'s note waits in its queue.
+fn note_queued_in(conn: &Connection, key: &DocKey) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 \
+           AND version_id=?2 AND object_id=?3)",
+        params![key.workspace_id, key.version_id, key.object_id],
         |row| row.get(0),
     )
     .map_err(SyncError::corrupt)
@@ -2232,6 +2383,45 @@ fn drain_deferred_ydoc(
                     ))
                 })?;
                 if keeps {
+                    // An owner device's edit that nothing queued ahead of it
+                    // joins the note's owner queue, leaving its row in the
+                    // same transaction, as it would have on arrival.
+                    if hosted
+                        && held_rows.is_empty()
+                        && read_parked_record_facts(store, key, &origin_id, origin_seq)?.is_none()
+                    {
+                        let preparations = cache.retirement_preparations();
+                        cache.remove(key);
+                        let queued = store.write_with(faults, |tx| {
+                            if let Some(leases) = recovery_leases {
+                                require_recovery_closed(tx, key, leases)?;
+                            }
+                            if !queue_device_update_in_tx(
+                                tx,
+                                key,
+                                &payload,
+                                &bytes,
+                                &origin_id,
+                                origin_seq,
+                                recorded_at_ms,
+                                &preparations,
+                            )? {
+                                return Ok(false);
+                            }
+                            tx.execute(
+                                "DELETE FROM ydoc_deferred_updates \
+                                 WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+                                params![key.workspace_id, origin_id, origin_seq],
+                            )
+                            .map_err(SyncError::persist)?;
+                            Ok::<_, SyncError>(true)
+                        })?;
+                        match queued {
+                            TxnOutcome::Committed(true) => continue,
+                            TxnOutcome::Committed(false) => {}
+                            TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+                        }
+                    }
                     // Only a hosted replica has a document to hold. An owner's
                     // row waits in its queue, and the pass writes nothing.
                     unadmitted = hosted;
@@ -4584,6 +4774,7 @@ pub fn reconcile_local_head_in_tx(
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    moment_id: Option<&str>,
     now_ms: i64,
 ) -> Result<LocalHeadReconcile, SyncError> {
     let key =
@@ -4599,6 +4790,7 @@ pub fn reconcile_local_head_in_tx(
         resulting,
         actor_origin_id,
         attribution,
+        moment_id,
         now_ms,
     )
 }
@@ -4611,6 +4803,7 @@ pub fn reconcile_prepared_local_head_in_tx(
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    moment_id: Option<&str>,
     now_ms: i64,
 ) -> Result<LocalHeadReconcile, SyncError> {
     reconcile_local_complete_resulting_head_in_tx(
@@ -4621,6 +4814,7 @@ pub fn reconcile_prepared_local_head_in_tx(
         resulting,
         actor_origin_id,
         attribution,
+        moment_id,
         now_ms,
     )
 }
@@ -4634,6 +4828,7 @@ fn reconcile_local_complete_resulting_head_in_tx(
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    moment_id: Option<&str>,
     now_ms: i64,
 ) -> Result<LocalHeadReconcile, SyncError> {
     let key = &complete.key;
@@ -4660,6 +4855,7 @@ fn reconcile_local_complete_resulting_head_in_tx(
                 LineageFoldAuthor {
                     actor_origin_id,
                     attribution,
+                    moment_id,
                 },
                 now_ms,
                 LineageFoldCause::LocalMutation { unsettled_authors },
@@ -4722,6 +4918,7 @@ pub fn reconcile_local_resulting_head_in_tx(
         resulting,
         actor_origin_id,
         attribution,
+        None,
         now_ms,
     )
     .map(|reconciled| reconciled.facts)
@@ -4732,6 +4929,9 @@ pub fn reconcile_local_resulting_head_in_tx(
 pub(crate) struct LineageFoldAuthor<'a> {
     pub(crate) actor_origin_id: Option<&'a str>,
     pub(crate) attribution: Option<&'a dohc_engine_domain::ChangeAttribution>,
+    /// The file change whose capture wrote this text. The journaled edit
+    /// names it, so a replica can pair the two.
+    pub(crate) moment_id: Option<&'a str>,
 }
 
 /// Why a fold folds. The cause decides whether the rewrite is journaled and
@@ -5255,6 +5455,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
     let LineageFoldAuthor {
         actor_origin_id,
         attribution,
+        moment_id,
     } = author;
     let key = &complete.key;
     require_resolved_local_settlement(tx, key, now_ms)?;
@@ -5421,20 +5622,24 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
                 .lineage_claim_id
                 .as_deref()
                 .ok_or_else(|| local_corruption("exact Y.Doc lineage has no claim id"))?;
+            let mut payload = crate::ydoc_update_payload(
+                key,
+                path,
+                marker.content_kind,
+                &dohc_engine_storage::hex_sha256(&update),
+                lineage_claim_id,
+                actor_origin_id,
+                attribution,
+                false,
+            );
+            if let Some(moment_id) = moment_id {
+                payload["momentId"] = serde_json::Value::String(moment_id.to_owned());
+            }
             crate::journal::journal_local_op_in_tx(
                 tx,
                 &key.workspace_id,
                 "ydoc.update",
-                &crate::ydoc_update_payload(
-                    key,
-                    path,
-                    marker.content_kind,
-                    &dohc_engine_storage::hex_sha256(&update),
-                    lineage_claim_id,
-                    actor_origin_id,
-                    attribution,
-                    false,
-                ),
+                &payload,
                 now_ms,
             )?;
         }
@@ -7994,6 +8199,12 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     if let Some(echo) =
         store.read_with(|conn| live_ordinary_classification(conn, &key, &payload, &bytes, false))?
     {
+        let preparations = cache.retirement_preparations();
+        if !echo && crate::owner_private::owner_device_origin(&envelope.origin_id) {
+            // An owner device's edit may join the note here. Evict before the
+            // transaction so a committed crash cannot leave a stale entry behind.
+            cache.remove(&key);
+        }
         return crate::apply::apply_envelope_with_mutation_outcome(
             store,
             envelope,
@@ -8015,10 +8226,32 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                     && !owner_stop_released(tx, &key)?
                     && owner_holds_queued_in(tx, &key)?
                     && owner_binding_off_host(tx, &key, &payload.lineage_claim_id)?.is_some();
-                let queues = (behind_held
-                    || (!echo
-                        && keeps_unadmitted(tx, &key, &payload, &op.origin_id, op.origin_seq)?))
-                    && !owner_holds_full(tx, &key)?;
+                let unadmitted =
+                    !echo && keeps_unadmitted(tx, &key, &payload, &op.origin_id, op.origin_seq)?;
+                // It joins the queue only behind nothing the note still holds.
+                if unadmitted
+                    && !behind_held
+                    && !note_queued_in(tx, &key)?
+                    && queue_device_update_in_tx(
+                        tx,
+                        &key,
+                        &payload,
+                        &bytes,
+                        &op.origin_id,
+                        op.origin_seq,
+                        op.recorded_at_ms,
+                        &preparations,
+                    )?
+                {
+                    return Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
+                        deferred: false,
+                        reason: Some(LIVE_DEVICE_UPDATE_QUEUED),
+                        conflicts_opened: 0,
+                        lineage_replacement: None,
+                        record_facts: Vec::new(),
+                    }));
+                }
+                let queues = (behind_held || unadmitted) && !owner_holds_full(tx, &key)?;
                 if echo && !queues {
                     Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
                         deferred: false,

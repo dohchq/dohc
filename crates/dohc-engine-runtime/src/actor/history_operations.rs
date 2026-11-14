@@ -1275,7 +1275,7 @@ fn publish_undo_member(
         dohc_engine_sync::ResultingHead::BinaryOrAbsent
     };
     if !live {
-        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+        dohc_engine_sync::reconcile_local_head_in_tx(
             tx,
             ws,
             version_id,
@@ -1283,6 +1283,7 @@ fn publish_undo_member(
             head,
             None,
             None,
+            (m.operation == dohc_engine_domain::MomentOp::Write).then_some(m.moment_id.as_str()),
             now,
         )
         .map_err(|e| {

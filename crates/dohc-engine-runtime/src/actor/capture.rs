@@ -2444,6 +2444,7 @@ fn capture_ingest_in_tx(
                     resulting,
                     actor_origin_id.as_deref(),
                     attribution.as_ref(),
+                    Some(result.moment.moment_id.as_str()),
                     input.now_ms,
                 )?,
                 // Capture resolved the path to a new object, not the one admitted.
@@ -2455,6 +2456,7 @@ fn capture_ingest_in_tx(
                     resulting,
                     actor_origin_id.as_deref(),
                     attribution.as_ref(),
+                    Some(result.moment.moment_id.as_str()),
                     input.now_ms,
                 )?,
             };

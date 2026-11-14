@@ -929,7 +929,7 @@ pub(super) fn versioned_text_write_with_publication_on_store(
             dohc_engine_domain::enqueue_write(tx, &result, preimage, "authored")?;
         }
         if !result.deduped
-            && let Some(facts) = dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            && let Some(facts) = dohc_engine_sync::reconcile_local_head_in_tx(
                 tx,
                 &input.workspace_id,
                 &input.version_id,
@@ -940,8 +940,10 @@ pub(super) fn versioned_text_write_with_publication_on_store(
                 },
                 actor.as_deref(),
                 attribution.as_ref(),
+                Some(result.moment.moment_id.as_str()),
                 input.now_ms,
             )?
+            .facts
         {
             result.automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
                 tx,
@@ -2356,13 +2358,14 @@ fn versioned_text_rollback_on_store(
                 compensating_moment_id,
                 input.author_json.as_deref(),
             )?;
+            let restores_text = restored_text.is_some();
             let resulting = restored_text.map_or(
                 dohc_engine_sync::ResultingHead::BinaryOrAbsent,
                 |(path, text)| dohc_engine_sync::ResultingHead::Text { path, text },
             );
             // Restoring older text is a change on this computer: its field
             // changes claim like any other write.
-            if let Some(facts) = dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+            if let Some(facts) = dohc_engine_sync::reconcile_local_head_in_tx(
                 tx,
                 &input.workspace_id,
                 &input.version_id,
@@ -2370,9 +2373,11 @@ fn versioned_text_rollback_on_store(
                 resulting,
                 actor.as_deref(),
                 attribution.as_ref(),
+                restores_text.then_some(compensating_moment_id),
                 recorded_at_ms,
             )
             .map_err(map_fold_error)?
+            .facts
             {
                 automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
                     tx,
@@ -2973,7 +2978,7 @@ fn versioned_text_merge_on_store(
                         // A merge replays changes made on another version,
                         // which claimed when they were made: it indexes the
                         // record and claims nothing.
-                        dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                        dohc_engine_sync::reconcile_local_head_in_tx(
                             tx,
                             &input.workspace_id,
                             &input.target_version_id,
@@ -2984,6 +2989,7 @@ fn versioned_text_merge_on_store(
                             },
                             None,
                             None,
+                            Some(write.moment.moment_id.as_str()),
                             input.now_ms,
                         )
                         .map_err(map_fold_error)?;
