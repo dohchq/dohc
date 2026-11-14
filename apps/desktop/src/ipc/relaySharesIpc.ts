@@ -23,6 +23,7 @@ import {
   GetRelayReceivedShareResult,
   ListRelaySharesResult,
   RelayShareReceivedRow,
+  RelayShareSelector,
   RevokeRelayShareResult,
   RelayShareRevokeResponse,
   RelayShareUndoResponse,
@@ -990,6 +991,14 @@ export async function stopNamedOwnerLiveDocument<
   return result;
 }
 
+// A selector this app cannot read is shown as damaged, as the relay shows one it cannot read,
+// so one bad row does not fail the whole listing and still offers its reverse path.
+function readableOrDamaged(row: Record<string, unknown>): Record<string, unknown> {
+  return row.damaged === true || RelayShareSelector.safeParse(row.selector).success
+    ? row
+    : { ...row, selector: null, damaged: true };
+}
+
 export function createRelaySharesIpcHandlers<
   Sender extends { id: number },
   Event extends { sender: Sender },
@@ -1308,7 +1317,7 @@ export function createRelaySharesIpcHandlers<
     });
     const relayUrl = currentCredentials()?.relayUrl;
     const withCode = (row: Record<string, unknown>) => ({
-      ...row,
+      ...readableOrDamaged(row),
       shareCode: buildShareCode({
         shareId: String(row.shareId),
         relayUrl: relayUrl!,
@@ -1354,7 +1363,7 @@ export function createRelaySharesIpcHandlers<
       return GetRelayReceivedShareResult.parse({ found: true, chats: true });
     }
     const received = RelayShareReceivedRow.parse({
-      ...row,
+      ...readableOrDamaged(row),
       shareCode: buildShareCode({
         shareId: input.shareId,
         relayUrl: credentials.relayUrl!,
