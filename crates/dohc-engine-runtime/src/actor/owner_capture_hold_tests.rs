@@ -11,7 +11,11 @@ use dohc_engine_collab::owner_outbox::{
     draft::{ObservedOwnerBinding, append_draft_in_tx, install_observed_binding_in_tx},
 };
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Ydoc};
-use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome, hex_sha256};
+use dohc_engine_storage::held_outside_changes::{self, HeldOutsideChange};
+use dohc_engine_storage::{
+    EngineStore, MaterializationJobSpec, MaterializationOperation, NoFaults, Preimage, TxnOutcome,
+    hex_sha256, upsert_projection_job,
+};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::OpenFlags;
 use std::path::Path;
@@ -245,4 +249,80 @@ async fn an_outside_change_to_a_bound_note_is_held_until_kept() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_quarantined_draft_holds_and_keeps_its_recovery_row() {
     held_then_kept(true).await;
+}
+
+/// Hold `sha` at the note's path, as capture records an outside change.
+fn hold(store: &mut EngineStore, sha: &str) {
+    store
+        .write_with(&NoFaults, |tx| {
+            held_outside_changes::record_in(
+                tx,
+                &HeldOutsideChange {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "object".into(),
+                    path: PATH.into(),
+                    observed_sha256: sha.into(),
+                    observed_size: 1,
+                    first_observed_at_ms: 10,
+                    observed_at_ms: 10,
+                },
+            )
+        })
+        .unwrap();
+}
+
+/// Finish dohc's write of `content` over a file it expected to hold
+/// `preimage`. Returns the bytes still held.
+fn finish_write(
+    store: &mut EngineStore,
+    job_id: &str,
+    content: &str,
+    preimage: &str,
+) -> Option<String> {
+    store
+        .write_with(&NoFaults, |tx| {
+            upsert_projection_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: job_id.into(),
+                    workspace_id: "ws".into(),
+                    target_path: PATH.into(),
+                    content_sha256: content.into(),
+                    preimage: Preimage::Present(preimage.into()),
+                    target_generation: 9,
+                    now_ms: 11,
+                },
+                MaterializationOperation::Write,
+            )
+        })
+        .unwrap();
+    store.mark_materialization_complete(job_id, 12).unwrap();
+    store
+        .read_with(|conn| held_outside_changes::hold_in(conn, "ws", PATH))
+        .unwrap()
+        .map(|hold| hold.observed_sha256)
+}
+
+/// dohc's own write replaces only bytes the store holds, so a finished write
+/// over the held bytes ends their hold and loses nothing. A hold on other
+/// bytes is an outside save the write did not replace, and it stays (#4066).
+#[test]
+fn a_finished_write_ends_the_hold_on_the_bytes_it_replaced() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let recorded = hex_sha256(bound_owner(&db, false).as_bytes());
+    let outside = hex_sha256(OUTSIDE.as_bytes());
+    let mut store = EngineStore::open(&db, 1_000).unwrap();
+    hold(&mut store, &outside);
+    assert_eq!(
+        finish_write(&mut store, "elsewhere", &recorded, &hex_sha256(b"other\n")),
+        Some(outside.clone()),
+        "a write that expected other bytes did not replace the held ones"
+    );
+    assert_eq!(
+        finish_write(&mut store, "replaced", &recorded, &outside),
+        None,
+        "the write replaced the held bytes"
+    );
 }

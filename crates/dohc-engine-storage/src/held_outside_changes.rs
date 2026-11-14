@@ -94,3 +94,21 @@ pub fn clear_in(tx: &Transaction<'_>, workspace: &str, path: &str) -> Result<boo
         .map(|deleted| deleted > 0)
         .map_err(StorageError::persist_public)
 }
+
+/// A finished write replaced the file's bytes only if they were the bytes it
+/// expected or its own, and only if the store holds them. A hold on those
+/// bytes ends, and nothing is lost. A hold on other bytes is an outside save
+/// the write did not replace, and it stays.
+pub(crate) fn end_replaced_in(conn: &Connection, job_id: &str) -> Result<(), StorageError> {
+    conn.prepare_cached(
+        "DELETE FROM held_outside_changes WHERE EXISTS (SELECT 1 FROM materialization_jobs j \
+         WHERE j.job_id=?1 AND j.workspace_id=held_outside_changes.workspace_id \
+         AND j.target_path=held_outside_changes.path \
+         AND (j.content_sha256=held_outside_changes.observed_sha256 \
+         OR (j.preimage_present=1 AND j.preimage_sha256=held_outside_changes.observed_sha256)))",
+    )
+    .map_err(StorageError::persist_public)?
+    .execute([job_id])
+    .map_err(StorageError::persist_public)?;
+    Ok(())
+}
