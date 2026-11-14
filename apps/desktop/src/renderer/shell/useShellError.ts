@@ -26,6 +26,7 @@ import { bridge } from "../bridge";
 import {
   SETTLEMENT_ATTRIBUTION_REFUSED,
   SETTLEMENT_BINDING_CHANGED,
+  SHARE_CHAT_REFUSED,
 } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import { TextNotSavedError, type ErrorDetailField } from "./copyDetails";
@@ -769,8 +770,10 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
           const markdownHeld = notice.kind === "markdown-write-held";
           const reason = notice.detail?.split("\n")[0];
           const bindingChanged = reason === SETTLEMENT_BINDING_CHANGED;
-          // Sync has moved past the refused saves, so there is nothing to try again.
+          // Sync has moved past these refusals, so there is nothing to try again.
           const attributionRefused = reason === SETTLEMENT_ATTRIBUTION_REFUSED;
+          // A set-aside chat message is not a save to review: it toasts once, in the window open when it happened.
+          const chatRefused = reason === SHARE_CHAT_REFUSED;
           const path = notice.target?.path;
           // Taking a step reads the row, so its toast closes and doesn't come back at the next start.
           const step = (label: string, run: () => void) => ({
@@ -787,17 +790,21 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
             id: notice.noticeId,
             kind: "sync-refusal" as const,
             message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
-            title: bindingChanged || attributionRefused || markdownHeld ? notice.title : undefined,
+            title: notice.title,
             // The whole path: a title names only the file, and two folders can hold one name.
             details: [
               ...(path ? [["File", path, path.length] as const] : []),
               ["Detail", notice.detail ?? notice.body],
             ] as const,
             atMs: notice.createdAtMs,
-            seen: prior?.seen === true || notice.readAtMs !== null,
+            seen:
+              prior?.seen === true ||
+              notice.readAtMs !== null ||
+              (chatRefused && notice.createdAtMs < performance.timeOrigin),
             // The list holds a read until main answers and lets go of one main refused.
             read: notice.readAtMs !== null,
-            retry: bindingChanged || attributionRefused || markdownHeld ? null : retry,
+            retry:
+              bindingChanged || attributionRefused || markdownHeld || chatRefused ? null : retry,
             // A hold is on purpose: nothing failed.
             ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),
             ...(bindingChanged && path && openFile ? step("Open", () => openFile(path)) : {}),

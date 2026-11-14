@@ -15,6 +15,7 @@ import {
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails, TextNotSavedError } from "./copyDetails";
+import { SHARE_CHAT_REFUSED } from "../../notices/settlementRefusal";
 import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 import {
   CollectionMoveUnfinishedError,
@@ -763,6 +764,66 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
     rerender({ workspace: "ws-b" });
     expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it("titles every refusal's toast", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const notice = {
+      noticeId: "refusal-1",
+      kind: "sync-refusal",
+      workspaceId: "ws-a",
+      store: "local" as const,
+      recipientShareId: null,
+      senderKind: null,
+      senderLabel: null,
+      title: "A change needs your review",
+      body: "dohc could not update “doc.md”. Review the file, then try sync again.",
+      target: {},
+      createdAtMs: 1,
+      readAtMs: null,
+      postedHere: true,
+    };
+    act(() => result.current.showSyncRefusals([notice], vi.fn()));
+    expect(result.current.shellErrors[0]).toMatchObject({
+      title: notice.title,
+      message: notice.body,
+    });
+  });
+
+  it("toasts a set-aside chat message once, when it happens, and leaves only its row after a restart", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const notice = (noticeId: string, createdAtMs: number) => ({
+      noticeId,
+      kind: "sync-refusal",
+      workspaceId: "ws-a",
+      store: "local" as const,
+      recipientShareId: null,
+      senderKind: null,
+      senderLabel: null,
+      title: "The server did not accept a chat message",
+      body: "dohc set it aside and sent the messages after it. Send it again if you still need it.",
+      detail: `${SHARE_CHAT_REFUSED}\nWorkspace: ws-a`,
+      target: {},
+      createdAtMs,
+      readAtMs: null,
+      postedHere: true,
+    });
+    // One from before this window started, as after a restart, and one that happens now.
+    const before = notice("before", Math.floor(performance.timeOrigin) - 60_000),
+      now = notice("now", Date.now());
+    act(() => result.current.showSyncRefusals([before, now], retry));
+    expect(result.current.shellErrors.find((error) => error.id === "before")).toMatchObject({
+      title: before.title,
+      seen: true,
+      read: false,
+      retry: null,
+    });
+    expect(result.current.shellErrors.find((error) => error.id === "now")).toMatchObject({
+      title: now.title,
+      seen: false,
+      retry: null,
+    });
   });
 
   it("opens the current file for a terminal binding refusal instead of retrying sync, and reads it", () => {
