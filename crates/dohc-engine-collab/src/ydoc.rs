@@ -892,6 +892,34 @@ impl Ydoc {
             .map(|pending| (pending.update.encode_v1(), pending.missing.clone()))
     }
 
+    /// What held updates here wait for: the lowest missing clock of each
+    /// client, and deletions of items this doc does not have.
+    pub(crate) fn pending_waits(&self) -> (Option<StateVector>, Option<IdSet>) {
+        let txn = self.doc.transact();
+        let store = txn.store();
+        (
+            store
+                .pending_update()
+                .map(|pending| pending.missing.clone()),
+            store.pending_ds().cloned(),
+        )
+    }
+
+    /// Whether a held update here needs text in `ids`: the lowest clock it
+    /// waits for from some client, or a deletion it holds, falls in `ids`.
+    pub(crate) fn waits_on_any(&self, ids: &IdSet) -> bool {
+        let txn = self.doc.transact();
+        let store = txn.store();
+        store.pending_update().is_some_and(|pending| {
+            pending
+                .missing
+                .iter()
+                .any(|(client, clock)| ids.contains(&yrs::ID::new(*client, *clock)))
+        }) || store
+            .pending_ds()
+            .is_some_and(|deletes| !deletes.intersect(ids).is_empty())
+    }
+
     pub(crate) fn pending_delete_set(&self) -> Option<IdSet> {
         self.doc.transact().store().pending_ds().cloned()
     }

@@ -599,11 +599,55 @@ impl ActorHandle {
                 Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
                 Err(error) => Err(error),
             };
-            if result.is_ok() {
+            if let Ok(applied) = &result {
+                cache.drop_owner_rows_through(&key, applied.accepted_cursor);
                 dohc_engine_collab::compact_after_commit(store, &key, &NoFaults, now_ms);
                 decide_owner_holds_after_commit(store, cache, &key);
             }
             Ok(result)
+        })
+        .await
+    }
+
+    /// A row the relay committed above the accepted cursor, for the owner's
+    /// screen only. It never reaches the store.
+    pub async fn owner_ydoc_put_committed_row(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        cursor: i64,
+        bytes: Vec<u8>,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::draft::OwnerRowOutcome, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(dohc_engine_collab::owner_outbox::draft::put_committed_row(
+                store, cache, &binding, cursor, bytes,
+            ))
+        })
+        .await
+    }
+
+    /// The owner route reopened and sends its rows again from its cursor.
+    pub async fn owner_ydoc_restart_committed_rows(
+        &self,
+        key: DocKey,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |_store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            dohc_engine_collab::owner_outbox::draft::restart_committed_rows(cache, &key);
+            Ok(())
         })
         .await
     }
