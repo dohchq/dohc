@@ -154,7 +154,10 @@ describe("CloudSyncSettings", () => {
     await waitFor(() => expect(syncSwitch().getAttribute("aria-checked")).toBe("false"));
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(true);
     // The switch can't turn on signed out, so focus goes to Connect server.
-    expect(document.activeElement).toBe(screen.getByTestId("settings-cloud-connect"));
+    // The page moves focus in an effect after the switch updates, so wait for it.
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByTestId("settings-cloud-connect")),
+    );
     expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
     expect(screen.getByTestId("cloud-sync-needs-server").textContent).toBe(SYNC_ON_NEEDS_SERVER);
   });
