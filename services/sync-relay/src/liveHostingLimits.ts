@@ -19,7 +19,11 @@ export const RECLAIM_SWEEP_MS = 60_000;
 export const RECLAIM_MAX_DEPARTING = 4;
 /** One workspace's documents that only a member's or an agent's open keeps: no owner's share enrolled them and the owner never asked. A quarter of the host, so one workspace's members leave room for every other. */
 export const MEMBER_OPEN_MAX_DOCUMENTS = 16;
-/** How long a member's open keeps its page counted and hosted. A member's browser session lasts 12 hours from the open that admitted it, so no session outlives the open's demand. */
+/**
+ * How long a member's open keeps its page in the member cap and hosted: a member's browser session's 12 hours.
+ * A session can outlast it by the open's wait for the host, and a live socket stays open past its session, so the
+ * host can retire a page a member still has open. That member's next open hosts it again.
+ */
 export const MEMBER_OPEN_DEMAND_MS = 12 * 60 * 60 * 1000;
 /** How long a personal open waits for its document to be ready. */
 export const HELD_OPEN_MAX_MS = 20_000;

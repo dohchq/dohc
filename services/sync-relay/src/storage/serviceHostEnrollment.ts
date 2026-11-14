@@ -566,21 +566,30 @@ function agentOnly(
  * of `RECLAIM_MAX_DEPARTING` retired documents. `full` is the intent's
  * answer when none does.
  * Member opens also fit their workspace cap for MEMBER_OPEN_DEMAND_MS.
+ * A member-held open needs only the member cap: its enrollment already occupies room.
  */
 function assertCapacity(
   storage: StorageContext,
   workspaceId: string,
   full: () => Error,
   nowMs: number,
-  enrolling?: Parameters<typeof agentOnly>[1] | "member",
+  enrolling?: Parameters<typeof agentOnly>[1] | "member" | "member-held",
 ): void {
   const all = storage.db
     .prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=0 LIMIT ?`)
     .all(SERVICE_HOST_MAX_DOCUMENTS + 1);
-  const personal = enrolling === "member" ? undefined : enrolling;
-  if (enrolling === "member") {
-    const opened = all.map(row).filter(enrollment => enrollment.workspaceId === workspaceId && memberOpened(storage, enrollment) && recentMemberDemand(enrollment.demandAtMs, nowMs)).length;
+  const personal = typeof enrolling === "object" ? enrolling : undefined;
+  if (enrolling === "member" || enrolling === "member-held") {
+    const opened = all
+      .map(row)
+      .filter(
+        (enrollment) =>
+          enrollment.workspaceId === workspaceId &&
+          memberOpened(storage, enrollment) &&
+          recentMemberDemand(enrollment.demandAtMs, nowMs),
+      ).length;
     if (opened >= MEMBER_OPEN_MAX_DOCUMENTS) throw full();
+    if (enrolling === "member-held") return;
   }
   const capped = personal !== undefined && agentOnly(storage, personal);
   if (
@@ -909,11 +918,12 @@ function ensureInsideTransaction(
   // Resolve and authorize: the caller's owner owns the workspace at its current identity, and the path holds a current rich document.
   const ownerUserId = authorizeIntent(storage, input, workspaceId, path, nowMs);
   const identity = ownedIdentity(storage, workspaceId, ownerUserId);
+  const membersShareId = getWorkspaceMembership(storage, workspaceId)?.shareId ?? null;
   const shareId =
     input.intent === "share"
       ? parseLiveUpdateIdentifier(input.shareId, "share ID")
       : input.intent === "member-open"
-        ? getWorkspaceMembership(storage, workspaceId)!.shareId
+        ? membersShareId
         : null;
   if (input.intent === "share")
     assertShareCovers(storage, { workspaceId, path, shareId: shareId!, ownerUserId });
@@ -956,18 +966,27 @@ function ensureInsideTransaction(
       );
     }
     const enabling = current.retired || !current.enabled || current.ownerStop !== null;
+    // A member's open takes the document as a new one does, unless another open's demand or a path share keeps it.
+    // Then it leaves the row as it is.
+    const memberTakes =
+      input.intent === "member-open" &&
+      (current.retired ||
+        memberOpened(storage, current) ||
+        (current.demandAtMs === null && !coveredByEditGrant(storage, current, false)));
     if (current.retired)
       assertCapacity(
         storage,
         workspaceId,
         full,
         nowMs,
-        input.intent === "personal-open"
-          ? current
-          : input.intent === "member-open"
-            ? "member"
-            : undefined,
+        input.intent === "personal-open" ? current : memberTakes ? "member" : undefined,
       );
+    else if (
+      memberTakes &&
+      !(memberOpened(storage, current) && recentMemberDemand(current.demandAtMs, nowMs))
+    ) {
+      assertCapacity(storage, workspaceId, full, nowMs, "member-held");
+    }
     if (held) retireHeldActivation(storage, current, identity, held, nowMs);
     if (enabling) {
       storage.db
@@ -976,7 +995,15 @@ function ensureInsideTransaction(
         )
         .run(Math.max(nowMs, current.updatedAtMs), workspaceId, objectId);
     }
-    if (input.intent !== "share") recordDemand(storage, { workspaceId, objectId }, nowMs, owner);
+    if (memberTakes) {
+      storage.db
+        .prepare(
+          `UPDATE ${SERVICE_HOST_ENROLLMENTS} SET share_id=?,owner_demand=0 WHERE workspace_id=? AND object_id=?`,
+        )
+        .run(membersShareId, workspaceId, objectId);
+    }
+    if (input.intent === "member-open" ? memberTakes : input.intent !== "share")
+      recordDemand(storage, { workspaceId, objectId }, nowMs, owner, membersShareId, memberTakes);
     input.changed?.(enabling);
     return read(storage, workspaceId, path)!;
   }
@@ -1034,17 +1061,30 @@ function ensureInsideTransaction(
   input.changed?.(true);
   return read(storage, workspaceId, path)!;
 }
-/** Records hosting demand. An owner's also takes the document out of the agent-only caps. */
+/**
+ * Records hosting demand. An owner's also takes the document out of the
+ * agent-only caps. Any intent's demand but a member's takes the document out
+ * of the member rules: it no longer names the members share.
+ */
 function recordDemand(
   storage: StorageContext,
   document: { workspaceId: string; objectId: string },
   nowMs: number,
   owner: boolean,
+  membersShareId: string | null,
+  member = false,
 ): void {
   storage.db
-    .prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET demand_at_ms=max(COALESCE(demand_at_ms,0),?),owner_demand=max(owner_demand,?)
-    WHERE workspace_id=? AND object_id=?`)
-    .run(nowMs, Number(owner), document.workspaceId, document.objectId);
+    .prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET demand_at_ms=max(COALESCE(demand_at_ms,0),?),owner_demand=max(owner_demand,?),
+    share_id=CASE WHEN ? AND share_id=? THEN NULL ELSE share_id END WHERE workspace_id=? AND object_id=?`)
+    .run(
+      nowMs,
+      Number(owner),
+      Number(!member),
+      membersShareId,
+      document.workspaceId,
+      document.objectId,
+    );
 }
 /**
  * Renews the demand of a document a personal session kept open, when that
@@ -1633,10 +1673,20 @@ function grantedOrDemanded(
       `SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND owner_user_id=? AND path=?`,
     )
     .get(enrollment.workspaceId, enrollment.objectId, enrollment.ownerUserId, enrollment.path);
-  const current = value ? row(value) : null;
-  if (!current || !memberOpened(storage, current))
-    return current?.demandAtMs != null || coveredByEditGrant(storage, enrollment);
-  return coveredByEditGrant(storage, enrollment, recentMemberDemand(current.demandAtMs, nowMs));
+  return value
+    ? heldFor(storage, enrollment, row(value), nowMs)
+    : coveredByEditGrant(storage, enrollment);
+}
+/** `grantedOrDemanded` for the enrollment's stored row. */
+function heldFor(
+  storage: StorageContext,
+  enrollment: CoveredEnrollment,
+  stored: Pick<ServiceHostEnrollment, "workspaceId" | "shareId" | "ownerDemand" | "demandAtMs">,
+  nowMs: number,
+): boolean {
+  if (!memberOpened(storage, stored))
+    return stored.demandAtMs !== null || coveredByEditGrant(storage, enrollment);
+  return coveredByEditGrant(storage, enrollment, recentMemberDemand(stored.demandAtMs, nowMs));
 }
 const covered = (storage: StorageContext, enrollment: CoveredEnrollment, nowMs: number) =>
   grantedOrDemanded(storage, enrollment, nowMs) || serviceHostOwnerRetains(storage, enrollment);
@@ -1764,10 +1814,11 @@ export function serviceHostDocumentEnabled(
   document: { workspaceId: string; objectId: string },
   owner?: { userId: string },
   restoring = false,
+  nowMs = Date.now(),
 ): boolean {
   if (serviceActivationRetirementOpen(storage, document)) return false;
   const value = storage.db
-    .prepare(`SELECT e.enabled,e.retired,e.owner_stop,e.owner_user_id,e.path,e.share_id,e.replication_epoch,e.stream_identity,e.demand_at_ms,
+    .prepare(`SELECT e.enabled,e.retired,e.owner_stop,e.owner_user_id,e.path,e.share_id,e.replication_epoch,e.stream_identity,e.demand_at_ms,e.owner_demand,
     w.owner_user_id AS current_owner,w.replication_epoch AS current_epoch,w.stream_identity AS current_stream
     FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
     WHERE e.workspace_id=? AND e.object_id=?`)
@@ -1787,8 +1838,16 @@ export function serviceHostDocumentEnabled(
     value.owner_user_id === value.current_owner &&
     value.replication_epoch === value.current_epoch &&
     value.stream_identity === value.current_stream &&
-    (value.demand_at_ms !== null ||
-      coveredByEditGrant(storage, enrollment) ||
+    (heldFor(
+      storage,
+      enrollment,
+      {
+        ...enrollment,
+        ownerDemand: value.owner_demand === 1,
+        demandAtMs: value.demand_at_ms === null ? null : Number(value.demand_at_ms),
+      },
+      nowMs,
+    ) ||
       (owner?.userId === enrollment.ownerUserId && keptByRestore(storage, enrollment, !restoring)))
   );
 }

@@ -1119,7 +1119,7 @@ it("hosts a document a member at Edit opens and records the open as demand", asy
     demandAtMs: 30,
   });
   expect(heard).toEqual([true]);
-  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding, undefined, false, 30)).toBe(true);
   // A second open renews the demand and changes nothing else.
   expect(
     memberOpen(f, {
@@ -1291,6 +1291,41 @@ it("opens a 17th page once the earlier member opens go stale, and retires the st
     }),
   ).toEqual({ ok: true });
   expect(release(next, stale)).toMatchObject({ enabled: false, retired: true });
+});
+
+// Proves: a member's open that revives a retired page, or takes over a live
+// page whose path share's Edit grant ended, counts toward the member cap and
+// lapses as a new member open does.
+it("counts and lapses a member open that revives a retired page or takes over one a revoked share left", async () => {
+  const f = await fixture();
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
+  const path = (name: string) => `docs/${name}.md`;
+  const release = (objectId: string, nowMs: number) => f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId, nowMs});
+  const revoke = (shareId: string) => expect(f.storage.revokeShareGrant({shareId, grantId: `${shareId}-edit`, revokedAtMs: 20}).ok).toBe(true);
+  // Its path share enrolled it, and its Edit grant ended before anyone joined.
+  f.seed(scope.workspaceId, "retired-object", path("retired"), "retired-share");
+  f.enroll({path: path("retired"), shareId: "retired-share"});
+  revoke("retired-share");
+  expect(release("retired-object", 25)).toMatchObject({retired: true});
+  // Its path share's Edit grant ends once a member reaches it, so the member's grant keeps it.
+  f.seed(scope.workspaceId, "held-object", path("held"), "held-share");
+  f.enroll({path: path("held"), shareId: "held-share"});
+  addMember(f);
+  revoke("held-share");
+  expect(release("held-object", 25)).toBeNull();
+  for (const name of ["retired", "held"]) expect(memberOpen(f, {path: path(name)})).toMatchObject({enabled: true, retired: false, shareId: "members-share"});
+  let opened = 0;
+  for (let i = 1; i <= MEMBER_OPEN_MAX_DOCUMENTS; i++) {
+    f.seed(scope.workspaceId, `member-object-${i}`, path(`member-${i}`), `member-share-${i}`, false);
+    if (refusal(() => memberOpen(f, {path: path(`member-${i}`)})) === "live_host_full") break;
+    opened++;
+  }
+  expect(opened).toBe(MEMBER_OPEN_MAX_DOCUMENTS - 2);
+  const stale = 30 + MEMBER_OPEN_DEMAND_MS;
+  for (const objectId of ["retired-object", "held-object"]) {
+    expect(serviceHostDocumentEnabled(f.storage as StorageContext, {workspaceId: scope.workspaceId, objectId}, undefined, false, stale)).toBe(false);
+    expect(release(objectId, stale)).toMatchObject({enabled: false, retired: true});
+  }
 });
 
 // Proves: a member's open leaves the path share and its grant as they were.
