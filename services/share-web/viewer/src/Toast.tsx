@@ -8,7 +8,7 @@ import {Icon} from "./icons";
  * A `success` has nothing to report, so it has no copy control.
  */
 export function Toast({title, body, tone, onRetry, onDismiss}: {title: string; body?: string; tone?: "warning" | "success"; onRetry?(): void; onDismiss(): void}) {
-  return <div className="edit-notice workspace-toast" role={tone ? "status" : "alert"}>
+  return <div className={`edit-notice workspace-toast${body || onRetry ? "" : " title-only"}`} role={tone ? "status" : "alert"}>
     {tone === "success" ? <span className="tile"><Icon name="check"/></span>
       : tone ? <span className="tile warn"><Icon name="triangle-alert"/></span> : <span className="tile bad"><Icon name="alert"/></span>}
     <div>
