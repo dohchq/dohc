@@ -3062,7 +3062,11 @@ function deletedByMerge(
       if (!(parent instanceof Y.AbstractType)) return false;
       if (parent._item !== null && parent._item.deleted) continue;
       const { right } = struct;
-      if (struct.parentSub !== null && right?.parent === parent && right.parentSub === struct.parentSub)
+      if (
+        struct.parentSub !== null &&
+        right?.parent === parent &&
+        right.parentSub === struct.parentSub
+      )
         continue;
       return false;
     }

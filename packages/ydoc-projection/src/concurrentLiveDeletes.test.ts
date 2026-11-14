@@ -470,7 +470,11 @@ describe("the same key set at once: one of the two is kept, the same for everyon
   it("keeps one of three values, the same for everyone, in every order the rows arrive", () => {
     const { baseline, rows, open } = session("---\nstatus: draft\n---\n\nNotes\n");
     const values = ["review", "done", "parked"];
-    values.forEach((value, index) => open(index + 2).getMap("frontmatter").set("status", value));
+    values.forEach((value, index) =>
+      open(index + 2)
+        .getMap("frontmatter")
+        .set("status", value),
+    );
     expect(rows).toHaveLength(3);
     const orders = [
       [0, 1, 2],
