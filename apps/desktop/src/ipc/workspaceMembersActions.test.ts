@@ -239,11 +239,15 @@ describe("workspace members actions", () => {
     it("refuses with the account check's reason", async () => {
       const h = joined();
       h.joinedRemote.mockRejectedValueOnce(
-        new Error("Sign in with the account the owner invited."),
+        new Error(
+          "This computer is signed in to a different account than the one the owner invited.",
+        ),
       );
       await expect(
         h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
-      ).rejects.toThrow("Sign in with the account the owner invited.");
+      ).rejects.toThrow(
+        "This computer is signed in to a different account than the one the owner invited.",
+      );
       expect(h.relay).not.toHaveBeenCalled();
     });
   });
@@ -506,7 +510,7 @@ describe("an admin's New group in a joined workspace", () => {
   ] as const)("refuses before the relay when %s (%s)", async (credentials, _why) => {
     const g = group(credentials);
     await expect(g.create(membership, { name: "Team" })).rejects.toThrow(
-      "Sign in with the account the owner invited.",
+      "This computer is signed in to a different account than the one the owner invited.",
     );
     expect(g.relay).not.toHaveBeenCalled();
   });

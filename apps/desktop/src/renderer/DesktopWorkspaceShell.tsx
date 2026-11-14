@@ -144,7 +144,13 @@ import { useMergeRemovalNotices } from "./shell/useMergeRemovalNotices";
 import { useSharedRestore } from "./shell/useSharedRestore";
 import { useVersionMergeNotices } from "./shell/useVersionMergeNotices";
 import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
-import { ShellErrorReporter, ShellNoticeClear, useShellError } from "./shell/useShellError";
+import {
+  OTHER_ACCOUNT_NOTICE,
+  ShellErrorReporter,
+  ShellNoticeClear,
+  useShellError,
+  type OtherAccountNotice,
+} from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
 import { useDisconnectedLinkAgents, useShareRemovalNotices } from "./shell/useShareRemovalNotices";
@@ -268,7 +274,7 @@ import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSur
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { workspaceName } from "./Titlebar";
-import { membershipRefreshFailure } from "./shell/membershipRefreshWords";
+import { membershipRefreshFailure, otherAccountWords } from "./shell/membershipRefreshWords";
 import { REMOVE_FAILED, RemoveFromListDialog } from "./RemoveFromListDialog";
 import { removalFacts } from "./workspaceRemoval";
 import { PathLine } from "./ui/PathLine";
@@ -1053,6 +1059,9 @@ export function DesktopWorkspaceShell(props: {
   const refreshShareViewRef = useRef<
     (trigger?: ShareViewRefreshTrigger) => Promise<ShareViewRefresh>
   >(async () => "current");
+  // Set below once the account and the share view are known.
+  const otherAccountNotice = useRef<OtherAccountNotice | null>(null);
+  const readOtherAccountNotice = useCallback(() => otherAccountNotice.current, []);
   const retryRefusedSharedView = useCallback(() => {
     void refreshShareViewRef.current();
   }, []);
@@ -1106,7 +1115,12 @@ export function DesktopWorkspaceShell(props: {
     noticeOwner,
     privacySettingsAction,
     keepCollectionsHere,
-  } = useShellError(workspaceId, props.workspace.shareView ? retryRefusedSharedView : undefined);
+    reportOtherAccount,
+  } = useShellError(
+    workspaceId,
+    props.workspace.shareView ? retryRefusedSharedView : undefined,
+    readOtherAccountNotice,
+  );
   const shellErrorsRef = useRef(shellErrors);
   shellErrorsRef.current = shellErrors;
   // A document's "Stopping live editing" row, while it stands, already says its Stop waits and keeps its actions.
@@ -2497,6 +2511,21 @@ export function DesktopWorkspaceShell(props: {
   const otherAccount = cloudStatus?.joinedBySignedInAccount === false;
   const otherAccountRef = useRef(otherAccount);
   otherAccountRef.current = otherAccount;
+  // One toast and Notices row says so, with Switch account. Failures with the
+  // same cause file that row instead of their own.
+  const otherAccountApplies =
+    membershipView && !shareViewEnded && cloudStatus?.connected === true && otherAccount;
+  otherAccountNotice.current = otherAccountApplies
+    ? {
+        ...otherAccountWords(workspaceName(props.workspace), cloudStatus?.email ?? null),
+        switchAccount: () => openSettings("cloud"),
+      }
+    : null;
+  const otherAccountMessage = otherAccountNotice.current?.message;
+  useEffect(() => {
+    if (otherAccountMessage) reportOtherAccount();
+    else clearIdentity(OTHER_ACCOUNT_NOTICE);
+  }, [clearIdentity, otherAccountMessage, reportOtherAccount]);
   // A joined workspace's refresh failure names the workspace, and another
   // account's gets Switch account. A share keeps its own words.
   const refreshFailureFacts = useRef({
@@ -2519,15 +2548,17 @@ export function DesktopWorkspaceShell(props: {
         error,
       });
       if ("fallback" in words) return reportShellError(words.fallback, error, retry);
+      if (reportOtherAccount()) return;
       reportShellFailure({
         title: words.title,
         message: words.message,
         cause: error,
         retry,
+        identity: OTHER_ACCOUNT_NOTICE,
         action: { label: "Switch account", run: () => openSettings("cloud") },
       });
     },
-    [openSettings, reportShellError, reportShellFailure],
+    [openSettings, reportOtherAccount, reportShellError, reportShellFailure],
   );
   const reportShareRefreshFailureRef = useRef(reportShareRefreshFailure);
   reportShareRefreshFailureRef.current = reportShareRefreshFailure;
@@ -8608,6 +8639,7 @@ export function DesktopWorkspaceShell(props: {
                                       onRunApp={openAppTab}
                                       onButtonError={documentReports.onError}
                                       onButtonNotice={documentReports.onNotice}
+                                      onSwitchAccount={openSyncSettings}
                                       onClosePath={closePathTabs}
                                       onOpenRecordHistory={recordHistory.open}
                                       accessEnded={shareViewEnded}
@@ -8625,7 +8657,9 @@ export function DesktopWorkspaceShell(props: {
                                       // The lists name this workspace's own notes, never a received share's.
                                       levelReadOnly={
                                         membershipView &&
-                                        (shareViewEnded || shareAccess === "view" || shareAccess === "comment")
+                                        (shareViewEnded ||
+                                          shareAccess === "view" ||
+                                          shareAccess === "comment")
                                       }
                                       liveEditingPaused={
                                         shareView || isMountedSharePath(path)

@@ -1003,7 +1003,9 @@ describe("chat writes", () => {
         const linkedFile = vi.fn(async () => ({ objectId: "object", pathHint: "plans/day-1.md" }));
         await expect(
           test.writes.createFileThread(test.place, { title: "Food", linkedFile }),
-        ).rejects.toThrow("Sign in with the account the owner invited.");
+        ).rejects.toThrow(
+          "This computer is signed in to a different account than the one the owner invited.",
+        );
         expect(linkedFile).not.toHaveBeenCalled();
         expectNothingWritten(test);
       }
@@ -1042,7 +1044,7 @@ describe("chat writes", () => {
         const test = member("comment");
         test.setCredentials(credentials);
         await expect(test.writeEach.send()).rejects.toThrow(
-          "Sign in with the account the owner invited.",
+          "This computer is signed in to a different account than the one the owner invited.",
         );
         expectNothingWritten(test);
       }

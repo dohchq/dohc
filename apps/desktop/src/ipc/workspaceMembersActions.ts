@@ -4,6 +4,7 @@ import { createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
 import { relayUrlsMatch } from "../workspaces/syncCode";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "./joinedAccountWords";
 
 type MembersWorkspace = { workspaceId: string; rootPath: string; shareView?: unknown };
 type MembersOperation<Workspace> = { workspace: Workspace; assertCurrent(): void };
@@ -22,8 +23,6 @@ interface MembersDependencies<Workspace, Credentials> {
   /** The relay accepted a change, so this computer's grant listings refresh now. */
   sharesChanged(workspaceId: string): void;
 }
-
-export const JOINED_BY_ANOTHER_ACCOUNT = "Sign in with the account the owner invited.";
 
 /** Whether these credentials are the account that joined this workspace, on the relay it joined through. */
 export function joinedByAccount(

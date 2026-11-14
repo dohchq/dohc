@@ -23,6 +23,7 @@ import {
 import { NoticeOwner, type NoticeSink } from "../../notices/noticeOwner";
 import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
+import { isJoinedByAnotherAccount } from "../../ipc/joinedAccountWords";
 import {
   SETTLEMENT_ATTRIBUTION_REFUSED,
   SETTLEMENT_BINDING_CHANGED,
@@ -234,7 +235,22 @@ export function useNoticeOwner(workspaceId: string, sink: NoticeSink): NoticeOwn
   }, [workspaceId]);
 }
 
-export function useShellError(workspaceId: string, retrySharedView?: () => void) {
+// The words of a joined workspace's one notice that an account other than the
+// one that joined is signed in, while that is so.
+export interface OtherAccountNotice {
+  title: string;
+  message: string;
+  switchAccount: () => void;
+}
+export const OTHER_ACCOUNT_NOTICE = "joined-other-account";
+
+// `otherAccount` names that notice while it applies. A failure with that
+// cause then files the notice and adds no toast of its own.
+export function useShellError(
+  workspaceId: string,
+  retrySharedView?: () => void,
+  otherAccount?: () => OtherAccountNotice | null,
+) {
   const currentWorkspace = useRef(workspaceId);
   currentWorkspace.current = workspaceId;
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
@@ -365,6 +381,22 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     },
     [push],
   );
+  // Files the other-account notice when it applies, and answers whether it did.
+  const reportOtherAccount = useCallback((): boolean => {
+    const notice = otherAccount?.();
+    if (!notice) return false;
+    push(
+      {
+        title: notice.title,
+        message: notice.message,
+        retry: null,
+        action: { label: "Switch account", run: notice.switchAccount },
+        identity: OTHER_ACCOUNT_NOTICE,
+      },
+      "repeat",
+    );
+    return true;
+  }, [otherAccount, push]);
   const clearIdentity = useCallback((identity: string) => {
     setShellErrors((current) =>
       current.some((error) => error.identity === identity)
@@ -530,6 +562,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       // The window's stop message already says why. Main marks the failed
       // read before the window learns of the stop.
       if (isStoppedWorkspaceRead(error) || reportSharedViewRefusal(error)) return;
+      if (isJoinedByAnotherAccount(error) && reportOtherAccount()) return;
       const { cause, title, words, canRetry, details: explanation } = readError(error);
       const sharedFileRefusal = refusalCode(error) === "share-collision-record";
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
@@ -592,7 +625,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         quiet || waitedForCollectionMove(error) ? "quiet" : false,
       );
     },
-    [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal],
+    [push, privacySettingsAction, keepCollectionsHere, reportSharedViewRefusal, reportOtherAccount],
   );
   // The error hook the shell hands its parts (ReportButtonError): no kind, and
   // an identity when the part names what failed.
@@ -631,6 +664,11 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     }) => {
       if (isStoppedWorkspaceRead(failure.cause) || isStoppedWorkspaceRead(failure.message)) return;
       if (reportSharedViewRefusal(failure.cause) || reportSharedViewRefusal(failure.message))
+        return;
+      if (
+        (isJoinedByAnotherAccount(failure.cause) || isJoinedByAnotherAccount(failure.message)) &&
+        reportOtherAccount()
+      )
         return;
       const refusal = [failure.cause, failure.message].find(
         (error) => refusalCode(error) === "share-collision-record",
@@ -676,7 +714,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         failure.quiet ? "quiet" : failure.repeat ? "repeat" : false,
       );
     },
-    [push, privacySettingsAction, reportSharedViewRefusal],
+    [push, privacySettingsAction, reportSharedViewRefusal, reportOtherAccount],
   );
   // A folder Open folder could not open. The reason leads, with no title
   // before it, and the folder goes in the report. Choose another folder
@@ -1553,6 +1591,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     clearKind,
     clearIdentity,
     noticeOwner,
+    reportOtherAccount,
     reportShellError,
     reportButtonError,
     reportShellFailure,

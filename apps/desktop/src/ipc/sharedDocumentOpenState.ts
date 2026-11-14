@@ -1,7 +1,8 @@
 import { z } from "zod";
+import { joinedByAnother } from "./joinedAccountWords";
 
 export const SharedDocumentOpenState = z.object({
-  state: z.enum(["pending", "offline", "refused", "access-ended", "failed", "host-refused"]),
+  state: z.enum(["pending", "offline", "refused", "access-ended", "failed", "host-refused", "other-account"]),
   message: z.string().min(1),
   /** Why the open failed or the server's live host would not take the document, for a `failed` or `host-refused` open. */
   reason: z.string().min(1).optional(),
@@ -9,6 +10,11 @@ export const SharedDocumentOpenState = z.object({
   awaitsHost: z.literal(true).optional(),
 });
 export type SharedDocumentOpenState = z.infer<typeof SharedDocumentOpenState>;
+
+/** A joined page opened while an account other than the one that joined is signed in. The workspace's notice offers Switch account. */
+export function otherAccountOpen(email: string | null | undefined): SharedDocumentOpenState {
+  return { state: "other-account", message: `${joinedByAnother(email)} You can still read this page.` };
+}
 
 export class SharedDocumentWaitingError extends Error {
   constructor(readonly waiting: SharedDocumentOpenState) {

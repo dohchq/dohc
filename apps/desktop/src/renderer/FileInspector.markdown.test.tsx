@@ -363,4 +363,24 @@ describe("FileInspector renders markdown through the shared component map", () =
       if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
     }
   });
+
+  // Try again can only fail while another account is signed in, so the page offers the step that fixes it.
+  it("gives the cause of a joined page opened with another account, with Switch account", async () => {
+    const read = bridgeMock.readWorkspaceText.getMockImplementation();
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text: "# Plan", truncated: false }));
+    Object.assign(engineDocState, { liveHostUnavailable: true, sharedWaiting: { state: "other-account",
+      message: "This computer is signed in as lee@dohc.test, not the account the owner invited. You can still read this page." } });
+    const onSwitchAccount = vi.fn();
+    try {
+      render(<FileInspector workspaceId="ws-1" path="a.md" onSwitchAccount={onSwitchAccount} />);
+      const notice = await screen.findByTestId("engine-may-hold-document-notice");
+      expect(notice.textContent).toBe("This computer is signed in as lee@dohc.test, not the account the owner invited. You can still read this page.Switch account");
+      expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+      fireEvent.click(within(notice).getByRole("button", { name: "Switch account" }));
+      expect(onSwitchAccount).toHaveBeenCalledOnce();
+    } finally {
+      Object.assign(engineDocState, { liveHostUnavailable: false, sharedWaiting: null });
+      if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+    }
+  });
 });

@@ -43,6 +43,7 @@ import { relayPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import type { CloudSettings } from "./CloudSyncSettings";
 import { SettingRow, SettingsSection, SwitchControl } from "./SettingRow";
+import { joinedByAnother } from "../../ipc/joinedAccountWords";
 
 type ReportError = (
   message: string,
@@ -343,30 +344,26 @@ function MembersGateView(props: {
       // Sync and sharing explains each; the button takes the one next step.
       const sync = { label: "Sync and sharing", run: props.onOpenSync };
       const next =
-        gate.kind === "other-account" && gate.joined ? {label: "Switch account", run: props.onOpenSync} :
-        gate.kind === "not-synced"
-          ? { label: "Set up sync", run: props.onOpenSync }
-          : gate.kind === "signed-out" && cloud
-            ? { label: "Connect server", run: cloud.onConnect }
-            : gate.kind === "expired" && cloud?.onSignInAgain
-              ? { label: "Sign in again", run: cloud.onSignInAgain }
-              : sync;
+        gate.kind === "other-account" && gate.joined
+          ? { label: "Switch account", run: props.onOpenSync }
+          : gate.kind === "not-synced"
+            ? { label: "Set up sync", run: props.onOpenSync }
+            : gate.kind === "signed-out" && cloud
+              ? { label: "Connect server", run: cloud.onConnect }
+              : gate.kind === "expired" && cloud?.onSignInAgain
+                ? { label: "Sign in again", run: cloud.onSignInAgain }
+                : sync;
       return (
         <GateState reason={gate.kind} icon={CloudOff} action={{ ...next, primary: true }}>
-          {gate.kind === "other-account" && gate.joined
-            ? <>{joinedByAnother(gate.joined.email)} dohc does not record that account's email.</>
-            : "Sync this workspace with your server to see who is in it."}
+          {gate.kind === "other-account" && gate.joined ? (
+            joinedByAnother(gate.joined.email)
+          ) : (
+            "Sync this workspace with your server to see who is in it."
+          )}
         </GateState>
       );
     }
   }
-}
-
-// dohc keeps the joined account's id, not its email, so it can name only the account signed in now.
-export function joinedByAnother(email: string | null): string {
-  return email
-    ? `This computer is signed in as ${email}, not the account the owner invited.`
-    : "This computer is signed in to a different account than the one the owner invited.";
 }
 
 function GateState(props: {

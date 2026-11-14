@@ -278,6 +278,8 @@ type FileInspectorProps = {
   // and the shell opens the record's History.
   onButtonError?: ReportButtonError;
   onButtonNotice?: (message: string, undo?: () => void) => void;
+  // Opens account settings, for a joined page opened with another account.
+  onSwitchAccount?: () => void;
   // Closes every tab showing a file, as an Undo that removes it does first.
   onClosePath?: (path: string) => void;
   onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
@@ -1008,6 +1010,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
                 : undefined
             }
             onRetryEngineOpen={retryEngineOpen}
+            onSwitchAccount={props.onSwitchAccount}
             onReloadChangedOutside={reloadChangedOutside}
             writesRefusedRef={writesRefusedRef}
             localBuffer={localBuffer}

@@ -49,7 +49,7 @@ import { createWorkLinkActivations, createWorkLinks } from "./workspaces/workLin
 import { workReferenceView } from "./workspaces/workReferenceViews";
 import { parseWorkLinkUrl } from "@dohc/workspace-contracts/work-links";
 import { recordHistoryPersonIsNamed } from "./ipc/recordHistoryIpc";
-import { SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
+import { otherAccountOpen, SharedDocumentWaitingError } from "./ipc/sharedDocumentOpenState";
 import { net, clipboard } from "electron";
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import { createDesktopAutomationControls } from "./workspaces/desktopAutomationControls";
@@ -282,9 +282,9 @@ import { createShareLinkAgentActions } from "./ipc/shareLinkAgentActions";
 import {
   createJoinedWorkspaceGroupAction,
   createWorkspaceMembersActions,
-  JOINED_BY_ANOTHER_ACCOUNT,
   joinedByAccount,
 } from "./ipc/workspaceMembersActions";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "./ipc/joinedAccountWords";
 import { createJoinedGroup } from "./workspaces/joinedGroupCreate";
 import { sharedViewHistory } from "./workspaces/sharedViewHistory";
 import { memberOperations } from "./ipc/memberOperations";
@@ -7408,6 +7408,14 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       });
     if (marker && !shareViewIdentityIsIntact(marker))
       throw new SharedDocumentWaitingError({ state: "failed", message: SHARE_VIEW_REOPEN_MESSAGE });
+    // A joined page edits only as the account that joined; the workspace's notice offers Switch account.
+    if (
+      marker &&
+      recordedShareSelector(marker.grantedSelector)?.wholeWorkspace === true &&
+      !joinedByAccount(marker, credentials)
+    ) {
+      throw new SharedDocumentWaitingError(otherAccountOpen(credentials.email));
+    }
     if (
       !marker ||
       !marker.relayUrl ||

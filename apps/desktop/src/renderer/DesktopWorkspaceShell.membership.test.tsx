@@ -233,6 +233,39 @@ describe("a joined workspace", () => {
     await waitFor(() => expect(screen.queryAllByText(/Could not read Collections/)).toHaveLength(toasts));
   });
 
+  // Every read and write needs the account that joined. The workspace says
+  // so once, titled with what failed, and offers the step that fixes it.
+  it("says once that another account is signed in, with Switch account and no Try again", async () => {
+    const bridge = makeShareBridge(Promise.resolve({ ...storedStateWithTabs(["a.md"]), aboutVisible: true }));
+    bridge.cloudStatus.mockResolvedValue({ connected: true, email: "lee@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true,
+      joinedBySignedInAccount: false });
+    bridge.refreshSharedView.mockResolvedValue({ ok: false, probed: true, changedPaths: 0, errorKind: "unauthorized",
+      errorMessage: "Sign in to the account that received this share." });
+    bridge.workspaceMembers.mockRejectedValue(new Error("This computer is signed in to a different account than the one the owner invited."));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, JOINED));
+    await waitFor(() => expect(bridge.workspaceMembers).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalled());
+    await act(async () => { await bridge.workspaceMembers.mock.results[0]!.value.catch(() => undefined); });
+    const toasts = screen.getByTestId("notice-toasts");
+    const toast = await waitFor(() => {
+      const shown = within(toasts).getByTestId("workspace-shell-error");
+      expect(shown.textContent).toContain("dohc could not open Community with this account");
+      return shown;
+    });
+    expect(toast.textContent).toContain("This computer is signed in as lee@dohc.test, not the account the owner invited.");
+    expect(within(toast).getByRole("button", { name: "Switch account" })).toBeTruthy();
+    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+    await waitFor(() => expect(within(toasts).getAllByTestId("workspace-shell-error")).toHaveLength(1));
+    expect(document.body.textContent).not.toContain("This computer is signed in to a different account than the one the owner invited.");
+    expect(document.body.textContent).not.toContain("does not record");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    const rows = within(screen.getByTestId("notice-center")).getAllByRole("listitem")
+      .filter(row => row.textContent?.includes("dohc could not open Community with this account"));
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]!).getByRole("button", { name: "Switch account" })).toBeTruthy();
+  });
+
   it("shows the ended band and keeps the copy readable after the membership ends", async () => {
     const bridge = makeShareBridge();
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "plan.md", kind: "file" }], folders: [] });

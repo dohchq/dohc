@@ -385,6 +385,8 @@ export function MarkdownView(props: {
   // Owned by the inspector, like the open itself. Required: the notice must
   // never render without its retry, and the one caller always passes it.
   onRetryEngineOpen: () => void;
+  // Opens account settings, for a joined page opened with another account.
+  onSwitchAccount?: (() => void) | undefined;
   // Reopen the note after a change outside dohc. Unlike a retry, it opens the
   // new bytes as a new note: the inspector reads and checks them again.
   onReloadChangedOutside: () => void;
@@ -2593,6 +2595,13 @@ export function MarkdownView(props: {
           contentShown
           message={engine.openRefusal ?? sharedWaitingLine(engine.sharedWaiting)}
           waiting={!engine.openRefusal && engine.sharedWaiting?.awaitsHost === true}
+          action={
+            !engine.openRefusal &&
+            engine.sharedWaiting?.state === "other-account" &&
+            props.onSwitchAccount
+              ? { label: "Switch account", run: props.onSwitchAccount }
+              : undefined
+          }
         />
       ) : null}
       {engine.removalInProgress ? (

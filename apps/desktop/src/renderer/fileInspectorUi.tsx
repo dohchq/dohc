@@ -188,6 +188,8 @@ export function EngineMayHoldDocumentNotice(props: {
   // and no Try again.
   waiting?: boolean;
   children?: ReactNode;
+  // The step that can fix the cause, in place of Try again, which would only fail again.
+  action?: { label: string; run: () => void } | undefined;
 }) {
   return (
     <div
@@ -220,10 +222,10 @@ export function EngineMayHoldDocumentNotice(props: {
         {props.waiting ? null : (
           <button
             type="button"
-            onClick={props.onRetry}
+            onClick={props.action?.run ?? props.onRetry}
             className="whitespace-nowrap text-subtle hover:text-ink"
           >
-            Try again
+            {props.action?.label ?? "Try again"}
           </button>
         )}
       </span>

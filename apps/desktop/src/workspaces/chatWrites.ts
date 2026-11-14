@@ -22,6 +22,7 @@ import {
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { recordedShareSelector } from "./shareViewRecords";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
 import { chatFileLinkScope, hasChatFileLink, refuseChatFileLinks } from "./chatFileLinkScope";
 import type {
@@ -359,7 +360,7 @@ export function createChatWrites(dependencies: {
       workspace.shareView &&
       (authorUserId === undefined || workspace.shareView.recipientUserId !== authorUserId)
     ) {
-      throw new Error("Sign in with the account the owner invited.");
+      throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
     }
     if (currentCredentialGeneration() !== generation) throw new Error(SESSION_CHANGED);
     return authorUserId;
