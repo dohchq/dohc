@@ -2015,7 +2015,8 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
     if (found.storedOn === "server") found.recovery = "copied";
     return {
       copyPath: path.replace(/\.md$/, " (recovered).md"),
-      packagePath: path.replace(/\.md$/, " (recovered).dohc-recovery.json"),
+      packagePath: `.dohc/local/live-recovery/${path.replace(/\.md$/, " (recovered).dohc-recovery.json")}`,
+      notInNote: 0,
       storedOn: found.storedOn,
       keptEdits: found.storedOn === "server" ? ("copied" as const) : ("kept" as const),
     };

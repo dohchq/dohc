@@ -257,8 +257,9 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
         ? {
             ok: true,
             copyPath: null,
-            packagePath: "plan (recovered).dohc-recovery.json",
-            folder: ".",
+            packagePath: ".dohc/local/live-recovery/plan (recovered).dohc-recovery.json",
+            notInNote: 0,
+            folder: ".dohc/local/live-recovery",
             storedOn: "server",
             keptEdits: "copied",
           }
@@ -295,7 +296,8 @@ it("lists, saves, tries again and stops again kept edits with only the caller's 
     }),
   ).toEqual({
     exitCode: 0,
-    stdout: "Saved plan (recovered).dohc-recovery.json\ndohc could not make a readable copy.\n",
+    stdout:
+      "Saved .dohc/local/live-recovery/plan (recovered).dohc-recovery.json on this computer\ndohc could not make a readable copy.\n",
     stderr: "",
   });
   expect(
@@ -671,8 +673,9 @@ describe("executeCli", () => {
                   result: {
                     ok: true,
                     copyPath: null,
-                    packagePath: "plan (recovered).dohc-recovery.json",
-                    folder: ".",
+                    packagePath: ".dohc/local/live-recovery/plan (recovered).dohc-recovery.json",
+                    notInNote: 0,
+                    folder: ".dohc/local/live-recovery",
                     storedOn: "server",
                     keptEdits: "copied",
                   },

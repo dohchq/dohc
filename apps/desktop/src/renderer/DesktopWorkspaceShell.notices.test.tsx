@@ -163,7 +163,8 @@ describe("edits the server refused", () => {
     await act(async () => {
       saving.resolve({
         copyPath: "notes/plan (recovered).md",
-        packagePath: "notes/plan (recovered).dohc-recovery.json",
+        packagePath: ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json",
+        notInNote: 2,
         storedOn: "this-computer",
         keptEdits: "kept",
       });
@@ -171,7 +172,7 @@ describe("edits the server refused", () => {
     });
     expect(
       await screen.findByText(
-        "Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on this computer.",
+        "Saved a recovery copy of notes/plan.md in notes. 2 edits didn't fit in the note and are listed at the end. Your kept edits stay on this computer.",
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();

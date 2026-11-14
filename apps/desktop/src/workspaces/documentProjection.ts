@@ -1,11 +1,9 @@
 import { Worker } from "node:worker_threads";
-import * as Y from "yjs";
 import {
   documentCreateUpdate,
   documentEditUpdate,
   documentMarkdown,
   settledDocumentMarkdown,
-  yDocToMarkdown,
   type DocumentEdit,
 } from "@dohc/ydoc-projection";
 import {
@@ -13,6 +11,7 @@ import {
   isLossyMarkdownCached,
   lossyNoteRefusal,
 } from "@dohc/ydoc-projection/lossy-markdown";
+import { recoveredDocument, type RecoveredDocument } from "./recoveredDocument";
 
 // Reading a live document as Markdown and computing an edit to it take time
 // in proportion to the document: about 250 ms for 700 KB. Main runs them in a
@@ -35,30 +34,18 @@ export type DocumentProjectionRequest =
   // Whether a file's text is a lossy note (CONTEXT.md). The worker remembers
   // the verdict by `digest`, the SHA-256 of the text.
   | { kind: "lossy"; markdown: string; digest: string }
-  | { kind: "recover"; updates: readonly Uint8Array[] };
+  // `kept` are a refused queue's edits, after the `accepted` updates they build on.
+  | { kind: "recover"; accepted: readonly Uint8Array[]; kept: readonly Uint8Array[] };
 
 type DocumentProjectionResult<Request extends DocumentProjectionRequest> = Request extends {
   kind: "recover";
 }
-  ? string | null
+  ? RecoveredDocument | null
   : Request extends { kind: "edit" | "create" }
     ? Uint8Array | null
     : Request extends { kind: "lossy" }
       ? boolean
       : string;
-
-/** The document a recovery package's updates rebuild, or null when one still waits on what it depends on. */
-export function recoveredDocumentMarkdown(updates: readonly Uint8Array[]): string | null {
-  const doc = new Y.Doc();
-  try {
-    for (const update of updates) Y.applyUpdate(doc, update);
-    // An update missing what it depends on would leave its edit out of the copy.
-    if (doc.store.pendingStructs !== null || doc.store.pendingDs !== null) return null;
-    return yDocToMarkdown(doc);
-  } finally {
-    doc.destroy();
-  }
-}
 
 export interface DocumentProjection {
   run<Request extends DocumentProjectionRequest>(
@@ -85,12 +72,12 @@ export function transferList(value: unknown): ArrayBuffer[] {
 }
 
 type WorkerMessage =
-  | { id: number; ok: true; result: string | Uint8Array | boolean | null }
+  | { id: number; ok: true; result: string | Uint8Array | boolean | RecoveredDocument | null }
   | { id: number; ok: false; message: string };
 
 export function runDocumentProjection(
   request: DocumentProjectionRequest,
-): string | Uint8Array | boolean | null {
+): string | Uint8Array | boolean | RecoveredDocument | null {
   switch (request.kind) {
     case "read":
       return documentMarkdown(request.state);
@@ -120,7 +107,7 @@ export function runDocumentProjection(
     case "lossy":
       return isLossyMarkdownCached(request.digest, request.markdown);
     case "recover":
-      return recoveredDocumentMarkdown(request.updates);
+      return recoveredDocument(request.accepted, request.kept);
   }
 }
 
@@ -169,7 +156,7 @@ export function createDocumentProjectionWorker(
     void stopped.terminate().catch(() => undefined);
   }
 
-  function send(request: DocumentProjectionRequest): Promise<string | Uint8Array | boolean | null> {
+  function send(request: DocumentProjectionRequest): Promise<string | Uint8Array | boolean | RecoveredDocument | null> {
     const current = started();
     const id = nextId++;
     return new Promise((resolve, reject) => {

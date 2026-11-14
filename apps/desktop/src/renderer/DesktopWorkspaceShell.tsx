@@ -3728,28 +3728,39 @@ export function DesktopWorkspaceShell(props: {
         .then(
           (saved) => {
             if (workspaceIdRef.current !== id) return;
-            const opened = saved.copyPath ?? saved.packagePath;
-            const slash = saved.packagePath.lastIndexOf("/");
-            const folder = slash < 0 ? "the workspace folder" : saved.packagePath.slice(0, slash);
             const kept =
               saved.keptEdits === "copied"
                 ? " The server may now release your kept edits."
                 : saved.keptEdits === "kept"
                   ? ` Your kept edits stay ${saved.storedOn === "server" ? "on the server" : "on this computer"}.`
                   : "";
+            const copy = saved.copyPath;
+            if (copy === null) {
+              // The package is in .dohc/local, which dohc does not open as a file.
+              showSuccessNotice(
+                `Saved your kept edits for ${path} on this computer in ${saved.packagePath}. dohc could not make a readable copy.${kept}`,
+              );
+              return;
+            }
+            const slash = copy.lastIndexOf("/");
+            const folder = slash < 0 ? "the workspace folder" : copy.slice(0, slash);
+            const listed =
+              saved.notInNote === 0
+                ? ""
+                : saved.notInNote === 1
+                  ? " 1 edit didn't fit in the note and is listed at the end."
+                  : ` ${saved.notInNote} edits didn't fit in the note and are listed at the end.`;
             showSuccessNotice(
-              saved.copyPath
-                ? `Saved a recovery copy of ${path} in ${folder}.${kept}`
-                : `Saved your kept edits for ${path} as a recovery package in ${folder}. dohc could not make a readable copy.${kept}`,
+              `Saved a recovery copy of ${path} in ${folder}.${listed}${kept}`,
               undefined,
               undefined,
               {
                 label: "Open",
                 run: () => {
-                  if (workspaceIdRef.current === id) openFile(opened);
+                  if (workspaceIdRef.current === id) openFile(copy);
                 },
               },
-              { to: "file", path: opened },
+              { to: "file", path: copy },
             );
           },
           (error: unknown) => {

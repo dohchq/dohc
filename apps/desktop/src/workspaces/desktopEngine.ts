@@ -1858,6 +1858,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const writes = {
         create: (relative: string, text: string) =>
           createDurableFile(workspace.rootPath, relative, text),
+        keep: recovery.keepOnThisComputer(workspace),
         exists: (relative: string) =>
           lstat(join(workspace.rootPath, relative)).then(
             () => true,

@@ -554,7 +554,14 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       const saved = result as Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>;
       return [
         ...(saved.copyPath === null ? [] : [`Saved ${lineSafe(saved.copyPath)}`]),
-        `Saved ${lineSafe(saved.packagePath)}`,
+        ...(saved.notInNote === 0
+          ? []
+          : [
+              saved.notInNote === 1
+                ? "1 kept edit isn't in the note. It's listed at the end of the copy."
+                : `${saved.notInNote} kept edits aren't in the note. They're listed at the end of the copy.`,
+            ]),
+        `Saved ${lineSafe(saved.packagePath)} on this computer`,
         ...(saved.copyPath === null ? ["dohc could not make a readable copy."] : []),
       ].join("\n");
     }

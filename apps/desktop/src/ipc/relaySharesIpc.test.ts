@@ -126,7 +126,8 @@ function harness() {
   );
   const saveOwnerLiveRecoveryCopy = vi.fn<Dependencies["saveOwnerLiveRecoveryCopy"]>(async () => ({
     copyPath: "notes/a (recovered).md",
-    packagePath: "notes/a (recovered).dohc-recovery.json",
+    packagePath: ".dohc/local/live-recovery/notes/a (recovered).dohc-recovery.json",
+    notInNote: 0,
     storedOn: "this-computer",
     keptEdits: "kept",
   }));
@@ -724,7 +725,8 @@ describe("owner live document enrollment", () => {
         }),
       ).resolves.toEqual({
         copyPath: "notes/a (recovered).md",
-        packagePath: "notes/a (recovered).dohc-recovery.json",
+        packagePath: ".dohc/local/live-recovery/notes/a (recovered).dohc-recovery.json",
+        notInNote: 0,
         storedOn: "this-computer",
         keptEdits: "kept",
       });
