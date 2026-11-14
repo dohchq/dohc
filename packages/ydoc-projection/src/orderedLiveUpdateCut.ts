@@ -3021,11 +3021,15 @@ function impliedDeletes(
 
 /**
  * Whether Yjs's merge deleted every struct in `ranges` with no update naming
- * it, because its parent was deleted. Deleting a type deletes its children,
- * including any that arrive later, and every replica does the same in any
- * order. Anything else is not explained: a GC struct, whose parent can't be
- * checked, or a map value that lost to a concurrent set of the same key while
- * its parent stayed live.
+ * it. Every replica does the same in any order when:
+ * - its parent was deleted. Deleting a type deletes its children, including
+ *   any that arrive later.
+ * - it is a value of a key that another entry of the same key follows. Yjs
+ *   keeps the last entry of a key's chain and deletes those before it, so when
+ *   two people set a key at once, one of the two is kept, the same for
+ *   everyone.
+ * Anything else is not explained, such as a GC struct, whose parent can't be
+ * checked, or formatting Yjs's cleanup removed.
  */
 function deletedByMerge(
   document: Y.Doc,
@@ -3056,7 +3060,11 @@ function deletedByMerge(
       if (!(struct instanceof Y.Item) || !struct.deleted) return false;
       const parent = struct.parent;
       if (!(parent instanceof Y.AbstractType)) return false;
-      if (parent._item === null || !parent._item.deleted) return false;
+      if (parent._item !== null && parent._item.deleted) continue;
+      const { right } = struct;
+      if (struct.parentSub !== null && right?.parent === parent && right.parentSub === struct.parentSub)
+        continue;
+      return false;
     }
   }
   return true;
