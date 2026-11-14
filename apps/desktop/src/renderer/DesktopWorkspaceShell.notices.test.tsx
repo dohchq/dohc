@@ -207,7 +207,12 @@ describe("edits the server refused", () => {
       }),
     );
     const words = "dohc could not make a readable copy";
-    await screen.findByText(words, { exact: false });
+    const toast = (await screen.findByText(words, { exact: false })).closest<HTMLElement>(
+      "[data-testid='workspace-shell-notice']",
+    )!;
+    // The toast is closed; the row is what still says where the edits are.
+    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace notice" }));
+    await waitFor(() => expect(screen.queryByText(words, { exact: false })).toBeNull());
     await user.click(screen.getByTestId("notice-center-toggle"));
     const row = within(await screen.findByTestId("notice-center"))
       .getByText(words, { exact: false })
