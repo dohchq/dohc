@@ -1070,6 +1070,10 @@ it("tells an invited editor that live editing stopped, keeps the edit, and sends
     f.requests.slice(asked).filter(({ path }) => path === "/api/live/named-ticket"),
   ).toHaveLength(1);
   expect(f.sockets).toHaveLength(1);
+  const retried = f.requests.length;
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(f.requests).toHaveLength(retried);
+  expect(vi.getTimerCount()).toBe(0);
 
   stopped = false;
   const reconnecting = f.value.reconnect();
