@@ -36,6 +36,7 @@ export type T3CodeCliRunner = (
   command: string,
   args: string[],
   signal: AbortSignal,
+  env: NodeJS.ProcessEnv,
 ) => Promise<{ exitCode: number | null; stdout: string }>;
 
 /** Where T3 Code's desktop app writes its program, in T3 Code's own folder. */
@@ -43,7 +44,7 @@ export function t3CodeCliPath(home: string, platform: NodeJS.Platform = process.
   return join(home, "bin", platform === "win32" ? "t3.cmd" : "t3");
 }
 
-const runProgram: T3CodeCliRunner = (command, args, signal) =>
+const runProgram: T3CodeCliRunner = (command, args, signal, env) =>
   new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(signal.reason as Error);
@@ -53,6 +54,7 @@ const runProgram: T3CodeCliRunner = (command, args, signal) =>
     // helper quotes every part and refuses one it cannot quote safely.
     const resolved = resolveSpawnCommand(command, args);
     const child = spawn(resolved.command, resolved.args, {
+      env,
       windowsHide: true,
       windowsVerbatimArguments: resolved.windowsVerbatimArguments,
       // Nothing is sent to it, and what it says of a failure is not read: it may hold a secret.
@@ -118,7 +120,9 @@ export function createT3CodeCodeMaker(options: {
       args.push("--ttl", CODE_LIFE, "--label", "dohc", "--json");
       let ran: Awaited<ReturnType<T3CodeCliRunner>>;
       try {
-        ran = await run(program, args, signal);
+        // The program takes its folder from the environment when one is named there.
+        // dohc names the folder whose server it signs in to, so the code is made for that server.
+        ran = await run(program, args, signal, { ...process.env, T3CODE_HOME: options.home });
       } catch (error) {
         if (signal.aborted) throw signal.reason as Error;
         // A path this computer's shell cannot carry safely, or a program that would not start.

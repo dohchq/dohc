@@ -15,14 +15,14 @@ const PROGRAM = t3CodeCliPath(HOME, "linux");
 const never = new AbortController().signal;
 
 function maker(run: T3CodeCliRunner, there = true) {
-  const ran: Array<{ command: string; args: string[] }> = [];
+  const ran: Array<{ command: string; args: string[]; home: string | undefined }> = [];
   const codes = createT3CodeCodeMaker({
     home: HOME,
     platform: "linux",
     exists: (path) => there && path === PROGRAM,
-    run: async (command, args, signal) => {
-      ran.push({ command, args });
-      return run(command, args, signal);
+    run: async (command, args, signal, env) => {
+      ran.push({ command, args, home: env.T3CODE_HOME });
+      return run(command, args, signal, env);
     },
   });
   return { codes, ran };
@@ -48,6 +48,8 @@ describe("making dohc's own sign-in code with T3 Code's program", () => {
     await codes.make("full-access", never);
 
     expect(ran.map((call) => call.command)).toEqual([PROGRAM, PROGRAM]);
+    // The code is made in the folder whose server dohc signs in to, whatever this process inherited.
+    expect(ran.map((call) => call.home)).toEqual([HOME, HOME]);
     expect(ran[0]!.args).toEqual([
       "auth",
       "pairing",
@@ -143,9 +145,13 @@ describe("running T3 Code's program", () => {
 
   it("reads the code a program prints, and none from one that fails", async () => {
     const { home, bin, codes } = await program({
-      windows: '@echo %*> "%~dp0asked.txt"\r\n@type "%~dp0made.json" 2>nul\r\n',
+      windows:
+        '@echo %*> "%~dp0asked.txt"\r\n@echo %T3CODE_HOME%> "%~dp0home.txt"\r\n' +
+        '@type "%~dp0made.json" 2>nul\r\n',
       other:
-        '#!/bin/sh\necho "$*" > "$(dirname "$0")/asked.txt"\nexec cat "$(dirname "$0")/made.json" 2>/dev/null\n',
+        '#!/bin/sh\necho "$*" > "$(dirname "$0")/asked.txt"\n' +
+        'echo "$T3CODE_HOME" > "$(dirname "$0")/home.txt"\n' +
+        'exec cat "$(dirname "$0")/made.json" 2>/dev/null\n',
     });
     try {
       expect(codes.available()).toBe(true);
@@ -154,6 +160,7 @@ describe("running T3 Code's program", () => {
       });
       await writeFile(join(bin, "made.json"), JSON.stringify({ credential: "Q8RZ3NWD5KTC" }));
       await expect(codes.make("full-access", never)).resolves.toBe("Q8RZ3NWD5KTC");
+      expect((await readFile(join(bin, "home.txt"), "utf8")).trim()).toBe(home);
       // cmd.exe hands a .cmd file each part in the quotes it arrived in.
       const asked = (await readFile(join(bin, "asked.txt"), "utf8")).replaceAll('"', "").trim();
       expect(asked).toBe(
