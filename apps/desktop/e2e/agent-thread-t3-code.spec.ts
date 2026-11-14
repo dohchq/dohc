@@ -91,13 +91,24 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
   const sends = () => t3.calls.filter((call) => call.tool === "t3_thread_send");
   // Each message starts a run, named for its place among the sends.
   t3.tools.t3_thread_send = (args) => ({ threadId: args.threadId, runId: `run-${sends().length}` });
+  // How many requests wait on the person in the thread, and the question among them.
+  let waiting = 0;
+  let question: { requestId: string; questions: unknown[] } | null = null;
+  t3.tools.t3_pending_request = (args) => {
+    if (args.action === "list") return { requestIds: question ? [question.requestId] : [] };
+    if (args.action === "read") return question;
+    // An answer ends the wait, and the thread works on.
+    question = null;
+    waiting = 0;
+    return { sequence: 1 };
+  };
   // What the thread's runs are doing, newest first, as the test sets them.
   let runs: Array<{ runId: string; status: string; completedAt: string | null }> = [];
   t3.tools.t3_thread_read = () => ({
     thread: {
       title: "Chief of Staff: dohc",
       activeRunId: runs.find((run) => run.status === "running")?.runId ?? null,
-      pendingRequestCount: 0,
+      pendingRequestCount: waiting,
       archived: false,
       settled: false,
     },
@@ -234,6 +245,57 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
         ),
       )
       .toEqual(["t3code://threads/env-fake/t-chief"]);
+
+    // An approval waits in T3 Code: the chat says so, and offers no answer here.
+    waiting = 1;
+    await expect(line).toHaveAttribute("data-state", "waiting-in-tool", { timeout: 30_000 });
+    await expect(line).toContainText("Waiting for you in T3 Code");
+    await expect(line.getByTestId("agent-thread-answer")).toHaveCount(0);
+
+    // The thread asks a question in its own box: the person answers it here.
+    question = {
+      requestId: "q-1",
+      questions: [
+        {
+          id: "which",
+          header: "Build",
+          question: "Which Mac build should I check?",
+          options: [
+            { label: "Signed", description: "The build from the release branch", value: "signed" },
+            { label: "Nightly", description: "Last night's build" },
+          ],
+        },
+        {
+          id: "note",
+          header: "",
+          question: "Anything else I should know?",
+          options: [],
+          required: false,
+        },
+      ],
+    };
+    await line.getByTestId("agent-thread-answer").click({ timeout: 30_000 });
+    const answer = page.getByTestId("agent-thread-answer-dialog");
+    await expect(answer).toHaveAttribute("data-view", "form");
+    await expect(answer).toContainText("Which Mac build should I check?");
+    await expect(answer).toContainText("The build from the release branch");
+    await shoot(page, page, "t3-code-h-question");
+    // A required question with no answer is not sent.
+    await answer.getByTestId("agent-thread-answer-submit").click();
+    await expect(answer.getByTestId("agent-thread-answer-missing")).toHaveCount(1);
+    await answer.getByRole("radio", { name: "Nightly" }).check();
+    await shoot(page, page, "t3-code-i-answer");
+    await answer.getByTestId("agent-thread-answer-submit").click();
+    await expect(answer).toHaveCount(0);
+    const responded = t3.calls.filter(
+      (call) => call.tool === "t3_pending_request" && call.args.action === "respond",
+    );
+    // An option with no value of its own is answered with its label. The optional question is left out.
+    expect(responded.map((call) => call.args)).toEqual([
+      { action: "respond", threadId: "t-chief", requestId: "q-1", answers: { which: "Nightly" } },
+    ]);
+    await expect(line).toHaveAttribute("data-state", "working", { timeout: 30_000 });
+    await expect(line.getByTestId("agent-thread-answer")).toHaveCount(0);
 
     // Its work ends with nothing posted here: dohc reminds the thread once.
     runs = [{ runId: "run-2", status: "completed", completedAt: new Date().toISOString() }];

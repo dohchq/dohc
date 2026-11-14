@@ -8231,7 +8231,8 @@ export type AgentThreadQuestionBox = z.infer<typeof AgentThreadQuestionBox>;
 export const AgentThreadAnswers = z
   .record(
     z.string().min(1).max(512),
-    z.union([z.string().max(20_000), z.array(z.string().max(2_000)).max(50)]),
+    // Every option of the largest question dohc shows, and the person's own text.
+    z.union([z.string().max(20_000), z.array(z.string().max(2_000)).max(51)]),
   )
   .refine((answers) => Object.keys(answers).length <= 20);
 export type AgentThreadAnswers = z.infer<typeof AgentThreadAnswers>;

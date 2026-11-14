@@ -4,7 +4,7 @@ status: accepted
 
 # dohc has built-in support for some agent tools, and a command for the rest
 
-This records a design that is built in part. Built, for T3 Code on one computer: a person picks a thread in Settings, and dohc gives it messages, in line or as a steer, and reads its state. Planned: answering a thread's questions, and Claude Code and Codex, which dohc still starts with a fixed profile and no knowledge of where the agent keeps its own conversation.
+This records a design that is built in part. Built, for T3 Code on one computer: a person picks a thread in Settings, and dohc gives it messages, in line or as a steer, reads its state, and answers its questions. Planned: Claude Code and Codex, which dohc still starts with a fixed profile and no knowledge of where the agent keeps its own conversation.
 
 In the plan, dohc knows three tools by name: T3 Code, Claude Code, and Codex. For each it knows how to give a message to an agent thread in that tool. For T3 Code it also lists the person's threads, steers a busy thread, reads its state, and answers its questions. A person picks the tool and the thread in Settings, with no command to type. Every other tool uses "Your command", with a switch that says the agent keeps its own memory.
 
