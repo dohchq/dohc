@@ -2100,7 +2100,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         operands: "",
         summary: "Request fresh Sharing observations with the same pacing as opening Sharing.",
         notes: [
-          "Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Paced follows the existing refresh schedule. Read access sharing afterward to inspect observations.",
+          "Reports requested, joined, paced, or unavailable. Requested and joined wait for started or existing attempts to settle, without promising success. Within a minute of the workspace's last check, it waits for the next one. Paced means only shares with you follow the existing refresh schedule. Read access sharing afterward to inspect observations.",
         ],
         parse: (input) => {
           noExtraArgs(input.operands, "access refresh");

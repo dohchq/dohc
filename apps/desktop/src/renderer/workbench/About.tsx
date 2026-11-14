@@ -1497,11 +1497,13 @@ export function AboutAccess(props: {
       const request = begin();
       const retry = () => void load({ refresh: true });
       try {
+        let paced = false;
         if (options.refresh) {
-          await bridge()
+          const refreshed = await bridge()
             .requestAccessRefresh({ workspaceId, reason: "access-expand" })
             .catch(() => undefined);
           if (!request.current()) return;
+          paced = refreshed?.status === "paced";
         }
         const cursor = options.after?.nextCursor ?? undefined;
         const answer = await bridge().getObjectAccess({
@@ -1521,6 +1523,14 @@ export function AboutAccess(props: {
             ? { ...answer, rows: [...options.after.rows, ...answer.rows] }
             : answer,
         });
+        // Main checked less than a minute ago, so this answer is that check's.
+        // When the next check ends, read again in place.
+        if (paced) {
+          const checked = await bridge()
+            .requestAccessRefresh({ workspaceId, reason: "access-expand", wait: true })
+            .catch(() => undefined);
+          if (checked && request.current()) void load({});
+        }
       } catch (error) {
         request.fail(
           { status: "failed" },

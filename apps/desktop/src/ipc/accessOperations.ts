@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   AccessAnswer,
   AccessRefreshInput,
+  AccessRefreshResult,
   ObjectAccessInput,
   SharingAccessInput,
 } from "@dohc/workspace-contracts/access";
@@ -34,5 +35,6 @@ export const accessOperations = {
     guard: "active-workspace",
     inactiveMessage: "This workspace is no longer open in this window.",
     payload: AccessRefreshInput.extend({ workspaceId }),
+    result: AccessRefreshResult,
   },
 } satisfies OperationTable;

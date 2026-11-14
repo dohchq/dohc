@@ -832,7 +832,9 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
               : // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
                 command.verb === "saveRecoveryCopy"
                 ? 420_000
-                : command.verb === "historyUndo" ||
+                : // A paced Access refresh waits up to a minute for the next roster check.
+                  command.verb === "historyUndo" ||
+                    command.verb === "accessRefresh" ||
                     command.verb === "dataset" ||
                     command.verb === "appPublication" ||
                     command.verb === "ownerAppResponses" ||

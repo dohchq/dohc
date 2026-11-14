@@ -107,4 +107,5 @@ export const AccessRefreshResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("unavailable"), reason: z.enum(["signed-out", "unreadable"]) }),
 ]);
 export type AccessRefreshResult = z.infer<typeof AccessRefreshResult>;
-export const AccessRefreshInput = z.object({ reason: z.enum(["sharing-open", "access-expand"]) });
+// `wait` makes a paced refresh resolve when the scheduled check ends.
+export const AccessRefreshInput = z.object({ reason: z.enum(["sharing-open", "access-expand"]), wait: z.literal(true).optional() });

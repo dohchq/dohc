@@ -1100,13 +1100,11 @@ export function SharingView(props: {
 }) {
   const { workspaceId, context, focus, onFocused } = props;
   const { facts, openSyncSettings, connect } = context;
-  const refresh = useCallback(
-    () =>
-      bridge()
-        .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
-        .catch(() => undefined),
-    [workspaceId],
-  );
+  const refresh = useCallback(async () => {
+    await bridge()
+      .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
+      .catch(() => undefined);
+  }, [workspaceId]);
   const granted = useSharingLane(workspaceId, "granted", props.notices, refresh);
   const received = useSharingLane(workspaceId, "received", props.notices, refresh);
   const [confirmShareId, setConfirmShareId] = useState<string | null>(null);

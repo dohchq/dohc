@@ -2517,7 +2517,7 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
 }
 
 const accessAcquisition = createAccessAcquisition({
-  roster: (workspaceId) => shareRosters.requestRefresh(workspaceId),
+  roster: (workspaceId, options) => shareRosters.requestRefresh(workspaceId, options),
   received: () => receivedShareAcquisition.refresh(),
 });
 const accessScopeIds = new WeakMap<object, string>();
@@ -2549,8 +2549,8 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
   roster: ({ workspace }) =>
     ownerAccessRoster(workspace, cachedCredentials, shareRosters.observation),
   received: () => receivedShareAcquisition.observation(),
-  refresh: (operation) =>
-    refreshAccessObservations(operation, warmCredentialCache, accessAcquisition),
+  refresh: (operation, options) =>
+    refreshAccessObservations(operation, warmCredentialCache, accessAcquisition, options),
   resolve: async (operation, ref) => {
     const workspace = operation.workspace;
     return resolveAccessObject(workspace, ref, {
@@ -7241,9 +7241,15 @@ const { startDesktopCliServer } = createDesktopCliServer({
   currentDaemon: () => desktopEngine.daemon,
   agentDispatchStoreHandleFor,
   sharedViewOf,
-  sharedViewHistory: (workspace) => sharedViewHistory(receivedShareEngine.storeFor({
-    engineWorkspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: workspace.attachmentId,
-  }), workspace.workspaceId),
+  sharedViewHistory: (workspace) =>
+    sharedViewHistory(
+      receivedShareEngine.storeFor({
+        engineWorkspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+        attachmentId: workspace.attachmentId,
+      }),
+      workspace.workspaceId,
+    ),
   createJoinedGroup: async (workspace, store, input, assertCurrent) =>
     (
       await createJoinedGroup(
@@ -9034,9 +9040,8 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
-    requestAccessRefresh: async (_input, { operation }) => {
-      await accessOwner.refresh(operation!);
-    },
+    requestAccessRefresh: (input, { operation }) =>
+      accessOwner.refresh(operation!, { wait: input.wait }),
   });
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: handleIpc,
