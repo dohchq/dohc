@@ -1248,6 +1248,33 @@ describe("signing out", () => {
     stop();
   });
 
+  it("keeps the delete owed while the folder can't sync, even once it lists nothing", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const { outbox, account, stop } = launch(disk, server);
+    await ready(outbox);
+    await outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+
+    // Each file is unlinked, but the folder sync after it fails, so a power loss could bring the files back.
+    disk.failWrites = "write";
+    disk.failRemoves = "sync-folder";
+    await expect(account.signOut()).rejects.toEqual(new OutboxError("not-deleted"));
+    expect(disk.names()).toEqual([]);
+
+    outbox.wake();
+    await settled();
+    expect(outbox.state()).toMatchObject({ status: "failed", deletion: "failed-unmarked" });
+
+    disk.failRemoves = null;
+    outbox.wake();
+    await ready(outbox);
+    expect(outbox.state().deletion).toBe("none");
+    expect(requests(server, "post")).toHaveLength(1);
+    stop();
+  });
+
   it("finishes a delete a closed app left mid-way before reading anything at the next launch", async () => {
     const disk = durableDisk();
     const server = testServer();
@@ -1547,6 +1574,36 @@ describe("signing out with the account's token store", () => {
     second.stop();
   });
 
+  it("deletes nothing while the token's delete is under way, even at a wake, then deletes once", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const tokens = memoryStore(SIGNED_IN);
+    const gate = deferred<void>();
+    const store: SignInStore = {
+      load: () => tokens.store.load(),
+      save: (next) => tokens.store.save(next),
+      clear: async () => {
+        await gate.promise;
+        await tokens.store.clear();
+      },
+    };
+    const first = await signedInWithRecord(disk, server, store);
+    const signingOut = first.account.signOut();
+    await vi.waitFor(() => expect(first.account.state().status).toBe("signed-out"));
+    first.outbox.wake();
+    await settled();
+    expect(disk.names()).toEqual(expect.arrayContaining(["signing-out", "m-000000000001"]));
+    expect(first.outbox.state().deletion).toBe("owed");
+
+    gate.resolve();
+    await signingOut;
+    expect(tokens.current()).toBeNull();
+    expect(disk.names()).toEqual([]);
+    expect(first.outbox.state()).toMatchObject({ status: "ready", deletion: "none" });
+    expect(disk.log.filter((entry) => entry === "remove signing-out")).toHaveLength(1);
+    first.stop();
+  });
+
   it("finishes the delete at the next launch when the app closes after the token went, and a new sign-in sends nothing", async () => {
     const disk = durableDisk();
     const server = testServer();
@@ -1757,7 +1814,11 @@ describe("signing out with the account's token store", () => {
       await ready(outbox);
       expect(disk.names()).toEqual([]);
       expect(outbox.state().deletion).toBe("none");
-      expect(disk.log).not.toContain("remove signing-out");
+      // The marker never landed. Removing it after the records only syncs the folder.
+      expect(disk.files.has("signing-out")).toBe(false);
+      expect(disk.log.lastIndexOf("remove signing-out")).toBeGreaterThan(
+        disk.log.lastIndexOf("remove m-000000000001"),
+      );
       await settled();
       expect(requests(server, "post")).toHaveLength(1);
       stop();

@@ -34,11 +34,12 @@ import type { ChatMessage } from "./workspaceReads";
 // keeps every record.
 //
 // Sign out, through `signOut`, stops sending and writes a marker. Only then does the account end the sign-in and
-// delete its token; then every file goes, and the marker last. A launch that finds the marker finishes the delete
-// before it reads anything. If the marker can't be written, the delete must finish at once, or Sign out fails, and a
-// phone still signed in stays signed in. From the moment Sign out starts, the delete is owed: nothing sends and
-// nothing is added, whoever signs in, until a try finishes it. `wake` and each sign-in try again, and `state()` shows
-// a failed try, so Connect can say so after a 401 has already signed the phone out.
+// delete its token; once that has settled, every file goes, and the marker last. A launch that finds the marker
+// finishes the delete before it reads anything, even if the app closed before the token went. If the marker can't be
+// written, every file must go at once, before the token, or Sign out fails, and a phone still signed in stays signed
+// in. From the moment Sign out starts, the delete is owed: nothing sends and nothing is added, whoever signs in, until
+// a try finishes it. `wake` and each sign-in try again once Sign out's own try has ended, and `state()` shows a failed
+// try, so Connect can say so after a 401 has already signed the phone out.
 //
 // Every disk change runs in one queue. A change checks the outbox's lifetime, which Sign out moves on, after each
 // wait, so a late answer can neither update another account's record nor bring back a deleted one.
@@ -488,6 +489,13 @@ export function createOutbox(options: {
     }
   }
 
+  /** Removes `name`, present or not, and resolves whether the folder synced after it. */
+  const removed = (name: string) =>
+    files.remove(name).then(
+      () => true,
+      () => false,
+    );
+
   /**
    * Makes the owed delete safe to finish later: writes the marker, unless it's on disk already. Without it, a kill would
    * lose the delete, so every file must go now. Runs in the queue.
@@ -501,19 +509,13 @@ export function createOutbox(options: {
       changed();
     }
     if (marked) return "marked";
-    return (await clearFolder(null)) ? "deleted" : "kept";
+    // An empty folder may hold deletes an earlier try couldn't sync. Removing the absent marker syncs the folder.
+    return (await clearFolder(null)) && (await removed(SIGNING_OUT)) ? "deleted" : "kept";
   }
 
   /** Deletes every file but the marker, then the marker. Runs in the queue. */
   async function eraseMarked(): Promise<boolean> {
-    if (!(await clearFolder(SIGNING_OUT))) return false;
-    if (
-      !(await files.remove(SIGNING_OUT).then(
-        () => true,
-        () => false,
-      ))
-    )
-      return false;
+    if (!(await clearFolder(SIGNING_OUT)) || !(await removed(SIGNING_OUT))) return false;
     marked = false;
     return true;
   }
@@ -532,14 +534,12 @@ export function createOutbox(options: {
   }
 
   /**
-   * Tries the owed delete: the marker if it isn't on disk, then every other file, then the marker; or, if the marker
-   * still can't be written, every file at once. Then reads the empty folder. A failure keeps the outbox closed until
-   * the next try. Calls in the same lifetime share one try; a Sign out that starts meanwhile owns the delete from then.
+   * Tries the owed delete in the queue: the marker if it isn't on disk, then every other file, then the marker; or, if
+   * the marker still can't be written, every file at once. Resolves whether it finished. A failure keeps the outbox
+   * closed until the next try.
    */
-  function finishDelete(): Promise<void> {
-    if (deleting?.at === epoch) return deleting.done;
-    const at = epoch;
-    const done: Promise<void> = serial(async () => {
+  function erase(at: number): Promise<boolean> {
+    return serial(async () => {
       if (!owed) return false;
       const outcome = await secure();
       if (outcome === "kept" || (outcome === "marked" && !(await eraseMarked()))) {
@@ -549,7 +549,15 @@ export function createOutbox(options: {
       if (epoch !== at) return false;
       deleteDone();
       return true;
-    })
+    }).catch(() => false);
+  }
+
+  /**
+   * Makes `run` the try at the owed delete that every call in lifetime `at` shares, and reads the empty folder once it
+   * finishes. `run` resolves whether it finished.
+   */
+  function track(at: number, run: Promise<boolean>): Promise<void> {
+    const done: Promise<void> = run
       .catch(() => false)
       .then((finished) => {
         if (deleting?.done === done) deleting = null;
@@ -557,6 +565,12 @@ export function createOutbox(options: {
       });
     deleting = { at, done };
     return done;
+  }
+
+  /** Tries the owed delete, or shares the try under way. A Sign out that starts meanwhile owns the delete from then. */
+  function finishDelete(): Promise<void> {
+    if (deleting?.at === epoch) return deleting.done;
+    return track(epoch, erase(epoch));
   }
 
   /** Deletes saved records whose result the latest reads show. */
@@ -976,7 +990,7 @@ export function createOutbox(options: {
       owed = true;
       status = "loading";
       changed();
-      return serial(async () => {
+      const left = serial(async () => {
         const outcome = await secure();
         // The records stay on disk, unread, until a later try deletes them.
         if (outcome === "kept") failDelete();
@@ -985,9 +999,16 @@ export function createOutbox(options: {
       }).then(async (outcome) => {
         if (outcome === "kept") throw new OutboxError("not-deleted");
         await leave();
-        if (outcome === "marked") await finishDelete();
-        else await load();
+        return outcome;
       });
+      // This is the try every call shares until it ends, so the signed-out notice `leave` sends, a sign-in or `wake`
+      // can't delete the records before `leave` has deleted the token.
+      const done = track(
+        at,
+        left.then((outcome) => (outcome === "marked" ? erase(at) : epoch === at)),
+      );
+      // Settles after the try has ended, so a `wake` the caller makes next starts a new one.
+      return done.then(() => left).then(() => undefined);
     },
 
     wake() {

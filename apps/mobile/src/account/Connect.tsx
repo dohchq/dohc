@@ -47,7 +47,8 @@ export function Connect() {
   const insets = useSafeAreaInsets();
   const { account, state, outbox, deletion } = useAccount();
   const last = state.status === "signed-out" ? state : null;
-  // A Sign out's delete failed after the phone signed out. No sign-in starts until a try finishes it.
+  // A Sign out's delete is owed: no sign-in starts until a try finishes it. Only a failed try shows a problem.
+  const deleteOwed = deletion !== "none";
   const deleteFailed = deletion === "failed" || deletion === "failed-unmarked";
   const [address, setAddress] = useState(last?.origin ?? "");
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
@@ -64,7 +65,7 @@ export function Connect() {
   useEffect(() => () => account.cancelSignIn(), [account]);
 
   async function connect(value = address) {
-    if (deleteFailed) return;
+    if (deleteOwed) return;
     const checked = check(value);
     if ("problem" in checked) {
       setAddressProblem(ADDRESS_PROBLEM[checked.problem]);
@@ -229,7 +230,7 @@ export function Connect() {
             ) : null}
             <Button
               label={busy ? accountWords.connecting : accountWords.connectServer}
-              disabled={busy || deleteFailed}
+              disabled={busy || deleteOwed}
               onPress={() => void connect()}
             />
           </View>
