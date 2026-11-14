@@ -3731,7 +3731,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             retryable_refusals: Vec::new(),
             first: true,
             made_progress: false,
-            held: holding.held_at_round(&durable),
+            held: BTreeSet::new(),
+            conflict_waits: BTreeMap::new(),
             durable,
             holding,
             rounds_done: false,
@@ -3807,6 +3808,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     store,
                     cache,
                     workspace_id,
+                    identity,
                     &ordered[index],
                     index,
                     p,
@@ -3866,26 +3868,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 // A hosted document that would pass the retention limit is
                 // held at its first op still to apply, as one that is not
                 // ready, so the pass still commits and releases other work.
-                // An origin a conflict holds says which conflict to resolve
-                // if its work passes the limit.
-                let conflict_waits: BTreeMap<String, Option<String>> = p
-                    .retryable_refusals
-                    .iter()
-                    .filter(|(_, reason)| *reason == crate::moment_apply::RESOLVE_EXISTING_CONFLICT)
-                    .map(|&(index, _)| {
-                        let op = &ordered[index];
-                        let path = op.payload["beforePath"]
-                            .as_str()
-                            .or(op.payload["path"].as_str());
-                        (op.origin_id.clone(), path.map(str::to_owned))
-                    })
-                    .collect();
                 let unretained = crate::deferred::retain_waiting(
                     store,
                     identity,
                     relay_namespace,
                     &retained,
-                    &conflict_waits,
+                    &p.conflict_waits,
                     faults,
                 )?;
                 for op in retained {
@@ -3906,7 +3894,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             p.retryable_refusals.clear();
             p.next = 0;
             p.made_progress = false;
-            p.held = p.holding.held_at_round(&p.durable);
+            // Retained work replays first and holds its file again if it
+            // still cannot apply.
+            p.held.clear();
+            p.conflict_waits.clear();
         }
         // The inactive drain's refusals reach the pass as pending refusals,
         // and the facts of rows it removes that applied to a head before
@@ -4053,6 +4044,37 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(Applying::Done(Box::new(pass)))
     }
 
+    /// Hold ordinary op `op` at `index` under `key`, behind earlier work of
+    /// its origin that has not applied. While each hold of the origin is
+    /// durable, it is retained at once with them.
+    fn hold_behind(
+        store: &mut EngineStore,
+        identity: &crate::SyncIdentity,
+        op: &ReplicationEnvelope,
+        index: usize,
+        key: String,
+        p: &mut ApplyProgress,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), RelayError> {
+        p.still_retryable.push(index);
+        p.held.insert(key.clone());
+        let durable = origin_keys(&p.durable, &op.origin_id).next().is_some()
+            && origin_keys(&p.held, &op.origin_id)
+                .all(|held| *held == key || p.durable.contains(held));
+        if durable {
+            p.durable.insert(key);
+            crate::deferred::retain_waiting(
+                store,
+                identity,
+                None,
+                &[op],
+                &p.conflict_waits,
+                faults,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Apply the ordered op at `index` within the round `p` stands in. One
     /// that waits for released-tail validation applies nothing and changes
     /// nothing of `p`.
@@ -4062,6 +4084,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
         workspace_id: &str,
+        identity: &crate::SyncIdentity,
         op: &ReplicationEnvelope,
         index: usize,
         p: &mut ApplyProgress,
@@ -4070,6 +4093,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
     ) -> Result<(), RelayError> {
         let key = p.holding.key(op);
+        // Later work of a held file, or of an origin held whole, waits.
+        if let (Holding::ByOrigin, Some(key)) = (&p.holding, &key)
+            && (p.held.contains(key) || p.held.contains(&op.origin_id))
+        {
+            Self::hold_behind(store, identity, op, index, key.clone(), p, faults)?;
+            return Ok(());
+        }
         if let (Holding::ByDocument { behind, .. }, Some(key)) = (&p.holding, &key) {
             let omitted = behind
                 .get(key)
@@ -4191,18 +4221,43 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         match held_for {
             Err(reason) => {
                 p.retryable_refusals.push((index, reason));
+                // An origin a conflict holds says which conflict to resolve
+                // if its work passes the retention limit.
+                if reason == crate::moment_apply::RESOLVE_EXISTING_CONFLICT {
+                    let path = op.payload["beforePath"]
+                        .as_str()
+                        .or(op.payload["path"].as_str());
+                    p.conflict_waits
+                        .insert(op.origin_id.clone(), path.map(str::to_owned));
+                }
                 if let Some(key) = key {
-                    if retained_while_held(op, reason) {
+                    let durable = retained_while_held(op, reason);
+                    if durable {
                         p.durable.insert(key.clone());
                     }
                     p.held.insert(key);
+                    // Retained now, so the origin's later work on other files
+                    // can pass it in this pass.
+                    if durable && matches!(p.holding, Holding::ByOrigin) {
+                        crate::deferred::retain_waiting(
+                            store,
+                            identity,
+                            None,
+                            &[op],
+                            &p.conflict_waits,
+                            faults,
+                        )?;
+                    }
                 }
                 p.still_retryable.push(index);
             }
             Ok(Err(SyncError::SequenceGap))
-                if matches!(p.holding, Holding::ByOrigin) && p.held.contains(&op.origin_id) =>
+                if matches!(p.holding, Holding::ByOrigin)
+                    && (origin_keys(&p.held, &op.origin_id).next().is_some()
+                        || origin_keys(&p.durable, &op.origin_id).next().is_some()) =>
             {
-                p.still_retryable.push(index);
+                let key = key.unwrap_or_else(|| op.origin_id.clone());
+                Self::hold_behind(store, identity, op, index, key, p, faults)?;
             }
             Ok(Err(error)) => return Err(self.local(error)),
             Ok(Ok(outcome)) => {
@@ -6183,10 +6238,26 @@ fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     }
 }
 
+/// The hold keys in `keys` of `origin`: the origin itself, held whole, and
+/// each of its files.
+fn origin_keys<'a>(
+    keys: &'a BTreeSet<String>,
+    origin: &'a str,
+) -> impl Iterator<Item = &'a String> + 'a {
+    keys.iter().filter(move |key| {
+        key.as_str() == origin
+            || key
+                .strip_prefix(origin)
+                .is_some_and(|rest| rest.starts_with('\u{1f}'))
+    })
+}
+
 /// How a pass holds later work behind an op that cannot apply yet.
 enum Holding {
-    /// Admission takes each origin in sequence, so it refuses later ops of a
-    /// held origin with a gap.
+    /// Admission takes each origin in sequence, except that an op may pass
+    /// the origin's retained work on other files and paths
+    /// ([`crate::deferred::passes_held_work`]). Later ops of a held file, or
+    /// of an origin an op with no file holds, wait behind it.
     ByOrigin,
     /// A hosted replica admits sparsely, so the pass itself holds later ops of
     /// a held document. `behind` gives, for each document whose retained work
@@ -6202,7 +6273,7 @@ enum Holding {
 impl Holding {
     fn key(&self, op: &ReplicationEnvelope) -> Option<String> {
         match self {
-            Self::ByOrigin => Some(op.origin_id.clone()),
+            Self::ByOrigin => Some(crate::deferred::hold_key(op)),
             Self::ByDocument { .. } => crate::hosted::hosted_document(op).map(str::to_owned),
         }
     }
@@ -6220,15 +6291,6 @@ impl Holding {
         store
             .read_with(|conn| crate::hosted::held_before_routing(conn, unready, op))
             .map_err(local)
-    }
-
-    /// What each round starts out holding: an origin with durable work, or
-    /// nothing for a hosted replica.
-    fn held_at_round(&self, durable: &BTreeSet<String>) -> BTreeSet<String> {
-        match self {
-            Self::ByOrigin => durable.clone(),
-            Self::ByDocument { .. } => BTreeSet::new(),
-        }
     }
 
     /// The document of `op`, when it is a hosted document that is not ready.
@@ -6341,6 +6403,8 @@ struct ApplyProgress {
     still_retryable: Vec<usize>,
     /// Why each op the round held could not apply.
     retryable_refusals: Vec<(usize, &'static str)>,
+    /// Each origin a conflict held in the round, with the conflict's path.
+    conflict_waits: BTreeMap<String, Option<String>>,
     first: bool,
     made_progress: bool,
     held: BTreeSet<String>,

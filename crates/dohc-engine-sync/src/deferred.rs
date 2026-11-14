@@ -14,15 +14,127 @@ const MAX_PENDING_OPS: i64 = 10_000;
 const MAX_PENDING_BYTES: i64 = 512 * 1024 * 1024;
 const REPLAY_PAGE: i64 = 500;
 
-/// Whether retained op `d` has yet to apply. An ordinary replica admits each
-/// origin contiguously, so its ack answers; a hosted replica admits sparsely,
-/// so only its journal does.
+/// Whether retained op `d` has yet to apply. Both kinds of replica admit
+/// sparsely past held work, so the journal answers; an ordinary replica's
+/// ack also covers everything at or below it.
 const UNAPPLIED: &str =
-    "CASE WHEN EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=d.workspace_id)
-    THEN NOT EXISTS(SELECT 1 FROM replication_log l WHERE l.workspace_id=d.workspace_id
+    "NOT EXISTS(SELECT 1 FROM replication_log l WHERE l.workspace_id=d.workspace_id
         AND l.origin_id=d.origin_id AND l.origin_seq=d.origin_seq)
-    ELSE d.origin_seq>COALESCE((SELECT a.acked_seq FROM replication_peers a
-        WHERE a.workspace_id=d.workspace_id AND a.origin_id=d.origin_id),-1) END";
+    AND (EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=d.workspace_id)
+      OR d.origin_seq>COALESCE((SELECT a.acked_seq FROM replication_peers a
+        WHERE a.workspace_id=d.workspace_id AND a.origin_id=d.origin_id),-1))";
+
+/// The objects and lowercased paths a file op touches. An op with none, or
+/// one that carries a conflict's effect, has no scope: it waits for all
+/// earlier work of its origin, and all later work waits for it.
+struct Scope {
+    objects: BTreeSet<String>,
+    paths: BTreeSet<String>,
+}
+
+fn scope(op: &ReplicationEnvelope) -> Option<Scope> {
+    if !matches!(op.op_kind.as_str(), "moment.append" | "ydoc.update")
+        || !op.payload["conflictId"].is_null()
+    {
+        return None;
+    }
+    let text = |name: &str| op.payload[name].as_str().map(str::to_owned);
+    let objects: BTreeSet<String> = ["objectId", "beforeObjectId"]
+        .into_iter()
+        .filter_map(text)
+        .collect();
+    if objects.is_empty() {
+        return None;
+    }
+    let paths = [
+        "path",
+        "payloadBeforePath",
+        "payloadAfterPath",
+        "beforePath",
+    ]
+    .into_iter()
+    .filter_map(text)
+    .map(|path| path.to_lowercase())
+    .collect();
+    Some(Scope { objects, paths })
+}
+
+fn path_overlaps(left: &str, right: &str) -> bool {
+    let under = |inner: &str, outer: &str| {
+        inner.len() > outer.len()
+            && inner.starts_with(outer)
+            && inner.as_bytes()[outer.len()] == b'/'
+    };
+    left == right || under(left, right) || under(right, left)
+}
+
+impl Scope {
+    fn independent(&self, other: &Scope) -> bool {
+        self.objects.is_disjoint(&other.objects)
+            && !self
+                .paths
+                .iter()
+                .any(|left| other.paths.iter().any(|right| path_overlaps(left, right)))
+    }
+}
+
+/// The key an ordinary pass holds `op` under: its origin and file, or the
+/// origin alone for an op with no scope.
+pub(crate) fn hold_key(op: &ReplicationEnvelope) -> String {
+    match scope(op) {
+        Some(_) => format!(
+            "{}\u{1f}{}",
+            op.origin_id,
+            op.payload["objectId"].as_str().unwrap_or_default()
+        ),
+        None => op.origin_id.clone(),
+    }
+}
+
+/// Whether ordinary op `op` may apply although its origin's ops after
+/// `acked` and before it have not all applied: each of them applied, or
+/// waits retained here on files and paths `op` does not touch.
+pub(crate) fn passes_held_work(
+    tx: &rusqlite::Transaction<'_>,
+    op: &ReplicationEnvelope,
+    acked: i64,
+) -> Result<bool, SyncError> {
+    let Some(mine) = scope(op) else {
+        return Ok(false);
+    };
+    let between = params![op.workspace_id, op.origin_id, acked, op.origin_seq];
+    let applied: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM replication_log
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>?3 AND origin_seq<?4",
+            between,
+            |r| r.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let mut stmt = tx
+        .prepare_cached(&format!(
+            "SELECT d.envelope_json FROM relay_deferred_ops d
+             WHERE d.workspace_id=?1 AND d.origin_id=?2 AND d.origin_seq>?3 AND d.origin_seq<?4
+               AND {UNAPPLIED}"
+        ))
+        .map_err(SyncError::corrupt)?;
+    let waiting = stmt
+        .query_map(between, |r| r.get::<_, String>(0))
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    if applied + waiting.len() as i64 != op.origin_seq - acked - 1 {
+        return Ok(false);
+    }
+    for encoded in waiting {
+        let held: ReplicationEnvelope =
+            serde_json::from_str(&encoded).map_err(SyncError::corrupt)?;
+        if !scope(&held).is_some_and(|theirs| mine.independent(&theirs)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 fn local(error: impl std::fmt::Display) -> RelayError {
     RelayError::Local(error.to_string())
@@ -225,11 +337,10 @@ pub(crate) fn retained_namespace(
 pub const WAITING_VERSION_CODE: &str = crate::moment_apply::RESOLVE_EXISTING_CONFLICT;
 
 /// The newer version that waits behind each of `conflict_ids` still open
-/// from sync, by conflict id. Only an origin's first retained op still to
-/// apply can wait on a conflict, because the rest of that origin waits
-/// behind it. So this reads one index entry per retained op and decodes one
-/// envelope per held origin. A hosted replica reads none here: its journal,
-/// not an origin's acknowledgement, says what applied.
+/// from sync, by conflict id. Only the first retained op still to apply of
+/// an origin's file can wait on a conflict, because the rest of that file
+/// waits behind it, as does the rest of an origin an op with no scope holds.
+/// A hosted replica reads none here: it retains by document, not origin.
 pub fn waiting_versions(
     store: &EngineStore,
     workspace: &str,
@@ -262,27 +373,22 @@ pub fn waiting_versions(
         }
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT d.origin_id,MIN(d.origin_seq) FROM relay_deferred_ops d
-                 WHERE d.workspace_id=?1 AND {UNAPPLIED} GROUP BY d.origin_id"
+                "SELECT d.envelope_json FROM relay_deferred_ops d
+                 WHERE d.workspace_id=?1 AND {UNAPPLIED} ORDER BY d.origin_id,d.origin_seq"
             ))
             .map_err(SyncError::corrupt)?;
-        let heads = stmt
-            .query_map([workspace], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        let encoded = stmt
+            .query_map([workspace], |r| r.get::<_, String>(0))
             .map_err(SyncError::corrupt)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(SyncError::corrupt)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT envelope_json FROM relay_deferred_ops
-                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
-            )
-            .map_err(SyncError::corrupt)?;
-        for (origin, seq) in heads {
-            let encoded: String = stmt
-                .query_row(params![workspace, origin, seq], |r| r.get(0))
-                .map_err(SyncError::corrupt)?;
+        let mut seen = BTreeSet::new();
+        for encoded in encoded {
             let op: ReplicationEnvelope =
                 serde_json::from_str(&encoded).map_err(SyncError::corrupt)?;
+            if seen.contains(&op.origin_id) || !seen.insert(hold_key(&op)) {
+                continue;
+            }
             if op.op_kind != "moment.append" {
                 continue;
             }
@@ -422,7 +528,12 @@ pub(crate) fn retain_waiting(
                     "SELECT MAX(COALESCE((SELECT MAX(origin_seq) FROM relay_deferred_ops WHERE workspace_id=?1 AND origin_id=?2),-1),
                      COALESCE((SELECT acked_seq FROM replication_peers WHERE workspace_id=?1 AND origin_id=?2),-1))",
                     params![op.workspace_id,op.origin_id], |r| r.get(0)).map_err(SyncError::corrupt)?;
-                if last.checked_add(1) != Some(op.origin_seq) { return Err(SyncError::SequenceGap); }
+                // Ops between the last retained or acknowledged one and this
+                // one applied ahead of held work.
+                let skipped: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq>?3 AND origin_seq<?4",
+                    params![op.workspace_id,op.origin_id,last,op.origin_seq], |r| r.get(0)).map_err(SyncError::corrupt)?;
+                if last.checked_add(1 + skipped) != Some(op.origin_seq) { return Err(SyncError::SequenceGap); }
                 None
             };
             // A document's retained work stays a prefix of its unapplied work.
