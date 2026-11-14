@@ -176,11 +176,16 @@ pub(crate) enum ShareDisposition {
 impl SyncError {
     /// The skip-or-abort decision, stated once and exhaustively.
     ///
-    /// No wildcard arm on purpose. A new variant does not silently inherit
-    /// "abort" and wedge a pull — it fails to compile here until its author
+    /// The wildcard enum match lints forbid a default arm.
+    /// A new variant does not silently inherit "abort" and wedge a pull —
+    /// it fails to compile here until its author
     /// decides which it is. That is the whole reason this is a function on the
     /// error rather than a list of classes at each lane: a list can be
     /// forgotten, and forgetting it costs the share, not the count.
+    #[deny(
+        clippy::wildcard_enum_match_arm,
+        clippy::match_wildcard_for_single_variants
+    )]
     pub(crate) fn share_disposition(&self) -> ShareDisposition {
         match self {
             SyncError::Shared(original) => original.share_disposition(),
