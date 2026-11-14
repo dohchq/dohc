@@ -150,6 +150,8 @@ export function createNamedLiveBrowserTransport<
       refused?: boolean;
       /** Set when the attempt uses the session an earlier attempt received. */
       kept?: boolean;
+      /** Set while an attempt with no session left reads the invitation, so its deadline stops retries. */
+      spent?: boolean;
     };
     let attempt: Attempt | undefined;
     let automatic = false,
@@ -443,6 +445,16 @@ export function createNamedLiveBrowserTransport<
       }
       return passingRefusal();
     }
+    /** Whether the invitation says the owner removed this account's access. */
+    async function accessRemoved(held: Attempt, grantId: string): Promise<boolean> {
+      held.spent = true;
+      try {
+        await json(held, "/api/live/named-documents", { grantId });
+        return false;
+      } catch (error) {
+        return error instanceof AccessRemoved;
+      }
+    }
     const passingRefusal = () =>
       accessStoodAt !== undefined && Date.now() - accessStoodAt < PASSING_REFUSAL_MS
         ? "host-unavailable"
@@ -468,11 +480,13 @@ export function createNamedLiveBrowserTransport<
           fail(
             held,
             "disconnected",
-            held.refused
-              ? passingRefusal()
-              : held.socket && !held.route
-                ? "host-unavailable"
-                : "connect-timeout",
+            held.spent
+              ? "authority-unavailable"
+              : held.refused
+                ? passingRefusal()
+                : held.socket && !held.route
+                  ? "host-unavailable"
+                  : "connect-timeout",
           ),
         limits.connectTimeoutMs,
       );
@@ -573,7 +587,9 @@ export function createNamedLiveBrowserTransport<
             : error instanceof AccessRemoved
               ? "access-removed"
               : error instanceof SessionSpent
-                ? "authority-unavailable"
+                ? "grantId" in target && (await accessRemoved(held, String(target.grantId)))
+                  ? "access-removed"
+                  : "authority-unavailable"
                 : error instanceof LiveAuthorityUnavailableError
                   ? !options.authorize && "grantId" in target
                     ? await recheck(held, String(target.grantId))
