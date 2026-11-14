@@ -955,6 +955,40 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  // A stopped relay is an outage. Calling it an ended share retires a
+  // membership for good.
+  it("names an unreachable relay for every share method, not an ended share", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method.startsWith("share.")) {
+        throw new DaemonRefusalError(
+          { code: "WORKSPACE_UNAVAILABLE", message: "relay-unreachable", retry: "afterBackoff" },
+          new Error("refused"),
+        );
+      }
+      return undefined;
+    });
+    const { client, sessions } = await harness(daemon);
+    const grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "comment",
+      wholeWorkspace: true,
+    } as const;
+    await expect(
+      client.pullShareView({ shareId: "share", grantedSelector }),
+    ).rejects.toBeInstanceOf(RelayUnreachableError);
+    await expect(
+      client.pushShareViewChat({ shareId: "share", grantedSelector }),
+    ).rejects.toBeInstanceOf(RelayUnreachableError);
+    await expect(
+      client.pullSharedChannel({ shareId: "share", channelWireId: "channel" }),
+    ).rejects.toBeInstanceOf(RelayUnreachableError);
+    await expect(
+      client.pushSharedChannel({ shareId: "share", channelWireId: "channel" }),
+    ).rejects.toBeInstanceOf(RelayUnreachableError);
+    await sessions.closeAll();
+  });
+
   it("allows a relay change after clean teardown without weakening transport locking", async () => {
     const { rootPath, daemon, live, routes } = await harness();
     const first = live.bind({
@@ -1081,22 +1115,34 @@ describe("allowInsecureLoopbackRelayForTests", () => {
   });
 });
 
-  it("reads what a stopped direct push left waiting, and refuses an answer it cannot read", async () => {
-    const answers: JsonValue[] = [
-      { pages: 2, collectionWrites: 1, morePending: false },
-      { pages: -1, collectionWrites: 0, morePending: false },
-      { pages: 1 },
-    ];
-    const daemon = new MockDaemon((request) =>
-      request.method === "share.direct.waiting" ? answers.shift() : undefined,
-    );
-    const { client, sessions } = await harness(daemon);
-    await expect(client.directWritesWaiting({ shareId: "share-file" }))
-      .resolves.toEqual({ pages: 2, collectionWrites: 1, morePending: false });
-    await expect(client.directWritesWaiting({ shareId: "share-file" })).rejects.toThrow("share.direct.waiting");
-    await expect(client.directWritesWaiting({ shareId: "share-file" })).rejects.toThrow("share.direct.waiting");
-    expect(daemon.requests.filter((request) => request.method === "share.direct.waiting").map((request) => request.params))
-      .toEqual(Array.from({ length: 3 }, () => ({ workspaceId: "workspace-a", shareId: "share-file" })));
-    expectStatefulRequestsScoped(daemon.requests);
-    await sessions.closeAll();
+it("reads what a stopped direct push left waiting, and refuses an answer it cannot read", async () => {
+  const answers: JsonValue[] = [
+    { pages: 2, collectionWrites: 1, morePending: false },
+    { pages: -1, collectionWrites: 0, morePending: false },
+    { pages: 1 },
+  ];
+  const daemon = new MockDaemon((request) =>
+    request.method === "share.direct.waiting" ? answers.shift() : undefined,
+  );
+  const { client, sessions } = await harness(daemon);
+  await expect(client.directWritesWaiting({ shareId: "share-file" })).resolves.toEqual({
+    pages: 2,
+    collectionWrites: 1,
+    morePending: false,
   });
+  await expect(client.directWritesWaiting({ shareId: "share-file" })).rejects.toThrow(
+    "share.direct.waiting",
+  );
+  await expect(client.directWritesWaiting({ shareId: "share-file" })).rejects.toThrow(
+    "share.direct.waiting",
+  );
+  expect(
+    daemon.requests
+      .filter((request) => request.method === "share.direct.waiting")
+      .map((request) => request.params),
+  ).toEqual(
+    Array.from({ length: 3 }, () => ({ workspaceId: "workspace-a", shareId: "share-file" })),
+  );
+  expectStatefulRequestsScoped(daemon.requests);
+  await sessions.closeAll();
+});

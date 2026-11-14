@@ -486,10 +486,10 @@ function translateRelayError(method: string, error: unknown): never {
     throw new RelayKeyEnvelopeMissingError();
   }
   if (error.wireCode === "WORKSPACE_UNAVAILABLE") {
-    if (method.startsWith("share.")) throw new ShareUnavailableError();
-    // Claim setup must distinguish a network outage from a refused claim.
+    // An outage, never an ended share: only SHARE_UNAVAILABLE ends one, and
+    // claim setup must tell an outage from a refused claim.
     if (
-      (SYNC_PASS_METHODS.has(method) || method === "sync.claim") &&
+      (SYNC_PASS_METHODS.has(method) || method === "sync.claim" || method.startsWith("share.")) &&
       error.message === "relay-unreachable"
     ) {
       throw new RelayUnreachableError();
@@ -1171,7 +1171,11 @@ export class EngineRelayClient {
             changed.set(path.path, path);
           }
           if (pageChangedPaths.length > 0) {
-            this.onShareViewPullProgress?.({ workspaceId: workspace.workspaceId, shareId, files: changed.size });
+            this.onShareViewPullProgress?.({
+              workspaceId: workspace.workspaceId,
+              shareId,
+              files: changed.size,
+            });
           }
           if (!hasMore) {
             finalCursor = cursor;
