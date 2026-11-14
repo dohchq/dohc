@@ -3586,16 +3586,16 @@ mod tests {
         .await;
         let actor = service.open(Some(&handle)).unwrap().actor.clone();
         let file = scratch.path().join("notes/owner.md");
-        let capture = |text: &str, now_ms: i64| {
+        let capture_at = |path: &str, text: &str, now_ms: i64| {
             let actor = actor.clone();
-            let text = text.to_owned();
+            let (path, text) = (path.to_owned(), text.to_owned());
             async move {
                 actor
                     .capture_ingest(
                         dohc_engine_runtime::CaptureIngest {
                             workspace_id: "owner-source".into(),
                             version_id: "main".into(),
-                            path: "notes/owner.md".into(),
+                            path,
                             text,
                             metadata_origin: "capture".into(),
                             metadata_summary: None,
@@ -3612,6 +3612,7 @@ mod tests {
                     .await
             }
         };
+        let capture = |text: &str, now_ms: i64| capture_at("notes/owner.md", text, now_ms);
         let db = || {
             rusqlite::Connection::open_with_flags(
                 &db_path,
@@ -3678,6 +3679,30 @@ mod tests {
             .await
             .expect("the file holds the recorded bytes again");
         assert_eq!(observe(), (moments, vec![]), "the hold ends with no moment");
+
+        // A hold left on a file whose note is not live keeps none of its
+        // bytes out of History.
+        let plain = "notes/plain.md";
+        let first = "Plain.\n";
+        std::fs::write(scratch.path().join(plain), first).unwrap();
+        capture_at(plain, first, 25)
+            .await
+            .expect("a file with no live note is captured");
+        let changed = "Plain, changed outside dohc.\n";
+        std::fs::write(scratch.path().join(plain), changed).unwrap();
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO held_outside_changes SELECT workspace_id,version_id,object_id,path,?1,?2,26,26 \
+                 FROM snapshots WHERE workspace_id='owner-source' AND path=?3 LIMIT 1",
+                rusqlite::params![sha(changed), changed.len() as i64, plain],
+            )
+            .unwrap();
+        let moments = moment_count();
+        capture_at(plain, changed, 27)
+            .await
+            .expect("capture reads held bytes once their note is not live");
+        assert_eq!(observe(), (moments + 1, vec![]), "the change reaches History");
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
