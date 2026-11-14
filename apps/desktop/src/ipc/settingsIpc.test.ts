@@ -227,6 +227,7 @@ async function harness() {
     second,
     open,
     zoom: capability.stepWindowZoom,
+    changeAgent: capability.changeAgent,
     setCachedNames,
     applyZoomLevelToWindows,
     applyThemeMode,
@@ -790,6 +791,48 @@ describe("registered settings IPC", () => {
     });
     expect(h.scanWorkspace).not.toHaveBeenCalled();
     expect(h.refreshDispatchTray).toHaveBeenCalledTimes(3);
+  });
+
+  it("changes one agent from the file as it is now, so two changes at once both land", async () => {
+    const h = await harness();
+    // An agent with a thread has no launch: its tool runs it.
+    const { launch: _launch, ...unlaunched } = testAgent({ name: "Chief" });
+    const chief = {
+      ...unlaunched,
+      thread: { tool: "t3-code" as const, id: "t3-thread-1" },
+      workspaces: ["workspace-a", "workspace-b"],
+    };
+    const seeded = { ...DEFAULT_USER_SETTINGS, agents: { chief } };
+    await h.invoke(settingsOperations.setUserSettings.channel, {
+      settings: seeded,
+      base: DEFAULT_USER_SETTINGS,
+    });
+    const without = (workspaceId: string) =>
+      h.changeAgent("chief", (agent) => ({
+        ...agent,
+        workspaces: (agent.workspaces ?? []).filter((id) => id !== workspaceId),
+      }));
+
+    // Each window takes its own workspace away. Neither puts the other's back.
+    await Promise.all([without("workspace-a"), without("workspace-b")]);
+    const saved = async () =>
+      (await userSettingsStore.readUserSettingsFile(h.stateDirectory())).settings.agents.chief;
+    expect((await saved())?.workspaces).toEqual([]);
+
+    // A change can refuse, and one for an agent that is gone is refused. Neither saves.
+    await expect(
+      h.changeAgent("chief", () => {
+        throw new Error("Chief was connected to another thread meanwhile. Try again.");
+      }),
+    ).rejects.toThrow("connected to another thread meanwhile");
+    await expect(h.changeAgent("gone", (agent) => ({ ...agent, name: "Gone" }))).rejects.toThrow(
+      "no longer in Settings",
+    );
+    expect(await saved()).toMatchObject({ name: "Chief", workspaces: [] });
+    // An agent given back unchanged announces nothing.
+    const announced = h.broadcastUserSettings.mock.calls.length;
+    await h.changeAgent("chief", (agent) => agent);
+    expect(h.broadcastUserSettings).toHaveBeenCalledTimes(announced);
   });
 
   it("applies two quick pins to the file one after the other, so both land", async () => {

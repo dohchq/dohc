@@ -17,6 +17,7 @@ import {
   runnableAgents,
   settingsDeepEqual,
   type Agent,
+  type AgentSettings,
   type DesktopUserSettings,
   type ThemeMode,
   type ZoomStep,
@@ -210,6 +211,25 @@ export function createSettingsIpc<
     );
   }
 
+  // One agent's settings, changed from the file as it is now, so a change
+  // made in another window a moment ago stays. `change` throws to refuse, and
+  // answers the agent it was given when there is nothing to change.
+  function changeAgent(
+    agentId: string,
+    change: (agent: AgentSettings) => AgentSettings,
+  ): Promise<DesktopUserSettingsResult> {
+    return saveUserSettings(() =>
+      updateUserSettingsFile(stateDir(), (current) => {
+        const agent = current.agents[agentId];
+        if (!agent) throw new Error("This agent is no longer in Settings.");
+        const next = change(agent);
+        return next === agent
+          ? current
+          : { ...current, agents: { ...current.agents, [agentId]: next } };
+      }),
+    );
+  }
+
   // Answers the function that stops the watch. It never keeps main alive.
   function watchUserSettingsFile(): () => void {
     return watchSettingsFile({
@@ -364,5 +384,6 @@ export function createSettingsIpc<
     ...handlers,
     watchUserSettingsFile,
     stepWindowZoom,
+    changeAgent,
   };
 }

@@ -446,25 +446,102 @@ describe("agent threads", () => {
     );
   });
 
-  it("readies an agent's thread for one more workspace: sets that backlog aside, then tells the thread", async () => {
-    const { agentThreads, order, sent, forward } = started(setup({ chief }, ["m1", "m2"]));
+  it("turns a workspace on for an agent's thread: sets the backlog aside, tells the thread, saves, and forwards only what comes after", async () => {
+    const off = { ...chief, workspaces: [] };
+    const { agentThreads, order, sent, forward, save, arrive } = started(
+      setup({ chief: off }, ["m1", "m2"]),
+    );
     const agent = { id: "chief", name: "Chief", thread };
+    agentThreads.watch(WORKSPACE);
+    await settled();
+    expect(order).toEqual([]);
 
-    await agentThreads.serve(WORKSPACE, agent);
+    // A message is written while the thread is told, before the workspace is on.
+    forward.mockImplementationOnce(async (input) => {
+      order.push("sent workspace");
+      sent.push(input);
+      arrive("m3");
+      await settled();
+      return { runId: null };
+    });
+    await agentThreads.serve(WORKSPACE, agent, async () => {
+      order.push("saved");
+      save({ chief });
+      agentThreads.settingsChanged();
+      await settled();
+    });
+    await settled();
 
-    expect(order).toEqual(["read m2", "sent workspace"]);
+    // What was written before the save landed is set aside, and never forwarded.
+    expect(order).toEqual(["read m2", "sent workspace", "saved", "read m3"]);
     expect(sent[0]).toMatchObject({ threadId: "t3-thread-1", how: "line" });
-    // The thread learns it now holds two workspaces' messages, and the name is quoted.
+    // The thread learns it can hold several workspaces' messages, and the name is quoted.
     expect(sent[0]!.message.split("\n")[0]).toContain('from the workspace named "Launch"');
     expect(sent[0]!.message).toContain("Do not carry what you learned from one workspace");
 
-    // Nothing is added for a thread dohc cannot tell, or a workspace that is gone.
+    // What is written once it is on goes to the thread.
+    arrive("m4");
+    await vi.waitFor(() => expect(order.slice(4)).toEqual(["sent message", "read m4"]));
+    expect(String(sent[1]!.message)).toContain("body of m4");
+  });
+
+  it("saves no workspace for a thread dohc cannot tell, or a workspace that is gone", async () => {
+    const { agentThreads, forward } = started(setup({ chief: { ...chief, workspaces: [] } }, []));
+    const agent = { id: "chief", name: "Chief", thread };
+    const save = vi.fn(async () => {});
+
     const refused = new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
     forward.mockRejectedValueOnce(refused);
-    await expect(agentThreads.serve(WORKSPACE, agent)).rejects.toBe(refused);
-    await expect(agentThreads.serve("ws-gone", agent)).rejects.toThrow(
+    await expect(agentThreads.serve(WORKSPACE, agent, save)).rejects.toBe(refused);
+    await expect(agentThreads.serve("ws-gone", agent, save)).rejects.toThrow(
       "no longer has this workspace",
     );
+    expect(save).not.toHaveBeenCalled();
+
+    // A save that fails is the failure, and the workspace stays off.
+    const unsaved = new Error("dohc did not save settings.");
+    await expect(
+      agentThreads.serve(WORKSPACE, agent, async () => {
+        throw unsaved;
+      }),
+    ).rejects.toBe(unsaved);
+  });
+
+  it("gives no line to a message the tool took before its workspace was turned off and on again", async () => {
+    const { agentThreads, forward, save, tool, order } = started(setup({ chief }));
+    tool.state = {
+      ...tool.state,
+      runs: [
+        { id: "run-1", state: "working", requestedAtMs: 100, startedAtMs: 200, endedAtMs: null },
+      ],
+    };
+    // The tool holds the message until the test lets it go.
+    let taken!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      taken = resolve;
+    });
+    forward.mockImplementationOnce(async () => {
+      await holding;
+      return { runId: "run-1" };
+    });
+    agentThreads.watch(WORKSPACE);
+    await vi.waitFor(() => expect(forward).toHaveBeenCalledTimes(1));
+
+    // The person turns the workspace off for the agent, and on again.
+    save({ chief: { ...chief, workspaces: [] } });
+    agentThreads.settingsChanged();
+    await settled();
+    await agentThreads.serve(WORKSPACE, { id: "chief", name: "Chief", thread }, async () => {
+      save({ chief });
+      agentThreads.settingsChanged();
+    });
+    expect(order).toEqual(["read m1", "sent workspace"]);
+
+    // Then the tool answers for the message it took before all that.
+    taken();
+    await settled();
+    await settled();
+    expect(agentThreads.lines(WORKSPACE)).toEqual([]);
   });
 
   it("keeps no line for a thread the agent left while the tool took a message for it", async () => {
