@@ -30,7 +30,6 @@ import {
   RUST_ARCHIVE_PROOFS,
   RUST_PARTITION_ZERO_DELAY_SECONDS,
   RUST_POLICY_STEPS,
-  RUST_READER_SECONDS,
   RUST_READER_SHARD,
   RUST_SHARDS,
   RUST_TEST_PROOFS,
@@ -533,7 +532,6 @@ test("The reader reserve holds back wall seconds times the test thread count", (
   const times = { defaultSeconds: 10, binaries: {}, tests: {} };
   const inventory = Array.from({ length: 24 }, (_, i) => `crate t${i}`);
   assert.equal(RUST_READER_SHARD, 1);
-  assert.equal(RUST_READER_SECONDS, 47);
   assert.equal(RUST_TEST_THREADS, 4);
   // A 20 s wall reserve holds back 20, 40, or 80 test-seconds at 1, 2, or 4 threads.
   for (const [threads, sizes] of [

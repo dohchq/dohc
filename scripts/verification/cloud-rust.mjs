@@ -17,12 +17,14 @@ import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test
 import rustTestTimes from "./rust-test-times.json" with { type: "json" };
 
 export const RUST_SHARDS = 7;
-// ubuntu-24.04 runners have 4 vCPUs, and nextest runs one test per CPU.
+// Default ubuntu-24.04 runners have 4 vCPUs, and nextest runs one test per CPU. An 8-vCPU
+// Blacksmith dispatch reserves too little. Every partition must compute the same plan, so this
+// stays a constant rather than a reading of the runner.
 export const RUST_TEST_THREADS = 4;
 // In run 43610854388, tests began 29 s wall after compile on partition 0, versus about 12 s elsewhere.
 export const RUST_PARTITION_ZERO_DELAY_SECONDS = 17;
 export const RUST_READER_SHARD = 1;
-// The reader tests run after the partition; they took 34 to 68 s wall in CI, with a median about 47 s.
+// The reader tests run after the partition; across six CI runs they took 34 to 68 s wall, median 47 s.
 export const RUST_READER_SECONDS = 47;
 export const RUST_POLICY_STEPS = [
   "tree provenance",
