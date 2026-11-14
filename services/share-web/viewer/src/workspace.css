@@ -28,6 +28,8 @@
 
 /* Errors and kept edits land at the window's bottom right, one above another. */
 .workspace-corner { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; width: 380px; max-width: calc(100% - 32px); flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
+/* Beside the workspace, the corner sits left of the side panel, so it never covers a Group's or a file's composer. */
+.workspace-page ~ .workspace-corner { right: calc(344px + 16px); max-width: calc(100% - 344px - 32px); }
 .workspace-corner .handoff-button { display: inline-flex; height: 28px; align-items: center; justify-content: center; border-radius: 6px; padding: 0 8px; font-size: 12px; font-weight: 500; text-decoration: none; white-space: nowrap; }
 .toast-slot { display: flex; width: 360px; max-width: 100%; flex-direction: column; gap: 8px; }
 .toast-slot:empty { display: none; }
@@ -114,7 +116,7 @@
   .workspace-opening-tabs i { width: 48px; }
   /* Above the tabs. */
   .workspace-corner { right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; }
-  .workspace-page ~ .workspace-corner { bottom: calc(56px + env(safe-area-inset-bottom)); }
+  .workspace-page ~ .workspace-corner { right: 8px; max-width: none; bottom: calc(56px + env(safe-area-inset-bottom)); }
   .toast-slot { width: 100%; }
   .workspace-tabs { display: flex; grid-area: 2 / 1; border-top: 1px solid var(--viewer-line); padding-bottom: env(safe-area-inset-bottom); background: var(--viewer-panel); }
   .workspace-tabs [role="tab"] { display: inline-flex; height: 48px; flex: 1; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; font-weight: 500; }
