@@ -16,7 +16,7 @@ import {
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
 import rustTestTimes from "./rust-test-times.json" with { type: "json" };
 
-export const RUST_SHARDS = 7;
+export const RUST_SHARDS = 6;
 // Default ubuntu-24.04 runners have 4 vCPUs, and nextest runs one test per CPU. An 8-vCPU
 // Blacksmith dispatch reserves too little. Every partition must compute the same plan, so this
 // stays a constant rather than a reading of the runner.
