@@ -278,6 +278,11 @@ describe("the Sharing view's two lists", () => {
             status: "revoked",
             selector: { paths: ["notes/old.md"], versionId: null },
           }),
+          granted({
+            shareId: "share-4",
+            grantId: "grant-4",
+            selector: { paths: ["notes/product-plan.md"], versionId: "version-1" },
+          }),
         ],
       }),
     });
@@ -292,6 +297,8 @@ describe("the Sharing view's two lists", () => {
     expect(note("share-2")).toBeNull();
     // An ended share has no link left to show the note.
     expect(note("share-3")).toBeNull();
+    // The read names notes by path only, and a share of a version sends from that version.
+    expect(note("share-4")).toBeNull();
   });
 
   it("files a failed read in Notices and reads again from Try again", async () => {

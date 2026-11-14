@@ -482,8 +482,12 @@ function GrantedRow(props: {
   const code = copies.code;
   const invitation = props.invitations ? copies.invitation : null;
   const word: Word | null = active ? null : first.status === "damaged" ? "damaged" : "ended";
+  // The engine names held notes by path only, so a share of a version has none.
   const notSent =
-    active && first.selector && first.selector.kind === undefined
+    active &&
+    first.selector &&
+    first.selector.kind === undefined &&
+    first.selector.versionId === null
       ? notSentWords(first.selector.paths, props.notSentWhileOpen)
       : null;
   const cancelRef = useRef<HTMLButtonElement>(null);
