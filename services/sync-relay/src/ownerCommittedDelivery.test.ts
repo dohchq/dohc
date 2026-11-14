@@ -539,6 +539,38 @@ it("settles a terminal again when its owner wants it, past the settlement an ord
   expect(settled).toEqual([receipt(2), receipt(2)]);
 });
 
+// Proves: a settle right after a done drain does not read the owner queue again, and one under a registration made
+// since that drain, here by a new connection, reads it first.
+it("settles after a done drain without draining again, unless its registration is new since", async () => {
+  const f = fixture({ prefix: 1 }),
+    settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({ kind: "done" });
+  expect(await f.consumer.settleDrained(document)).toMatchObject({
+    terminalCursor: 2,
+    materialized: true,
+  });
+  expect(drainOwnerOutbox).toHaveBeenCalledTimes(1);
+  expect(await f.reconnect().settleDrained(document)).toMatchObject({ terminalCursor: 2 });
+  expect(drainOwnerOutbox).toHaveBeenCalledTimes(2);
+  expect(settled).toEqual([receipt(2), receipt(2)]);
+});
+
+// Proves: an edit queued between a done drain and its settle is neither lost nor settled over. The settle covers only
+// what the drain applied, and the next pass's drain delivers the edit before its settle covers it.
+it("delivers an edit queued between a done drain and its settle on the next pass", async () => {
+  const f = fixture({ prefix: 1 }),
+    settled = settlementRequired(f, () => false);
+  expect(await f.consumer.drain(document)).toMatchObject({ kind: "done" });
+  f.retained.push(receipt(3));
+  expect(await f.consumer.settleDrained(document)).toMatchObject({ terminalCursor: 2 });
+  expect(f.outboxAcks).toEqual([receipt(2)]);
+  expect(f.retained).toEqual([receipt(3)]);
+  expect(await f.consumer.drain(document)).toMatchObject({ kind: "done" });
+  expect(f.outboxAcks).toEqual([receipt(2), receipt(3)]);
+  expect(await f.consumer.settleDrained(document)).toMatchObject({ terminalCursor: 3 });
+  expect(settled).toEqual([receipt(2), receipt(3)]);
+});
+
 it.each(["held", "unmaterialized"] as const)(
   "asks the host again once a settlement of a terminal it settled before comes back %s",
   async (outcome) => {

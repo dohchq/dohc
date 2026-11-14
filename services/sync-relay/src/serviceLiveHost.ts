@@ -1476,7 +1476,7 @@ export async function startServiceLiveHost(options: {
           return undefined;
         };
         const settleTarget: Parameters<ServiceActivationDriver["activate"]>[2] = config.settlement
-          ? (consumer, document, joined) => consumer.settle(document, joined)
+          ? (consumer, document, joined) => consumer.settleDrained(document, joined)
           : undefined;
         // Whether a hosted document's owner lost live authority over it: Pause or
         // Stop fenced it, or neither an Edit grant of its owner covers it nor the
@@ -3169,7 +3169,7 @@ export async function startServiceLiveHost(options: {
                           timed.object ??= document.objectId.slice(0, 8);
                           const sent = consumer.settlesSent;
                           try {
-                            const settled = await consumer.settle(document, joined);
+                            const settled = await consumer.settleDrained(document, joined);
                             timed.materialized =
                               !settlementPending(settled) && settled.materialized;
                             return settled;
