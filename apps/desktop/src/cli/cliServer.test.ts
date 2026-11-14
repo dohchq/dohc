@@ -1488,6 +1488,7 @@ describe("CLI socket server", () => {
       context.keptCopies = {
         list: async () => ({ keptCopies: [], more: false }),
         save: async () => ({ status: "saved", path: "kept.md" }),
+        keepOutsideChange: async () => false,
         restoreProtected: async () => ({ path: ".env", status: "restored" }),
         discardProtected: async () => ({ path: ".env", status: "discarded" }),
       };

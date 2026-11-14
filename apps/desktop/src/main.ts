@@ -4,6 +4,7 @@ import { createActorPresentationRequest } from "./workspaces/actorPresentation";
 import { agentColorsForPresentation } from "./settings/userSettingsStore";
 import { createChatFileMentionsReader } from "./workspaces/chatFileMentions";
 import { createWorkspaceLinksReader } from "./workspaces/workspaceLinks";
+import { captureOperations } from "./ipc/captureOperations";
 import { linksOperations } from "./ipc/linksOperations";
 import { heldChangeOperations } from "./ipc/heldChangeOperations";
 import { createWorkspaceHeldChanges } from "./workspaces/workspaceHeldChanges";
@@ -4076,6 +4077,14 @@ async function withEngineAdapter<T>(
 
 const workspaceLinks = createWorkspaceLinksReader(withEngineAdapter, () => shareViewFiles);
 const workspaceHeldChanges = createWorkspaceHeldChanges(withEngineAdapter);
+// Live notes whose file changed outside dohc, as the engine holds them now.
+async function workspaceOutsideChanges(workspace: EngineWorkspace) {
+  const changes = await withEngineAdapter(workspace, (adapter) => adapter.outsideChanges());
+  if (changes === null) throw new Error("The workspace engine is not running.");
+  return {
+    outsideChanges: changes.map(({ path, firstObservedAtMs }) => ({ path, firstObservedAtMs })),
+  };
+}
 const resolveEngineFiles = createEngineFileResolver(
   withEngineAdapter,
   createReceivedFileReferenceScopes<EngineWorkspace>({
@@ -6820,6 +6829,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
     linksEdges: (workspace, input) => workspaceLinks.edges(workspace, input),
     linksIn: (workspace, input) => workspaceLinks.incoming(workspace, input),
     linksResolve: (workspace, input) => workspaceLinks.resolve(workspace, input),
+    outsideChanges: (workspace) => workspaceOutsideChanges(workspace),
   },
   heldChanges: workspaceHeldChanges,
   findWorkspace,
@@ -8533,6 +8543,9 @@ function registerIpcHandlers(): void {
     linksResolve: ({ workspaceId: _workspaceId, ...input }, { operation }) =>
       workspaceLinks.resolve(operation.workspace, input),
   });
+  registerOperations(operationBoundary, captureOperations, {
+    outsideChanges: (_input, { operation }) => workspaceOutsideChanges(operation.workspace),
+  });
   registerOperations(operationBoundary, heldChangeOperations, {
     readHeldChange: async ({ path }, { operation }) => ({
       change: await workspaceHeldChanges.change(operation.workspace, path),
@@ -9024,12 +9037,14 @@ function registerIpcHandlers(): void {
     });
     return result;
   };
+  const keepOutsideChange = async (workspace: RegistryEntry, path: string) =>
+    (await requireEngineCapture(workspace, "Engine history")).capture.keepOutsideChange(path);
   ownerLiveDocumentsForCli = {
     list: (operation, input) => agentOwnerLiveDocuments.list(input, operation),
     stop: (operation, input) =>
       stopNamedOwnerLiveDocument(
         agentOwnerLiveDocuments,
-        { ...ownerLiveDocumentDependencies, sendRendererActivity },
+        { ...ownerLiveDocumentDependencies, keepOutsideChange, sendRendererActivity },
         { workspaceId: operation.workspace.workspaceId, ...input },
         operation,
       ),
@@ -9046,6 +9061,7 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation
   >({
     ...ownerLiveDocumentDependencies,
+    keepOutsideChange,
     currentCredentials: () => cachedCredentials,
     warmCredentialCache,
     relayShareJson,

@@ -103,6 +103,7 @@ import {
   saveRecoveryCopy,
   retryKeptEdits,
   stopAgain,
+  keepOutsideChange,
   listLiveDocuments,
   stopLiveEditing,
   resumeLiveEditing,
@@ -522,6 +523,16 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { path: z.string().min(1).max(4096), incident: z.string().min(1).max(1024) },
     },
     async (args) => text(await stopAgain(ctx, args)),
+  );
+
+  register(
+    "dohc_keep_outside_change",
+    {
+      description:
+        "Keep a live note's outside change, as Keep a copy does in dohc. Take `path` from dohc_list_outside_changes. dohc saves the file's bytes beside it as a copy, then writes the note's last saved text back into the file. `kept` is false when the file no longer holds an outside change. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096) },
+    },
+    async (args) => text(await keepOutsideChange(ctx, args)),
   );
 
   register(

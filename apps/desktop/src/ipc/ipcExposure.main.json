@@ -10,6 +10,7 @@
     "desktop:agents-listening",
     "desktop:allow-dohc-in-t3-code",
     "desktop:cancel-allow-dohc-in-t3-code",
+    "desktop:keep-outside-change",
     "desktop:list-not-versioned-files",
     "desktop:list-t3-code-projects",
     "desktop:list-t3-code-threads",
@@ -385,7 +386,8 @@
     "desktop:workspace-path-open-failed",
     "desktop:write-collection-automations",
     "desktop:write-workspace-asset",
-    "desktop:write-workspace-text"
+    "desktop:write-workspace-text",
+    "desktop:outside-changes"
   ],
   "guards": {
     "desktop:held-note-change": "active-workspace",
@@ -442,6 +444,7 @@
     "desktop:read-held-change": "active-workspace",
     "desktop:make-message-link": "active-workspace",
     "desktop:resolve-work-link": "active-workspace",
-    "desktop:describe-work-references": "active-workspace"
+    "desktop:describe-work-references": "active-workspace",
+    "desktop:outside-changes": "active-workspace"
   }
 }

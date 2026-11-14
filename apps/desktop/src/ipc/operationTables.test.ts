@@ -75,9 +75,9 @@ it("refuses an IPC table whose family the list does not name", async () => {
   vi.resetModules();
   vi.doMock("@dohc/workspace-contracts/all-declarations", async (importOriginal) => {
     const {
-      DECLARATION_FAMILIES: { chat },
-    } = await importOriginal<{ DECLARATION_FAMILIES: { chat: object } }>();
-    return { DECLARATION_FAMILIES: { chat } };
+      DECLARATION_FAMILIES: { capture, chat },
+    } = await importOriginal<{ DECLARATION_FAMILIES: { capture: object; chat: object } }>();
+    return { DECLARATION_FAMILIES: { capture, chat } };
   });
   // linksOperations.ts also fails the typecheck: the list has no links family.
   await expect(import("./operationTables")).rejects.toThrow("links is not a listed family.");

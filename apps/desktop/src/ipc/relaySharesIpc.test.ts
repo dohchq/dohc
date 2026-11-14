@@ -160,6 +160,7 @@ function harness() {
     currentPath: "path" in target ? target.path : "live.md",
   }));
   const pushRecorded = vi.fn<Dependencies["pushRecorded"]>(async () => undefined);
+  const keepOutsideChange = vi.fn<Dependencies["keepOutsideChange"]>(async () => false);
   const editors = new Set<string>(),
     reserved: string[] = [];
   const withoutEditors: Dependencies["withoutEditors"] = async (_workspace, path, change) => {
@@ -180,6 +181,7 @@ function harness() {
     ownerLiveStop,
     pushRecorded,
     liveDocument,
+    keepOutsideChange,
     withoutEditors,
     listOwnerLiveStops: localStops,
     ownerLiveQuarantines,
@@ -235,6 +237,7 @@ function harness() {
     ownerLiveStop,
     pushRecorded,
     liveDocument,
+    keepOutsideChange,
     editors,
     reserved,
     ownerLiveQuarantines,
@@ -621,6 +624,7 @@ describe("owner live document enrollment", () => {
       expect(h.ownerLiveQuarantines).not.toHaveBeenCalled();
       expect(h.ownerLiveStop).not.toHaveBeenCalled();
       expect(h.request).not.toHaveBeenCalled();
+      expect(h.keepOutsideChange).not.toHaveBeenCalled();
     });
 
     it("names the document before it chooses a record or starts a Stop", async () => {
@@ -854,6 +858,42 @@ describe("owner live document enrollment", () => {
       ).rejects.toThrow("list changed");
     },
   );
+});
+
+describe("Stop on a note whose file changed outside dohc", () => {
+  // Proves: Stop keeps the outside change as a copy before the note leaves
+  // live editing, so the release writes the note's own text, and a keep that
+  // fails starts no Stop.
+  it("keeps the change as a copy first, and stops nothing when that fails", async () => {
+    const h = harness();
+    h.keepOutsideChange.mockResolvedValue(true);
+    h.request.mockImplementation(async (_credentials, _path, init) => {
+      const { path, objectId } = JSON.parse(init!.body as string) as {
+        path: string;
+        objectId: string;
+      };
+      return { ok: true, path, objectId, status: "retired", acceptedCursor: 37 };
+    });
+    const stop = () =>
+      h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {
+        workspaceId,
+        path: "live.md",
+      });
+    await expect(stop()).resolves.toEqual({ keptEdits: "none" });
+    expect(h.keepOutsideChange.mock.calls).toEqual([[h.workspace, "live.md"]]);
+    expect(h.keepOutsideChange.mock.invocationCallOrder[0]).toBeLessThan(
+      h.ownerLiveStop.mock.invocationCallOrder[0]!,
+    );
+
+    h.keepOutsideChange.mockClear();
+    h.ownerLiveStop.mockClear();
+    h.request.mockClear();
+    h.keepOutsideChange.mockRejectedValueOnce(new Error("dohc could not write live.md."));
+    await expect(stop()).rejects.toThrow("dohc could not write live.md.");
+    expect(h.keepOutsideChange).toHaveBeenCalledOnce();
+    expect(h.ownerLiveStop).not.toHaveBeenCalled();
+    expect(h.request).not.toHaveBeenCalled();
+  });
 });
 
 describe("registered owner restore handler", () => {

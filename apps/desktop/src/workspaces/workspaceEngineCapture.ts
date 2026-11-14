@@ -1,4 +1,5 @@
-import type { CaptureFileHold, OutsideChange } from "../ipc/bridgeContract";
+import type { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
+import type { CaptureFileHold } from "../ipc/bridgeContract";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { resolveEngineFileTargets } from "./resolveEngineFiles";

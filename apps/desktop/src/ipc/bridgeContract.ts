@@ -1,8 +1,10 @@
 import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
 import { ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
+import type { captureOperations } from "./captureOperations";
 import type { linksOperations } from "./linksOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -1575,13 +1577,6 @@ export const CaptureHoldsEvent = z
   .object({ workspaceId: WORKSPACE_ID, heldFiles: z.array(CaptureFileHold) })
   .strict();
 export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
-// A live note's file that changed outside dohc. The note and History do not
-// have those bytes; they stay only in the file until it matches the note
-// again or someone keeps them as a copy.
-export const OutsideChange = z
-  .object({ path: z.string().min(1), firstObservedAtMs: z.number().int() })
-  .strict();
-export type OutsideChange = z.infer<typeof OutsideChange>;
 
 const SYNC_STATUS_BASE_FIELDS = {
   syncPause: WorkspaceSyncPauseStatus.optional(),
@@ -1850,6 +1845,19 @@ export const captureRecoveryOperations = {
     handlerCheck: {
       check: "withRendererWorkspaceOperation",
       reason: "The handler clears recovery only in the sending window's active workspace.",
+    },
+  },
+  // Keep a copy, from a live note's outside change Notices row.
+  keepOutsideChange: {
+    capabilityId: "capture.outside.keep",
+    channel: "desktop:keep-outside-change",
+    payload: WorkspaceIdPayload.extend({ path: PATH_STRING }),
+    result: z.object({ kept: z.boolean() }),
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: {
+      check: "withRendererWorkspaceOperation",
+      reason: "Only the sending window's active workspace keeps its outside change.",
     },
   },
   // Restarts History recording that stopped. Rejects while it is still paused.
@@ -9003,6 +9011,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof linksOperations>,
+    OperationBridge<typeof captureOperations>,
     OperationBridge<typeof heldChangeOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,

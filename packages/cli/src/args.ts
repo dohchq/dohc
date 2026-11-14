@@ -1,5 +1,6 @@
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
+import { OutsideChangesInput } from "@dohc/workspace-contracts/outside-changes";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
 import {
@@ -66,6 +67,7 @@ type CliCommandBody =
     }
   | { verb: "saveRecoveryCopy"; path: string; incident?: string }
   | { verb: "liveKeptEdits" }
+  | { verb: "keepOutsideChange"; path: string }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "liveDocuments"; cursor?: string }
   | { verb: "liveStop"; path: string; objectId?: string }
@@ -670,6 +672,22 @@ const DOCUMENT_VERBS = {
     parse: (input) => {
       noExtraArgs(input.operands, "document kept-edits");
       return { verb: "liveKeptEdits" };
+    },
+  },
+  "keep-outside-change": {
+    capabilityId: "capture.outside.keep",
+    summary:
+      "Keep a live note's outside change as a copy and put the note's text back in its file.",
+    operands: "<path>",
+    notes: [
+      "Take the path from outside-changes. dohc saves the file's bytes beside it as a copy, then writes the note's last saved text into the file.",
+      "kept is false when the file no longer holds an outside change.",
+    ],
+    parse: (input) => {
+      const [path, ...extra] = input.operands;
+      if (!path) fail("document keep-outside-change requires a path");
+      noExtraArgs(extra, "document keep-outside-change");
+      return { verb: "keepOutsideChange", path };
     },
   },
   "save-recovery-copy": {
@@ -1936,6 +1954,10 @@ const DECLARED_PARSERS: {
       ...(subject ? { subject: JSON.parse(subject) } : {}),
       cursor: lastValue(input, "--cursor"),
     });
+  },
+  outsideChanges: (input, command) => {
+    noExtraArgs(input.operands, command);
+    return OutsideChangesInput.parse({});
   },
 };
 

@@ -297,6 +297,7 @@ function buildCliRequest(
     case "fileChats":
     case "documentRead":
     case "documentHeld":
+    case "keepOutsideChange":
       return {
         verb: command.verb,
         protocolVersion: common.protocolVersion,
@@ -722,6 +723,7 @@ const REFUSING_VERBS = new Set([
   "saveRecoveryCopy",
   "retryKeptEdits",
   "stopAgain",
+  "keepOutsideChange",
   "liveDocuments",
   "liveStop",
   "liveResume",

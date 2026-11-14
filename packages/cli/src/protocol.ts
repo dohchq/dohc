@@ -319,8 +319,11 @@ export function isDeclaredVerb(verb: string): verb is DeclaredVerb {
 // Requests a declared verb takes besides its input. The desktop resolves each
 // to the input before it reads.
 const DECLARED_ALTERNATE_INPUTS = { chatLinks: chatLinksGroupInputSchema } as const;
+// Zod reads an input with no fields as Record<string, never>, which would
+// erase the request fields it is joined to.
+type InputFields<Input> = string extends keyof Input ? Record<never, never> : Input;
 export type DeclaredRequestInput<Verb extends DeclaredVerb> =
-  | z.output<DeclaredOperationOf<Verb>["input"]>
+  | InputFields<z.output<DeclaredOperationOf<Verb>["input"]>>
   | (Verb extends keyof typeof DECLARED_ALTERNATE_INPUTS
       ? z.output<(typeof DECLARED_ALTERNATE_INPUTS)[Verb]>
       : never);
@@ -597,6 +600,8 @@ const retryKeptEditsArgsSchema = z
   .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema })
   .strict();
 const stopAgainArgsSchema = retryKeptEditsArgsSchema;
+// A live note's file that changed outside dohc, kept as a copy.
+const keepOutsideChangeArgsSchema = z.object({ ...argsBase, path: documentPathArg }).strict();
 // Why a live document is not live, and the next step for each, as Live
 // documents and Notices give it. Agents read these codes, so each one carries
 // its step in the help and the reference.
@@ -1140,6 +1145,13 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     .strict(),
   z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
   z
+    .object({
+      ...requestBase,
+      verb: z.literal("keepOutsideChange"),
+      args: keepOutsideChangeArgsSchema,
+    })
+    .strict(),
+  z
     .object({ ...requestBase, verb: z.literal("heldNoteChange"), args: heldNoteChangeArgsSchema })
     .strict(),
   z
@@ -1267,6 +1279,7 @@ export const CLI_CAPABILITIES = distinct(
     saveRecoveryCopy: ["share.live.document.recovery.save"],
     retryKeptEdits: ["share.live.document.retry"],
     stopAgain: ["share.live.document.stop"],
+    keepOutsideChange: ["capture.outside.keep"],
     heldNoteChange: ["document.held.change"],
     liveDocuments: ["share.live.documents.list"],
     liveStop: ["share.live.document.stop"],
@@ -2341,6 +2354,11 @@ const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
+// kept is false when the file no longer held an outside change.
+const keepOutsideChangeResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), kept: z.boolean() }).strict(),
+  rawFailureSchema,
+]);
 const retryKeptEditsResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), path: z.string().min(1) }).strict(),
   rawFailureSchema,
@@ -2957,6 +2975,7 @@ export const cliResultSchemas = distinct(
     saveRecoveryCopy: saveRecoveryCopyResultSchema,
     retryKeptEdits: retryKeptEditsResultSchema,
     stopAgain: stopAgainResultSchema,
+    keepOutsideChange: keepOutsideChangeResultSchema,
     heldNoteChange: heldNoteChangeResultSchema,
     liveDocuments: liveDocumentsResultSchema,
     liveStop: liveStopResultSchema,

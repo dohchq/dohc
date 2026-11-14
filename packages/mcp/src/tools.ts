@@ -121,6 +121,7 @@ export const MCP_TOOL_CAPABILITIES = distinct(
     dohc_save_recovery_copy: ["share.live.document.recovery.save"],
     dohc_retry_kept_edits: ["share.live.document.retry"],
     dohc_stop_again: ["share.live.document.stop"],
+    dohc_keep_outside_change: ["capture.outside.keep"],
     dohc_list_live_documents: ["share.live.documents.list"],
     dohc_stop_live_editing: ["share.live.document.stop"],
     dohc_resume_live_editing: ["share.live.document.resume"],
@@ -2656,6 +2657,12 @@ export async function retryKeptEdits(ctx: ToolContext, args: { path: string; inc
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "retryKeptEdits", { path: resolved.normalized, incident: args.incident });
+}
+
+export async function keepOutsideChange(ctx: ToolContext, args: { path: string }) {
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "keepOutsideChange", { path: resolved.normalized });
 }
 
 export async function stopAgain(ctx: ToolContext, args: { path: string; incident: string }) {

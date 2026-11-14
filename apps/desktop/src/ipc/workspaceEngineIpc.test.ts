@@ -329,6 +329,7 @@ async function harness(
   };
   const capture = {
     filePathForObjectId: vi.fn<WorkspaceEngineCapture["filePathForObjectId"]>(async () => null),
+    keepOutsideChange: vi.fn<WorkspaceEngineCapture["keepOutsideChange"]>(async () => true),
     listMoments: vi.fn<WorkspaceEngineCapture["listMoments"]>(async () => ({
       moments: [],
       nextCursor: null,
@@ -609,6 +610,7 @@ const channels = [
   captureRecoveryOperations.retryHeldCapture.channel,
   captureRecoveryOperations.getCaptureRecoveryStatus.channel,
   captureRecoveryOperations.clearCaptureRecovery.channel,
+  captureRecoveryOperations.keepOutsideChange.channel,
   captureRecoveryOperations.retryHistoryCapture.channel,
   captureRecoveryOperations.retrySecretKey.channel,
   fileObservationOperations.retryFileObservation.channel,
