@@ -652,7 +652,13 @@ export interface T3CodeThreadState {
   activeRunId: string | null;
   /** Something waits on the person in T3 Code: a question, an approval, or another request. */
   waitingOnPerson: boolean;
-  /** The question that waits on the person there, by T3 Code's id for it. Null when none does. */
+  /**
+   * The thread's question that waits on the person, by T3 Code's id for it,
+   * when questions are all that wait there. Null when nothing waits, and
+   * when anything else waits too, such as an approval. T3 Code does not say
+   * which of a thread's runs asked a question, so this is the thread's
+   * question, and may come from earlier work than the run dohc follows.
+   */
   questionId: string | null;
   /** The thread was archived or settled, so it takes no more work. */
   closed: boolean;
@@ -754,13 +760,16 @@ export type T3CodeAnswers = Record<string, string | string[]>;
 
 // The limits of what dohc shows from a question box. A box past them is one
 // the person answers in T3 Code.
-const QuestionIds = z.object({ requestIds: z.array(z.string().min(1).max(512)) });
+const MAX_ID_CHARS = 512;
+const MAX_BOX_CHARS = 200_000;
+const QuestionIds = z.object({ requestIds: z.array(z.string().min(1)) });
 const QuestionRead = z.object({
-  requestId: z.string().min(1).max(512),
+  requestId: z.string().min(1).max(MAX_ID_CHARS),
   questions: z
     .array(
       z.object({
-        id: z.string().min(1).max(512),
+        // Some providers name a question by its own words, so its id may be as long.
+        id: z.string().min(1).max(20_000),
         header: z.string().max(500),
         question: z.string().max(20_000),
         options: z
@@ -796,19 +805,16 @@ function closedQuestion(error: unknown): "already-answered" | "closed" | null {
   return null;
 }
 
-async function firstT3CodeQuestion(
-  session: T3CodeSession,
-  threadId: string,
-): Promise<string | null> {
+/** T3 Code's ids for the questions that wait on the person in a thread. */
+async function listT3CodeQuestions(session: T3CodeSession, threadId: string): Promise<string[]> {
   try {
-    const { requestIds } = shaped(
+    return shaped(
       QuestionIds,
       await session.call("t3_pending_request", { action: "list", threadId }),
-    );
-    return requestIds[0] ?? null;
+    ).requestIds;
   } catch (error) {
     // A T3 Code that refuses to list questions still says what the thread is doing.
-    if (error instanceof T3CodeError && error.problem === "refused") return null;
+    if (error instanceof T3CodeError && error.problem === "refused") return [];
     throw error;
   }
 }
@@ -819,10 +825,11 @@ export async function readT3CodeQuestion(
   input: { threadId: string; requestId: string },
 ): Promise<T3CodeQuestionBox> {
   try {
-    const box = shaped(
-      QuestionRead,
-      await session.call("t3_pending_request", { action: "read", ...input }),
-    );
+    const answer = await session.call("t3_pending_request", { action: "read", ...input });
+    // A box too large to lay out at once is one the person answers in T3 Code.
+    if (JSON.stringify(answer ?? null).length > MAX_BOX_CHARS)
+      throw new T3CodeError("unexpected", "This question is too long for dohc to show.");
+    const box = shaped(QuestionRead, answer);
     return {
       status: "open",
       requestId: box.requestId,
@@ -884,9 +891,18 @@ export async function readT3CodeThread(
     }),
   );
   // T3 Code counts every request that waits on the person together. Only its
-  // list of questions tells a question from an approval.
+  // list of questions tells a question from an approval. A question is given
+  // only when every request that waits is one: beside an approval, an answer
+  // here would leave the thread waiting, on something the chat cannot show.
+  const questions =
+    thread.pendingRequestCount > 0 ? await listT3CodeQuestions(session, threadId) : [];
+  const first = questions[0];
   const questionId =
-    thread.pendingRequestCount > 0 ? await firstT3CodeQuestion(session, threadId) : null;
+    first !== undefined &&
+    questions.length === thread.pendingRequestCount &&
+    first.length <= MAX_ID_CHARS
+      ? first
+      : null;
   return {
     title: thread.title,
     working: thread.activeRunId !== null,

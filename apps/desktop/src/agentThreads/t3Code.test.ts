@@ -505,10 +505,30 @@ describe("T3 Code's thread tools", () => {
     });
     expect(listed().at(-1)?.args).toEqual({ action: "list", threadId: "t1" });
 
+    // One thing waits, and it is a question.
+    t3.tools.t3_pending_request = () => ({ requestIds: ["q-1"] });
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: "q-1",
+    });
+    // A question and an approval wait: an answer here would leave the thread waiting.
+    pending = 2;
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: null,
+    });
+    // Two questions wait and nothing else: the first T3 Code lists is given.
     t3.tools.t3_pending_request = () => ({ requestIds: ["q-1", "q-2"] });
     await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
       waitingOnPerson: true,
       questionId: "q-1",
+    });
+    // An id too long to carry is no reason to lose what the thread is doing.
+    pending = 1;
+    t3.tools.t3_pending_request = () => ({ requestIds: ["q".repeat(513)] });
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: null,
     });
 
     // A T3 Code that refuses the list still says the thread waits.
@@ -581,6 +601,31 @@ describe("T3 Code's thread tools", () => {
     expect(t3.calls.at(-1)).toEqual({
       tool: "t3_pending_request",
       args: { action: "read", ...asked },
+    });
+
+    // A provider may name a question by its own words, however long they are.
+    const words = "Which of these should I do first? ".repeat(100);
+    t3.tools.t3_pending_request = () => ({
+      requestId: "q-1",
+      questions: [{ id: words, header: "", question: words, options: [] }],
+    });
+    await expect(readT3CodeQuestion(session, asked)).resolves.toMatchObject({
+      status: "open",
+      questions: [{ id: words }],
+    });
+    // A box too large to lay out at once is not shown.
+    t3.tools.t3_pending_request = () => ({
+      requestId: "q-1",
+      questions: Array.from({ length: 20 }, (_, index) => ({
+        id: `q${index}`,
+        header: "",
+        question: "?".repeat(15_000),
+        options: [],
+      })),
+    });
+    await expect(readT3CodeQuestion(session, asked)).rejects.toMatchObject({
+      problem: "unexpected",
+      message: "This question is too long for dohc to show.",
     });
 
     // A box larger than dohc shows is one the person answers in T3 Code.

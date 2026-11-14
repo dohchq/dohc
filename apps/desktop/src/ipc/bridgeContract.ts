@@ -8202,7 +8202,8 @@ export const AgentThreadLine = z.strictObject({
 export type AgentThreadLine = z.infer<typeof AgentThreadLine>;
 // A question an agent asks the person in its tool's own question box.
 export const AgentThreadQuestion = z.strictObject({
-  id: z.string().min(1).max(512),
+  // Some tools name a question by its own words.
+  id: z.string().min(1).max(20_000),
   header: z.string(),
   question: z.string(),
   // What an answer carries for an option is its value.
@@ -8230,7 +8231,7 @@ export type AgentThreadQuestionBox = z.infer<typeof AgentThreadQuestionBox>;
 // Answers by question id: the person's own text, or the values of the options they picked.
 export const AgentThreadAnswers = z
   .record(
-    z.string().min(1).max(512),
+    z.string().min(1).max(20_000),
     // Every option of the largest question dohc shows, and the person's own text.
     z.union([z.string().max(20_000), z.array(z.string().max(2_000)).max(51)]),
   )

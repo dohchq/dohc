@@ -77,7 +77,8 @@ export function AgentThreadAnswerDialog(props: {
     key: `agent-thread-question:${agentId}:${requestId}`,
     load: () => bridge().readAgentThreadQuestion({ workspaceId, agentId, requestId }),
   });
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  // By question id. A tool may give a question any id, such as "constructor", so this is a Map.
+  const [drafts, setDrafts] = useState<ReadonlyMap<string, Draft>>(new Map());
   // The required questions the last send found unanswered.
   const [missing, setMissing] = useState<ReadonlySet<string>>(new Set());
   const [failure, setFailure] = useState<string | null>(null);
@@ -124,14 +125,16 @@ export function AgentThreadAnswerDialog(props: {
   }, [failure]);
 
   async function send() {
-    if (busyRef.current || box?.status !== "open") return;
-    const answers: AgentThreadAnswers = {};
+    // A read that is out may find the question closed: nothing is sent until it is back.
+    if (busyRef.current || read.pending || box?.status !== "open") return;
+    const given: Array<[string, string | string[]]> = [];
     const unanswered: number[] = [];
     box.questions.forEach((question, index) => {
-      const answer = answerOf(question, drafts[question.id] ?? BLANK);
-      if (answer !== undefined) answers[question.id] = answer;
+      const answer = answerOf(question, drafts.get(question.id) ?? BLANK);
+      if (answer !== undefined) given.push([question.id, answer]);
       else if (question.required) unanswered.push(index);
     });
+    const answers: AgentThreadAnswers = Object.fromEntries(given);
     if (unanswered.length > 0) {
       setMissing(new Set(unanswered.map((index) => box.questions[index]!.id)));
       panel.current
@@ -258,10 +261,10 @@ export function AgentThreadAnswerDialog(props: {
                     id={`${id}-q${index}`}
                     index={index}
                     question={question}
-                    draft={drafts[question.id] ?? BLANK}
+                    draft={drafts.get(question.id) ?? BLANK}
                     missing={missing.has(question.id)}
                     onChange={(draft) => {
-                      setDrafts((current) => ({ ...current, [question.id]: draft }));
+                      setDrafts((current) => new Map(current).set(question.id, draft));
                       setMissing((current) => {
                         if (!current.has(question.id)) return current;
                         const left = new Set(current);
@@ -307,7 +310,7 @@ export function AgentThreadAnswerDialog(props: {
                   ref={submit}
                   type="submit"
                   data-testid="agent-thread-answer-submit"
-                  disabled={busy || view === "loading"}
+                  disabled={busy || read.pending}
                 >
                   {busy ? "Answering…" : "Answer"}
                 </PrimaryButton>

@@ -457,6 +457,42 @@ it("reads the question again once when its line stops carrying it, and shows wha
   expect(document.body.textContent).not.toContain("Squash it");
 });
 
+it("sends nothing while the second read is out, so no send outlives the dialog", async () => {
+  const { push, reads, sends } = await answering(question());
+  fireEvent.click(screen.getByRole("radio", { name: "Merge" }));
+  // The line goes: the dialog asks what became of the question.
+  push([]);
+  expect(reads).toHaveLength(2);
+  const answer = screen.getByRole<HTMLButtonElement>("button", { name: "Answer" });
+  expect(answer.disabled).toBe(true);
+  fireEvent.submit(dialog());
+  expect(sends).toHaveLength(0);
+
+  // It was closed: the dialog says so, and can be closed with nothing on its way.
+  await settle(() => reads[1]!.answer.resolve({ status: "closed" }));
+  expect(within(dialog()).getByRole("status").textContent).toBe(
+    "This question no longer waits for an answer.",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(sends).toHaveLength(0);
+});
+
+it("takes a question whatever a tool names it", async () => {
+  // Ids that are also the names of what every object has.
+  const { sends } = await answering(
+    question({ id: "constructor" }),
+    question({ id: "toString", question: "Why?", options: [] }),
+  );
+  fireEvent.click(screen.getByRole("radio", { name: "Merge" }));
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "It is cleaner." } });
+  send();
+  expect(Object.entries(sends[0]!.input.answers)).toEqual([
+    ["constructor", "merge-value"],
+    ["toString", "It is cleaner."],
+  ]);
+});
+
 it("keeps what was typed when the second read finds the question still open", async () => {
   const { push, reads } = await answering(question({ allowCustomAnswer: true }));
   fireEvent.change(screen.getByRole("textbox", { name: "Your own answer" }), {
