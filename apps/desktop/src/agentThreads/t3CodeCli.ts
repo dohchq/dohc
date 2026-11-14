@@ -27,6 +27,8 @@ export const T3_CODE_ACCESS_SCOPES: Record<T3CodeAccess, readonly string[]> = {
 const CODE_LIFE = "1m";
 /** How long T3 Code's program may take before dohc ends it. */
 const RUN_TIMEOUT_MS = 20_000;
+/** How long a program dohc ended has to end before dohc ends it outright. */
+const END_GRACE_MS = 2_000;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 
 const Made = z.object({ credential: z.string().regex(/^[\x21-\x7e]{6,128}$/u) });
@@ -44,60 +46,80 @@ export function t3CodeCliPath(home: string, platform: NodeJS.Platform = process.
   return join(home, "bin", platform === "win32" ? "t3.cmd" : "t3");
 }
 
-const runProgram: T3CodeCliRunner = (command, args, signal, env) =>
-  new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason as Error);
-      return;
-    }
-    // On Windows the program is a .cmd file, which runs behind cmd.exe. The
-    // helper quotes every part and refuses one it cannot quote safely.
-    const resolved = resolveSpawnCommand(command, args);
-    const ownGroup = process.platform !== "win32";
-    const child = spawn(resolved.command, resolved.args, {
-      env,
-      detached: ownGroup,
-      windowsHide: true,
-      windowsVerbatimArguments: resolved.windowsVerbatimArguments,
-      // Nothing is sent to it, and what it says of a failure is not read: it may hold a secret.
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    let stdout = "";
-    let over = false;
-    const end = () => {
-      // The file starts the real program, so what it started is ended with it.
-      // On Windows that is the tree. Elsewhere it is the group the file leads:
-      // T3 Code's AppImage file runs the program as a child and waits for it.
-      void killChildTreeWin32(child).then((killed) => {
-        if (killed) return;
-        try {
-          if (ownGroup && child.pid) process.kill(-child.pid, "SIGTERM");
-          else child.kill();
-        } catch {
-          child.kill();
-        }
-      });
-    };
-    const timer = setTimeout(end, RUN_TIMEOUT_MS);
-    signal.addEventListener("abort", end, { once: true });
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-      if (over) return;
-      stdout += chunk;
-      if (Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) {
-        over = true;
-        stdout = "";
-        end();
+/**
+ * Runs a program file and reads what it prints. dohc ends the program when
+ * it takes longer than `runMs`, prints too much, or the person cancels, and
+ * then reads nothing it printed. A program that does not end when asked is
+ * ended outright `graceMs` later, so dohc never waits on it past that.
+ */
+export function t3CodeCliRunner(
+  limits: { runMs: number; graceMs: number } = { runMs: RUN_TIMEOUT_MS, graceMs: END_GRACE_MS },
+): T3CodeCliRunner {
+  return (command, args, signal, env) =>
+    new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason as Error);
+        return;
       }
+      // On Windows the program is a .cmd file, which runs behind cmd.exe. The
+      // helper quotes every part and refuses one it cannot quote safely.
+      const resolved = resolveSpawnCommand(command, args);
+      const ownGroup = process.platform !== "win32";
+      const child = spawn(resolved.command, resolved.args, {
+        env,
+        detached: ownGroup,
+        windowsHide: true,
+        windowsVerbatimArguments: resolved.windowsVerbatimArguments,
+        // Nothing is sent to it, and what it says of a failure is not read: it may hold a secret.
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      let stdout = "";
+      let ended = false;
+      let force: ReturnType<typeof setTimeout> | undefined;
+      // The file starts the real program, so what it started is ended with it.
+      // Off Windows that is the group the file leads: T3 Code's AppImage file
+      // runs the program as a child and waits for it.
+      const signalGroup = (how: "SIGTERM" | "SIGKILL") => {
+        try {
+          if (ownGroup && child.pid) process.kill(-child.pid, how);
+          else child.kill(how);
+        } catch {
+          child.kill(how);
+        }
+      };
+      const end = () => {
+        if (ended) return;
+        ended = true;
+        stdout = "";
+        // On Windows the whole tree is ended at once.
+        void killChildTreeWin32(child).then((killed) => {
+          if (!killed) signalGroup("SIGTERM");
+        });
+        force = setTimeout(() => {
+          signalGroup("SIGKILL");
+          // What the program started may still hold this open.
+          child.stdout.destroy();
+        }, limits.graceMs);
+      };
+      const timer = setTimeout(end, limits.runMs);
+      signal.addEventListener("abort", end, { once: true });
+      child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+        if (ended) return;
+        stdout += chunk;
+        if (Buffer.byteLength(stdout) > MAX_OUTPUT_BYTES) end();
+      });
+      const done = (exitCode: number | null) => {
+        clearTimeout(timer);
+        clearTimeout(force);
+        signal.removeEventListener("abort", end);
+        if (signal.aborted) reject(signal.reason as Error);
+        // A program dohc ended did not finish, whatever it says of itself.
+        else resolve({ exitCode: ended ? null : exitCode, stdout });
+      };
+      child.once("error", () => done(null));
+      child.once("close", (exitCode) => done(exitCode));
     });
-    const done = (exitCode: number | null) => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", end);
-      if (signal.aborted) reject(signal.reason as Error);
-      else resolve({ exitCode: over ? null : exitCode, stdout });
-    };
-    child.once("error", () => done(null));
-    child.once("close", (exitCode) => done(exitCode));
-  });
+}
 
 const UNAVAILABLE = "dohc could not make its own sign-in code in T3 Code.";
 
@@ -120,7 +142,7 @@ export function createT3CodeCodeMaker(options: {
 } {
   const program = t3CodeCliPath(options.home, options.platform);
   const exists = options.exists ?? existsSync;
-  const run = options.run ?? runProgram;
+  const run = options.run ?? t3CodeCliRunner();
   return {
     available: () => exists(program),
     async make(access, signal) {

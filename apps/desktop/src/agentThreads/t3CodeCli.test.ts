@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { T3CodeError, T3_CODE_ACCESS } from "./t3Code";
 import {
   createT3CodeCodeMaker,
+  t3CodeCliRunner,
   t3CodeCliPath,
   T3_CODE_ACCESS_SCOPES,
   type T3CodeCliRunner,
@@ -133,14 +134,21 @@ describe("making dohc's own sign-in code with T3 Code's program", () => {
 describe("running T3 Code's program", () => {
   const windows = process.platform === "win32";
 
-  async function program(script: { windows: string; other: string }) {
+  async function program(
+    script: { windows: string; other: string },
+    limits?: { runMs: number; graceMs: number },
+  ) {
     const home = await mkdtemp(join(tmpdir(), "dohc t3 program "));
     const bin = join(home, "bin");
     await mkdir(bin);
     const path = t3CodeCliPath(home);
     await writeFile(path, windows ? script.windows : script.other);
     if (!windows) await chmod(path, 0o755);
-    return { home, bin, codes: createT3CodeCodeMaker({ home }) };
+    return {
+      home,
+      bin,
+      codes: createT3CodeCodeMaker({ home, ...(limits ? { run: t3CodeCliRunner(limits) } : {}) }),
+    };
   }
 
   it("reads the code a program prints, and none from one that fails", async () => {
@@ -171,6 +179,51 @@ describe("running T3 Code's program", () => {
       await rm(home, { recursive: true, force: true });
     }
   });
+
+  const PRINTED = '{"credential":"Q8RZ3NWD5KTC"}';
+
+  it("ends a program that takes too long, and reads nothing it printed", async () => {
+    const { home, codes } = await program(
+      {
+        windows: `@echo ${PRINTED}\r\n@ping -n 60 127.0.0.1 >nul\r\n`,
+        // Asked to end, this one says it finished well.
+        other: `#!/bin/sh\ntrap 'exit 0' TERM\necho '${PRINTED}'\nsleep 60 &\nwait\n`,
+      },
+      { runMs: 500, graceMs: 2_000 },
+    );
+    try {
+      await expect(codes.make("auto", never)).rejects.toMatchObject({
+        problem: "cannot-allow-here",
+      });
+    } finally {
+      await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  }, 15_000);
+
+  it.skipIf(windows)(
+    "ends outright a program that does not end when asked",
+    async () => {
+      const { home, bin, codes } = await program(
+        {
+          windows: "",
+          // What a shell ignores, the programs it starts ignore too.
+          other: `#!/bin/sh\ntrap '' TERM\necho '${PRINTED}'\nsleep 60\necho late > "$(dirname "$0")/late.txt"\n`,
+        },
+        { runMs: 300, graceMs: 300 },
+      );
+      try {
+        await expect(codes.make("auto", never)).rejects.toMatchObject({
+          problem: "cannot-allow-here",
+        });
+        await expect(readFile(join(bin, "late.txt"), "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } finally {
+        await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      }
+    },
+    15_000,
+  );
 
   it("ends a program that is still running when the person cancels", async () => {
     const { home, codes } = await program({

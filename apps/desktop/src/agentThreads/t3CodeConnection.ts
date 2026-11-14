@@ -165,7 +165,17 @@ export function createT3CodeConnection(dependencies: {
           ? {}
           : { approve: { access, code: (signal) => codes!.make(access, signal) } }),
       });
-      await change(() => store.save(signIn));
+      // The person can cancel while the sign-in waits behind another change.
+      // A cancelled sign-in is not kept, and what dohc had stays.
+      const cancelled = () => {
+        if (input.signal?.aborted)
+          throw new T3CodeError("not-allowed", "The sign-in to T3 Code was cancelled.");
+      };
+      cancelled();
+      await change(async () => {
+        cancelled();
+        await store.save(signIn);
+      });
     },
     projects: () => use(listT3CodeProjects),
     threads: (input) => use((session) => listT3CodeThreads(session, input)),

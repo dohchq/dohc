@@ -302,6 +302,51 @@ describe("dohc's connection to T3 Code", () => {
     expect((await store.load())?.token).toBe("token-1");
   });
 
+  it("does not keep a sign-in the person cancelled while it waited to be saved", async () => {
+    const { t3, home, store } = await setup();
+    let saving!: () => void;
+    const savingStarted = new Promise<void>((resolve) => (saving = resolve));
+    let finishSave!: () => void;
+    const held = new Promise<void>((resolve) => (finishSave = resolve));
+    const saved: Array<string | null> = [];
+    const connection = createT3CodeConnection({
+      home,
+      store: {
+        ...store,
+        save: async (signIn) => {
+          saved.push(signIn.access);
+          saving();
+          await held;
+          await store.save(signIn);
+        },
+      },
+      codes: { available: () => true, make: async () => t3.issueCode() },
+    });
+
+    // One sign-in is being saved. A second, for more, gets its answer from T3
+    // Code and waits behind the first.
+    const first = connection.signIn({ open: browser });
+    await savingStarted;
+    const cancel = new AbortController();
+    const answered = vi.spyOn(cancel.signal, "removeEventListener");
+    const second = connection.signIn({
+      open: browser,
+      signal: cancel.signal,
+      access: "full-access",
+    });
+    const refused = problemOf(second);
+    // The sign-in stops listening for a cancel once T3 Code has answered it.
+    await vi.waitFor(() => expect(answered).toHaveBeenCalled());
+    cancel.abort();
+    finishSave();
+    await first;
+
+    expect(await refused).toBe("not-allowed");
+    expect(saved).toEqual([null]);
+    expect((await store.load())?.access).toBeNull();
+    expect(await connection.access()).toBeNull();
+  });
+
   it("says a thread is gone from T3 Code, and gives back the work a message started", async () => {
     const { t3, store, connection, forward } = await setup();
     await store.save({
