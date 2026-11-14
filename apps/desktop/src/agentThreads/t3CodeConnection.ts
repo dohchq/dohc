@@ -106,7 +106,7 @@ export function createT3CodeConnection(dependencies: {
   }
 
   return {
-    forward: (input) => use((session) => sendToT3CodeThread(session, input).then(() => undefined)),
+    forward: (input) => use((session) => sendToT3CodeThread(session, input)),
     canKeep: () => store.canKeep(),
     signedInUntil: async () => (await store.load())?.expiresAtMs ?? null,
     async signIn(input) {

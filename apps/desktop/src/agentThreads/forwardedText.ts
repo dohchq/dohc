@@ -117,8 +117,14 @@ function placeOf(message: ForwardedMessage): string {
 const cliNotes = (cli: CliForThread): string[] =>
   cli.notes.length > 0 ? [cli.notes.join(" ")] : [];
 
+/** The chat thread a thread's commands name, and the program that runs them. */
+type ReplyTarget = Pick<ForwardedMessage, "cli" | "agentId"> & {
+  workspace: { id: string };
+  thread: { id: string; title: string };
+};
+
 // The reply's text goes in on stdin, so no shell reads it.
-function commandLines(message: ForwardedMessage): string[] {
+function commandLines(message: ReplyTarget): string[] {
   if (![message.thread.id, message.workspace.id, message.agentId].every(fitsCommand))
     return ["dohc can't name this chat thread in a command, so you can't reply there."];
   const { program } = message.cli;
@@ -149,6 +155,19 @@ export function forwardedMessageText(message: ForwardedMessage): string {
     ...after,
     ...(after.length > 0 ? [""] : []),
     ...commandLines(message),
+  ].join("\n");
+}
+
+/**
+ * What dohc says once to a thread whose work on a message ended with nothing
+ * posted in the chat thread the message came from.
+ */
+export function reminderText(target: ReplyTarget): string {
+  return [
+    `dohc: you finished without replying in chat thread ${quoted(target.thread.title)}. The person sees nothing you wrote here.`,
+    "Reply there when there is something for them to read. dohc will not remind you again for that message.",
+    "",
+    ...commandLines(target),
   ].join("\n");
 }
 
