@@ -8,13 +8,14 @@ import {
   PRIVACY_DENIED_WORDS,
   VOLUME_SHARES_NEW_FILES_WORDS,
 } from "../../ipc/errorWords";
+import { quoteRemovedText } from "@dohc/ydoc-projection/removed-text";
 import { bridge } from "../bridge";
 import { copyNoteAsMarkdown } from "../DocumentMenu";
 import type { ErrorDetailField } from "./copyDetails";
 import type { ShellError, ShellErrorKind } from "./useShellError";
 
 export interface DocumentSaveFailure {
-  tone?: "success";
+  tone?: ShellError["tone"];
   title?: string;
   message: string;
   cause?: unknown;
@@ -284,6 +285,41 @@ export function useDocumentSaveNotices(input: {
           },
         );
     };
+    // Each removal keeps its own row until dismissed. The quote is one line,
+    // because a notice reads its message as one; Copy text copies it as typed.
+    let removals = 0;
+    const removedText = (path: string, text: string): void => {
+      const { quoted, more } = quoteRemovedText(text.replace(/\s*\n\s*/g, " "));
+      const identity = `text-removed:${owner}:${path}:${++removals}`;
+      const copy = (): void => {
+        if (!navigator.clipboard) return void failedCopy(new Error("The clipboard is not available."));
+        navigator.clipboard.writeText(text).catch(failedCopy);
+      };
+      const failedCopy = (cause: unknown): void => {
+        if (current())
+          latest.current.report({
+            message: "dohc could not copy the removed text.",
+            cause,
+            retry: copy,
+            identity: `${identity}:copy`,
+          });
+      };
+      latest.current.report({
+        tone: "warning",
+        title: `Someone else's change removed your text from ${path}`,
+        message: [
+          `It read "${quoted}"`,
+          more > 0 ? `Copy text copies all ${text.length.toLocaleString()} characters.` : "",
+          "The file's owner keeps a copy in History.",
+        ]
+          .filter(Boolean)
+          .join(" "),
+        retry: null,
+        action: { label: "Copy text", run: copy, reads: true },
+        target: { to: "file", path },
+        identity,
+      });
+    };
     const stopDocuments = bridge().onEngineYDocSaveState((event) => {
       if (!current()) return;
       const refusal = event.editRefusal;
@@ -297,6 +333,10 @@ export function useDocumentSaveNotices(input: {
         return;
       }
       if (event.workspaceId !== owner) return;
+      if (event.textRemoved) {
+        removedText(event.path, event.textRemoved.text);
+        return;
+      }
       const newest = sessions.get(event.path);
       if (event.closing && newest && newest.sessionId !== event.sessionId && !newest.closing)
         return;

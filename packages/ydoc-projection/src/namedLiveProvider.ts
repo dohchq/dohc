@@ -16,6 +16,7 @@ import {
 } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveUpdateHostApplicationAck } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveAuthorContext, type LiveAuthorContext } from "@dohc/live-session-contract";
+import { applyUpdateFindingRemovedText, type RemovedText } from "@dohc/ydoc-projection/removed-text";
 
 export interface NamedLiveProviderLimits {
   readonly frames: LiveFrameSessionPolicy;
@@ -123,6 +124,26 @@ export function createNamedLiveProvider(
   const body = getDohcYDocBodyFragment(doc);
   const pending: PendingUpdate[] = [];
   const listeners = new Set<(state: NamedLiveProviderState) => void>();
+  const removedListeners = new Set<(removed: RemovedText) => void>();
+  // Every client whose changes this page sent. A desktop editor applies its own doc's
+  // updates here, so its typing carries that doc's client, not this one's.
+  const ownClients = new Set([doc.clientID]);
+  doc.on("afterTransaction", (transaction: Y.Transaction) => {
+    if (transaction.origin === REMOTE) return;
+    transaction.afterState.forEach((clock, client) => {
+      if ((transaction.beforeState.get(client) ?? 0) < clock) ownClients.add(client);
+    });
+  });
+  const ownText = (item: Y.Item) => ownClients.has(item.id.client);
+  function tellRemoved(removed: RemovedText) {
+    for (const listener of removedListeners) {
+      try {
+        listener(removed);
+      } catch {
+        /* A view listener cannot change delivery ownership. */
+      }
+    }
+  }
   let route: Route | undefined;
   let status: NamedLiveProviderState["status"] = "disconnected",
     reason: string | null = null;
@@ -434,12 +455,19 @@ export function createNamedLiveProvider(
                 return;
               }
               const hostVector = Y.decodeStateVector(sync.hostVector);
-              Y.decodeUpdate(sync.missingStateUpdate);
+              const { ds } = Y.decodeUpdate(sync.missingStateUpdate);
               // Yjs observers run synchronously; record attribution before they can retire the route.
               binding = parseLiveObjectBinding(sync.binding);
               held.receivedCursor = begin.appliedThroughJournalCursor;
               highestObservedCursor = begin.appliedThroughJournalCursor;
-              Y.applyUpdate(doc, sync.missingStateUpdate, REMOTE);
+              const removed = applyUpdateFindingRemovedText(
+                doc,
+                sync.missingStateUpdate,
+                REMOTE,
+                () => ds,
+                ownText,
+              );
+              if (removed) tellRemoved(removed);
               if (!current(held)) return;
               const appliedVector = Y.decodeStateVector(Y.encodeStateVector(doc));
               if (
@@ -460,10 +488,11 @@ export function createNamedLiveProvider(
                 quarantine("stale-update-cursor");
                 return;
               }
-              Y.decodeUpdate(content);
+              const { ds } = Y.decodeUpdate(content);
               held.receivedCursor = begin.journalCursor;
               highestObservedCursor = Math.max(highestObservedCursor, begin.journalCursor);
-              Y.applyUpdate(doc, content, REMOTE);
+              const removed = applyUpdateFindingRemovedText(doc, content, REMOTE, () => ds, ownText);
+              if (removed) tellRemoved(removed);
               if (!current(held)) return;
             } else quarantine("unexpected-transfer");
           }
@@ -597,6 +626,13 @@ export function createNamedLiveProvider(
       notify();
       return true;
     },
+    /** This page's own text that someone else's change removed without having seen it. */
+    onRemovedText(listener: (removed: RemovedText) => void) {
+      removedListeners.add(listener);
+      return () => {
+        removedListeners.delete(listener);
+      };
+    },
     connect(transport: NamedLiveTransport) {
       if (status === "closed" || status === "quarantined")
         throw new Error("The provider cannot reconnect.");
@@ -637,6 +673,7 @@ export function createNamedLiveProvider(
       retire("closed", null);
       doc.off("update", localUpdate);
       listeners.clear();
+      removedListeners.clear();
     },
   };
 }

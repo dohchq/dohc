@@ -9012,6 +9012,9 @@ export const EngineYDocSaveStateEvent = z.object({
   // The file changed outside dohc while this session held it. `unsaved` is
   // whether the document had edits no save carried.
   changedOutside: z.object({ unsaved: z.boolean() }).strict().optional(),
+  // Text this device typed that someone else's change removed without having
+  // seen it. It says nothing about the save state, which the event repeats.
+  textRemoved: z.object({ text: z.string().min(1) }).strict().optional(),
   // A settle failed to write the file, and why when a check can tell. Absent
   // for an edit refusal, an author-capacity refusal, and an error no settle
   // reported.

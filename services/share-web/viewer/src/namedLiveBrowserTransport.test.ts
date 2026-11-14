@@ -309,6 +309,19 @@ function host(socket: Socket, value: Session, epoch = 1, policy = limits().provi
         });
       await waitState(value, (state) => ["live", "quarantined"].includes(state.status));
     },
+    applied(bytes: Uint8Array, cursor: number) {
+      const id = transferId++;
+      send({
+        kind: "begin",
+        purpose: "applied-update",
+        transferId: id,
+        totalBytes: bytes.length,
+        digest: hash(bytes),
+        journalCursor: cursor,
+      });
+      for (let offset = 0; offset < bytes.length; offset += 900)
+        send({ kind: "chunk", transferId: id, offset, bytes: bytes.subarray(offset, offset + 900) });
+    },
     async submitted(count = 1) {
       await until(() => submissions().length >= count);
       return submissions()[count - 1]!;
@@ -706,6 +719,32 @@ it.each(Object.keys(LIVE_CONNECTION_LIMIT_MESSAGES))(
     expect(socket.listenerCount).toBe(0);
   },
 );
+
+// The desktop's editor has its own doc and applies its changes here through edit(), so its
+// typing carries the editor's client, not the session's.
+it("counts a desktop editor's typing as its own when someone else's change removes it", async () => {
+  const { value, peer, doc } = await live();
+  const removed: string[] = [];
+  value.onRemovedText((text) => removed.push(text.text));
+  const editor = new Y.Doc();
+  cleanup.push(() => editor.destroy());
+  Y.applyUpdate(editor, Y.encodeStateAsUpdate(value.doc));
+  expect(editor.clientID).not.toBe(value.doc.clientID);
+  const before = Y.encodeStateVector(editor);
+  const line = (getDohcYDocBodyFragment(editor).get(0) as Y.XmlElement).get(0) as Y.XmlText;
+  line.insert(line.length, " from the desktop");
+  const typed = Y.encodeStateAsUpdate(editor, before);
+  expect(value.edit(() => Y.applyUpdate(value.doc, typed))).toBe(true);
+  peer.ack(await peer.submitted());
+
+  // Someone who never received the typing deletes its line.
+  const hostBefore = Y.encodeStateVector(doc);
+  getDohcYDocBodyFragment(doc).delete(0, 1);
+  peer.applied(Y.encodeStateAsUpdate(doc, hostBefore), 2);
+
+  await vi.waitFor(() => expect(value.body.length).toBe(0));
+  expect(removed).toEqual([" from the desktop"]);
+});
 
 it("keeps retryable admission editable and resubmits the same update on its socket", async () => {
   const f = await live();

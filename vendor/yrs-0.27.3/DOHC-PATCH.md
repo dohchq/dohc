@@ -31,6 +31,13 @@ This preserves negative zero across Yjs import, snapshot encoding, and reopen.
 Ordinary integer values keep their existing bytes. Regression tests cover
 signed zero, safe integer extrema, and the shared bootstrap projection vectors.
 
+`src/deleted_content.rs` adds `deleted_runs`. It reads the items a delete set
+names in a document that keeps deleted content: each run's text, embed or
+element with its attributes, the line it sat in and its place in the document.
+Yjs reads these through item fields that are crate-private here. The engine
+uses it to quote text someone else's change removed unseen; tests live in
+`crates/yrs-interop/tests/deleted_content.rs`.
+
 `src/id_set.rs` adds `Ranges::subset_of`, which forwards to the existing
 `IdRange::subset_of`. Stop's release checks that each client's deleted ranges
 are covered without looking the client up again. The collab owner-outbox
