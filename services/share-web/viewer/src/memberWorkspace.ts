@@ -25,8 +25,10 @@ export async function openMemberGroups(grantId: string, signal: AbortSignal): Pr
       !Array.isArray(value.channels)) throw invalid();
   const {shareId, userId} = value, maxPostBytes = Number(value.maxPostBytes), maxBodyBytes = Number(value.maxBodyBytes);
   const groups = value.channels.map((channel: unknown): NamedChatChannel => {
-    if (!record(channel) || typeof channel.channelWireId !== "string" || (channel.access !== "read-only" && channel.access !== "read-write")) throw invalid();
-    return {shareId, userId, channelWireId: channel.channelWireId, name: normalizeShareLabel(channel.name), access: channel.access, maxPostBytes, maxBodyBytes};
+    if (!record(channel) || typeof channel.channelWireId !== "string" || (channel.access !== "read-only" && channel.access !== "read-write") ||
+        (channel.type !== "posts" && channel.type !== "chat" && channel.type !== "both")) throw invalid();
+    return {shareId, userId, channelWireId: channel.channelWireId, name: normalizeShareLabel(channel.name), access: channel.access, type: channel.type,
+      maxPostBytes, maxBodyBytes};
   });
   return {shareId, userId, maxPostBytes, maxBodyBytes, groups};
 }

@@ -22,16 +22,16 @@ it("names the grant as the session the view routes read", () => {
 
 it("opens every Group the member reaches, each with its own access", async () => {
   const fetch = vi.fn(async () => jsonResponse({shareId: "share", userId: "sam", maxPostBytes: 9000, maxBodyBytes: 8000, channels: [
-    {channelWireId: "wire-plans", name: "plans", kind: "channel", access: "read-write"},
-    {channelWireId: "wire-food", name: "food", kind: "channel", access: "read-only"}]}));
+    {channelWireId: "wire-plans", name: "plans", kind: "channel", type: "posts", access: "read-write"},
+    {channelWireId: "wire-food", name: "food", kind: "channel", type: "both", access: "read-only"}]}));
   vi.stubGlobal("fetch", fetch);
   const opened = await openMemberGroups("grant-1", new AbortController().signal);
   expect(String((fetch.mock.calls[0] as unknown[])[0])).toBe("/api/named-chat/channels?grantId=grant-1");
   expect(opened).toEqual({shareId: "share", userId: "sam", maxPostBytes: 9000, maxBodyBytes: 8000, groups: [
-    {shareId: "share", userId: "sam", channelWireId: "wire-plans", name: "plans", access: "read-write", maxPostBytes: 9000, maxBodyBytes: 8000},
-    {shareId: "share", userId: "sam", channelWireId: "wire-food", name: "food", access: "read-only", maxPostBytes: 9000, maxBodyBytes: 8000}]});
+    {shareId: "share", userId: "sam", channelWireId: "wire-plans", name: "plans", access: "read-write", type: "posts", maxPostBytes: 9000, maxBodyBytes: 8000},
+    {shareId: "share", userId: "sam", channelWireId: "wire-food", name: "food", access: "read-only", type: "both", maxPostBytes: 9000, maxBodyBytes: 8000}]});
   vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({shareId: "share", userId: "sam", maxPostBytes: 9000, maxBodyBytes: 8000,
-    channels: [{channelWireId: "wire-plans", name: "plans", kind: "channel", access: "owner"}]})));
+    channels: [{channelWireId: "wire-plans", name: "plans", kind: "channel", type: "both", access: "owner"}]})));
   await expect(openMemberGroups("grant-1", new AbortController().signal)).rejects.toBeInstanceOf(NamedChatError);
 });
 

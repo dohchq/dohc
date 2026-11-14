@@ -33,7 +33,7 @@
 .chat-author { font-weight: 600; overflow-wrap: anywhere; }
 .chat-agent-mark { align-self: center; width: 10px; height: 10px; border-radius: 3px; background: var(--viewer-accent); }
 .chat-link-mark { align-self: center; width: 12px; height: 12px; color: var(--viewer-subtle); }
-.chat-owner, .chat-meta time { color: var(--viewer-subtle); font: 11px/1.5 ui-monospace, monospace; }
+.chat-owner, .chat-meta time { color: var(--viewer-subtle); font-size: 12px; font-variant-numeric: tabular-nums; }
 .chat-body.markdown { max-width: none; margin: 0; overflow-wrap: anywhere; font: 14px/1.55 ui-sans-serif, system-ui, sans-serif; }
 .chat-body > * { margin: 0 0 6px; }
 .chat-body > :last-child { margin-bottom: 0; }
@@ -75,6 +75,19 @@
 .chat-read-only { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
 .chat-read-only p { margin: 0; color: var(--viewer-muted); }
 .chat-read-only textarea { display: block; width: 100%; margin-top: 8px; }
+.chat-unsent-actions { display: flex; gap: 8px; margin-top: 8px; }
+.chat-unsent-actions .handoff-button { padding: 3px 9px; }
+
+/* A Group shows its lanes as the desktop does: posts with their threads, and one chat. */
+.chat-lanes { display: flex; flex: none; gap: 2px; margin: 0 16px 4px; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 2px; background: var(--viewer-panel); align-self: flex-start; }
+.chat-lanes [role="tab"] { border: 0; border-radius: 6px; padding: 3px 10px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 12px; }
+.chat-lanes [role="tab"][aria-selected="true"] { background: var(--viewer-paper); color: var(--viewer-ink); box-shadow: 0 1px 2px rgb(0 0 0 / 8%); }
+.chat-lanes [role="tab"]:focus-visible { outline: 2px solid var(--viewer-accent); outline-offset: 1px; }
+.chat-thread-head { display: flex; flex: none; align-items: center; gap: 4px; padding: 0 12px 4px 8px; }
+.chat-thread-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.chat-replies { margin-top: 4px; border: 0; border-radius: 6px; padding: 2px 6px; margin-left: -6px; background: transparent; color: var(--viewer-accent); cursor: pointer; font-size: 12px; font-weight: 500; }
+.chat-replies:hover { background: var(--viewer-hover); }
+.chat-replies:focus-visible { outline: 2px solid var(--viewer-accent); outline-offset: 1px; }
 
 /* A share link's Group channel, in the link viewer's side column. */
 .comments-panel.link-channel { display: flex; flex-direction: column; min-height: 0; max-height: calc(100vh - 116px); padding: 0; position: sticky; top: 0; }

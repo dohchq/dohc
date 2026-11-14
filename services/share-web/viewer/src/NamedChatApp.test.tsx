@@ -665,7 +665,7 @@ it("shows the account owner beside an agent's name", async () => {
   await render();
   await opened();
   expect(container.querySelector(".chat-author")?.textContent).toBe("Planner");
-  expect(container.querySelector(".chat-owner")?.textContent).toBe("Owned by Alice");
+  expect(container.querySelector(".chat-owner")?.textContent).toBe("Alice's agent");
 });
 
 it("marks a link holder's post as a link holder, even under an account's name", async () => {

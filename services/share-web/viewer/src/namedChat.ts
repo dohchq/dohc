@@ -6,6 +6,8 @@ export const CHAT_FOLLOW_HOLD_MS = 30_000;
 export const CHAT_EMPTY_PAGE_LIMIT = 20;
 
 export type NamedChatAccess = "read-only" | "read-write";
+/** A Group's lanes: a feed of posts, one running chat, or both. */
+export type GroupType = "posts" | "chat" | "both";
 export interface NamedChatChannel {
   shareId: string;
   userId: string;
@@ -14,6 +16,8 @@ export interface NamedChatChannel {
   access: NamedChatAccess;
   maxPostBytes: number;
   maxBodyBytes: number;
+  /** A member's Group names its lanes. */
+  type?: GroupType;
 }
 /** A current file's Comments in a workspace share, named by the file's path. */
 export interface NamedChatComments {
@@ -38,6 +42,21 @@ export interface NamedChatMessage {
   body: string | null;
   /** A link author that is an agent, signed in with the link. */
   linkAgent: boolean;
+  /** A named reader's message names its lane, and a chat reply names the message it answers. */
+  lane?: "posts" | "chat";
+  parentMessageId?: string | null;
+}
+
+/**
+ * A new message: a new thread in the channel or on the file, or in a Group's lane. A reply names its thread,
+ * and a reply in a Group's chat names the message it answers.
+ */
+export interface ChatPost {
+  id: string;
+  body: string;
+  lane?: "posts" | "chat";
+  threadId?: string;
+  parentMessageId?: string;
 }
 
 /**
@@ -125,7 +144,11 @@ export function chatMessage(value: unknown): NamedChatMessage {
       !(value.linkAgent === true && value.authorKind === "link")) ||
     !Number.isSafeInteger(value.createdAtMs) ||
     !Number.isSafeInteger(value.relaySeq) ||
-    Number(value.relaySeq) <= 0
+    Number(value.relaySeq) <= 0 ||
+    (value.lane !== undefined && value.lane !== "posts" && value.lane !== "chat") ||
+    (value.parentMessageId !== undefined &&
+      value.parentMessageId !== null &&
+      (typeof value.parentMessageId !== "string" || value.lane !== "chat"))
   )
     throw invalid();
   return {
@@ -139,6 +162,12 @@ export function chatMessage(value: unknown): NamedChatMessage {
     createdAtMs: Number(value.createdAtMs),
     body: value.body,
     linkAgent: value.linkAgent === true,
+    ...(value.lane === undefined
+      ? {}
+      : {
+          lane: value.lane,
+          parentMessageId: typeof value.parentMessageId === "string" ? value.parentMessageId : null,
+        }),
   };
 }
 
@@ -249,10 +278,10 @@ export async function followNamedChat(
   };
 }
 
-/** Posts a new thread in the channel, or on the file. Retrying with the same `id` and fields returns the original message. */
+/** Posts a message. Retrying with the same `id` and fields returns the original message. */
 export async function postNamedChatMessage(
   channel: NamedChatPlace,
-  post: { id: string; body: string },
+  post: ChatPost,
   signal: AbortSignal,
 ) {
   const value = await chatRequest("/api/named-chat/messages", signal, {

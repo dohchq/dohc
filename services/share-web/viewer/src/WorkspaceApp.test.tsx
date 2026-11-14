@@ -22,8 +22,10 @@ const FILES = [
   {path: "welcome/readme.md", objectId: "object-readme", blobSha256: "c".repeat(64), contentKind: "text"},
 ];
 const TEXT: Record<string, string> = {["a".repeat(64)]: "Leave at nine.", ["b".repeat(64)]: "Fuel and food.", ["c".repeat(64)]: "Welcome."};
-const chat = (relaySeq: number, body: string, author = "ana") => ({relaySeq, messageId: `m${relaySeq}`, threadId: `t${relaySeq}`, authorUserId: author,
-  authorDisplayName: author === "ana" ? "Ana" : "Sam", authorKind: "human", linkAgent: false, authorOwnerDisplayName: null, createdAtMs: relaySeq * 1000, body, bodyTooLarge: false});
+const chat = (relaySeq: number, body: string, author = "ana", thread: {threadId?: string; lane?: "posts" | "chat"; parentMessageId?: string | null} = {}) => ({
+  relaySeq, messageId: `m${relaySeq}`, threadId: thread.threadId ?? `t${relaySeq}`, authorUserId: author,
+  authorDisplayName: author === "ana" ? "Ana" : "Sam", authorKind: "human", linkAgent: false, authorOwnerDisplayName: null, createdAtMs: relaySeq * 1000, body, bodyTooLarge: false,
+  lane: thread.lane ?? "posts", parentMessageId: thread.parentMessageId ?? null});
 type Held = {path: string; url: URL; signal: AbortSignal; answer(value: unknown, status?: number): void};
 
 let container: HTMLDivElement, root: Root, held: Held[], posts: Record<string, unknown>[], narrow: boolean;
@@ -40,12 +42,13 @@ beforeEach(() => {
   });
 });
 afterEach(async () => {
+  try {sessionStorage.clear();} catch {/* A test blocks storage. */}
   await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); vi.resetAllMocks(); vi.unstubAllGlobals();
   Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal"); Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
 });
 
-function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wire: string; name: string}>; files?: typeof FILES; member?: boolean;
-  groupsFail?: number} = {}) {
+function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wire: string; name: string; type?: "posts" | "chat" | "both"}>; files?: typeof FILES; member?: boolean;
+  groupsFail?: number; history?: Record<string, unknown[]>; postFails?: {status: number; code: string}} = {}) {
   let signedIn = options.signedIn ?? true, groupsFail = options.groupsFail ?? 0;
   const level = options.level ?? "comment", files = options.files ?? FILES;
   const access = level === "view" ? "read-only" : "read-write";
@@ -76,11 +79,14 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
     }
     if (url.pathname === "/api/named-chat/channels" && groupsFail > 0) {groupsFail -= 1; return jsonResponse({ok: false, error: "unavailable"}, 503);}
     if (url.pathname === "/api/named-chat/channels") return jsonResponse({shareId: "share", userId: "sam", maxPostBytes: 9000, maxBodyBytes: 8000,
-      channels: groups.map(group => ({channelWireId: group.wire, name: group.name, kind: "channel", access}))});
+      channels: groups.map(group => ({channelWireId: group.wire, name: group.name, kind: "channel", type: group.type ?? "both", access}))});
     if (url.pathname === "/api/named-chat/messages" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>; posts.push(body);
+      if (options.postFails) return jsonResponse({ok: false, error: "refused", code: options.postFails.code}, options.postFails.status);
       const place = typeof body.path === "string" ? {path: body.path} : {channelWireId: body.channelWireId};
-      return jsonResponse({shareId: "share", ...place, message: chat(40, String(body.body), "sam")});
+      const threadId = typeof body.threadId === "string" ? body.threadId : undefined, parentMessageId = typeof body.parentMessageId === "string" ? body.parentMessageId : null;
+      return jsonResponse({shareId: "share", ...place, message: chat(39 + posts.length, String(body.body), "sam",
+        {threadId, parentMessageId, lane: body.lane === "chat" || parentMessageId || threadId === "t-chat" ? "chat" : "posts"})});
     }
     // A file's Comments, by the file's path.
     const path = url.searchParams.get("path");
@@ -93,7 +99,7 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
     if (url.pathname === "/api/named-chat/messages") {
       const wire = url.searchParams.get("channelWireId");
       return jsonResponse({shareId: "share", channelWireId: wire, nextCursor: 20, olderCursor: null,
-        messages: wire === "wire-plans" ? [chat(3, "Plans start here")] : [chat(5, "Bring snacks")]});
+        messages: options.history?.[wire ?? ""] ?? (wire === "wire-plans" ? [chat(3, "Plans start here")] : [chat(5, "Bring snacks")])});
     }
     throw Error(`Unexpected request ${url.pathname}`);
   });
@@ -187,10 +193,10 @@ it("posts in a Group at Comment, counts another Group's new messages, and opens 
   server({level: "comment"}); await render(); await opened();
   expect(following("chat")[0]!.url.searchParams.get("channelWireId")).toBeNull();
   const box = groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
-  expect(box.placeholder).toBe("Message #plans");
+  expect(box.placeholder).toBe("What's happening in #plans?");
   setControlValue(box, "Count me in"); await click("Send");
   await settle(() => posts.length === 1);
-  expect(posts[0]).toMatchObject({shareId: "share", channelWireId: "wire-plans", body: "Count me in", authorKind: "human"});
+  expect(posts[0]).toMatchObject({shareId: "share", channelWireId: "wire-plans", lane: "posts", body: "Count me in", authorKind: "human"});
   await act(async () => following("chat")[0]!.answer({shareId: "share", nextCursor: 22, hasMore: false,
     messages: [{...chat(21, "Bring snacks too"), channelWireId: "wire-food"}]}));
   await settle(() => button("All Groups")?.textContent?.includes("1") === true);
@@ -202,6 +208,125 @@ it("posts in a Group at Comment, counts another Group's new messages, and opens 
   expect(groupPanel().querySelector("h2")?.textContent).toBe("food");
   // One follow serves every Group, whichever is open.
   await settle(() => following("chat").length === 1);
+});
+
+const composer = () => groupPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
+const listed = () => [...groupPanel().querySelectorAll(".chat-list > .chat-message .chat-body")].map(node => node.textContent?.trim());
+
+it("shows a Posts Group's posts with their reply counts, and replies in a post's thread", async () => {
+  server({groups: [{wire: "wire-plans", name: "plans", type: "posts"}], history: {"wire-plans": [
+    chat(3, "Plans start here", "ana", {threadId: "t-plan"}), chat(4, "Agreed", "sam", {threadId: "t-plan"}), chat(6, "Train or car?", "ana", {threadId: "t-ride"}),
+  ]}});
+  await render(); await opened();
+  expect(listed()).toEqual(["Plans start here", "Train or car?"]);
+  expect(groupPanel().querySelector('[role="tablist"]')).toBeNull();
+  expect(composer().placeholder).toBe("What's happening in #plans?");
+  setControlValue(composer(), "Who books the hotel?"); await click("Send");
+  await settle(() => posts.length === 1);
+  expect(posts[0]).toMatchObject({channelWireId: "wire-plans", lane: "posts", body: "Who books the hotel?"});
+  expect(posts[0]).not.toHaveProperty("threadId");
+
+  await click("1 reply");
+  await settle(() => listed().includes("Agreed"));
+  expect(listed()).toEqual(["Plans start here", "Agreed"]);
+  expect(composer().placeholder).toBe("Reply…");
+  setControlValue(composer(), "I'll book it"); await click("Send");
+  await settle(() => posts.length === 2);
+  expect(posts[1]).toMatchObject({channelWireId: "wire-plans", threadId: "t-plan", body: "I'll book it"});
+  expect(posts[1]).not.toHaveProperty("lane");
+  await click("Back to posts");
+  expect(listed()).toEqual(["Plans start here", "Train or car?", "Who books the hotel?"]);
+  expect(button("2 replies")).toBeDefined();
+  expect(composer().placeholder).toBe("What's happening in #plans?");
+});
+
+it("shows a Chat Group as one conversation, and answers a message in its thread", async () => {
+  server({groups: [{wire: "wire-plans", name: "plans", type: "chat"}], history: {"wire-plans": [
+    chat(3, "Plans start here", "ana", {threadId: "t-chat", lane: "chat"}), chat(4, "Agreed", "sam", {threadId: "t-chat", lane: "chat", parentMessageId: "m3"}),
+    chat(6, "Train or car?", "ana", {threadId: "t-chat", lane: "chat"}),
+  ]}});
+  await render(); await opened();
+  expect(listed()).toEqual(["Plans start here", "Train or car?"]);
+  expect(composer().placeholder).toBe("Message #plans");
+  setControlValue(composer(), "Train"); await click("Send");
+  await settle(() => posts.length === 1);
+  expect(posts[0]).toMatchObject({channelWireId: "wire-plans", lane: "chat", body: "Train"});
+
+  await click("1 reply");
+  await settle(() => listed().includes("Agreed"));
+  expect(composer().placeholder).toBe("Reply…");
+  setControlValue(composer(), "Same"); await click("Send");
+  await settle(() => posts.length === 2);
+  expect(posts[1]).toMatchObject({threadId: "t-chat", parentMessageId: "m3", body: "Same"});
+  await click("Back to the conversation");
+  expect(composer().placeholder).toBe("Message #plans");
+});
+
+it("switches a Group with both lanes between Posts and Chat", async () => {
+  server({history: {"wire-plans": [chat(3, "Plans start here"), chat(4, "Quick question", "sam", {threadId: "t-chat", lane: "chat"})]}});
+  await render(); await opened();
+  const lanes = () => [...groupPanel().querySelectorAll<HTMLButtonElement>('[role="tablist"] [role="tab"]')];
+  expect(lanes().map(tab => tab.textContent)).toEqual(["Posts", "Chat"]);
+  expect(listed()).toEqual(["Plans start here"]);
+  await act(async () => lanes()[1]!.click());
+  expect(listed()).toEqual(["Quick question"]);
+  expect(composer().placeholder).toBe("Message #plans");
+});
+
+it("keeps a Group's draft and a file's comment draft while the person moves around, and clears each after its send", async () => {
+  server({level: "comment"}); await render(); await opened();
+  setControlValue(composer(), "Half a thought");
+  await click("All Groups");
+  await act(async () => buttons().find(node => node.textContent?.startsWith("food"))!.click());
+  await settle(() => groupPanel().textContent?.includes("Bring snacks") === true);
+  expect(composer().value).toBe("");
+  await click("All Groups");
+  await act(async () => buttons().find(node => node.textContent?.startsWith("plans"))!.click());
+  await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
+  expect(composer().value).toBe("Half a thought");
+
+  await showComments();
+  const comment = () => commentsPanel().querySelector<HTMLTextAreaElement>('textarea[name="body"]')!;
+  setControlValue(comment(), "Nine works");
+  await click("Chats");
+  await click("Comments");
+  await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
+  expect(comment().value).toBe("Nine works");
+  await act(async () => commentsPanel().querySelector<HTMLButtonElement>('button[type="submit"]')!.click());
+  await settle(() => posts.length === 1 && comment().value === "");
+  await click("Chats");
+  await click("Comments");
+  await settle(() => commentsPanel().textContent?.includes("Nine is early") === true);
+  expect(comment().value).toBe("");
+
+  // A new page load in the same tab finds the Group's draft.
+  await act(async () => root.unmount()); root = createRoot(container); held = [];
+  await render(); await opened();
+  expect(composer().value).toBe("Half a thought");
+});
+
+it("keeps drafts when the tab's storage is unavailable", async () => {
+  vi.stubGlobal("sessionStorage", {getItem() {throw new Error("blocked");}, setItem() {throw new Error("blocked");}, removeItem() {throw new Error("blocked");}});
+  server({level: "comment"}); await render(); await opened();
+  setControlValue(composer(), "Still here");
+  await click("All Groups");
+  await act(async () => buttons().find(node => node.textContent?.startsWith("plans"))!.click());
+  await settle(() => groupPanel().textContent?.includes("Plans start here") === true);
+  expect(composer().value).toBe("Still here");
+});
+
+it("keeps unsent text to copy once the person can no longer post", async () => {
+  server({level: "comment", postFails: {status: 403, code: "share_read_only"}});
+  const writeText = vi.fn(async () => undefined);
+  Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
+  await render(); await opened();
+  setControlValue(composer(), "Not sent yet"); await click("Send");
+  await settle(() => groupPanel().textContent?.includes("Only people who can comment post here.") === true);
+  expect(groupPanel().querySelector<HTMLTextAreaElement>('textarea[aria-label="Your unsent message"]')?.value).toBe("Not sent yet");
+  await act(async () => groupPanel().querySelector<HTMLButtonElement>('button[aria-label="Copy unsent message"]')!.click());
+  expect(writeText).toHaveBeenCalledWith("Not sent yet");
+  await click("Discard");
+  expect(groupPanel().querySelector('textarea[aria-label="Your unsent message"]')).toBeNull();
 });
 
 function liveSession() {
@@ -289,7 +414,7 @@ it("refuses an account that is not a member, and offers to sign out", async () =
 
 it("lays the files, the page and Chats or Comments side by side on a wide screen, and as four tabs on a phone", async () => {
   server({level: "comment"}); await render(); await opened();
-  const side = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  const side = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].filter(tab => !tab.closest(".chat-lanes"));
   expect(side.map(tab => tab.textContent)).toEqual(["Comments", "Chats"]);
   expect(side.map(tab => tab.getAttribute("aria-selected"))).toEqual(["false", "true"]);
   for (const id of ["workspace-files", "workspace-main", "workspace-chats"]) {
@@ -298,7 +423,7 @@ it("lays the files, the page and Chats or Comments side by side on a wide screen
   expect(commentsPanel().hasAttribute("inert")).toBe(true);
   await act(async () => root.unmount()); root = createRoot(container); held = [];
   narrow = true; await render(); await opened();
-  const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].filter(tab => !tab.closest(".chat-lanes"));
   expect(tabs.map(tab => tab.textContent)).toEqual(["Files", "Page", "Comments", "Chats"]);
   expect(tabs.map(tab => tab.getAttribute("aria-selected"))).toEqual(["false", "true", "false", "false"]);
   expect(container.querySelector("#workspace-files")?.hasAttribute("inert")).toBe(true);

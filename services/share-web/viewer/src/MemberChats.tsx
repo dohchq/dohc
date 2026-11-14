@@ -92,7 +92,8 @@ export function MemberChats({found, onRetry, shown, onEnded, onUnread}: {
         <h2>{group.name ?? "Group"}</h2>
       </div>
       <ChannelView key={`${opened.shareId}\n${group.channelWireId}`} client={hub.client(group)} name={group.name}
-        onEnded={reason => onEndedRef.current(reason)} readOnlyNote={READ_ONLY} empty={EMPTY}/>
+        onEnded={reason => onEndedRef.current(reason)} readOnlyNote={READ_ONLY} empty={EMPTY} threads={group.type ?? "both"}
+        draftKey={`${opened.shareId}\ngroup\n${group.channelWireId}`}/>
     </> : <>
       <div className="chats-head"><h2>Chats</h2></div>
       {found === "loading" ? <p className="chat-state">Loading Groups…</p> :
@@ -128,7 +129,7 @@ export function MemberComments({found, onRetry, path, access, onEnded}: {
     <div className="chats-head"><h2>Comments</h2><span className="comments-file" title={path}>{name}</span></div>
     {client && opened ? <ChannelView key={`${opened.shareId}\n${path}\n${access}`} client={client} name={`Comments on ${name}`}
       onEnded={onEnded} readOnlyNote={READ_ONLY} empty={NO_COMMENTS} messageLabel="Comment"
-      placeholder="Comment on this file…"/> :
+      placeholder="Comment on this file…" draftKey={`${opened.shareId}\nfile\n${path}`}/> :
       found === "failed" ? <div className="chat-state" role="alert"><p>Comments didn't load.</p>
         <button type="button" className="handoff-button secondary" onClick={onRetry}>Try again</button></div> :
       <p className="chat-state">Loading comments…</p>}
