@@ -1328,6 +1328,8 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, "note.md", "written outside dohc\n");
     // The engine holds the change until a capture finds the note's text in the file.
     let held = [{ path: "note.md", firstObservedAtMs: 1 }];
+    // Captures an open editor's session deferred.
+    let deferred: string[] = [];
     const store = new Proxy(liveStore, {
       get(target, property) {
         if (property === "watcherStatus")
@@ -1335,13 +1337,19 @@ describe("workspaceEngineCapture batch capture", () => {
             running: true,
             degraded: false,
             terminal: false,
-            deferredWrites: [],
+            deferredWrites: deferred,
             outsideChanges: held,
           });
         // Capture elsewhere in the workspace has not settled until Keep's own
         // write puts the note's text back.
         if (property === "flushCapture")
           return async () => {
+            // The editor closed, so the capture it deferred runs and is held.
+            if (deferred.length > 0) {
+              held = deferred.map((path) => ({ path, firstObservedAtMs: 2 }));
+              deferred = [];
+              return;
+            }
             if ((await readFile(join(root, "note.md"), "utf8")) !== "the note\n")
               throw new Error("Capture has not settled.");
             held = [];
@@ -1365,6 +1373,14 @@ describe("workspaceEngineCapture batch capture", () => {
       expect(await readFile(join(root, copies[0]!), "utf8")).toBe("written outside dohc\n");
       expect(outsideChanges).toHaveBeenLastCalledWith([]);
       await expect(engine.keepOutsideChange("note.md")).resolves.toBe(false);
+
+      // A Stop closed an editor whose session deferred the capture of a second change.
+      await write(root, "note.md", "written outside again\n");
+      deferred = ["note.md"];
+      await expect(engine.keepOutsideChange("note.md")).resolves.toBe(true);
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe("the note\n");
+      const kept = (await readdir(root)).filter((name) => name !== "note.md" && name !== ".dohc");
+      expect(kept).toHaveLength(2);
     } finally {
       await engine.stop();
       await liveStore.close();
