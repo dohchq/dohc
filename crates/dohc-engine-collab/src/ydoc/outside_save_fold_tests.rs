@@ -177,6 +177,48 @@ fn an_unchanged_outside_save_changes_nothing() {
 }
 
 #[test]
+fn an_outside_save_keeps_lines_that_differ_only_by_an_empty_text_piece() {
+    // A note made before every empty line carried a text piece holds empty
+    // lines without one, and a line can keep an empty piece beside its text.
+    let doc = Ydoc::wire();
+    let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+    {
+        let mut txn = doc.doc.transact_mut();
+        let first = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        first.push_back(&mut txn, XmlTextPrelim::new("One."));
+        first.push_back(&mut txn, XmlTextPrelim::new(""));
+        for _ in 0..2 {
+            body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        }
+        let last = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        last.push_back(&mut txn, XmlTextPrelim::new("Two."));
+    }
+    let lines = || -> Vec<yrs::XmlElementRef> {
+        let txn = doc.doc.transact();
+        body.children(&txn)
+            .map(|line| match line {
+                XmlOut::Element(line) => line,
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    let before = lines();
+    let markdown = doc.project_richdoc().unwrap();
+    // The file reads back as the same four lines, so the save changes none.
+    assert_eq!(
+        body_json(&folded(&markdown))["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4,
+        "{markdown:?}"
+    );
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &markdown)
+        .unwrap();
+    assert_eq!(lines(), before, "{markdown:?}");
+}
+
+#[test]
 fn folding_over_another_note_reads_as_a_fresh_fold() {
     let corpus: Value = serde_json::from_str(include_str!(
         "../../../../tools/rust-engine-program/nested-markdown-contract.json"

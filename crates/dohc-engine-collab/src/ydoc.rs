@@ -5147,8 +5147,7 @@ fn same_xml<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new:
     count_fold_work!(compared);
     match (old, new) {
         (XmlOut::Element(old), XmlOut::Element(new)) => {
-            let len = old.len(old_txn);
-            if old.tag() != new.tag() || len != new.len(new_txn) {
+            if old.tag() != new.tag() {
                 return false;
             }
             let mut attributes = 0;
@@ -5162,16 +5161,29 @@ fn same_xml<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new:
             if attributes != new.attributes(new_txn).count() {
                 return false;
             }
+            // An empty text piece shows nothing, so a line holding one is the
+            // same line as one without, as the server's check reads it.
             // `children` stops at a value that isn't XML, so such a child
-            // leaves the count short.
-            let mut children = 0;
-            for (old, new) in old.children(old_txn).zip(new.children(new_txn)) {
-                if !same_xml(old_txn, &old, new_txn, &new) {
-                    return false;
+            // leaves a count short.
+            let (old_len, new_len) = (old.len(old_txn), new.len(new_txn));
+            let (mut old_seen, mut new_seen) = (0, 0);
+            let mut olds = old
+                .children(old_txn)
+                .inspect(|_| old_seen += 1)
+                .filter(|child| !is_empty_text(old_txn, child));
+            let mut news = new
+                .children(new_txn)
+                .inspect(|_| new_seen += 1)
+                .filter(|child| !is_empty_text(new_txn, child));
+            loop {
+                match (olds.next(), news.next()) {
+                    (None, None) => break,
+                    (Some(old), Some(new)) if same_xml(old_txn, &old, new_txn, &new) => {}
+                    _ => return false,
                 }
-                children += 1;
             }
-            children == len
+            drop((olds, news));
+            old_seen == old_len && new_seen == new_len
         }
         (XmlOut::Text(old), XmlOut::Text(new)) => {
             let old = old.diff(old_txn, YChange::identity);
@@ -5185,6 +5197,10 @@ fn same_xml<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new:
         }
         _ => false,
     }
+}
+
+fn is_empty_text<T: ReadTxn>(txn: &T, node: &XmlOut) -> bool {
+    matches!(node, XmlOut::Text(text) if text.len(txn) == 0)
 }
 
 fn xml_json<T: ReadTxn>(txn: &T, node: XmlOut) -> Value {
@@ -6018,12 +6034,15 @@ fn markdown_node<T: ReadTxn>(
                 }
                 attrs.insert(key.to_string(), value);
             }
-            let children = element
-                .children(txn)
-                .map(|child| {
-                    markdown_node(txn, child, depth + 1, remaining_nodes, source_text_bytes)
-                })
-                .collect::<ProjectionResult<_>>()?;
+            let mut children = Vec::new();
+            for child in element.children(txn) {
+                let child =
+                    markdown_node(txn, child, depth + 1, remaining_nodes, source_text_bytes)?;
+                // An empty text piece writes nothing; its line is still an empty line.
+                if !matches!(&child, MarkdownNode::Text(runs) if runs.is_empty()) {
+                    children.push(child);
+                }
+            }
             Ok(MarkdownNode::Element {
                 tag: element.tag().to_string(),
                 attrs,
@@ -9882,6 +9901,48 @@ mod projection_tests {
         );
         let body = serde_json::to_string(&folded.canonical_content()["body"]).expect("body json");
         assert!(body.contains("a<br>b &#124; <b>*x*</b>"), "{body}");
+    }
+
+    #[test]
+    fn an_empty_text_piece_leaves_the_saved_markdown_as_it_was() {
+        fn saved(pieces: bool) -> String {
+            let doc = Ydoc::wire();
+            let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            {
+                let mut txn = doc.doc.transact_mut();
+                let first = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+                first.push_back(&mut txn, XmlTextPrelim::new("One."));
+                // An empty piece beside a line break, on either side of it.
+                for (before, after) in [("", ""), ("Two.", ""), ("", "Three.")] {
+                    let line = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+                    if !before.is_empty() {
+                        line.push_back(&mut txn, XmlTextPrelim::new(before));
+                    } else if pieces && !after.is_empty() {
+                        line.push_back(&mut txn, XmlTextPrelim::new(""));
+                    }
+                    line.push_back(&mut txn, XmlElementPrelim::empty("hardBreak"));
+                    if !after.is_empty() {
+                        line.push_back(&mut txn, XmlTextPrelim::new(after));
+                    } else if pieces {
+                        line.push_back(&mut txn, XmlTextPrelim::new(""));
+                    }
+                }
+                // Lines in a row, an empty heading between them, and empty lines at the end.
+                for tag in ["paragraph", "paragraph", "heading", "paragraph", "paragraph"] {
+                    let line = body.push_back(&mut txn, XmlElementPrelim::empty(tag));
+                    if tag == "heading" {
+                        line.insert_attribute(&mut txn, "level", 1i64);
+                    }
+                    if pieces {
+                        line.push_back(&mut txn, XmlTextPrelim::new(""));
+                    }
+                }
+            }
+            doc.project_richdoc().unwrap()
+        }
+        let without = saved(false);
+        assert!(without.contains("&nbsp;"), "{without:?}");
+        assert_eq!(saved(true), without);
     }
 
     #[test]
