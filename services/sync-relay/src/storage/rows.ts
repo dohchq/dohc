@@ -1,5 +1,4 @@
-import {parseSettlementAuthors} from "./hostedSettlement";
-import { parseLiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
+import { parseSettlementAuthors } from "./hostedSettlement";
 import {
   type ObjectMomentRow,
   type ShareProposalRow,
@@ -75,7 +74,9 @@ export function rowToShareRow(row: Record<string, unknown>): SyncRelayShareRow {
     workspaceId: String(row.workspace_id),
     granterUserId: String(row.granter_user_id),
     selectorJson: String(row.selector_json),
-    ...(row.creation_provenance_json == null ? {} : {creationProvenance: JSON.parse(String(row.creation_provenance_json))}),
+    ...(row.creation_provenance_json == null
+      ? {}
+      : { creationProvenance: JSON.parse(String(row.creation_provenance_json)) }),
     createdAtMs: Number(row.created_at_ms),
   };
 }
@@ -104,9 +105,7 @@ export function rowToShareGrantRow(row: Record<string, unknown>): SyncRelayShare
   };
 }
 
-export function rowToLinkCredentialRow(
-  row: Record<string, unknown>,
-): SyncRelayLinkCredentialRow {
+export function rowToLinkCredentialRow(row: Record<string, unknown>): SyncRelayLinkCredentialRow {
   return {
     credentialId: String(row.credential_id),
     grantId: String(row.grant_id),
@@ -118,9 +117,7 @@ export function rowToLinkCredentialRow(
   };
 }
 
-export function rowToLinkPrincipalRow(
-  row: Record<string, unknown>,
-): SyncRelayLinkPrincipalRow {
+export function rowToLinkPrincipalRow(row: Record<string, unknown>): SyncRelayLinkPrincipalRow {
   return {
     principalId: String(row.principal_id),
     grantId: String(row.grant_id),
@@ -186,9 +183,7 @@ export function rowToLinkHandoffCodeRow(
   };
 }
 
-export function rowToShareWithGrantRow(
-  row: Record<string, unknown>,
-): SyncRelayShareWithGrantRow {
+export function rowToShareWithGrantRow(row: Record<string, unknown>): SyncRelayShareWithGrantRow {
   return {
     share: rowToShareRow(row),
     grant: rowToShareGrantRow({
@@ -208,10 +203,24 @@ export function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {
     payloadJson: String(row.payload_json),
     recordedAtMs: Number(row.recorded_at_ms),
     relaySeq: Number(row.relay_seq),
-    ...(row.settlement_admission_json == null ? {} : {settlementAdmission:JSON.parse(String(row.settlement_admission_json)) as import("./hostedSettlement").SettlementAdmission}),
-    ...(row.relay_admission == null ? {} : {relayAdmission: String(row.relay_admission) as import("./relayAdmission").RelayAdmission}),
-    ...(row.admitted_author_snapshot_json == null ? {} : {
-      admittedAuthorSnapshot: parseSettlementAuthors(JSON.parse(String(row.admitted_author_snapshot_json))),
-    }),
+    ...(row.settlement_admission_json == null
+      ? {}
+      : {
+          settlementAdmission: JSON.parse(
+            String(row.settlement_admission_json),
+          ) as import("./hostedSettlement").SettlementAdmission,
+        }),
+    ...(row.relay_admission == null
+      ? {}
+      : {
+          relayAdmission: String(row.relay_admission) as import("./relayAdmission").RelayAdmission,
+        }),
+    ...(row.admitted_author_snapshot_json == null
+      ? {}
+      : {
+          admittedAuthorSnapshot: parseSettlementAuthors(
+            JSON.parse(String(row.admitted_author_snapshot_json)),
+          ),
+        }),
   };
 }

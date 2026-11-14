@@ -30,7 +30,10 @@ type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
-  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => {
+  DatabaseSync: new (
+    path: string,
+    options?: { readOnly?: boolean },
+  ) => {
     prepare(sql: string): { get(...params: unknown[]): Record<string, unknown> | undefined };
     close(): void;
   };
@@ -68,27 +71,43 @@ type ShotGate = { release(): void };
 // up in ipcMain._invokeHandlers on each invoke, so the swap catches that call
 // and puts the original back for every call after it. A failure is the
 // engine going away, which the renderer words after what failed.
-async function interceptNext(desktop: Desktop, channel: string, mode: "hold" | "fail" | "hold-then-fail"): Promise<void> {
-  await desktop.app.evaluate(({ ipcMain }, input) => {
-    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, InvokeHandler> })._invokeHandlers;
-    const original = handlers.get(input.channel);
-    if (!original) throw new Error(`main has no handler for ${input.channel}`);
-    let open!: () => void;
-    const gate = new Promise<void>((resolve) => { open = resolve; });
-    handlers.set(input.channel, async (...args: unknown[]) => {
-      handlers.set(input.channel, original);
-      const fail = () => { throw Object.assign(new Error("Rust engine daemon exited."), { name: "EngineDaemonUnavailableError" }); };
-      if (input.mode === "fail") fail();
-      await gate;
-      if (input.mode === "hold-then-fail") fail();
-      return await original(...args);
-    });
-    (globalThis as { __dohcShotGate?: ShotGate }).__dohcShotGate = { release: open };
-  }, { channel, mode });
+async function interceptNext(
+  desktop: Desktop,
+  channel: string,
+  mode: "hold" | "fail" | "hold-then-fail",
+): Promise<void> {
+  await desktop.app.evaluate(
+    ({ ipcMain }, input) => {
+      const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, InvokeHandler> })
+        ._invokeHandlers;
+      const original = handlers.get(input.channel);
+      if (!original) throw new Error(`main has no handler for ${input.channel}`);
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      handlers.set(input.channel, async (...args: unknown[]) => {
+        handlers.set(input.channel, original);
+        const fail = () => {
+          throw Object.assign(new Error("Rust engine daemon exited."), {
+            name: "EngineDaemonUnavailableError",
+          });
+        };
+        if (input.mode === "fail") fail();
+        await gate;
+        if (input.mode === "hold-then-fail") fail();
+        return await original(...args);
+      });
+      (globalThis as { __dohcShotGate?: ShotGate }).__dohcShotGate = { release: open };
+    },
+    { channel, mode },
+  );
 }
 
 async function releaseHeld(desktop: Desktop): Promise<void> {
-  await desktop.app.evaluate(() => (globalThis as { __dohcShotGate?: ShotGate }).__dohcShotGate?.release());
+  await desktop.app.evaluate(() =>
+    (globalThis as { __dohcShotGate?: ShotGate }).__dohcShotGate?.release(),
+  );
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
@@ -111,13 +130,19 @@ async function shootParts(page: Page, name: string, parts: Locator[]): Promise<v
   const bottom = Math.max(...present.map((box) => box.y + box.height)) + pad;
   for (const theme of ["light", "dark"] as const) {
     await setTheme(page, theme);
-    await page.screenshot({ path: join(SHOT_DIR, `${name}-${theme}.png`), clip: { x: left, y: top, width: right - left, height: bottom - top } });
+    await page.screenshot({
+      path: join(SHOT_DIR, `${name}-${theme}.png`),
+      clip: { x: left, y: top, width: right - left, height: bottom - top },
+    });
   }
   await setTheme(page, "light");
 }
 
 async function shootMenu(page: Page, name: string): Promise<void> {
-  await shootParts(page, name, [page.getByTestId("version-menu-button"), page.getByTestId("version-menu")]);
+  await shootParts(page, name, [
+    page.getByTestId("version-menu-button"),
+    page.getByTestId("version-menu"),
+  ]);
 }
 
 async function shootDialog(page: Page, name: string): Promise<void> {
@@ -160,7 +185,13 @@ async function switchTo(page: Page, name: string): Promise<void> {
   await expectActive(page, name);
 }
 
-async function writeCaptured(page: Page, rootPath: string, version: string, path: string, contents: string): Promise<void> {
+async function writeCaptured(
+  page: Page,
+  rootPath: string,
+  version: string,
+  path: string,
+  contents: string,
+): Promise<void> {
   await writeWorkspaceFiles({ rootPath }, [{ path, contents }]);
   await expect.poll(() => engineText(rootPath, version, path), { timeout: 30_000 }).toBe(contents);
   await expect(page.getByTestId("version-menu-button")).toBeEnabled();
@@ -189,9 +220,17 @@ function protectedByteLength(rootPath: string, versionName: string, path: string
   }
 }
 
-async function writeProtected(page: Page, rootPath: string, version: string, path: string, contents: string): Promise<void> {
+async function writeProtected(
+  page: Page,
+  rootPath: string,
+  version: string,
+  path: string,
+  contents: string,
+): Promise<void> {
   await writeWorkspaceFiles({ rootPath }, [{ path, contents }]);
-  await expect.poll(() => protectedByteLength(rootPath, version, path), { timeout: 30_000 }).toBe(Buffer.byteLength(contents));
+  await expect
+    .poll(() => protectedByteLength(rootPath, version, path), { timeout: 30_000 })
+    .toBe(Buffer.byteLength(contents));
   await expect(page.getByTestId("version-menu-button")).toBeEnabled();
 }
 
@@ -217,7 +256,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expectActive(page, "Main");
 
-    // On Main: the menu, the New version dialog, a taken name, and Creating….
     await shootWindow(page, "window-main");
     await openMenu(page);
     await shootMenu(page, "menu-main");
@@ -240,8 +278,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expectActive(page, "Draft");
     await expect(page.getByTestId("version-new-dialog")).toHaveCount(0);
 
-    // On Draft: the trigger without a dot, the menu opened with the mouse,
-    // and the dialog starting from Draft.
     await shootParts(page, "trigger-draft", [page.getByTestId("version-menu-button")]);
     await openMenu(page);
     await shootMenu(page, "menu-draft");
@@ -250,8 +286,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(page.getByTestId("version-new-no-merge")).toBeVisible();
     await shootDialog(page, "new-version-draft");
 
-    // A create that fails for another reason: a notice with Try again, and
-    // its row in Notices. The dialog keeps the name.
     await interceptNext(desktop, "desktop:create-workspace-version", "fail");
     await page.getByTestId("version-new-input").press("Enter");
     const createFailed = errorToast(page, "Ideas");
@@ -295,24 +329,27 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(page.getByTestId("version-merge-confirm")).toHaveText("Merging…");
     await shootWindow(page, "merge-retry-running");
     await releaseHeld(desktop);
-    await expect(page.locator('[data-testid="version-conflict"][data-conflict-path="notes.md"]')).toBeVisible({ timeout: 30_000 });
+    await expect(
+      page.locator('[data-testid="version-conflict"][data-conflict-path="notes.md"]'),
+    ).toBeVisible({ timeout: 30_000 });
     await shootWindow(page, "merge-conflicts");
     await page.getByTestId("version-conflict-keep-incoming").click();
-    await expect(page.getByTestId("version-merge-status")).toHaveText("Merged Draft into Main", { timeout: 30_000 });
+    await expect(page.getByTestId("version-merge-status")).toHaveText("Merged Draft into Main", {
+      timeout: 30_000,
+    });
     await shootWindow(page, "merge-resolved");
     await page.getByTestId("version-merge-done").click();
 
-    // A clean merge.
     await writeCaptured(page, temp.rootPath, "Draft", "plan.md", "# Plan\n\nSecond draft.\n");
     await openMenu(page);
     await page.getByTestId("version-merge").click();
     await page.getByTestId("version-merge-confirm").click();
-    await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, { timeout: 30_000 });
+    await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, {
+      timeout: 30_000,
+    });
     await shootWindow(page, "merge-success");
     await page.getByTestId("version-merge-done").click();
 
-    // A merge whose dialog closed while it ran keeps going, and its answer
-    // is a toast and a Notices row: a success, a failure, and files to decide.
     const closeWhileMerging = async (mode: "hold" | "hold-then-fail", shot?: string) => {
       await openMenu(page);
       await page.getByTestId("version-merge").click();
@@ -326,10 +363,12 @@ test("@ui-audit the versions menu and what it opens", async () => {
       await releaseHeld(app);
     };
     // Each clean merge below changes a file the earlier merges left alone. A
-    // second merge of plan.md would ask which copy to keep (#3211).
+    // second merge of plan.md would ask which copy to keep.
     await writeCaptured(page, temp.rootPath, "Draft", "ideas.md", "# Ideas\n");
     await closeWhileMerging("hold", "merge-running-close");
-    const mergedAway = page.getByTestId("workspace-shell-notice").filter({ hasText: "Merged 1 file from Draft into Main" });
+    const mergedAway = page
+      .getByTestId("workspace-shell-notice")
+      .filter({ hasText: "Merged 1 file from Draft into Main" });
     await expect(mergedAway).toBeVisible({ timeout: 30_000 });
     // A success fades, but not under the pointer.
     await mergedAway.hover();
@@ -343,31 +382,49 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(failedAway).toBeVisible({ timeout: 30_000 });
     await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeVisible();
     await shootWindow(page, "merge-closed-failure");
-    // While another merge dialog is open, Try again waits and says why.
     await openMenu(page);
     await page.getByTestId("version-merge").click();
     await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeDisabled();
-    await expect(failedAway.getByTestId("workspace-shell-error-retry-reason")).toHaveText("Close the open merge first.");
+    await expect(failedAway.getByTestId("workspace-shell-error-retry-reason")).toHaveText(
+      "Close the open merge first.",
+    );
     await shootWindow(page, "merge-closed-failure-blocked");
     await page.getByTestId("version-merge-cancel").click();
     await expect(page.getByTestId("version-merge-dialog")).toHaveCount(0);
     await expect(failedAway.getByTestId("workspace-shell-error-retry")).toBeEnabled();
-    // Try again opens the dialog merging again, and the answer shows there.
     await failedAway.getByTestId("workspace-shell-error-retry").click();
-    await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, { timeout: 30_000 });
+    await expect(page.getByTestId("version-merge-status")).toHaveText(/Merged 1 file into Main/, {
+      timeout: 30_000,
+    });
     await page.getByTestId("version-merge-done").click();
 
-    await writeCaptured(page, temp.rootPath, "Draft", "notes.md", "# Notes\n\nDraft's notes, again.\n");
+    await writeCaptured(
+      page,
+      temp.rootPath,
+      "Draft",
+      "notes.md",
+      "# Notes\n\nDraft's notes, again.\n",
+    );
     await switchTo(page, "Main");
-    await writeCaptured(page, temp.rootPath, "Main", "notes.md", "# Notes\n\nMain's notes, again.\n");
+    await writeCaptured(
+      page,
+      temp.rootPath,
+      "Main",
+      "notes.md",
+      "# Notes\n\nMain's notes, again.\n",
+    );
     await switchTo(page, "Draft");
     await closeWhileMerging("hold");
-    const decideAway = page.getByTestId("workspace-shell-notice").filter({ hasText: "Merging Draft into Main needs a decision" });
+    const decideAway = page
+      .getByTestId("workspace-shell-notice")
+      .filter({ hasText: "Merging Draft into Main needs a decision" });
     await expect(decideAway).toBeVisible({ timeout: 30_000 });
     await expect(decideAway).toContainText("One file has two copies.");
     await shootWindow(page, "merge-closed-decide");
     await page.getByTestId("notice-center-toggle").click();
-    const decideRow = page.locator("[data-notice-row]").filter({ hasText: "Merging Draft into Main needs a decision" });
+    const decideRow = page
+      .locator("[data-notice-row]")
+      .filter({ hasText: "Merging Draft into Main needs a decision" });
     await expect(decideRow).toBeVisible();
     await shootWindow(page, "merge-closed-decide-notices");
     await page.getByTestId("notice-center-toggle").click();
@@ -380,7 +437,9 @@ test("@ui-audit the versions menu and what it opens", async () => {
     const draftRow = page
       .getByTestId("versions-page-row")
       .filter({ has: page.getByTestId("versions-page-name").getByText("Draft", { exact: true }) });
-    await expect(draftRow.getByTestId("versions-page-conflicts")).toHaveText("1 to decide", { timeout: 30_000 });
+    await expect(draftRow.getByTestId("versions-page-conflicts")).toHaveText("1 to decide", {
+      timeout: 30_000,
+    });
     await expect(draftRow.getByTestId("versions-page-merge")).toHaveCount(0);
     await page.mouse.move(4, 400);
     await expect(draftRow.getByTestId("versions-page-decide")).toBeVisible();
@@ -399,11 +458,12 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await expect(decideRow).toHaveCount(0, { timeout: 30_000 });
     await page.getByTestId("notice-center-toggle").click();
 
-    // Nothing new to merge.
     await openMenu(page);
     await page.getByTestId("version-merge").click();
     await page.getByTestId("version-merge-confirm").click();
-    await expect(page.getByTestId("version-merge-status")).toHaveText("No files merged into Main", { timeout: 30_000 });
+    await expect(page.getByTestId("version-merge-status")).toHaveText("No files merged into Main", {
+      timeout: 30_000,
+    });
     await shootWindow(page, "merge-nothing-new");
     await page.getByTestId("version-merge-done").click();
 
@@ -431,43 +491,68 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await openMenu(page);
     await page.getByTestId("version-merge").click();
     await page.getByTestId("version-merge-confirm").click();
-    await expect(page.getByTestId("version-merge-status")).toHaveText("Merged 7 files into Main", { timeout: 30_000 });
+    await expect(page.getByTestId("version-merge-status")).toHaveText("Merged 7 files into Main", {
+      timeout: 30_000,
+    });
     await shootWindow(page, "merge-protected-seven");
     await page.getByTestId("version-merge-done").click();
 
     // A conflict and a protected file in one merge: the files wait behind
     // Show files while the conflict is the task, then show open at the end.
     await writeProtected(page, temp.rootPath, "Draft", ".env", "API_KEY=the third\n");
-    await writeCaptured(page, temp.rootPath, "Draft", "notes.md", "# Notes\n\nDraft's second notes.\n");
+    await writeCaptured(
+      page,
+      temp.rootPath,
+      "Draft",
+      "notes.md",
+      "# Notes\n\nDraft's second notes.\n",
+    );
     await switchTo(page, "Main");
-    await writeCaptured(page, temp.rootPath, "Main", "notes.md", "# Notes\n\nMain's second notes.\n");
+    await writeCaptured(
+      page,
+      temp.rootPath,
+      "Main",
+      "notes.md",
+      "# Notes\n\nMain's second notes.\n",
+    );
     await switchTo(page, "Draft");
     await openMenu(page);
     await page.getByTestId("version-merge").click();
     await page.getByTestId("version-merge-confirm").click();
-    await expect(page.getByTestId("version-merge-protected-toggle")).toHaveAttribute("aria-expanded", "false", { timeout: 30_000 });
+    await expect(page.getByTestId("version-merge-protected-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+      { timeout: 30_000 },
+    );
     await shootWindow(page, "merge-conflicts-protected-closed");
     await page.getByTestId("version-merge-protected-toggle").click();
-    await expect(page.getByTestId("version-merge-protected-toggle")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("version-merge-protected-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     await page.mouse.move(4, 400);
     await shootWindow(page, "merge-conflicts-protected-open");
     await page.getByTestId("version-conflict-keep-incoming").click();
-    await expect(page.getByTestId("version-merge-status")).toHaveText("Merged Draft into Main", { timeout: 30_000 });
+    await expect(page.getByTestId("version-merge-status")).toHaveText("Merged Draft into Main", {
+      timeout: 30_000,
+    });
     await expect(page.getByRole("list", { name: "Protected files" })).toBeVisible();
     await shootWindow(page, "merge-resolved-protected");
     await page.getByTestId("version-merge-done").click();
 
-    // A version made from Draft cannot merge into Main, and says why.
     await createVersion(page, "Draft two");
     await openMenu(page);
     await shootMenu(page, "menu-nested");
     await page.keyboard.press("Escape");
-    // Opened from the keyboard, then down to the disabled Merge row.
     await page.getByTestId("version-menu-button").focus();
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("version-menu")).toBeVisible();
     const merge = page.getByTestId("version-merge");
-    for (let step = 0; step < 12 && !(await merge.evaluate((row) => row === document.activeElement)); step++) {
+    for (
+      let step = 0;
+      step < 12 && !(await merge.evaluate((row) => row === document.activeElement));
+      step++
+    ) {
       await page.keyboard.press("ArrowDown");
     }
     await expect(merge).toBeFocused();
@@ -475,7 +560,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await page.keyboard.press("Escape");
     await shootWindow(page, "window-nested");
 
-    // Switching with an edit main has not taken yet asks to save it first.
     await explorerRow(page, "plan.md").click();
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toBeVisible({ timeout: 20_000 });

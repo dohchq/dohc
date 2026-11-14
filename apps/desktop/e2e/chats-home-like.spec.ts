@@ -40,8 +40,6 @@ test("Home Like works by keyboard and pointer and persists across reopen in both
     const search = page.getByRole("textbox", { name: "Search emoji or paste any emoji" });
     await expect(pill).toHaveCount(0);
 
-    // Keyboard: Enter opens the picker with its search focused. A pasted
-    // emoji is the first choice, and Enter picks it.
     await like.focus();
     await page.keyboard.press("Enter");
     await expect(search).toBeFocused();
@@ -51,8 +49,6 @@ test("Home Like works by keyboard and pointer and persists across reopen in both
     await expect(pill).toHaveAttribute("aria-pressed", "true");
     await expect(pill).toContainText("1");
     await expect(page.getByTestId("chats-feed-reaction-picker")).toHaveCount(0);
-    // The write settles: focus stays on the trigger and the controls accept
-    // the next write. The time is taken once they do.
     await expect(like).toBeFocused();
     await expect(like).not.toHaveAttribute("aria-disabled", "true");
     await expect(pill).not.toHaveAttribute("aria-disabled", "true");
@@ -62,13 +58,15 @@ test("Home Like works by keyboard and pointer and persists across reopen in both
     });
 
     for (const theme of ["light", "dark"] as const) {
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`home-like-${theme}.png`) });
     }
 
-    // Remove from the pill, then add again from the pointer.
     const removedAt = performance.now();
     await pill.click();
     await expect(pill).toHaveCount(0);
@@ -83,9 +81,6 @@ test("Home Like works by keyboard and pointer and persists across reopen in both
     await expect(pill).toHaveAttribute("aria-pressed", "true");
     await expect(like).not.toHaveAttribute("aria-disabled", "true");
 
-    // Keyboard on the pill itself: the viewer is its only reactor, so it
-    // unmounts, and focus moves to Add reaction instead of the page body.
-    // From there the keyboard adds it back.
     await pill.focus();
     await page.keyboard.press("Enter");
     await expect(pill).toHaveCount(0);

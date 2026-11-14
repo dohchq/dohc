@@ -4,7 +4,6 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import type { CrashReportNotice } from "../workbench/NoticeCenter";
 
-// What stopped, in the words the rest of dohc uses for it.
 const CRASH_REPORT_TITLES: Record<CrashReportSource, string> = {
   main: "dohc had an unexpected error",
   window: "A dohc window stopped unexpectedly",
@@ -87,9 +86,11 @@ export function useCrashReport(notify: CrashReportNotify): {
     // The toast closes at once. A read that started before this one would
     // show it again, so it no longer counts.
     readToken.current += 1;
-    setState((current) => current.report?.through === through
-      ? { ...current, report: { ...current.report, read: true } }
-      : current);
+    setState((current) =>
+      current.report?.through === through
+        ? { ...current, report: { ...current.report, read: true } }
+        : current,
+    );
     void bridge()
       .markCrashReportRead({ through })
       .then(

@@ -29,13 +29,16 @@ export function initReducedMotion(): () => void {
       const reduced = String(await api.getSystemReducedMotion({}));
       // An unchanged write would still restyle every element the motion rules match.
       const root = document.documentElement;
-      if (!stopped && root.dataset.systemReducedMotion !== reduced) root.dataset.systemReducedMotion = reduced;
+      if (!stopped && root.dataset.systemReducedMotion !== reduced)
+        root.dataset.systemReducedMotion = reduced;
     } catch {
       // Keep the last native value, or the media query before the first read.
     } finally {
       reading = false;
       if (!stopped && visible()) {
-        timer = setTimeout(() => { void refresh(); }, 1000);
+        timer = setTimeout(() => {
+          void refresh();
+        }, 1000);
       }
     }
   };

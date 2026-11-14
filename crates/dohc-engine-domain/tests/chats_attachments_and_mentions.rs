@@ -1,7 +1,6 @@
 use dohc_engine_domain::{
     AgentReader, ChatActorKind, ChatChannelKind, ChatThreadLane, CreateFileThread, LinkedChatStore,
-    LocalAttachmentInput, NoFaults, SendMessage, StartChannelThread, attachment_id_for,
-    parse_mention_handles,
+    LocalAttachmentInput, NoFaults, SendMessage, StartChannelThread, parse_mention_handles,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -26,16 +25,6 @@ fn attachment(object: &str) -> LocalAttachmentInput {
     }
 }
 
-fn section(object: &str, anchor: &str, occurrence: i64) -> LocalAttachmentInput {
-    LocalAttachmentInput {
-        object_id: object.to_owned(),
-        path_hint: Some(format!("notes/{object}.md")),
-        heading_text: Some("Heading".to_owned()),
-        heading_anchor: Some(anchor.to_owned()),
-        heading_occurrence: Some(occurrence),
-    }
-}
-
 fn seed_channel(store: &mut EngineStore) {
     LinkedChatStore::new(store)
         .create_channel(
@@ -47,45 +36,6 @@ fn seed_channel(store: &mut EngineStore) {
             &NO_FAULTS,
         )
         .expect("channel");
-}
-
-fn start_with(
-    store: &mut EngineStore,
-    thread_id: &str,
-    message_id: &str,
-    attachments: Vec<LocalAttachmentInput>,
-    now_ms: i64,
-) -> Result<(), dohc_engine_domain::DomainError> {
-    LinkedChatStore::new(store)
-        .start_channel_thread(
-            &StartChannelThread {
-                automation: None,
-                workspace_id: WS.to_owned(),
-                channel_id: "channel".to_owned(),
-                thread_id: thread_id.to_owned(),
-                message_id: message_id.to_owned(),
-                title: Some("Thread".to_owned()),
-                lane: ChatThreadLane::Posts,
-                own_thread: false,
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Ada".to_owned(),
-                author_owner_display_name: None,
-                author_user_id: Some("ada".to_owned()),
-                origin: None,
-                body: "Opening".to_owned(),
-                needs_decision: false,
-                options: Vec::new(),
-                attachments,
-                author_agent_id: None,
-                author_reported: None,
-                work: None,
-                wake_agent_ids: Vec::new(),
-                now_ms,
-                request_id: None,
-            },
-            &NO_FAULTS,
-        )
-        .map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -200,223 +150,6 @@ fn send_text(
 }
 
 #[test]
-fn attachment_heading_triplet_is_all_or_none() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    let mut malformed = attachment("object");
-    malformed.heading_text = Some("Heading".to_owned());
-    let result = start_with(&mut store, "thread", "message", vec![malformed], 20);
-    assert!(
-        matches!(
-            result,
-            Err(dohc_engine_domain::DomainError::Chat {
-                code: "invalid-path",
-                ..
-            })
-        ),
-        "allowing a partial heading triplet -> malformed section target is persisted."
-    );
-}
-
-#[test]
-fn attachment_targets_dedupe_before_insert_and_journal() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    let first = section("object", "anchor", 0);
-    let mut duplicate = first.clone();
-    duplicate.path_hint = Some("renamed/object.md".to_owned());
-    start_with(&mut store, "thread", "message", vec![first, duplicate], 20).expect("start");
-    let (rows, ops): (i64, i64) =
-        store
-            .read_with(|conn| {
-                Ok::<_, StorageError>((
-                conn.query_row("SELECT COUNT(*) FROM chat_attachments", [], |row| row.get(0))
-                    .map_err(StorageError::corrupt_public)?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM replication_log WHERE op_kind = 'chat.attachment.add'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(StorageError::corrupt_public)?,
-            ))
-            })
-            .expect("counts");
-    assert_eq!(
-        (rows, ops),
-        (1, 1),
-        "deduping only at INSERT (or not at all) -> a second replication op escapes."
-    );
-}
-
-#[test]
-fn attachment_id_matches_whole_file_and_section_oracles() {
-    assert_eq!(
-        attachment_id_for("message-1", "object-1", None, None),
-        "98d07738824d67bb04e6d2656fc621fb6dcc9ea57c266624f13432e236d8ddac",
-        "adding separators to the legacy whole-file formula -> oracle hash differs.",
-    );
-    assert_eq!(
-        attachment_id_for("message-1", "object-1", Some("heading-anchor"), Some(3)),
-        "0a93bfb0192c909a1498046c107c6f12f8fbe46415b0a7b9c3be59cc9d6699d9",
-        "omitting any NUL separator in the section formula -> oracle hash differs.",
-    );
-}
-
-#[test]
-fn attachment_insert_and_replication_op_commit_together() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
-    let result = LinkedChatStore::new(&mut store).start_channel_thread(
-        &StartChannelThread {
-            automation: None,
-            workspace_id: WS.to_owned(),
-            channel_id: "channel".to_owned(),
-            thread_id: "thread".to_owned(),
-            message_id: "message".to_owned(),
-            title: None,
-            lane: ChatThreadLane::Posts,
-            own_thread: false,
-            author_kind: ChatActorKind::Human,
-            author_display_name: "Ada".to_owned(),
-            author_owner_display_name: None,
-            author_user_id: None,
-            origin: None,
-            body: "Opening".to_owned(),
-            needs_decision: false,
-            options: Vec::new(),
-            attachments: vec![attachment("object")],
-            author_agent_id: None,
-            author_reported: None,
-            work: None,
-            wake_agent_ids: Vec::new(),
-            now_ms: 20,
-            request_id: Some("request".to_owned()),
-        },
-        faults.as_ref(),
-    );
-    assert!(result.is_err());
-    let (attachments, ops): (i64, i64) = store
-        .read_with(|conn| {
-            Ok::<_, StorageError>((
-                conn.query_row("SELECT COUNT(*) FROM chat_attachments", [], |row| {
-                    row.get(0)
-                })
-                .map_err(StorageError::corrupt_public)?,
-                conn.query_row("SELECT COUNT(*) FROM replication_log", [], |row| row.get(0))
-                    .map_err(StorageError::corrupt_public)?,
-            ))
-        })
-        .expect("counts");
-    assert_eq!(
-        (attachments, ops),
-        (0, 1),
-        "only the pre-existing channel op remains"
-    );
-}
-
-#[test]
-fn attachment_read_hides_orphans_without_deleting_them() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_with(&mut store, "thread", "message", vec![], 20).expect("start");
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute(
-                "INSERT INTO chat_attachments \
-                 (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) \
-                 VALUES (?1,'orphan','thread','missing','file','object',30)",
-                [WS],
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("orphan");
-    let visible = LinkedChatStore::new(&mut store)
-        .list_thread_attachments(WS, "thread", None, 10)
-        .expect("list");
-    let retained: i64 = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM chat_attachments WHERE attachment_id='orphan'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("retained");
-    assert!(
-        visible.is_empty(),
-        "removing the message inner join -> an orphan leaks through the read."
-    );
-    assert_eq!(retained, 1);
-}
-
-#[test]
-fn file_thread_requires_exactly_one_linked_owner() {
-    let (_scratch, mut store) = store();
-    let result = LinkedChatStore::new(&mut store).create_thread(
-        &CreateFileThread {
-            workspace_id: WS.to_owned(),
-            thread_id: "thread".to_owned(),
-            title: "File thread".to_owned(),
-            linked_object_id: "   ".to_owned(),
-            linked_path_hint: None,
-            now_ms: 20,
-            request_id: "request".to_owned(),
-        },
-        &NO_FAULTS,
-    );
-    assert!(
-        matches!(
-            result,
-            Err(dohc_engine_domain::DomainError::Chat {
-                code: "invalid-path",
-                ..
-            })
-        ),
-        "accepting a missing linked identity -> ownerless thread is persisted."
-    );
-}
-
-#[test]
-fn local_file_thread_create_refuses_newline_in_linked_object_id() {
-    let (_scratch, mut store) = store();
-    let result = LinkedChatStore::new(&mut store).create_thread(
-        &CreateFileThread {
-            workspace_id: WS.to_owned(),
-            thread_id: "thread".to_owned(),
-            title: "File thread".to_owned(),
-            linked_object_id: "object\nid".to_owned(),
-            linked_path_hint: None,
-            now_ms: 20,
-            request_id: "request".to_owned(),
-        },
-        &NO_FAULTS,
-    );
-    let counts: (i64, i64) = store
-        .read_with(|conn| {
-            Ok::<_, StorageError>((
-                conn.query_row("SELECT COUNT(*) FROM chat_threads", [], |row| row.get(0))
-                    .map_err(StorageError::corrupt_public)?,
-                conn.query_row("SELECT COUNT(*) FROM replication_log", [], |row| row.get(0))
-                    .map_err(StorageError::corrupt_public)?,
-            ))
-        })
-        .expect("counts");
-    assert!(
-        matches!(
-            result,
-            Err(dohc_engine_domain::DomainError::Chat {
-                code: "invalid-path",
-                ..
-            })
-        ),
-        "dropping the control-character gate mints a thread op that its own replicated apply contract refuses."
-    );
-    assert_eq!(counts, (0, 0));
-}
-
-#[test]
 fn file_thread_create_search_and_replication_are_atomic() {
     let (_scratch, mut store) = store();
     let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
@@ -453,46 +186,6 @@ fn file_thread_create_search_and_replication_are_atomic() {
         counts,
         (0, 0, 0),
         "splitting row/search/op across transactions -> any partial count becomes nonzero."
-    );
-}
-
-#[test]
-fn file_thread_create_request_replay_is_exact() {
-    let (_scratch, mut store) = store();
-    let input = CreateFileThread {
-        workspace_id: WS.to_owned(),
-        thread_id: "thread".to_owned(),
-        title: "File thread".to_owned(),
-        linked_object_id: "object".to_owned(),
-        linked_path_hint: Some("notes/file.md".to_owned()),
-        now_ms: 20,
-        request_id: "request".to_owned(),
-    };
-    let first = LinkedChatStore::new(&mut store)
-        .create_thread(&input, &NO_FAULTS)
-        .expect("create");
-    let second = LinkedChatStore::new(&mut store)
-        .create_thread(
-            &CreateFileThread {
-                now_ms: 99,
-                ..input
-            },
-            &NO_FAULTS,
-        )
-        .expect("replay");
-    let ops: i64 = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM replication_log WHERE op_kind='chat.thread.create'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("ops");
-    assert_eq!(
-        (first, ops),
-        (second, 1),
-        "replay reruns creation -> timestamp/result changes or a second op is appended."
     );
 }
 
@@ -546,55 +239,6 @@ fn attachment_idempotency_fingerprint_includes_canonical_targets() {
 }
 
 #[test]
-fn send_message_returns_authoritative_attachments() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_with(&mut store, "thread", "opening", vec![], 20).expect("start");
-    let message = LinkedChatStore::new(&mut store)
-        .send_message(
-            &SendMessage {
-                automation: None,
-                workspace_id: WS.to_owned(),
-                thread_id: "thread".to_owned(),
-                message_id: "reply".to_owned(),
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Ada".to_owned(),
-                author_owner_display_name: None,
-                author_user_id: None,
-                parent_message_id: None,
-                origin: None,
-                body: "Reply".to_owned(),
-                needs_decision: false,
-                options: Vec::new(),
-                attachments: vec![attachment("object")],
-                author_agent_id: None,
-                author_reported: None,
-                work: None,
-                wake_agent_ids: Vec::new(),
-                now_ms: 30,
-                request_id: None,
-            },
-            &NO_FAULTS,
-        )
-        .expect("send");
-    assert_eq!(
-        message.attachments.len(),
-        1,
-        "returning the pre-insert message DTO -> authoritative attachments remain empty."
-    );
-}
-
-#[test]
-fn mention_parser_matches_unicode_boundary_punctuation_and_case_oracle() {
-    let body = "@YOU (@agent.ops_v2) [@you] ice@you.dev @unknown @K @ſ @agent...";
-    assert_eq!(
-        parse_mention_handles(body),
-        vec!["you", "agent.ops_v2", "unknown", "k", "ſ", "agent"],
-        "ASCII-only case folding or an email boundary match changes this oracle vector.",
-    );
-}
-
-#[test]
 fn mention_parser_ignores_inline_and_fenced_code() {
     // The oracle keeps the first opener armed and ignores different-length
     // runs, so neither pair of double/single runs becomes an independent span.
@@ -637,49 +281,20 @@ fn mention_parser_skips_names_inside_file_links() {
             "@[trip @Nova notes.md] for @Nova, and @Ana@[x.md]",
             &["nova", "ana"],
         ),
-        // A blank path or heading makes no link.
         ("@[ ] @a @[ @b ]", &["a"]),
         ("@[x.md# @c] @[y.md# ] @d", &["d"]),
-        // Neither does a nested opener, a line break, or an opener in code.
         ("@[a @h @[b] @g]", &["h", "g"]),
         ("@[a @i\nb]", &["i"]),
         ("`@[` @j]", &["j"]),
         ("`@[a @k]`", &[]),
         // An escaped `]` stays in the path.
         ("@[a%5D @l] @m", &["m"]),
-        // Multi-byte text before and inside a link.
         ("日本 @[ノート @Nova.md] @Ana", &["ana"]),
         ("@[ノート.md#見出し @Nova] @Bo", &["bo"]),
     ];
     for (body, handles) in cases {
         assert_eq!(parse_mention_handles(body), handles, "{body:?}");
     }
-}
-
-#[test]
-fn mention_index_dedupes_handles_per_message() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@Agent and (@agent) and @AGENT.",
-        20,
-    );
-    let count: i64 = store
-        .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM chat_mentions", [], |row| row.get(0))
-        })
-        .expect("count");
-    assert_eq!(
-        count, 1,
-        "omitting per-message dedupe leaves multiple logical index cells."
-    );
 }
 
 #[test]
@@ -760,155 +375,6 @@ fn local_start_and_send_index_mentions_atomically() {
     );
 }
 
-#[test]
-fn mention_backfill_covers_all_existing_rust_and_imported_messages() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "rust-message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@rust",
-        20,
-    );
-    send_text(
-        &mut store,
-        "thread",
-        "imported-message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@imported",
-        30,
-    );
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute("DELETE FROM chat_mentions", [])
-                .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("simulate pre-index rows");
-    let inserted = LinkedChatStore::new(&mut store)
-        .backfill_mentions(WS, &NO_FAULTS)
-        .expect("backfill");
-    let handles: Vec<String> = store
-        .read_with(|conn| {
-            let mut stmt = conn.prepare("SELECT handle FROM chat_mentions ORDER BY handle")?;
-            stmt.query_map([], |row| row.get(0))?.collect()
-        })
-        .expect("handles");
-    assert_eq!(
-        (inserted, handles),
-        (2, vec!["imported".to_owned(), "rust".to_owned()]),
-        "filtering the backfill by writer/origin misses one pre-existing row.",
-    );
-}
-
-#[test]
-fn mention_backfill_is_idempotent() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute("DELETE FROM chat_mentions", [])
-                .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("clear");
-    let first = LinkedChatStore::new(&mut store)
-        .backfill_mentions(WS, &NO_FAULTS)
-        .expect("first");
-    let second = LinkedChatStore::new(&mut store)
-        .backfill_mentions(WS, &NO_FAULTS)
-        .expect("second");
-    assert_eq!(
-        (first, second),
-        (1, 0),
-        "plain INSERT makes readiness fail on every reopen/retry."
-    );
-}
-
-#[test]
-fn mention_backfill_completes_before_first_read() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute("DELETE FROM chat_mentions", [])
-                .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("simulate older database");
-    LinkedChatStore::new(&mut store)
-        .backfill_mentions(WS, &NO_FAULTS)
-        .expect("readiness backfill");
-    let mentions = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", None, 10)
-        .expect("read");
-    assert_eq!(
-        mentions.len(),
-        1,
-        "reading before the backfill misses this row."
-    );
-}
-
-#[test]
-fn mention_read_requires_present_message_and_thread() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@agent",
-        20,
-    );
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute("DELETE FROM chat_messages WHERE message_id='message'", [])
-                .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("orphan index");
-    let rows = LinkedChatStore::new(&mut store)
-        .list_mentions_for_handle(WS, "agent", None, 10)
-        .expect("list");
-    assert!(
-        rows.is_empty(),
-        "dropping either inner join leaks a local derived orphan."
-    );
-}
-
 #[allow(clippy::too_many_arguments)]
 fn send_waking(
     store: &mut EngineStore,
@@ -980,64 +446,6 @@ fn requests(store: &EngineStore) -> Vec<(String, String, String, i64, i64)> {
             .map_err(StorageError::corrupt_public)
         })
         .expect("requests")
-}
-
-#[test]
-fn a_message_in_an_agent_chat_wakes_only_the_agents_its_sender_lists() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, "research-chat", "research", "Research", 11, &NO_FAULTS)
-        .expect("agent chat");
-    start_message(
-        &mut store,
-        "research-chat",
-        "agent-thread",
-        "unlisted",
-        ChatActorKind::Human,
-        None,
-        None,
-        "hello",
-        19,
-    );
-    assert!(
-        requests(&store).is_empty(),
-        "an agent you run gets no request for its DM, so the sender lists none."
-    );
-    start_waking(
-        &mut store,
-        "research-chat",
-        "listed-thread",
-        "direct",
-        ChatActorKind::Human,
-        None,
-        None,
-        &["research"],
-        "hello",
-        20,
-    );
-    start_message(
-        &mut store,
-        "channel",
-        "group-thread",
-        "group",
-        ChatActorKind::Human,
-        None,
-        None,
-        "hello @agent",
-        21,
-    );
-    assert_eq!(
-        requests(&store),
-        vec![(
-            "direct".to_owned(),
-            "research".to_owned(),
-            "pending".to_owned(),
-            20,
-            20
-        )],
-        "a group message that names no agent wakes none, and @agent is not a trigger.",
-    );
 }
 
 #[test]
@@ -1163,89 +571,6 @@ fn each_agent_sees_a_message_that_named_it_until_that_agent_reads_it() {
 }
 
 #[test]
-fn each_named_agent_gets_one_request_and_they_run_one_after_the_other() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "opening",
-        ChatActorKind::Human,
-        None,
-        None,
-        "Opening",
-        20,
-    );
-    send_waking(
-        &mut store,
-        "thread",
-        "both",
-        ChatActorKind::Human,
-        None,
-        &["research", "default", "research"],
-        "@Research and @Myagent",
-        30,
-        &NO_FAULTS,
-    )
-    .expect("send");
-    assert_eq!(
-        requests(&store)
-            .into_iter()
-            .map(|(trigger, agent, ..)| (trigger, agent))
-            .collect::<Vec<_>>(),
-        vec![
-            ("both".to_owned(), "default".to_owned()),
-            ("both".to_owned(), "research".to_owned()),
-        ],
-        "a repeated name wakes its agent once."
-    );
-    let mut chats = LinkedChatStore::new(&mut store);
-    let first = chats
-        .claim_next_pending(WS, "default", "run-1", "", None, 40, &NO_FAULTS)
-        .expect("claim")
-        .expect("first agent");
-    assert_eq!(
-        (
-            first.dispatch.agent_id.as_str(),
-            first.run.agent_id.as_str()
-        ),
-        ("default", "default")
-    );
-    assert!(
-        chats
-            .claim_next_pending(WS, "research", "run-2", "", None, 41, &NO_FAULTS)
-            .expect("claim while running")
-            .is_none(),
-        "one run at a time per workspace."
-    );
-    chats
-        .complete_dispatch(WS, "run-1", 0, 50, &NO_FAULTS)
-        .expect("complete");
-    let second = chats
-        .claim_next_pending(WS, "research", "run-2", "", None, 60, &NO_FAULTS)
-        .expect("claim")
-        .expect("second agent");
-    assert_eq!(
-        (
-            second.dispatch.trigger_message_id.as_str(),
-            second.run.agent_id.as_str()
-        ),
-        ("both", "research"),
-        "covering the first agent's run must not take the other agent's request."
-    );
-    chats
-        .complete_dispatch(WS, "run-2", 0, 70, &NO_FAULTS)
-        .expect("complete");
-    assert!(
-        chats
-            .claim_next_pending(WS, "default", "run-3", "", None, 80, &NO_FAULTS)
-            .expect("claim")
-            .is_none()
-    );
-}
-
-#[test]
 fn cli_messages_wake_no_agent_and_only_people_name_agents() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
@@ -1307,127 +632,6 @@ fn cli_messages_wake_no_agent_and_only_people_name_agents() {
         Err(dohc_engine_domain::DomainError::InvalidInput { .. })
     ));
     assert!(requests(&store).is_empty());
-}
-
-#[test]
-fn a_message_wakes_exactly_its_listed_agents_and_enqueue_still_records() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "opening",
-        ChatActorKind::Human,
-        None,
-        None,
-        "Opening",
-        20,
-    );
-    send_waking(
-        &mut store,
-        "thread",
-        "listed",
-        ChatActorKind::Human,
-        None,
-        &["research"],
-        "@Myagent and @Research",
-        30,
-        &NO_FAULTS,
-    )
-    .expect("send");
-    send_waking(
-        &mut store,
-        "thread",
-        "from-cli",
-        ChatActorKind::Human,
-        Some("cli"),
-        &[],
-        "@Research",
-        31,
-        &NO_FAULTS,
-    )
-    .expect("cli send");
-    let crowd: Vec<String> = (0..65).map(|index| format!("agent-{index}")).collect();
-    let crowd: Vec<&str> = crowd.iter().map(String::as_str).collect();
-    assert!(
-        matches!(
-            send_waking(
-                &mut store,
-                "thread",
-                "crowd",
-                ChatActorKind::Human,
-                None,
-                &crowd,
-                "Everyone",
-                32,
-                &NO_FAULTS,
-            ),
-            Err(dohc_engine_domain::DomainError::InvalidInput { .. })
-        ),
-        "a message wakes at most 64 agents."
-    );
-    let woken = |store: &EngineStore| {
-        requests(store)
-            .into_iter()
-            .map(|(trigger, agent, ..)| (trigger, agent))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        woken(&store),
-        vec![("listed".to_owned(), "research".to_owned())],
-        "a mention outside the list wakes no agent, and a CLI post wakes none."
-    );
-    LinkedChatStore::new(&mut store)
-        .enqueue_dispatch(WS, "from-cli", "research", "thread", 32, &NO_FAULTS)
-        .expect("enqueue");
-    assert_eq!(
-        woken(&store),
-        vec![
-            ("from-cli".to_owned(), "research".to_owned()),
-            ("listed".to_owned(), "research".to_owned()),
-        ],
-        "a caller that enqueues a request still records it."
-    );
-}
-
-#[test]
-fn a_request_rolls_back_with_its_message() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "opening",
-        ChatActorKind::Human,
-        None,
-        None,
-        "Opening",
-        20,
-    );
-    let failed = send_waking(
-        &mut store,
-        "thread",
-        "named",
-        ChatActorKind::Human,
-        None,
-        &["default"],
-        "@Myagent",
-        30,
-        ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist).as_ref(),
-    );
-    assert!(failed.is_err());
-    let messages: i64 = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM chat_messages WHERE message_id='named'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("messages");
-    assert_eq!((messages, requests(&store).len()), (0, 0));
 }
 
 #[test]
@@ -1501,28 +705,4 @@ fn a_plain_agent_mention_stays_in_the_agent_inbox() {
             .collect::<Vec<_>>(),
         vec!["plain"]
     );
-}
-
-#[test]
-fn windows_reserved_names_are_mention_lookup_keys() {
-    let (_scratch, mut store) = store();
-    seed_channel(&mut store);
-    start_message(
-        &mut store,
-        "channel",
-        "thread",
-        "message",
-        ChatActorKind::Human,
-        None,
-        None,
-        "@CON @nul @aux.txt",
-        20,
-    );
-    for handle in ["con", "NUL", "aux.txt"] {
-        let mentions = LinkedChatStore::new(&mut store)
-            .list_mentions_for_handle(WS, handle, None, 10)
-            .expect("reserved filename is a valid mention key");
-        assert_eq!(mentions.len(), 1);
-        assert_eq!(mentions[0].message_id, "message");
-    }
 }

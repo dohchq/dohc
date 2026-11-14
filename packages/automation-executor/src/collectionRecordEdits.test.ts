@@ -24,7 +24,10 @@ import { derivedRecordId } from "./recordIds";
 import { createTestScratch } from "./testScratch";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { newRun } from "./collectionAutomationRun";
-import { undoCollectionAutomationRuns, type CollectionAutomationUndoDependencies } from "./collectionAutomationUndo";
+import {
+  undoCollectionAutomationRuns,
+  type CollectionAutomationUndoDependencies,
+} from "./collectionAutomationUndo";
 
 const AGENT = {
   kind: "agent",
@@ -43,17 +46,30 @@ const AUTOMATION = {
 
 it("uses the engine journal to skip an Undo field after a crash and another Undo", async () => {
   const root = await createTestScratch("dohc-undo-journal-");
-  const {session, log} = fakeSession();
+  const { session, log } = fakeSession();
   const context = contextFor(root, session);
   const key = "automation-undo/test-run";
   log.doc.getMap("frontmatter").set("status", "done");
-  const input = {recordPath: "tasks/one.md", fields: {status: "todo"}, expectedBefore: {status: "done"},
-    author: {kind: "user", userId: "owner"} as const, idempotencyKeyPrefix: key, preserveCompletedFields: true};
-  const fail = vi.spyOn(session, "settleNow").mockRejectedValueOnce(new Error("Interrupted after journal"));
-  await expect(setCollectionRecordFields(context, input)).rejects.toThrow("Interrupted after journal");
+  const input = {
+    recordPath: "tasks/one.md",
+    fields: { status: "todo" },
+    expectedBefore: { status: "done" },
+    author: { kind: "user", userId: "owner" } as const,
+    idempotencyKeyPrefix: key,
+    preserveCompletedFields: true,
+  };
+  const fail = vi
+    .spyOn(session, "settleNow")
+    .mockRejectedValueOnce(new Error("Interrupted after journal"));
+  await expect(setCollectionRecordFields(context, input)).rejects.toThrow(
+    "Interrupted after journal",
+  );
   expect(log.doc.getMap("frontmatter").get("status")).toBe("todo");
   log.doc.getMap("frontmatter").set("status", "done");
-  await expect(setCollectionRecordFields(context, input)).resolves.toMatchObject({replaced: {}, kept: {}});
+  await expect(setCollectionRecordFields(context, input)).resolves.toMatchObject({
+    replaced: {},
+    kept: {},
+  });
   expect(log.doc.getMap("frontmatter").get("status")).toBe("done");
   expect(log.journaled).toHaveLength(1);
   fail.mockRestore();
@@ -61,132 +77,322 @@ it("uses the engine journal to skip an Undo field after a crash and another Undo
 
 it("recovers Undo receipts through production record writes after receipt persistence fails", async () => {
   const root = await createTestScratch("dohc-undo-production-receipt-");
-  const draft = {outboxId: "outbox", nativeHeadSequence: 3, relayDatabaseNamespace: "relay", revision: 1,
-    acceptedCursor: 2, nativeUnsettled: false, pendingBytes: 10, state: "active" as const,
-    binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
-      currentPath: "tasks/one.md", selectorPaths: ["tasks"], restoreFenceGeneration: 4}};
-  const {session, log} = fakeSession({settleError: new YdocOwnerDraftPendingError(draft)});
+  const draft = {
+    outboxId: "outbox",
+    nativeHeadSequence: 3,
+    relayDatabaseNamespace: "relay",
+    revision: 1,
+    acceptedCursor: 2,
+    nativeUnsettled: false,
+    pendingBytes: 10,
+    state: "active" as const,
+    binding: {
+      workspaceId: "workspace",
+      mainVersionId: "main",
+      objectId: "object",
+      lineageClaimId: "a".repeat(64),
+      currentPath: "tasks/one.md",
+      selectorPaths: ["tasks"],
+      restoreFenceGeneration: 4,
+    },
+  };
+  const { session, log } = fakeSession({ settleError: new YdocOwnerDraftPendingError(draft) });
   log.doc.getMap("frontmatter").set("status", "done");
-  const writes = collectionRecordWrites(contextFor(root, session, {withAdapter: async work => work({
-    getCollectionRecord: async () => {throw Error("Not used");}, sharedFileUpdateStates: async candidates => candidates.map(() => "pending"),
-  })}));
-  const parsed = parseAutomationsFile("version: 1\nautomations:\n  - id: finish\n    name: Finish\n    when: record-added\n    do: [{set: {status: done}}]");
-  if(parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw Error("No definition");
-  const run = {...newRun({automationId: "collection:tasks#finish", claimId: "claim"}, parsed.entries[0].automation, "hash-1", 1),
-    undo: "started" as const, undoScope: "production-receipt", applied: [{ordinal: 0, writes: [{kind: "field" as const,
-      recordId: "record", path: "tasks/one.md", field: "status", before: "todo", after: "done"}]}]};
+  const writes = collectionRecordWrites(
+    contextFor(root, session, {
+      withAdapter: async (work) =>
+        work({
+          getCollectionRecord: async () => {
+            throw Error("Not used");
+          },
+          sharedFileUpdateStates: async (candidates) => candidates.map(() => "pending"),
+        }),
+    }),
+  );
+  const parsed = parseAutomationsFile(
+    "version: 1\nautomations:\n  - id: finish\n    name: Finish\n    when: record-added\n    do: [{set: {status: done}}]",
+  );
+  if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid")
+    throw Error("No definition");
+  const run = {
+    ...newRun(
+      { automationId: "collection:tasks#finish", claimId: "claim" },
+      parsed.entries[0].automation,
+      "hash-1",
+      1,
+    ),
+    undo: "started" as const,
+    undoScope: "production-receipt",
+    applied: [
+      {
+        ordinal: 0,
+        writes: [
+          {
+            kind: "field" as const,
+            recordId: "record",
+            path: "tasks/one.md",
+            field: "status",
+            before: "todo",
+            after: "done",
+          },
+        ],
+      },
+    ],
+  };
   let failed = false;
   const dependencies: CollectionAutomationUndoDependencies = {
-    withRecordWrites: async (_signal, work) => work(writes), collectionPathOf: () => "tasks", trash: async () => {},
-    withReads: async work => work({getCollectionRecord: async () => ({collection: {path: "tasks", objectId: "tasks", status: "valid", reasons: []},
-      record: {id: "record", path: "tasks/one.md", conflicted: false, values: []}, history: [], nextBeforeHistoryId: null}),
-      queryCollectionRecords: async () => {throw Error("Not used");}}),
-    recordReversal: async () => {if(!failed) {failed = true; throw Error("Receipt save failed");}},
+    withRecordWrites: async (_signal, work) => work(writes),
+    collectionPathOf: () => "tasks",
+    trash: async () => {},
+    withReads: async (work) =>
+      work({
+        getCollectionRecord: async () => ({
+          collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
+          record: { id: "record", path: "tasks/one.md", conflicted: false, values: [] },
+          history: [],
+          nextBeforeHistoryId: null,
+        }),
+        queryCollectionRecords: async () => {
+          throw Error("Not used");
+        },
+      }),
+    recordReversal: async () => {
+      if (!failed) {
+        failed = true;
+        throw Error("Receipt save failed");
+      }
+    },
   };
-  await expect(undoCollectionAutomationRuns(dependencies, [run], new AbortController().signal)).rejects.toThrow("Receipt save failed");
-  const retry = await undoCollectionAutomationRuns(dependencies, [run], new AbortController().signal);
-  expect(retry.undoWrites).toMatchObject([{field: "status", draft: {appendKey: expect.stringMatching(/^automation-undo\//)}}]);
+  await expect(
+    undoCollectionAutomationRuns(dependencies, [run], new AbortController().signal),
+  ).rejects.toThrow("Receipt save failed");
+  const retry = await undoCollectionAutomationRuns(
+    dependencies,
+    [run],
+    new AbortController().signal,
+  );
+  expect(retry.undoWrites).toMatchObject([
+    { field: "status", draft: { appendKey: expect.stringMatching(/^automation-undo\//) } },
+  ]);
   expect(retry.undoWrites[0]!.draft.appendKey).toBe(log.journaled[0]!.idempotencyKey);
   expect(log.journaled).toHaveLength(1);
 });
 
 it("keeps Undo unfinished until an unchanged shared receipt can be checked", async () => {
   const root = await createTestScratch("dohc-undo-receipt-status-");
-  const draft = {outboxId: "outbox", nativeHeadSequence: 3, relayDatabaseNamespace: "relay", revision: 1,
-    acceptedCursor: 2, nativeUnsettled: false, pendingBytes: 10, state: "active" as const,
-    binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
-      currentPath: "tasks/one.md", selectorPaths: ["tasks"], restoreFenceGeneration: 4}};
-  const {session, log} = fakeSession({settleError: new YdocOwnerDraftPendingError(draft)});
+  const draft = {
+    outboxId: "outbox",
+    nativeHeadSequence: 3,
+    relayDatabaseNamespace: "relay",
+    revision: 1,
+    acceptedCursor: 2,
+    nativeUnsettled: false,
+    pendingBytes: 10,
+    state: "active" as const,
+    binding: {
+      workspaceId: "workspace",
+      mainVersionId: "main",
+      objectId: "object",
+      lineageClaimId: "a".repeat(64),
+      currentPath: "tasks/one.md",
+      selectorPaths: ["tasks"],
+      restoreFenceGeneration: 4,
+    },
+  };
+  const { session, log } = fakeSession({ settleError: new YdocOwnerDraftPendingError(draft) });
   log.doc.getMap("frontmatter").set("status", "done");
   let unavailable = false;
-  const context = contextFor(root, session, {withAdapter: async work => work({
-    getCollectionRecord: async () => {throw Error("Not used");}, sharedFileUpdateStates: async writes => {
-      if(unavailable) throw Error("Status lookup overloaded");
-      return writes.map(() => "pending");
-    },
-  })});
-  const input = {recordPath: "tasks/one.md", fields: {status: "todo"}, expectedBefore: {status: "done"},
-    author: {kind: "user", userId: "owner"} as const, idempotencyKeyPrefix: "automation-undo/status",
-    preserveCompletedFields: true};
+  const context = contextFor(root, session, {
+    withAdapter: async (work) =>
+      work({
+        getCollectionRecord: async () => {
+          throw Error("Not used");
+        },
+        sharedFileUpdateStates: async (writes) => {
+          if (unavailable) throw Error("Status lookup overloaded");
+          return writes.map(() => "pending");
+        },
+      }),
+  });
+  const input = {
+    recordPath: "tasks/one.md",
+    fields: { status: "todo" },
+    expectedBefore: { status: "done" },
+    author: { kind: "user", userId: "owner" } as const,
+    idempotencyKeyPrefix: "automation-undo/status",
+    preserveCompletedFields: true,
+  };
   const writes = collectionRecordWrites(context);
   const written = await writes.setFields(input);
   unavailable = true;
-  await expect(writes.setFields(input)).rejects.toThrow("dohc could not check this run's shared reversals.");
+  await expect(writes.setFields(input)).rejects.toThrow(
+    "dohc could not check this run's shared reversals.",
+  );
   unavailable = false;
   expect((await writes.setFields(input)).sharedFileUpdates).toEqual(written.sharedFileUpdates);
   expect(log.journaled).toHaveLength(1);
 });
 
-it.each(["write-refused", "conflict-stale-target", "Saved locally. The shared file update is pending."])("does not accept other settlement errors as a completed automation effect (%s)", async message => {
-  const root = await createTestScratch("dohc-automation-settle-refusal-");
-  const error = new Error(message);
-  error.name = "YdocOwnerDraftPendingError";
-  const {session} = fakeSession({settleError: error});
-  await expect(collectionRecordWrites(contextFor(root, session)).setFields({recordPath: "tasks/one.md", fields: {status: "done"}, author: AUTOMATION})).rejects.toBe(error);
-});
+it.each([
+  "write-refused",
+  "conflict-stale-target",
+  "Saved locally. The shared file update is pending.",
+])(
+  "does not accept other settlement errors as a completed automation effect (%s)",
+  async (message) => {
+    const root = await createTestScratch("dohc-automation-settle-refusal-");
+    const error = new Error(message);
+    error.name = "YdocOwnerDraftPendingError";
+    const { session } = fakeSession({ settleError: error });
+    await expect(
+      collectionRecordWrites(contextFor(root, session)).setFields({
+        recordPath: "tasks/one.md",
+        fields: { status: "done" },
+        author: AUTOMATION,
+      }),
+    ).rejects.toBe(error);
+  },
+);
 
 it("records each field's append key when automation settlement is pending, including a resumed write", async () => {
   const root = await createTestScratch("dohc-automation-draft-identity-");
-  const draft = {outboxId: "outbox", nativeHeadSequence: 3, relayDatabaseNamespace: "relay", revision: 1,
-    acceptedCursor: 2, nativeUnsettled: false, pendingBytes: 10, state: "active" as const,
-    binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
-      currentPath: "tasks/one.md", selectorPaths: ["tasks"], restoreFenceGeneration: 4}};
-  const {session, log} = fakeSession({settleError: new YdocOwnerDraftPendingError(draft)});
-  const context = contextFor(root, session, {withAdapter: async work => work({
-    getCollectionRecord: async () => {throw new Error("Not used");},
-    sharedFileUpdateStates: async writes => writes.map(write => log.journaled.some(entry => entry.idempotencyKey === write.appendKey) ? "pending" : "absent"),
-  })});
-  const result = await collectionRecordWrites(context).setFields({
-    recordPath: "tasks/one.md", fields: {status: "done", note: "saved"}, author: AUTOMATION, idempotencyKeyPrefix: "write",
+  const draft = {
+    outboxId: "outbox",
+    nativeHeadSequence: 3,
+    relayDatabaseNamespace: "relay",
+    revision: 1,
+    acceptedCursor: 2,
+    nativeUnsettled: false,
+    pendingBytes: 10,
+    state: "active" as const,
+    binding: {
+      workspaceId: "workspace",
+      mainVersionId: "main",
+      objectId: "object",
+      lineageClaimId: "a".repeat(64),
+      currentPath: "tasks/one.md",
+      selectorPaths: ["tasks"],
+      restoreFenceGeneration: 4,
+    },
+  };
+  const { session, log } = fakeSession({ settleError: new YdocOwnerDraftPendingError(draft) });
+  const context = contextFor(root, session, {
+    withAdapter: async (work) =>
+      work({
+        getCollectionRecord: async () => {
+          throw new Error("Not used");
+        },
+        sharedFileUpdateStates: async (writes) =>
+          writes.map((write) =>
+            log.journaled.some((entry) => entry.idempotencyKey === write.appendKey)
+              ? "pending"
+              : "absent",
+          ),
+      }),
   });
-  const update = {outboxId: "outbox", binding: draft.binding, nativeHeadSequence: 3};
-  expect(result.sharedFileUpdates).toEqual({status: {...update, appendKey: "write/status"}, note: {...update, appendKey: "write/note"}});
-  expect(log.journaled.map(write => write.idempotencyKey)).toEqual(["write/status", "write/note"]);
+  const result = await collectionRecordWrites(context).setFields({
+    recordPath: "tasks/one.md",
+    fields: { status: "done", note: "saved" },
+    author: AUTOMATION,
+    idempotencyKeyPrefix: "write",
+  });
+  const update = { outboxId: "outbox", binding: draft.binding, nativeHeadSequence: 3 };
+  expect(result.sharedFileUpdates).toEqual({
+    status: { ...update, appendKey: "write/status" },
+    note: { ...update, appendKey: "write/note" },
+  });
+  expect(log.journaled.map((write) => write.idempotencyKey)).toEqual([
+    "write/status",
+    "write/note",
+  ]);
   const resumed = await collectionRecordWrites(context).setFields({
-    recordPath: "tasks/one.md", fields: {status: "done", note: "saved"}, author: AUTOMATION, idempotencyKeyPrefix: "write",
+    recordPath: "tasks/one.md",
+    fields: { status: "done", note: "saved" },
+    author: AUTOMATION,
+    idempotencyKeyPrefix: "write",
   });
   expect(resumed.sharedFileUpdates).toEqual(result.sharedFileUpdates);
   expect(log.journaled).toHaveLength(2);
   log.doc.getMap("frontmatter").set("status", "todo");
   const handReverted = await collectionRecordWrites(context).setFields({
-    recordPath: "tasks/one.md", fields: {status: "todo", note: null}, expectedBefore: {status: "done", note: "saved"},
-    author: AUTOMATION, idempotencyKeyPrefix: "undo",
+    recordPath: "tasks/one.md",
+    fields: { status: "todo", note: null },
+    expectedBefore: { status: "done", note: "saved" },
+    author: AUTOMATION,
+    idempotencyKeyPrefix: "undo",
   });
-  expect(handReverted.sharedFileUpdates).toEqual({note: {...update, appendKey: "undo/note"}});
-  expect(log.journaled.map(entry => entry.idempotencyKey)).not.toContain("undo/status");
+  expect(handReverted.sharedFileUpdates).toEqual({ note: { ...update, appendKey: "undo/note" } });
+  expect(log.journaled.map((entry) => entry.idempotencyKey)).not.toContain("undo/status");
   const neverLanded = await collectionRecordWrites(context).setFields({
-    recordPath: "tasks/one.md", fields: {status: "todo"}, author: AUTOMATION, idempotencyKeyPrefix: "never-landed",
+    recordPath: "tasks/one.md",
+    fields: { status: "todo" },
+    author: AUTOMATION,
+    idempotencyKeyPrefix: "never-landed",
   });
   expect(neverLanded.sharedFileUpdates).toEqual({});
 });
 
-it.each(["write", "undo"])("keeps a journaled %s when an unchanged field's status read is overloaded", async prefix => {
-  const root = await createTestScratch("dohc-automation-status-overloaded-");
-  const draft = {outboxId: "outbox", nativeHeadSequence: 3, relayDatabaseNamespace: "relay", revision: 1,
-    acceptedCursor: 2, nativeUnsettled: false, pendingBytes: 10, state: "active" as const,
-    binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
-      currentPath: "tasks/one.md", selectorPaths: ["tasks"], restoreFenceGeneration: 4}};
-  const {session, log} = fakeSession({settleError: new YdocOwnerDraftPendingError(draft)});
-  log.doc.getMap("frontmatter").set("status", "done");
-  const read = vi.fn(async () => {
-    throw new DaemonRefusalError({code: "OVERLOADED", message: "Overloaded", retry: "afterBackoff"}, undefined);
-  });
-  const context = contextFor(root, session, {withAdapter: async work => work({
-    getCollectionRecord: async () => {throw new Error("Not used");}, sharedFileUpdateStates: read,
-  })});
-  const result = await collectionRecordWrites(context).setFields({
-    recordPath: "tasks/one.md", fields: {status: "done", note: "saved"}, author: AUTOMATION,
-    idempotencyKeyPrefix: prefix,
-    ...(prefix === "undo" ? {expectedBefore: {status: "done", note: null}} : {}),
-  });
-  expect(result.sharedFileUpdates).toEqual({note: {
-    outboxId: draft.outboxId, binding: draft.binding, nativeHeadSequence: draft.nativeHeadSequence, appendKey: `${prefix}/note`,
-  }});
-  expect(read).toHaveBeenCalledOnce();
-  expect(log.journaled.map(write => write.idempotencyKey)).toEqual([`${prefix}/note`]);
-  expect(log.doc.getMap("frontmatter").get("note")).toBe("saved");
-  expect(log.order.at(-1)).toBe("close");
-});
+it.each(["write", "undo"])(
+  "keeps a journaled %s when an unchanged field's status read is overloaded",
+  async (prefix) => {
+    const root = await createTestScratch("dohc-automation-status-overloaded-");
+    const draft = {
+      outboxId: "outbox",
+      nativeHeadSequence: 3,
+      relayDatabaseNamespace: "relay",
+      revision: 1,
+      acceptedCursor: 2,
+      nativeUnsettled: false,
+      pendingBytes: 10,
+      state: "active" as const,
+      binding: {
+        workspaceId: "workspace",
+        mainVersionId: "main",
+        objectId: "object",
+        lineageClaimId: "a".repeat(64),
+        currentPath: "tasks/one.md",
+        selectorPaths: ["tasks"],
+        restoreFenceGeneration: 4,
+      },
+    };
+    const { session, log } = fakeSession({ settleError: new YdocOwnerDraftPendingError(draft) });
+    log.doc.getMap("frontmatter").set("status", "done");
+    const read = vi.fn(async () => {
+      throw new DaemonRefusalError(
+        { code: "OVERLOADED", message: "Overloaded", retry: "afterBackoff" },
+        undefined,
+      );
+    });
+    const context = contextFor(root, session, {
+      withAdapter: async (work) =>
+        work({
+          getCollectionRecord: async () => {
+            throw new Error("Not used");
+          },
+          sharedFileUpdateStates: read,
+        }),
+    });
+    const result = await collectionRecordWrites(context).setFields({
+      recordPath: "tasks/one.md",
+      fields: { status: "done", note: "saved" },
+      author: AUTOMATION,
+      idempotencyKeyPrefix: prefix,
+      ...(prefix === "undo" ? { expectedBefore: { status: "done", note: null } } : {}),
+    });
+    expect(result.sharedFileUpdates).toEqual({
+      note: {
+        outboxId: draft.outboxId,
+        binding: draft.binding,
+        nativeHeadSequence: draft.nativeHeadSequence,
+        appendKey: `${prefix}/note`,
+      },
+    });
+    expect(read).toHaveBeenCalledOnce();
+    expect(log.journaled.map((write) => write.idempotencyKey)).toEqual([`${prefix}/note`]);
+    expect(log.doc.getMap("frontmatter").get("note")).toBe("saved");
+    expect(log.order.at(-1)).toBe("close");
+  },
+);
 
 interface FakeSessionLog {
   doc: Y.Doc;
@@ -199,13 +405,15 @@ interface FakeSessionLog {
   updates: Uint8Array[];
 }
 
-function fakeSession(options: {
-  journaledKeys?: Map<string, string>;
-  settleError?: Error;
-  onSettle?: () => Promise<void>;
-  /** Runs just before each update's turn on the session chain, as a remote update would land. */
-  beforeTurn?: (doc: Y.Doc) => void;
-} = {}): {
+function fakeSession(
+  options: {
+    journaledKeys?: Map<string, string>;
+    settleError?: Error;
+    onSettle?: () => Promise<void>;
+    /** Runs just before each update's turn on the session chain, as a remote update would land. */
+    beforeTurn?: (doc: Y.Doc) => void;
+  } = {},
+): {
   session: RecordEditSession;
   log: FakeSessionLog;
 } {
@@ -224,7 +432,11 @@ function fakeSession(options: {
     applyDecidedLocalUpdate(
       decide: (current: Y.Doc) => Uint8Array | null,
       onArmed?: () => void,
-      applyOptions?: { actorOriginId?: string; attribution?: ChangeAttributionWire; idempotencyKey?: string },
+      applyOptions?: {
+        actorOriginId?: string;
+        attribution?: ChangeAttributionWire;
+        idempotencyKey?: string;
+      },
     ): Promise<boolean> {
       const turn = chain.then(() => {
         options.beforeTurn?.(doc);
@@ -250,7 +462,10 @@ function fakeSession(options: {
       if (key !== undefined && journaledKeys.has(key)) {
         if (journaledKeys.get(key) !== bytes) {
           onArmed?.();
-          throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "idempotency-key-reuse-mismatch", retry: "no" }, undefined);
+          throw new DaemonRefusalError(
+            { code: "INVALID_PARAMS", message: "idempotency-key-reuse-mismatch", retry: "no" },
+            undefined,
+          );
         }
         return;
       }
@@ -276,12 +491,14 @@ function fakeSession(options: {
   return { session, log };
 }
 
-/** A host over files in `root`: it records each session opened and each file created, with its author. */
 function contextFor(
   root: string,
   session: RecordEditSession,
   overrides: Partial<CollectionRecordEditContext> = {},
-): CollectionRecordEditContext & { openedPaths: string[]; createdFiles: Array<{ path: string; author: unknown }> } {
+): CollectionRecordEditContext & {
+  openedPaths: string[];
+  createdFiles: Array<{ path: string; author: unknown }>;
+} {
   const openedPaths: string[] = [];
   const createdFiles: Array<{ path: string; author: unknown }> = [];
   return {
@@ -310,27 +527,36 @@ function contextFor(
 it("rejects an unkeyed field write when the session declines the decided update", async () => {
   const root = await createTestScratch("dohc-record-declined-");
   const { session, log } = fakeSession();
-  vi.spyOn(session, "applyDecidedLocalUpdate").mockImplementationOnce(async decide => {
+  vi.spyOn(session, "applyDecidedLocalUpdate").mockImplementationOnce(async (decide) => {
     decide(log.doc);
     return false;
   });
-  await expect(setCollectionRecordFields(contextFor(root, session), {
-    recordPath: "tasks/a.md", fields: { status: "done" }, author: AGENT,
-  })).rejects.toThrow("did not accept the field change");
+  await expect(
+    setCollectionRecordFields(contextFor(root, session), {
+      recordPath: "tasks/a.md",
+      fields: { status: "done" },
+      author: AGENT,
+    }),
+  ).rejects.toThrow("did not accept the field change");
   expect(log.order).toEqual(["close"]);
   expect(log.doc.getMap("frontmatter").get("status")).toBeUndefined();
 });
 
 it("refuses to set fields on a lossy note before any session opens", async () => {
   const root = await createTestScratch("dohc-record-lossy-");
-  const text = "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
+  const text =
+    "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
   await mkdir(join(root, "tasks"));
   await writeFile(join(root, "tasks", "a.md"), text);
   const { session, log } = fakeSession();
   const context = contextFor(root, session);
-  await expect(setCollectionRecordFields(context, {
-    recordPath: "tasks/a.md", fields: { status: "done" }, author: AUTOMATION,
-  })).rejects.toThrow(
+  await expect(
+    setCollectionRecordFields(context, {
+      recordPath: "tasks/a.md",
+      fields: { status: "done" },
+      author: AUTOMATION,
+    }),
+  ).rejects.toThrow(
     "dohc can't change tasks/a.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
   );
   expect(context.openedPaths).toEqual([]);
@@ -341,11 +567,17 @@ it("refuses to set fields on a lossy note before any session opens", async () =>
 it("refuses a field write when its safety read fails, though a session could open", async () => {
   const { session, log } = fakeSession();
   const context = contextFor(await createTestScratch("dohc-record-unread-"), session, {
-    readText: async () => { throw new Error("read refused"); },
+    readText: async () => {
+      throw new Error("read refused");
+    },
   });
-  await expect(setCollectionRecordFields(context, {
-    recordPath: "tasks/a.md", fields: { status: "done" }, author: AUTOMATION,
-  })).rejects.toThrow("dohc couldn't read tasks/a.md to check it, so nothing changed. Try again.");
+  await expect(
+    setCollectionRecordFields(context, {
+      recordPath: "tasks/a.md",
+      fields: { status: "done" },
+      author: AUTOMATION,
+    }),
+  ).rejects.toThrow("dohc couldn't read tasks/a.md to check it, so nothing changed. Try again.");
   expect(context.openedPaths).toEqual([]);
   expect(log.order).toEqual([]);
   expect(log.doc.getMap("frontmatter").get("status")).toBeUndefined();
@@ -355,17 +587,24 @@ it("refuses a field write when the session holds a lossy note the read did not s
   const root = await createTestScratch("dohc-record-replaced-");
   await mkdir(join(root, "tasks"));
   // The file is absent, but the live session still carries the source witness.
-  const replacement = "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
+  const replacement =
+    "---\nstatus: open\n---\n\n<details>\n<summary>Notes</summary>\n\nHidden.\n</details>\n";
   const lossy = markdownToYDoc(replacement);
   const sha = (text: string) => createHash("sha256").update(text).digest("hex");
   lossy.getMap("meta").set("dohcMarkdownSource", replacement);
   lossy.getMap("meta").set("dohcMarkdownSourceSha256", sha(replacement));
   lossy.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(lossy)));
-  const { session, log } = fakeSession({ beforeTurn: (doc) => Y.applyUpdate(doc, Y.encodeStateAsUpdate(lossy)) });
+  const { session, log } = fakeSession({
+    beforeTurn: (doc) => Y.applyUpdate(doc, Y.encodeStateAsUpdate(lossy)),
+  });
   const context = contextFor(root, session);
-  await expect(setCollectionRecordFields(context, {
-    recordPath: "tasks/a.md", fields: { status: "done" }, author: AUTOMATION,
-  })).rejects.toThrow(
+  await expect(
+    setCollectionRecordFields(context, {
+      recordPath: "tasks/a.md",
+      fields: { status: "done" },
+      author: AUTOMATION,
+    }),
+  ).rejects.toThrow(
     "dohc can't change tasks/a.md without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.",
   );
   expect(context.openedPaths).toEqual(["tasks/a.md"]);
@@ -375,47 +614,59 @@ it("refuses a field write when the session holds a lossy note the read did not s
   lossy.destroy();
 });
 
-it.each(["absent", "matching", "converted"] as const)("checks an edited witness against the %s head before an automation changes fields", async head => {
-  const root = await createTestScratch("dohc-record-witness-head-");
-  const source = "---\nstatus: open\n---\n\n<details>Hidden.</details>\n\nEditable.\n";
-  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
-  const witness = markdownToYDoc(source);
-  const meta = witness.getMap("meta");
-  meta.set("dohcMarkdownSource", source);
-  meta.set("dohcMarkdownSourceSha256", sha(source));
-  meta.set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(witness)));
-  Y.applyUpdate(witness, documentEditUpdate(Y.encodeStateAsUpdate(witness), { replacement: "Unsettled tail." }, { keepBlocks: true })!);
-  await mkdir(join(root, "tasks"));
-  const file = join(root, "tasks", "a.md");
-  const fileText = head === "matching" ? source : "---\nstatus: open\n---\n\nConverted.\n";
-  if (head !== "absent") await writeFile(file, fileText);
-  const { session, log } = fakeSession();
-  Y.applyUpdate(log.doc, Y.encodeStateAsUpdate(witness));
-  const context = contextFor(root, session);
-  try {
-    const result = setCollectionRecordFields(context, {
-      recordPath: "tasks/a.md", fields: { status: "done" }, author: AUTOMATION,
-    });
-    if (head === "converted") {
-      await expect(result).resolves.toMatchObject({replaced: {status: "open"}});
-      expect(log.journaled).toHaveLength(1);
-      expect(log.order).toEqual(["apply", "settle", "close"]);
-      expect(log.doc.getMap("frontmatter").get("status")).toBe("done");
-    } else {
-      await expect(result).rejects.toThrow("parts it can't show");
-      expect(log.journaled).toEqual([]);
-      expect(log.order).not.toContain("settle");
-      expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
-      expect(context.openedPaths).toEqual(head === "absent" ? ["tasks/a.md"] : []);
+it.each(["absent", "matching", "converted"] as const)(
+  "checks an edited witness against the %s head before an automation changes fields",
+  async (head) => {
+    const root = await createTestScratch("dohc-record-witness-head-");
+    const source = "---\nstatus: open\n---\n\n<details>Hidden.</details>\n\nEditable.\n";
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    const witness = markdownToYDoc(source);
+    const meta = witness.getMap("meta");
+    meta.set("dohcMarkdownSource", source);
+    meta.set("dohcMarkdownSourceSha256", sha(source));
+    meta.set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(witness)));
+    Y.applyUpdate(
+      witness,
+      documentEditUpdate(
+        Y.encodeStateAsUpdate(witness),
+        { replacement: "Unsettled tail." },
+        { keepBlocks: true },
+      )!,
+    );
+    await mkdir(join(root, "tasks"));
+    const file = join(root, "tasks", "a.md");
+    const fileText = head === "matching" ? source : "---\nstatus: open\n---\n\nConverted.\n";
+    if (head !== "absent") await writeFile(file, fileText);
+    const { session, log } = fakeSession();
+    Y.applyUpdate(log.doc, Y.encodeStateAsUpdate(witness));
+    const context = contextFor(root, session);
+    try {
+      const result = setCollectionRecordFields(context, {
+        recordPath: "tasks/a.md",
+        fields: { status: "done" },
+        author: AUTOMATION,
+      });
+      if (head === "converted") {
+        await expect(result).resolves.toMatchObject({ replaced: { status: "open" } });
+        expect(log.journaled).toHaveLength(1);
+        expect(log.order).toEqual(["apply", "settle", "close"]);
+        expect(log.doc.getMap("frontmatter").get("status")).toBe("done");
+      } else {
+        await expect(result).rejects.toThrow("parts it can't show");
+        expect(log.journaled).toEqual([]);
+        expect(log.order).not.toContain("settle");
+        expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+        expect(context.openedPaths).toEqual(head === "absent" ? ["tasks/a.md"] : []);
+      }
+      expect(yDocToMarkdown(log.doc)).toContain("Unsettled tail.");
+      if (head === "absent") await expect(readFile(file)).rejects.toMatchObject({ code: "ENOENT" });
+      else expect(await readFile(file, "utf8")).toBe(fileText);
+    } finally {
+      witness.destroy();
+      log.doc.destroy();
     }
-    expect(yDocToMarkdown(log.doc)).toContain("Unsettled tail.");
-    if (head === "absent") await expect(readFile(file)).rejects.toMatchObject({code: "ENOENT"});
-    else expect(await readFile(file, "utf8")).toBe(fileText);
-  } finally {
-    witness.destroy();
-    log.doc.destroy();
-  }
-});
+  },
+);
 
 /**
  * The engine side of a create: records it has adopted, keyed by id, and its
@@ -432,7 +683,7 @@ function fakeEngine() {
   const overrides: Partial<CollectionRecordEditContext> = {
     withAdapter: async (work) =>
       await work({
-        sharedFileUpdateStates: async writes => writes.map(() => "absent"),
+        sharedFileUpdateStates: async (writes) => writes.map(() => "absent"),
         async getCollectionRecord({ collectionPath, recordId }) {
           lookups.push(recordId);
           for (const waiter of [...waitingForLookups]) {
@@ -444,7 +695,12 @@ function fakeEngine() {
           const path = records.get(recordId);
           if (path === undefined) throw new Error("collection-record-not-found");
           return {
-            collection: { path: collectionPath, objectId: "object-test", status: "valid", reasons: [] },
+            collection: {
+              path: collectionPath,
+              objectId: "object-test",
+              status: "valid",
+              reasons: [],
+            },
             record: { id: recordId, path, conflicted: false, values: [] },
             history: [],
             nextBeforeHistoryId: null,
@@ -462,12 +718,10 @@ function fakeEngine() {
     records,
     lookups,
     listeners,
-    /** Resolves once the seam is waiting for an announcement. */
     listening(): Promise<void> {
       if (listeners.size > 0) return Promise.resolve();
       return new Promise((resolve) => waitingForListener.push(resolve));
     },
-    /** Resolves once the seam has asked for `count` records. */
     lookupsReached(count: number): Promise<void> {
       if (lookups.length >= count) return Promise.resolve();
       return new Promise((resolve) => waitingForLookups.push({ count, resolve }));
@@ -478,7 +732,6 @@ function fakeEngine() {
     announce(paths: readonly string[] | null) {
       for (const listener of [...listeners]) listener(paths);
     },
-    /** Adopts the file the seam wrote at `path` under the id in its frontmatter. */
     async adopt(root: string, path: string): Promise<string> {
       const text = await readFile(join(root, path), "utf8");
       const recordId = /^---\nid: (rec_[a-z2-7]{26})\n---\n$/.exec(text)?.[1];
@@ -498,42 +751,48 @@ function fakeEngine() {
   };
 }
 
-const ADOPTION_TIMEOUT_MESSAGE =
-  "The record file was created at tasks/two.md, but the engine did not adopt it as a collection record in time. Look for it in the Collection before you create it again.";
-
 afterEach(() => {
   vi.useRealTimers();
 });
 
 describe("setCollectionRecordFields", () => {
   it.each([
-    '{status: draft, score: .nan}',
-    '&root {status: draft, score: .nan}',
-    '!custom &root {status: draft, score: .nan}',
-    ': note\nstatus: draft\nscore: .nan',
-    'status: &v .nan\nscore: *v',
-    'status: &v .nan\nscore: {nested: [*v]}',
-  ])("refuses unsafe property candidates before writing the file: %s", async yaml => {
+    "{status: draft, score: .nan}",
+    "&root {status: draft, score: .nan}",
+    "!custom &root {status: draft, score: .nan}",
+    ": note\nstatus: draft\nscore: .nan",
+    "status: &v .nan\nscore: *v",
+    "status: &v .nan\nscore: {nested: [*v]}",
+  ])("refuses unsafe property candidates before writing the file: %s", async (yaml) => {
     const root = await createTestScratch("dohc-collection-edits-");
     const file = join(root, "one.md");
     const markdown = `---\n${yaml}\n---\n\nBody`;
     const original = Buffer.from(markdown);
     await writeFile(file, original);
     const { session, log } = fakeSession({
-      onSettle: async () => { await writeFile(file, yDocToMarkdown(log.doc)); },
+      onSettle: async () => {
+        await writeFile(file, yDocToMarkdown(log.doc));
+      },
     });
     const imported = markdownToYDoc(markdown);
     try {
       Y.applyUpdate(log.doc, Y.encodeStateAsUpdate(imported));
       const before = Y.encodeStateAsUpdate(log.doc);
-      await expect(setCollectionRecordFields(contextFor(root, session), {
-        recordPath: "one.md", fields: { status: "done" }, author: AGENT,
-      })).rejects.toThrow("without rewriting the others");
+      await expect(
+        setCollectionRecordFields(contextFor(root, session), {
+          recordPath: "one.md",
+          fields: { status: "done" },
+          author: AGENT,
+        }),
+      ).rejects.toThrow("without rewriting the others");
       expect(log.order).toEqual(["close"]);
       expect(log.journaled).toEqual([]);
       expect(Y.encodeStateAsUpdate(log.doc)).toEqual(before);
       expect(await readFile(file)).toEqual(original);
-    } finally { imported.destroy(); log.doc.destroy(); }
+    } finally {
+      imported.destroy();
+      log.doc.destroy();
+    }
   });
 
   it("journals each field as its own update with the agent's actor origin, settles once, then releases", async () => {
@@ -554,8 +813,6 @@ describe("setCollectionRecordFields", () => {
     });
 
     expect(context.openedPaths).toEqual(["tasks/one.md"]);
-    // One journaled update per field carrying the agent's origin, then one
-    // settle before release.
     expect(log.order).toEqual(["apply", "apply", "settle", "close"]);
     const journaled = {
       actorOriginId: "notes-agent",
@@ -583,7 +840,12 @@ describe("setCollectionRecordFields", () => {
     expect(log.journaled).toEqual([
       {
         actorOriginId: AUTOMATION.automationId,
-        attribution: { actorKind: "automation", onBehalfOf: "local", depth: 1, run: { claimId: "claim-7", automationName: "Stamp the finish date" } },
+        attribution: {
+          actorKind: "automation",
+          onBehalfOf: "local",
+          depth: 1,
+          run: { claimId: "claim-7", automationName: "Stamp the finish date" },
+        },
         idempotencyKey: "claim-7/1/0/status",
       },
     ]);
@@ -612,7 +874,6 @@ describe("setCollectionRecordFields", () => {
       kept: {},
     });
 
-    // The journaled updates touch only the changed fields, one each.
     expect(log.updates).toHaveLength(2);
     const replica = new Y.Doc();
     Y.applyUpdate(replica, before);
@@ -716,7 +977,6 @@ describe("setCollectionRecordFields", () => {
     const context = contextFor(root, session, {
       signal: controller.signal,
       async openRecord() {
-        // An automation run's deadline passes while the engine opens it.
         controller.abort();
         return session;
       },
@@ -795,7 +1055,9 @@ describe("setCollectionRecordFields", () => {
       replaced: { Due: null },
       kept: { Owner: "ana" },
     });
-    expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual(["claim-7/hash/0/rec_one/Due"]);
+    expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual([
+      "claim-7/hash/0/rec_one/Due",
+    ]);
     expect(frontmatter.toJSON()).toEqual({ Count: 3, Owner: "ana", Due: "2026-09-30" });
   });
 
@@ -803,19 +1065,24 @@ describe("setCollectionRecordFields", () => {
     const root = await createTestScratch("dohc-record-key-reuse-");
     const { session, log } = fakeSession();
     const context = contextFor(root, session);
-    const input = { recordPath: "tasks/one.md", fields: { status: "open" }, author: AGENT, idempotencyKeyPrefix: "edit" };
+    const input = {
+      recordPath: "tasks/one.md",
+      fields: { status: "open" },
+      author: AGENT,
+      idempotencyKeyPrefix: "edit",
+    };
     await setCollectionRecordFields(context, input);
     log.doc.getMap("frontmatter").delete("status");
-    await expect(setCollectionRecordFields(context, input)).rejects.toThrow("idempotency-key-reuse-mismatch");
+    await expect(setCollectionRecordFields(context, input)).rejects.toThrow(
+      "idempotency-key-reuse-mismatch",
+    );
     expect(log.doc.getMap("frontmatter").has("status")).toBe(false);
     expect(log.journaled).toHaveLength(1);
   });
 
   it("compares each field when it is written, so a change that lands after the session opens is kept", async () => {
     const root = await createTestScratch("dohc-collection-edits-");
-    // Undo's case: put Note back to "old" only while it still holds the run's "new".
     const { session, log } = fakeSession({
-      // A remote edit lands after the open and before the field's turn.
       beforeTurn: (doc) => doc.getMap("frontmatter").set("Note", "theirs"),
     });
     log.doc.getMap("frontmatter").set("Note", "new");
@@ -842,9 +1109,7 @@ describe("setCollectionRecordFields", () => {
       author: { kind: "user", userId: "local" },
     });
 
-    expect(log.journaled).toEqual([
-      { attribution: { actorKind: "human" } },
-    ]);
+    expect(log.journaled).toEqual([{ attribution: { actorKind: "human" } }]);
     expect(actorOriginIdFor(AGENT)).toBe("notes-agent");
     expect(actorOriginIdFor({ kind: "user", userId: "local" })).toBeUndefined();
     expect(attributionFor(AGENT)).toEqual({
@@ -929,9 +1194,19 @@ describe("createCollectionRecord", () => {
       await writeFile(join(root, path), text);
       throw failure;
     };
-    await expect(createCollectionRecord(context, {
-      collectionPath: "tasks", name: "failed", recordId, author: AUTOMATION,
-    })).resolves.toMatchObject({ kind: "partial", created: ["tasks/failed.md"], failedStage: "write", retry: { mode: "resume", recordId } });
+    await expect(
+      createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "failed",
+        recordId,
+        author: AUTOMATION,
+      }),
+    ).resolves.toMatchObject({
+      kind: "partial",
+      created: ["tasks/failed.md"],
+      failedStage: "write",
+      retry: { mode: "resume", recordId },
+    });
     expect(engine.listeners.size).toBe(0);
   });
 
@@ -941,15 +1216,12 @@ describe("createCollectionRecord", () => {
     const { session, log } = fakeSession();
     const engine = fakeEngine();
 
-    const created = createCollectionRecord(
-      contextFor(root, session, engine.overrides),
-      {
-        collectionPath: "tasks",
-        name: "two",
-        fields: { status: "open" },
-        author: AGENT,
-      },
-    );
+    const created = createCollectionRecord(contextFor(root, session, engine.overrides), {
+      collectionPath: "tasks",
+      name: "two",
+      fields: { status: "open" },
+      author: AGENT,
+    });
 
     // One lookup when the wait starts. The only timer is the adoption
     // ceiling, and time short of it looks nothing up again.
@@ -965,7 +1237,6 @@ describe("createCollectionRecord", () => {
     expect(engine.lookups).toEqual([recordId, recordId]);
     expect(engine.listeners.size).toBe(0);
 
-    // Fields were seeded through the one write seam, attributed to the agent.
     expect(log.journaled).toEqual([
       {
         actorOriginId: "notes-agent",
@@ -981,10 +1252,11 @@ describe("createCollectionRecord", () => {
     const { session } = fakeSession();
     const engine = fakeEngine();
 
-    const created = createCollectionRecord(
-      contextFor(root, session, engine.overrides),
-      { collectionPath: "tasks", name: "two", author: AGENT },
-    );
+    const created = createCollectionRecord(contextFor(root, session, engine.overrides), {
+      collectionPath: "tasks",
+      name: "two",
+      author: AGENT,
+    });
     await engine.listening();
     const recordId = await engine.adopt(root, "tasks/two.md");
     engine.announce(null);
@@ -1022,9 +1294,7 @@ describe("createCollectionRecord", () => {
       path: "tasks/renamed.md",
       recordId,
     });
-    expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual([
-      "claim-7/1/0/status",
-    ]);
+    expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual(["claim-7/1/0/status"]);
     // The automation's file carries it as the moment's author, so the added
     // record's claim knows the automation and its depth.
     expect(context.createdFiles).toEqual([{ path: "tasks/two.md", author: AUTOMATION }]);
@@ -1039,16 +1309,13 @@ describe("createCollectionRecord", () => {
     const engine = fakeEngine();
     const requested = derivedRecordId("claim-7/0");
 
-    const created = createCollectionRecord(
-      contextFor(root, session, engine.overrides),
-      {
-        collectionPath: "tasks",
-        name: "two",
-        fields: { status: "open" },
-        author: AUTOMATION,
-        recordId: requested,
-      },
-    );
+    const created = createCollectionRecord(contextFor(root, session, engine.overrides), {
+      collectionPath: "tasks",
+      name: "two",
+      fields: { status: "open" },
+      author: AUTOMATION,
+      recordId: requested,
+    });
     await engine.listening();
     // The requested id belonged to a record someone deleted, so the engine
     // adopts the file under a new id and writes that id into it.
@@ -1069,16 +1336,13 @@ describe("createCollectionRecord", () => {
     await mkdir(join(root, "tasks"));
     await writeFile(join(root, "tasks", "two.md"), `---\nid: ${recordId}\n---\n`);
 
-    const created = createCollectionRecord(
-      contextFor(root, session, engine.overrides),
-      {
-        collectionPath: "tasks",
-        name: "two",
-        fields: { status: "open" },
-        author: AUTOMATION,
-        recordId,
-      },
-    );
+    const created = createCollectionRecord(contextFor(root, session, engine.overrides), {
+      collectionPath: "tasks",
+      name: "two",
+      fields: { status: "open" },
+      author: AUTOMATION,
+      recordId,
+    });
     await engine.listening();
     await engine.adopt(root, "tasks/two.md");
     engine.announce(["tasks/two.md"]);
@@ -1142,7 +1406,7 @@ describe("createCollectionRecord", () => {
     await engine.lookupsReached(2);
     controller.abort();
     const error = await created.then(
-      result => result,
+      (result) => result,
       (reason: unknown) => reason,
     );
 
@@ -1151,7 +1415,12 @@ describe("createCollectionRecord", () => {
     await engine.adopt(root, "tasks/two.md");
     engine.announce(["tasks/two.md"]);
 
-    expect(error).toMatchObject({ kind: "partial", created: ["tasks/two.md"], failedStage: "index", retry: { mode: "resume" } });
+    expect(error).toMatchObject({
+      kind: "partial",
+      created: ["tasks/two.md"],
+      failedStage: "index",
+      retry: { mode: "resume" },
+    });
     expect(engine.listeners.size).toBe(0);
     expect(engine.lookups).toHaveLength(2);
     expect(context.openedPaths).toEqual([]);
@@ -1163,98 +1432,118 @@ describe("createCollectionRecord", () => {
     const { session } = fakeSession();
     const engine = fakeEngine();
 
-    const created = createCollectionRecord(
-      contextFor(root, session, engine.overrides),
-      { collectionPath: "tasks", name: "two", author: AGENT },
-    );
+    const created = createCollectionRecord(contextFor(root, session, engine.overrides), {
+      collectionPath: "tasks",
+      name: "two",
+      author: AGENT,
+    });
     const outcome = created.then(
-      result => result,
+      (result) => result,
       (reason: unknown) => reason,
     );
     await engine.lookupsReached(1);
     await vi.advanceTimersByTimeAsync(15_000);
 
-    expect(await outcome).toMatchObject({ kind: "partial", created: ["tasks/two.md"], failedStage: "index", retry: { mode: "resume" } });
+    expect(await outcome).toMatchObject({
+      kind: "partial",
+      created: ["tasks/two.md"],
+      failedStage: "index",
+      retry: { mode: "resume" },
+    });
     expect(engine.listeners.size).toBe(0);
   });
 
-  it.each(["abort", "deadline"] as const)("stops a pending file read at %s without starting a late lookup", async end => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const root = await createTestScratch("dohc-record-read-wait-");
-    const { session } = fakeSession();
-    const engine = fakeEngine();
-    const controller = new AbortController();
-    const context = contextFor(root, session, { ...engine.overrides, signal: controller.signal });
-    const started = Promise.withResolvers<void>();
-    const held = Promise.withResolvers<{ text: string; truncated: boolean }>();
-    vi.spyOn(context, "readText").mockImplementationOnce(() => {
-      started.resolve();
-      return held.promise;
-    });
-    const created = createCollectionRecord(context, {
-      collectionPath: "tasks", name: "two", fields: { status: "open" }, author: AGENT,
-    });
-    await started.promise;
-    engine.announce(null);
-    if (end === "abort") controller.abort();
-    else await vi.advanceTimersByTimeAsync(15_000);
-    expect(await created).toMatchObject({
-      kind: "partial", failedStage: "index",
-      reason: "dohc created tasks/two.md, but the engine did not add it to the Collection in time.",
-    });
-    expect(engine.listeners.size).toBe(0);
-    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
-    expect(vi.getTimerCount()).toBe(0);
+  it.each(["abort", "deadline"] as const)(
+    "stops a pending file read at %s without starting a late lookup",
+    async (end) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const root = await createTestScratch("dohc-record-read-wait-");
+      const { session } = fakeSession();
+      const engine = fakeEngine();
+      const controller = new AbortController();
+      const context = contextFor(root, session, { ...engine.overrides, signal: controller.signal });
+      const started = Promise.withResolvers<void>();
+      const held = Promise.withResolvers<{ text: string; truncated: boolean }>();
+      vi.spyOn(context, "readText").mockImplementationOnce(() => {
+        started.resolve();
+        return held.promise;
+      });
+      const created = createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "two",
+        fields: { status: "open" },
+        author: AGENT,
+      });
+      await started.promise;
+      engine.announce(null);
+      if (end === "abort") controller.abort();
+      else await vi.advanceTimersByTimeAsync(15_000);
+      expect(await created).toMatchObject({
+        kind: "partial",
+        failedStage: "index",
+        reason:
+          "dohc created tasks/two.md, but the engine did not add it to the Collection in time.",
+      });
+      expect(engine.listeners.size).toBe(0);
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
 
-    await engine.adopt(root, "tasks/two.md");
-    held.resolve(await context.readText("tasks/two.md"));
-    await held.promise;
-    await new Promise<void>(resolve => setImmediate(resolve));
-    expect(engine.lookups).toHaveLength(0);
-    expect(context.openedPaths).toEqual([]);
-  });
-
-  it.each(["abort", "deadline"] as const)("stops a pending lookup at %s without seeding its late result", async end => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const root = await createTestScratch("dohc-record-lookup-wait-");
-    const { session, log } = fakeSession();
-    const engine = fakeEngine();
-    const controller = new AbortController();
-    const context = contextFor(root, session, { ...engine.overrides, signal: controller.signal });
-    const createFile = context.createFile;
-    vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
-      const path = await createFile(...args);
-      await engine.adopt(root, path);
-      return path;
-    });
-    const started = Promise.withResolvers<void>();
-    const held = Promise.withResolvers<void>();
-    const withAdapter = context.withAdapter;
-    vi.spyOn(context, "withAdapter").mockImplementationOnce(async work => {
-      const result = await withAdapter(work);
-      started.resolve();
+      await engine.adopt(root, "tasks/two.md");
+      held.resolve(await context.readText("tasks/two.md"));
       await held.promise;
-      return result;
-    });
-    const created = createCollectionRecord(context, {
-      collectionPath: "tasks", name: "two", fields: { status: "open" }, author: AGENT,
-    });
-    await started.promise;
-    engine.announce(null);
-    if (end === "abort") controller.abort();
-    else await vi.advanceTimersByTimeAsync(15_000);
-    expect(await created).toMatchObject({ kind: "partial", failedStage: "index" });
-    expect(engine.listeners.size).toBe(0);
-    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
-    expect(vi.getTimerCount()).toBe(0);
-    held.resolve();
-    await held.promise;
-    // Cross the real scheduler's event-loop boundary, without waiting for time.
-    await new Promise<void>(resolve => setImmediate(resolve));
-    expect(engine.lookups).toHaveLength(1);
-    expect(context.openedPaths).toEqual([]);
-    expect(log.updates).toEqual([]);
-  });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(engine.lookups).toHaveLength(0);
+      expect(context.openedPaths).toEqual([]);
+    },
+  );
+
+  it.each(["abort", "deadline"] as const)(
+    "stops a pending lookup at %s without seeding its late result",
+    async (end) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const root = await createTestScratch("dohc-record-lookup-wait-");
+      const { session, log } = fakeSession();
+      const engine = fakeEngine();
+      const controller = new AbortController();
+      const context = contextFor(root, session, { ...engine.overrides, signal: controller.signal });
+      const createFile = context.createFile;
+      vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
+        const path = await createFile(...args);
+        await engine.adopt(root, path);
+        return path;
+      });
+      const started = Promise.withResolvers<void>();
+      const held = Promise.withResolvers<void>();
+      const withAdapter = context.withAdapter;
+      vi.spyOn(context, "withAdapter").mockImplementationOnce(async (work) => {
+        const result = await withAdapter(work);
+        started.resolve();
+        await held.promise;
+        return result;
+      });
+      const created = createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "two",
+        fields: { status: "open" },
+        author: AGENT,
+      });
+      await started.promise;
+      engine.announce(null);
+      if (end === "abort") controller.abort();
+      else await vi.advanceTimersByTimeAsync(15_000);
+      expect(await created).toMatchObject({ kind: "partial", failedStage: "index" });
+      expect(engine.listeners.size).toBe(0);
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+      held.resolve();
+      await held.promise;
+      // Cross the real scheduler's event-loop boundary, without waiting for time.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(engine.lookups).toHaveLength(1);
+      expect(context.openedPaths).toEqual([]);
+      expect(log.updates).toEqual([]);
+    },
+  );
 
   it("coalesces a burst during a lookup into one follow-up check", async () => {
     const root = await createTestScratch("dohc-record-burst-");
@@ -1264,13 +1553,17 @@ describe("createCollectionRecord", () => {
     const started = Promise.withResolvers<void>();
     const held = Promise.withResolvers<void>();
     const withAdapter = context.withAdapter;
-    vi.spyOn(context, "withAdapter").mockImplementationOnce(async work => {
+    vi.spyOn(context, "withAdapter").mockImplementationOnce(async (work) => {
       const result = await withAdapter(work);
       started.resolve();
       await held.promise;
       return result;
     });
-    const created = createCollectionRecord(context, { collectionPath: "tasks", name: "two", author: AGENT });
+    const created = createCollectionRecord(context, {
+      collectionPath: "tasks",
+      name: "two",
+      author: AGENT,
+    });
     await started.promise;
     // Use resolved reads for the event-loop barrier below.
     const read = await context.readText("tasks/two.md");
@@ -1279,7 +1572,7 @@ describe("createCollectionRecord", () => {
     expect(engine.lookups).toHaveLength(1);
     held.resolve();
     await engine.lookupsReached(2);
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(engine.lookups).toHaveLength(2);
     const recordId = await engine.adopt(root, "tasks/two.md");
     engine.announce(null);
@@ -1294,7 +1587,9 @@ describe("createCollectionRecord", () => {
     const engine = fakeEngine();
     engine.refuseLookups(Error("collection reloading"));
     const created = createCollectionRecord(contextFor(root, session, engine.overrides), {
-      collectionPath: "tasks", name: "two", author: AGENT,
+      collectionPath: "tasks",
+      name: "two",
+      author: AGENT,
     });
     await engine.lookupsReached(1);
     engine.refuseLookups(null);
@@ -1304,37 +1599,48 @@ describe("createCollectionRecord", () => {
     expect(engine.listeners.size).toBe(0);
   });
 
-  it.each(["creation", "registration"] as const)("releases a subscription when the workspace ends during %s", async when => {
-    const root = await createTestScratch("dohc-record-subscribe-abort-");
-    const { session } = fakeSession();
-    const engine = fakeEngine();
-    const controller = new AbortController();
-    const unsubscribe = vi.fn();
-    const context = contextFor(root, session, {
-      ...engine.overrides,
-      signal: controller.signal,
-      onRecordsChanged(listener) {
-        const remove = engine.overrides.onRecordsChanged!(listener);
-        if (when === "registration") controller.abort();
-        return () => { remove(); unsubscribe(); };
-      },
-    });
-    const createFile = context.createFile;
-    if (when === "creation") vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
-      const path = await createFile(...args);
-      controller.abort();
-      return path;
-    });
-    const read = vi.spyOn(context, "readText");
-    expect(await createCollectionRecord(context, { collectionPath: "tasks", name: "two", author: AGENT }))
-      .toMatchObject({ kind: "partial", failedStage: "index" });
-    expect(unsubscribe).toHaveBeenCalledTimes(1);
-    expect(engine.listeners.size).toBe(0);
-    expect(context.openedPaths).toEqual([]);
-    // Only the outer creation's diagnostic read runs after cancellation.
-    expect(read).toHaveBeenCalledTimes(1);
-    expect(engine.lookups).toEqual([]);
-  });
+  it.each(["creation", "registration"] as const)(
+    "releases a subscription when the workspace ends during %s",
+    async (when) => {
+      const root = await createTestScratch("dohc-record-subscribe-abort-");
+      const { session } = fakeSession();
+      const engine = fakeEngine();
+      const controller = new AbortController();
+      const unsubscribe = vi.fn();
+      const context = contextFor(root, session, {
+        ...engine.overrides,
+        signal: controller.signal,
+        onRecordsChanged(listener) {
+          const remove = engine.overrides.onRecordsChanged!(listener);
+          if (when === "registration") controller.abort();
+          return () => {
+            remove();
+            unsubscribe();
+          };
+        },
+      });
+      const createFile = context.createFile;
+      if (when === "creation")
+        vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
+          const path = await createFile(...args);
+          controller.abort();
+          return path;
+        });
+      const read = vi.spyOn(context, "readText");
+      expect(
+        await createCollectionRecord(context, {
+          collectionPath: "tasks",
+          name: "two",
+          author: AGENT,
+        }),
+      ).toMatchObject({ kind: "partial", failedStage: "index" });
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(engine.listeners.size).toBe(0);
+      expect(context.openedPaths).toEqual([]);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(engine.lookups).toEqual([]);
+    },
+  );
 
   it("handles notifications during registration when the file is already indexed", async () => {
     const root = await createTestScratch("dohc-record-register-news-");
@@ -1356,8 +1662,13 @@ describe("createCollectionRecord", () => {
       recordId = await engine.adopt(root, path);
       return path;
     });
-    expect(await createCollectionRecord(context, { collectionPath: "tasks", name: "two", author: AGENT }))
-      .toEqual({ path: "tasks/two.md", recordId });
+    expect(
+      await createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "two",
+        author: AGENT,
+      }),
+    ).toEqual({ path: "tasks/two.md", recordId });
     expect(engine.lookups).toEqual([recordId]);
     expect(engine.listeners.size).toBe(0);
   });
@@ -1367,7 +1678,10 @@ describe("createCollectionRecord", () => {
     const { session: oldSession, log: oldLog } = fakeSession();
     const oldEngine = fakeEngine();
     const controller = new AbortController();
-    const oldContext = contextFor(oldRoot, oldSession, { ...oldEngine.overrides, signal: controller.signal });
+    const oldContext = contextFor(oldRoot, oldSession, {
+      ...oldEngine.overrides,
+      signal: controller.signal,
+    });
     const started = Promise.withResolvers<void>();
     const held = Promise.withResolvers<{ text: string; truncated: boolean }>();
     vi.spyOn(oldContext, "readText").mockImplementationOnce(() => {
@@ -1375,7 +1689,10 @@ describe("createCollectionRecord", () => {
       return held.promise;
     });
     const oldCreation = createCollectionRecord(oldContext, {
-      collectionPath: "tasks", name: "two", fields: { status: "old" }, author: AGENT,
+      collectionPath: "tasks",
+      name: "two",
+      fields: { status: "old" },
+      author: AGENT,
     });
     await started.promise;
     controller.abort();
@@ -1386,7 +1703,10 @@ describe("createCollectionRecord", () => {
     const nextEngine = fakeEngine();
     const nextContext = contextFor(nextRoot, nextSession, nextEngine.overrides);
     const nextCreation = createCollectionRecord(nextContext, {
-      collectionPath: "tasks", name: "two", fields: { status: "next" }, author: AGENT,
+      collectionPath: "tasks",
+      name: "two",
+      fields: { status: "next" },
+      author: AGENT,
     });
     await nextEngine.listening();
     const oldId = await oldEngine.adopt(oldRoot, "tasks/two.md");
@@ -1407,22 +1727,24 @@ describe("createCollectionRecord", () => {
     const { session } = fakeSession({ settleError: new Error("settle refused") });
     const engine = fakeEngine();
 
-    const created = createCollectionRecord(
-      contextFor(root, session, engine.overrides),
-      {
-        collectionPath: "tasks",
-        name: "partial",
-        fields: { status: "open" },
-        author: AGENT,
-      },
-    );
+    const created = createCollectionRecord(contextFor(root, session, engine.overrides), {
+      collectionPath: "tasks",
+      name: "partial",
+      fields: { status: "open" },
+      author: AGENT,
+    });
     await engine.listening();
     const recordId = await engine.adopt(root, "tasks/partial.md");
     engine.announce(["tasks/partial.md"]);
 
     // The file and its id exist by the time the seed fails: the error says
     // so, so a caller reconciles instead of creating a second record.
-    await expect(created).resolves.toMatchObject({ kind: "partial", created: ["tasks/partial.md"], failedStage: "settle", retry: { mode: "resume", recordId } });
+    await expect(created).resolves.toMatchObject({
+      kind: "partial",
+      created: ["tasks/partial.md"],
+      failedStage: "settle",
+      retry: { mode: "resume", recordId },
+    });
   });
 
   it("returns without a session when fields are absent or empty", async () => {
@@ -1478,14 +1800,13 @@ describe("createCollectionRecord", () => {
       }),
     ).rejects.toThrow(/Record id must be "rec_"/);
     await expect(
-      createCollectionRecord(
-        contextFor(root, session, { signal: aborted.signal }),
-        { collectionPath: "tasks", name: "two", author: AGENT },
-      ),
+      createCollectionRecord(contextFor(root, session, { signal: aborted.signal }), {
+        collectionPath: "tasks",
+        name: "two",
+        author: AGENT,
+      }),
     ).rejects.toThrow(/no longer active/i);
-    await expect(readFile(join(root, "tasks", "two.md"), "utf8")).rejects.toThrow(
-      /ENOENT/,
-    );
+    await expect(readFile(join(root, "tasks", "two.md"), "utf8")).rejects.toThrow(/ENOENT/);
   });
 });
 
@@ -1495,9 +1816,14 @@ describe("partial record retry", () => {
     const { session } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    vi.spyOn(session, "applyDecidedLocalUpdate").mockRejectedValueOnce(new Error("idempotency-key-reuse-mismatch"));
+    vi.spyOn(session, "applyDecidedLocalUpdate").mockRejectedValueOnce(
+      new Error("idempotency-key-reuse-mismatch"),
+    );
     const first = createCollectionRecord(context, {
-      collectionPath: "tasks", name: "retry", fields: { status: "open" }, author: AGENT,
+      collectionPath: "tasks",
+      name: "retry",
+      fields: { status: "open" },
+      author: AGENT,
     });
     await engine.listening();
     await engine.adopt(root, "tasks/retry.md");
@@ -1505,42 +1831,58 @@ describe("partial record retry", () => {
     expect(await first).toMatchObject({ kind: "partial", failedStage: "fields" });
   });
 
-  it.each(["delete", "null"])("preserves a cleared seed after settlement fails (%s)", async clear => {
-    const root = await createTestScratch("dohc-record-cleared-seed-");
-    const journaledKeys = new Map<string, string>();
-    const { session, log } = fakeSession({ journaledKeys });
-    const engine = fakeEngine();
-    const context = contextFor(root, session, engine.overrides);
-    const input = { collectionPath: "tasks", name: "retry", fields: { status: "open" }, author: AGENT };
-    vi.spyOn(session, "settleNow").mockRejectedValueOnce(new Error("settle refused"));
-    const first = createCollectionRecord(context, input);
-    await engine.listening();
-    const recordId = await engine.adopt(root, "tasks/retry.md");
-    engine.announce(["tasks/retry.md"]);
-    expect(await first).toMatchObject({ kind: "partial", failedStage: "settle" });
-    expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
+  it.each(["delete", "null"])(
+    "preserves a cleared seed after settlement fails (%s)",
+    async (clear) => {
+      const root = await createTestScratch("dohc-record-cleared-seed-");
+      const journaledKeys = new Map<string, string>();
+      const { session, log } = fakeSession({ journaledKeys });
+      const engine = fakeEngine();
+      const context = contextFor(root, session, engine.overrides);
+      const input = {
+        collectionPath: "tasks",
+        name: "retry",
+        fields: { status: "open" },
+        author: AGENT,
+      };
+      vi.spyOn(session, "settleNow").mockRejectedValueOnce(new Error("settle refused"));
+      const first = createCollectionRecord(context, input);
+      await engine.listening();
+      const recordId = await engine.adopt(root, "tasks/retry.md");
+      engine.announce(["tasks/retry.md"]);
+      expect(await first).toMatchObject({ kind: "partial", failedStage: "settle" });
+      expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
 
-    const resumed = fakeSession({ journaledKeys });
-    Y.applyUpdate(resumed.log.doc, Y.encodeStateAsUpdate(log.doc));
-    const fields = resumed.log.doc.getMap("frontmatter");
-    if (clear === "delete") fields.delete("status");
-    else fields.set("status", null);
-    await expect(createCollectionRecord(contextFor(root, resumed.session, engine.overrides), {
-      ...input, recordId,
-    })).resolves.toEqual({ path: "tasks/retry.md", recordId, kept: { status: null } });
-    expect(fields.get("status")).toBe(clear === "delete" ? undefined : null);
-    expect(resumed.log.journaled).toEqual([]);
-    expect(resumed.log.order).toEqual(["settle", "close"]);
-    expect(journaledKeys.size).toBe(1);
-    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
-  });
+      const resumed = fakeSession({ journaledKeys });
+      Y.applyUpdate(resumed.log.doc, Y.encodeStateAsUpdate(log.doc));
+      const fields = resumed.log.doc.getMap("frontmatter");
+      if (clear === "delete") fields.delete("status");
+      else fields.set("status", null);
+      await expect(
+        createCollectionRecord(contextFor(root, resumed.session, engine.overrides), {
+          ...input,
+          recordId,
+        }),
+      ).resolves.toEqual({ path: "tasks/retry.md", recordId, kept: { status: null } });
+      expect(fields.get("status")).toBe(clear === "delete" ? undefined : null);
+      expect(resumed.log.journaled).toEqual([]);
+      expect(resumed.log.order).toEqual(["settle", "close"]);
+      expect(journaledKeys.size).toBe(1);
+      expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+    },
+  );
 
   it("preserves a person's later edit after seeding lands but settlement fails", async () => {
     const root = await createTestScratch("dohc-record-later-edit-");
     const { session, log } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    const input = { collectionPath: "tasks", name: "retry", fields: { status: "open" }, author: AGENT };
+    const input = {
+      collectionPath: "tasks",
+      name: "retry",
+      fields: { status: "open" },
+      author: AGENT,
+    };
     vi.spyOn(session, "settleNow").mockRejectedValueOnce(new Error("settle refused"));
     const first = createCollectionRecord(context, input);
     await engine.listening();
@@ -1555,9 +1897,12 @@ describe("partial record retry", () => {
     const resumed = fakeSession();
     Y.applyUpdate(resumed.log.doc, Y.encodeStateAsUpdate(log.doc));
     resumed.log.doc.getMap("frontmatter").set("status", "done");
-    await expect(createCollectionRecord(contextFor(root, resumed.session, engine.overrides), {
-      ...input, recordId: partial.retry.recordId,
-    })).resolves.toEqual({ path: "tasks/retry.md", recordId, kept: { status: "done" } });
+    await expect(
+      createCollectionRecord(contextFor(root, resumed.session, engine.overrides), {
+        ...input,
+        recordId: partial.retry.recordId,
+      }),
+    ).resolves.toEqual({ path: "tasks/retry.md", recordId, kept: { status: "done" } });
     expect(resumed.log.doc.getMap("frontmatter").get("status")).toBe("done");
     expect(resumed.log.journaled).toEqual([]);
     expect(log.journaled[0]?.idempotencyKey).toBe(`create-record/${recordId}/status`);
@@ -1569,7 +1914,12 @@ describe("partial record retry", () => {
     const { session, log } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    const input = { collectionPath: "tasks", name: "retry", fields: { status: "open", priority: "high" }, author: AGENT };
+    const input = {
+      collectionPath: "tasks",
+      name: "retry",
+      fields: { status: "open", priority: "high" },
+      author: AGENT,
+    };
     vi.spyOn(context, "openRecord").mockRejectedValueOnce(new Error("bind refused"));
     const first = createCollectionRecord(context, input);
     await engine.listening();
@@ -1577,9 +1927,15 @@ describe("partial record retry", () => {
     engine.announce(["tasks/retry.md"]);
     expect(await first).toMatchObject({ kind: "partial", failedStage: "bind" });
     log.doc.getMap("frontmatter").set("status", "done");
-    await expect(createCollectionRecord(context, { ...input, recordId })).resolves.toEqual({ path: "tasks/retry.md", recordId, kept: { status: "done" } });
+    await expect(createCollectionRecord(context, { ...input, recordId })).resolves.toEqual({
+      path: "tasks/retry.md",
+      recordId,
+      kept: { status: "done" },
+    });
     expect(log.doc.getMap("frontmatter").toJSON()).toEqual({ status: "done", priority: "high" });
-    expect(log.journaled.map(entry => entry.idempotencyKey)).toEqual([`create-record/${recordId}/priority`]);
+    expect(log.journaled.map((entry) => entry.idempotencyKey)).toEqual([
+      `create-record/${recordId}/priority`,
+    ]);
   });
 
   it("keeps a reassigned automation identity when capture cannot finish", async () => {
@@ -1594,16 +1950,29 @@ describe("partial record retry", () => {
       await engine.adoptUnderNewId(root, "tasks/retry.md", adopted);
       return written;
     });
-    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => { throw Error("capture offline"); });
+    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => {
+      throw Error("capture offline");
+    });
     // The engine reassigned the identity before capture could be confirmed.
     const remember = vi.fn(async () => {});
-    await expect(collectionRecordWrites(context).create({
-      collectionPath: "tasks", name: "retry", recordId: derivedRecordId("planned"), author: AUTOMATION, onPartial: remember,
-    })).rejects.toThrow();
+    await expect(
+      collectionRecordWrites(context).create({
+        collectionPath: "tasks",
+        name: "retry",
+        recordId: derivedRecordId("planned"),
+        author: AUTOMATION,
+        onPartial: remember,
+      }),
+    ).rejects.toThrow();
     expect(remember).toHaveBeenCalledWith({ path: "tasks/retry.md", recordId: adopted });
-    await expect(collectionRecordWrites(context).create({
-      collectionPath: "tasks", name: "retry", recordId: adopted, author: AUTOMATION,
-    })).resolves.toEqual({ path: "tasks/retry.md", recordId: adopted });
+    await expect(
+      collectionRecordWrites(context).create({
+        collectionPath: "tasks",
+        name: "retry",
+        recordId: adopted,
+        author: AUTOMATION,
+      }),
+    ).resolves.toEqual({ path: "tasks/retry.md", recordId: adopted });
     expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
 
@@ -1613,24 +1982,38 @@ describe("partial record retry", () => {
     const engine = fakeEngine();
     const recordId = derivedRecordId("other");
     engine.records.set(recordId, "tasks/other.md");
-    await expect(createCollectionRecord(contextFor(root, session, engine.overrides), {
-      collectionPath: "tasks", name: "new", fields: { status: "open" }, recordId, author: AGENT,
-    })).rejects.toThrow("belongs to another path");
+    await expect(
+      createCollectionRecord(contextFor(root, session, engine.overrides), {
+        collectionPath: "tasks",
+        name: "new",
+        fields: { status: "open" },
+        recordId,
+        author: AGENT,
+      }),
+    ).rejects.toThrow("belongs to another path");
     expect(log.updates).toEqual([]);
   });
-
 
   it("keeps partial record facts when the workspace lease rejects completion", async () => {
     const root = await createTestScratch("dohc-record-lease-");
     const { session } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => { throw Error("capture offline"); });
-    const partial = await runCollectionRecordCreation(async work => {
-      await work(context);
-      throw Error("stale workspace");
-    }, { collectionPath: "tasks", name: "retry", author: AGENT });
-    expect(partial).toMatchObject({ kind: "partial", created: ["tasks/retry.md"], failedStage: "capture" });
+    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => {
+      throw Error("capture offline");
+    });
+    const partial = await runCollectionRecordCreation(
+      async (work) => {
+        await work(context);
+        throw Error("stale workspace");
+      },
+      { collectionPath: "tasks", name: "retry", author: AGENT },
+    );
+    expect(partial).toMatchObject({
+      kind: "partial",
+      created: ["tasks/retry.md"],
+      failedStage: "capture",
+    });
   });
 
   it("reports a saved record when only the final workspace lease check fails", async () => {
@@ -1638,20 +2021,31 @@ describe("partial record retry", () => {
     const { session } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    const first = runCollectionRecordCreation(async work => {
-      await work(context);
-      throw Error("stale workspace");
-    }, { collectionPath: "tasks", name: "retry", author: AGENT });
+    const first = runCollectionRecordCreation(
+      async (work) => {
+        await work(context);
+        throw Error("stale workspace");
+      },
+      { collectionPath: "tasks", name: "retry", author: AGENT },
+    );
     await engine.listening();
     const recordId = await engine.adopt(root, "tasks/retry.md");
     engine.announce(null);
-    expect(await first).toMatchObject({ kind: "partial", failedStage: "scope", retry: { recordId } });
-    await expect(runCollectionRecordCreation(work => work(context), {
-      collectionPath: "tasks", name: "retry", recordId, author: AGENT,
-    })).resolves.toEqual({ path: "tasks/retry.md", recordId });
+    expect(await first).toMatchObject({
+      kind: "partial",
+      failedStage: "scope",
+      retry: { recordId },
+    });
+    await expect(
+      runCollectionRecordCreation((work) => work(context), {
+        collectionPath: "tasks",
+        name: "retry",
+        recordId,
+        author: AGENT,
+      }),
+    ).resolves.toEqual({ path: "tasks/retry.md", recordId });
     expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
-
 
   it("retries an authored write that landed before the transport failed", async () => {
     const root = await createTestScratch("dohc-record-write-retry-");
@@ -1665,13 +2059,20 @@ describe("partial record retry", () => {
     });
     const input = { collectionPath: "tasks", name: "retry", author: AUTOMATION };
     const partial = await createCollectionRecord(context, input);
-    expect(partial).toMatchObject({ kind: "partial", failedStage: "write", created: ["tasks/retry.md"] });
+    expect(partial).toMatchObject({
+      kind: "partial",
+      failedStage: "write",
+      created: ["tasks/retry.md"],
+    });
     if (!("kind" in partial)) throw Error("expected partial");
     const retry = createCollectionRecord(context, { ...input, recordId: partial.retry.recordId });
     await engine.listening();
     await engine.adopt(root, "tasks/retry.md");
     engine.announce(null);
-    await expect(retry).resolves.toEqual({ path: "tasks/retry.md", recordId: partial.retry.recordId });
+    await expect(retry).resolves.toEqual({
+      path: "tasks/retry.md",
+      recordId: partial.retry.recordId,
+    });
     expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
 
@@ -1681,7 +2082,9 @@ describe("partial record retry", () => {
     const { session } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => { throw Error("capture offline"); });
+    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => {
+      throw Error("capture offline");
+    });
     const input = { collectionPath: "tasks", name: "retry", author: AGENT };
     const partial = await createCollectionRecord(context, input);
     expect(partial).toMatchObject({ kind: "partial", failedStage: "capture" });
@@ -1691,7 +2094,10 @@ describe("partial record retry", () => {
     await engine.listening();
     await engine.adopt(root, "tasks/retry.md");
     engine.announce(null);
-    await expect(retry).resolves.toEqual({ path: "tasks/retry.md", recordId: partial.retry.recordId });
+    await expect(retry).resolves.toEqual({
+      path: "tasks/retry.md",
+      recordId: partial.retry.recordId,
+    });
     expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
 
@@ -1700,41 +2106,72 @@ describe("partial record retry", () => {
     const { session } = fakeSession();
     const engine = fakeEngine();
     const context = contextFor(root, session, engine.overrides);
-    const busy = new DaemonRefusalError({code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff"}, undefined);
-    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => { throw busy; });
+    const busy = new DaemonRefusalError(
+      { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
+      undefined,
+    );
+    vi.spyOn(context, "onRecordsChanged").mockImplementationOnce(() => {
+      throw busy;
+    });
     const onPartial = vi.fn(async () => undefined);
-    const input = { collectionPath: "tasks", name: "retry", author: AGENT, recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", onPartial };
+    const input = {
+      collectionPath: "tasks",
+      name: "retry",
+      author: AGENT,
+      recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      onPartial,
+    };
     const first = collectionRecordWrites(context).create(input);
     await expect(first).rejects.toBe(busy);
     const id = await engine.adopt(root, "tasks/retry.md");
-    expect(onPartial).toHaveBeenCalledWith({path: "tasks/retry.md", recordId: id});
-    await expect(collectionRecordWrites(context).create({...input, recordId: id})).resolves.toEqual({path: "tasks/retry.md", recordId: id});
+    expect(onPartial).toHaveBeenCalledWith({ path: "tasks/retry.md", recordId: id });
+    await expect(
+      collectionRecordWrites(context).create({ ...input, recordId: id }),
+    ).resolves.toEqual({ path: "tasks/retry.md", recordId: id });
     expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
 
-  it.each(["bind", "fields", "settle", "close"] as const)("resumes after %s without another file or field update", async stage => {
-    const root = await createTestScratch("dohc-record-retry-");
-    const { session, log } = fakeSession();
-    const engine = fakeEngine();
-    const context = contextFor(root, session, engine.overrides);
-    const input = { collectionPath: "tasks", name: "retry", fields: { status: "open" }, author: AGENT };
-    const fail = () => { throw new Error("injected " + stage); };
-    if (stage === "bind") vi.spyOn(context, "openRecord").mockImplementationOnce(fail);
-    if (stage === "fields") vi.spyOn(session, "applyDecidedLocalUpdate").mockImplementationOnce(fail);
-    if (stage === "settle") vi.spyOn(session, "settleNow").mockImplementationOnce(fail);
-    if (stage === "close") vi.spyOn(session, "close").mockImplementationOnce(fail);
-    const first = createCollectionRecord(context, input);
-    await engine.listening();
-    const id = await engine.adopt(root, "tasks/retry.md");
-    engine.announce(["tasks/retry.md"]);
-    const partial = await first;
-    expect(partial).toMatchObject({ kind: "partial", created: ["tasks/retry.md"], failedStage: stage, retry: { mode: "resume", recordId: id } });
-    if (!("kind" in partial)) throw Error("expected partial");
-    await expect(createCollectionRecord(context, { ...input, recordId: partial.retry.recordId })).resolves.toEqual({ path: "tasks/retry.md", recordId: id });
-    expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
-    expect(log.updates).toHaveLength(1);
-    expect(log.order).toContain("settle");
-  });
+  it.each(["bind", "fields", "settle", "close"] as const)(
+    "resumes after %s without another file or field update",
+    async (stage) => {
+      const root = await createTestScratch("dohc-record-retry-");
+      const { session, log } = fakeSession();
+      const engine = fakeEngine();
+      const context = contextFor(root, session, engine.overrides);
+      const input = {
+        collectionPath: "tasks",
+        name: "retry",
+        fields: { status: "open" },
+        author: AGENT,
+      };
+      const fail = () => {
+        throw new Error("injected " + stage);
+      };
+      if (stage === "bind") vi.spyOn(context, "openRecord").mockImplementationOnce(fail);
+      if (stage === "fields")
+        vi.spyOn(session, "applyDecidedLocalUpdate").mockImplementationOnce(fail);
+      if (stage === "settle") vi.spyOn(session, "settleNow").mockImplementationOnce(fail);
+      if (stage === "close") vi.spyOn(session, "close").mockImplementationOnce(fail);
+      const first = createCollectionRecord(context, input);
+      await engine.listening();
+      const id = await engine.adopt(root, "tasks/retry.md");
+      engine.announce(["tasks/retry.md"]);
+      const partial = await first;
+      expect(partial).toMatchObject({
+        kind: "partial",
+        created: ["tasks/retry.md"],
+        failedStage: stage,
+        retry: { mode: "resume", recordId: id },
+      });
+      if (!("kind" in partial)) throw Error("expected partial");
+      await expect(
+        createCollectionRecord(context, { ...input, recordId: partial.retry.recordId }),
+      ).resolves.toEqual({ path: "tasks/retry.md", recordId: id });
+      expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
+      expect(log.updates).toHaveLength(1);
+      expect(log.order).toContain("settle");
+    },
+  );
 
   it("resumes an adoption timeout with the returned identity", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -1753,36 +2190,53 @@ describe("partial record retry", () => {
     await engine.listening();
     await engine.adopt(root, "tasks/retry.md");
     engine.announce(null);
-    await expect(retry).resolves.toEqual({ path: "tasks/retry.md", recordId: partial.retry.recordId });
+    await expect(retry).resolves.toEqual({
+      path: "tasks/retry.md",
+      recordId: partial.retry.recordId,
+    });
     expect(await readdir(join(root, "tasks"))).toEqual(["retry.md"]);
   });
 });
 
-it.each(["deleted", "renamed", "replaced"].flatMap(state => [
-  { state, fields: undefined }, { state, fields: { status: "done" } },
-]))("skips an automation replay with a stale binding after the file was $state ($fields)", async ({ state, fields }) => {
-  const root = await createTestScratch("dohc-stale-record-");
-  const { session, log } = fakeSession();
-  const engine = fakeEngine();
-  const context = contextFor(root, session, engine.overrides);
-  const recordId = derivedRecordId("stale");
-  await mkdir(join(root, "tasks"));
-  await writeFile(join(root, "tasks", "two.md"), `---\nid: ${recordId}\n---\n`);
-  await engine.adopt(root, "tasks/two.md");
-  if (state === "renamed") await rename(join(root, "tasks", "two.md"), join(root, "tasks", "moved.md"));
-  else await unlink(join(root, "tasks", "two.md"));
-  const other = `---\nid: ${derivedRecordId("other")}\n---\n`;
-  if (state === "replaced") await writeFile(join(root, "tasks", "two.md"), other);
+it.each(
+  ["deleted", "renamed", "replaced"].flatMap((state) => [
+    { state, fields: undefined },
+    { state, fields: { status: "done" } },
+  ]),
+)(
+  "skips an automation replay with a stale binding after the file was $state ($fields)",
+  async ({ state, fields }) => {
+    const root = await createTestScratch("dohc-stale-record-");
+    const { session, log } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const recordId = derivedRecordId("stale");
+    await mkdir(join(root, "tasks"));
+    await writeFile(join(root, "tasks", "two.md"), `---\nid: ${recordId}\n---\n`);
+    await engine.adopt(root, "tasks/two.md");
+    if (state === "renamed")
+      await rename(join(root, "tasks", "two.md"), join(root, "tasks", "moved.md"));
+    else await unlink(join(root, "tasks", "two.md"));
+    const other = `---\nid: ${derivedRecordId("other")}\n---\n`;
+    if (state === "replaced") await writeFile(join(root, "tasks", "two.md"), other);
 
-  // No reconciliation: the engine still answers the old path for this id.
-  await expect(createCollectionRecord(context, {
-    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION, fields,
-  })).rejects.toBeInstanceOf(AutomationCreationSkipped);
-  expect(context.openedPaths).toEqual([]);
-  expect(context.createdFiles).toEqual([]);
-  expect(log.updates).toEqual([]);
-  if (state === "replaced") expect(await readFile(join(root, "tasks", "two.md"), "utf8")).toBe(other);
-});
+    // No reconciliation: the engine still answers the old path for this id.
+    await expect(
+      createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "two",
+        recordId,
+        author: AUTOMATION,
+        fields,
+      }),
+    ).rejects.toBeInstanceOf(AutomationCreationSkipped);
+    expect(context.openedPaths).toEqual([]);
+    expect(context.createdFiles).toEqual([]);
+    expect(log.updates).toEqual([]);
+    if (state === "replaced")
+      expect(await readFile(join(root, "tasks", "two.md"), "utf8")).toBe(other);
+  },
+);
 
 it("skips an automation replay when the bound file read reports file-not-found", async () => {
   const root = await createTestScratch("dohc-stale-record-read-");
@@ -1791,10 +2245,17 @@ it("skips an automation replay when the bound file read reports file-not-found",
   const recordId = derivedRecordId("stale");
   engine.records.set(recordId, "tasks/two.md");
   const context = contextFor(root, session, engine.overrides);
-  const read = vi.spyOn(context, "readText").mockRejectedValueOnce(new VersionedTextStoreError("file-not-found", "missing"));
-  await expect(createCollectionRecord(context, {
-    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION,
-  })).rejects.toBeInstanceOf(AutomationCreationSkipped);
+  const read = vi
+    .spyOn(context, "readText")
+    .mockRejectedValueOnce(new VersionedTextStoreError("file-not-found", "missing"));
+  await expect(
+    createCollectionRecord(context, {
+      collectionPath: "tasks",
+      name: "two",
+      recordId,
+      author: AUTOMATION,
+    }),
+  ).rejects.toBeInstanceOf(AutomationCreationSkipped);
   expect(read).toHaveBeenCalledOnce();
   expect(context.openedPaths).toEqual([]);
 });
@@ -1810,31 +2271,44 @@ it("propagates a transient bound-file read failure without treating the record a
   const context = contextFor(root, session, engine.overrides);
   const error = Object.assign(new Error("read refused"), { code: "EACCES" });
   const read = vi.spyOn(context, "readText").mockRejectedValueOnce(error);
-  await expect(createCollectionRecord(context, {
-    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION,
-  })).rejects.toBe(error);
+  await expect(
+    createCollectionRecord(context, {
+      collectionPath: "tasks",
+      name: "two",
+      recordId,
+      author: AUTOMATION,
+    }),
+  ).rejects.toBe(error);
   expect(read).toHaveBeenCalledOnce();
   expect(context.openedPaths).toEqual([]);
 });
 
-it.each([undefined, derivedRecordId("first-create")])("does not add a file read to a first automation creation (%s)", async recordId => {
-  const root = await createTestScratch("dohc-first-record-read-");
-  const { session } = fakeSession();
-  const engine = fakeEngine();
-  const context = contextFor(root, session, engine.overrides);
-  const write = context.createFile;
-  vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
-    const path = await write(...args);
-    await engine.adopt(root, path);
-    return path;
-  });
-  const read = vi.spyOn(context, "readText");
-  await expect(createCollectionRecord(context, {
-    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION,
-  })).resolves.toMatchObject({ path: "tasks/two.md" });
-  // Only waitForRecord reads the new file to confirm adoption.
-  expect(read).toHaveBeenCalledExactlyOnceWith("tasks/two.md");
-});
+it.each([undefined, derivedRecordId("first-create")])(
+  "does not add a file read to a first automation creation (%s)",
+  async (recordId) => {
+    const root = await createTestScratch("dohc-first-record-read-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, engine.overrides);
+    const write = context.createFile;
+    vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
+      const path = await write(...args);
+      await engine.adopt(root, path);
+      return path;
+    });
+    const read = vi.spyOn(context, "readText");
+    await expect(
+      createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "two",
+        recordId,
+        author: AUTOMATION,
+      }),
+    ).resolves.toMatchObject({ path: "tasks/two.md" });
+    // Only waitForRecord reads the new file to confirm adoption.
+    expect(read).toHaveBeenCalledExactlyOnceWith("tasks/two.md");
+  },
+);
 
 it("continues an automation replay when the bound file still has the requested id", async () => {
   const root = await createTestScratch("dohc-live-record-replay-");
@@ -1846,9 +2320,15 @@ it("continues an automation replay when the bound file still has the requested i
   await engine.adopt(root, "tasks/two.md");
   const context = contextFor(root, session, engine.overrides);
   const read = vi.spyOn(context, "readText");
-  await expect(createCollectionRecord(context, {
-    collectionPath: "tasks", name: "two", recordId, author: AUTOMATION, fields: { status: "done" },
-  })).resolves.toEqual({ path: "tasks/two.md", recordId });
+  await expect(
+    createCollectionRecord(context, {
+      collectionPath: "tasks",
+      name: "two",
+      recordId,
+      author: AUTOMATION,
+      fields: { status: "done" },
+    }),
+  ).resolves.toEqual({ path: "tasks/two.md", recordId });
   // Once for its id, and once to check it is not a lossy note before its fields are set.
   expect(read.mock.calls).toEqual([["tasks/two.md"], ["tasks/two.md"]]);
   expect(context.createdFiles).toEqual([]);
@@ -1856,16 +2336,32 @@ it("continues an automation replay when the bound file still has the requested i
   expect(log.doc.getMap("frontmatter").get("status")).toBe("done");
 });
 
-it.each(["missing", "other", "unreadable"] as const)("checks a committed creation's %s file before skipping it", async state => {
-  const root = await createTestScratch("dohc-committed-record-");
-  const { session } = fakeSession();
-  const context = contextFor(root, session, fakeEngine().overrides);
-  const recordId = derivedRecordId("committed");
-  if (state === "other") { await mkdir(join(root, "tasks")); await writeFile(join(root, "tasks", "two.md"), `---\nid: ${derivedRecordId("other")}\n---\n`); }
-  context.createFile = async () => { throw new AutomationCreationCommitted(); };
-  if (state === "unreadable") context.readText = async () => { throw Error("read refused"); };
-  const result = createCollectionRecord(context, { collectionPath: "tasks", name: "two", recordId, author: AGENT });
-  if (state === "unreadable") await expect(result).rejects.toThrow("read refused");
-  else await expect(result).rejects.toBeInstanceOf(AutomationCreationSkipped);
-  expect(context.openedPaths).toEqual([]);
-});
+it.each(["missing", "other", "unreadable"] as const)(
+  "checks a committed creation's %s file before skipping it",
+  async (state) => {
+    const root = await createTestScratch("dohc-committed-record-");
+    const { session } = fakeSession();
+    const context = contextFor(root, session, fakeEngine().overrides);
+    const recordId = derivedRecordId("committed");
+    if (state === "other") {
+      await mkdir(join(root, "tasks"));
+      await writeFile(join(root, "tasks", "two.md"), `---\nid: ${derivedRecordId("other")}\n---\n`);
+    }
+    context.createFile = async () => {
+      throw new AutomationCreationCommitted();
+    };
+    if (state === "unreadable")
+      context.readText = async () => {
+        throw Error("read refused");
+      };
+    const result = createCollectionRecord(context, {
+      collectionPath: "tasks",
+      name: "two",
+      recordId,
+      author: AGENT,
+    });
+    if (state === "unreadable") await expect(result).rejects.toThrow("read refused");
+    else await expect(result).rejects.toBeInstanceOf(AutomationCreationSkipped);
+    expect(context.openedPaths).toEqual([]);
+  },
+);

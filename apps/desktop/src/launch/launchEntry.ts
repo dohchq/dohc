@@ -14,7 +14,11 @@ export function checkedPassFrom(argv: readonly string[]): string | null {
 /** The arguments for the relaunch: this launch's, with a fresh pass. */
 export function checkedRelaunchArguments(argv: readonly string[], pass: string): string[] {
   return [
-    ...argv.slice(1).filter((value) => value !== LAUNCH_CHECKED_FLAG && !value.startsWith(`${LAUNCH_CHECKED_FLAG}=`)),
+    ...argv
+      .slice(1)
+      .filter(
+        (value) => value !== LAUNCH_CHECKED_FLAG && !value.startsWith(`${LAUNCH_CHECKED_FLAG}=`),
+      ),
     `${LAUNCH_CHECKED_FLAG}=${pass}`,
   ];
 }

@@ -10,16 +10,24 @@ function stopRecordedChild(path) {
   const { pid } = JSON.parse(readFileSync(path, "utf8"));
   if (!Number.isInteger(pid) || pid <= 0) return;
   if (process.platform === "win32") {
-    const stopped = spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { timeout: 5000, windowsHide: true });
+    const stopped = spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+      timeout: 5000,
+      windowsHide: true,
+    });
     if (stopped.status === 0) return;
   }
-  try { process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL"); }
-  catch (error) { if (error.code !== "ESRCH") throw error; }
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL");
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+  }
 }
 
 async function runLauncher(source, args, env, outcome) {
   const launcher = spawn(process.execPath, ["--input-type=module", "-e", source, ...args], {
-    env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    env,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
   let stderr = "";
@@ -31,27 +39,45 @@ async function runLauncher(source, args, env, outcome) {
   }, 20_000);
   launcher.stdout.on("data", (chunk) => {
     stdout += String(chunk);
-    if (process.platform !== "win32" && outcome !== "success" && !signaled && /(?:^|\n)fixture-cargo-ready\r?\n/.test(stdout)) {
+    if (
+      process.platform !== "win32" &&
+      outcome !== "success" &&
+      !signaled &&
+      /(?:^|\n)fixture-cargo-ready\r?\n/.test(stdout)
+    ) {
       signaled = true;
       launcher.kill(outcome);
     }
   });
-  launcher.stderr.on("data", (chunk) => { stderr += String(chunk); });
+  launcher.stderr.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
   try {
     return await new Promise((resolve) => {
-      launcher.once("error", (failure) => { error = failure; });
-      launcher.once("close", (status, signal) => resolve({ status, signal, error, stdout, stderr }));
+      launcher.once("error", (failure) => {
+        error = failure;
+      });
+      launcher.once("close", (status, signal) =>
+        resolve({ status, signal, error, stdout, stderr }),
+      );
     });
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 for (const flow of ["dev", "release"]) {
-  for (const [outcome, expectedStatus] of [["success", 0], ["SIGINT", 130], ["SIGTERM", 143]]) {
+  for (const [outcome, expectedStatus] of [
+    ["success", 0],
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ]) {
     test(`desktop ${flow} Cargo ${outcome} completes cleanup before continuing`, async () => {
       const root = mkdtempSync(join(tmpdir(), "dohc-desktop-cargo-"));
       let childStopped = false;
       try {
-        const result = await runLauncher(`
+        const result = await runLauncher(
+          `
           import assert from "node:assert/strict";
           import { existsSync, mkdirSync, writeFileSync } from "node:fs";
           import { join } from "node:path";
@@ -126,22 +152,36 @@ for (const flow of ["dev", "release"]) {
               childStopped: Boolean(child && (child.exitCode !== null || child.signalCode !== null)),
             }));
           }
-        `, [root, flow, outcome], {
-          ...process.env, DOHC_BUILD_SLOT_ROOT: join(root, "slots"), DOHC_GATE_DISK_FLOOR_GB: "0",
-        }, outcome);
+        `,
+          [root, flow, outcome],
+          {
+            ...process.env,
+            DOHC_BUILD_SLOT_ROOT: join(root, "slots"),
+            DOHC_GATE_DISK_FLOOR_GB: "0",
+          },
+          outcome,
+        );
         const receiptPath = join(root, "result.json");
-        const receipt = existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, "utf8")) : null;
+        const receipt = existsSync(receiptPath)
+          ? JSON.parse(readFileSync(receiptPath, "utf8"))
+          : null;
         childStopped = receipt?.childStopped === true;
         assert.equal(result.error, undefined);
         assert.equal(result.status, expectedStatus, result.stderr);
         assert.deepEqual(receipt, {
-          interrupted: outcome !== "success", heldAfterSignal: outcome !== "success", slotExists: false,
-          devStarted: flow === "dev" && outcome === "success", staged: flow === "release" && outcome === "success",
+          interrupted: outcome !== "success",
+          heldAfterSignal: outcome !== "success",
+          slotExists: false,
+          devStarted: flow === "dev" && outcome === "success",
+          staged: flow === "release" && outcome === "success",
           childStopped: true,
         });
         if (receipt.staged) {
           const binaryName = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
-          assert.equal(readFileSync(join(root, "desktop/resources/workspace-engine", binaryName), "utf8"), "cached engine");
+          assert.equal(
+            readFileSync(join(root, "desktop/resources/workspace-engine", binaryName), "utf8"),
+            "cached engine",
+          );
         }
       } finally {
         if (!childStopped) stopRecordedChild(join(root, "child.json"));
@@ -155,7 +195,12 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   test(`desktop dev ${signal} after Cargo closes prevents server startup (${process.platform === "win32" ? "synthetic Windows event" : "real POSIX signal"})`, () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-desktop-handoff-"));
     try {
-      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
         import assert from 'node:assert/strict';
         import {execFileSync} from 'node:child_process';
         import {existsSync,writeFileSync} from 'node:fs';
@@ -191,13 +236,37 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
         }catch(error){assert.match(error.message,/interrupted/);interrupted=true;}
         writeFileSync(join(root,'result.json'),JSON.stringify({interrupted,devStarted,childClosedAtSignal,slotHeldAtSignal,
           slotExists:existsSync(slot),listeners:[process.listenerCount('SIGINT'),process.listenerCount('SIGTERM')]}));
-      `, root], { encoding: "utf8", timeout: 10_000, windowsHide: true,
-        env: { ...process.env, DOHC_BUILD_SLOT_ROOT: join(root, "slots"), DOHC_GATE_DISK_FLOOR_GB: "0" } });
+      `,
+          root,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 10_000,
+          windowsHide: true,
+          env: {
+            ...process.env,
+            DOHC_BUILD_SLOT_ROOT: join(root, "slots"),
+            DOHC_GATE_DISK_FLOOR_GB: "0",
+          },
+        },
+      );
       assert.equal(result.error, undefined, result.stderr);
       const outcome = JSON.parse(readFileSync(join(root, "result.json"), "utf8"));
-      assert.deepEqual(outcome, { interrupted: true, devStarted: false, childClosedAtSignal: true, slotHeldAtSignal: true,
-        slotExists: false, listeners: [0, 0] }, JSON.stringify({ status: result.status, signal: result.signal, outcome }));
+      assert.deepEqual(
+        outcome,
+        {
+          interrupted: true,
+          devStarted: false,
+          childClosedAtSignal: true,
+          slotHeldAtSignal: true,
+          slotExists: false,
+          listeners: [0, 0],
+        },
+        JSON.stringify({ status: result.status, signal: result.signal, outcome }),
+      );
       assert.equal(result.status, signal === "SIGINT" ? 130 : 143, result.stderr);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 }

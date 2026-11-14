@@ -15,7 +15,6 @@ export interface OwnerCollectionWriteFile {
   path: string;
   objectId: string;
   momentId: string;
-  /** The write created the file. */
   created: boolean;
   publicPrincipalId?: string;
 }
@@ -55,9 +54,14 @@ export function readOwnerCollectionWrites(
   input: OwnerCollectionWritesInput,
 ): OwnerCollectionWritesPage {
   if (
-    !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100 ||
-    !identifier(input.workspaceId) || !identifier(input.ownerUserId) || !identifier(input.grantId) ||
-    (input.afterOriginSeq !== undefined && (!Number.isSafeInteger(input.afterOriginSeq) || input.afterOriginSeq < -1))
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 100 ||
+    !identifier(input.workspaceId) ||
+    !identifier(input.ownerUserId) ||
+    !identifier(input.grantId) ||
+    (input.afterOriginSeq !== undefined &&
+      (!Number.isSafeInteger(input.afterOriginSeq) || input.afterOriginSeq < -1))
   ) {
     throw badRequest("Invalid collection write page.");
   }
@@ -65,16 +69,23 @@ export function readOwnerCollectionWrites(
     if (!storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId)) throw notFound();
     const grant = storage.getShareGrant(input.grantId);
     const share = grant && storage.getShare(grant.shareId);
-    if (!share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId) throw notFound();
-    const rows = storage.db.prepare(
-      `SELECT w.submit_id, w.grant_generation, w.author_kind, w.created_at_ms, w.origin_id, w.first_origin_seq, w.last_origin_seq,
+    if (
+      !share ||
+      share.workspaceId !== input.workspaceId ||
+      share.granterUserId !== input.ownerUserId
+    )
+      throw notFound();
+    const rows = storage.db
+      .prepare(
+        `SELECT w.submit_id, w.grant_generation, w.author_kind, w.created_at_ms, w.origin_id, w.first_origin_seq, w.last_origin_seq,
          w.paths_json, p.public_principal_id
        FROM sync_relay_collection_writes w
        LEFT JOIN sync_relay_app_public_principals p ON w.author_kind = 'link'
          AND p.workspace_id = w.workspace_id AND p.grant_id = w.grant_id AND p.principal_id = w.principal_id
        WHERE w.grant_id = ? AND w.workspace_id = ? AND w.first_origin_seq > ?
        ORDER BY w.first_origin_seq LIMIT ?`,
-    ).all(input.grantId, input.workspaceId, input.afterOriginSeq ?? -1, input.limit + 1);
+      )
+      .all(input.grantId, input.workspaceId, input.afterOriginSeq ?? -1, input.limit + 1);
     const moments = storage.db.prepare(
       `SELECT origin_seq, op_kind,
          json_extract(payload_json, '$.momentId') AS moment_id,
@@ -97,15 +108,24 @@ export function readOwnerCollectionWrites(
       if (row.origin_id !== origin || !identifier(row.submit_id)) damaged();
       if (row.public_principal_id !== null && !identifier(row.public_principal_id)) damaged();
       let paths: unknown;
-      try { paths = JSON.parse(String(row.paths_json)); } catch { damaged(); }
+      try {
+        paths = JSON.parse(String(row.paths_json));
+      } catch {
+        damaged();
+      }
       if (!Array.isArray(paths) || paths.length !== last - first + 1) damaged();
       const logged = moments.all(input.workspaceId, origin, first, last);
       if (logged.length !== paths.length) damaged();
       const files = logged.map((moment, index): OwnerCollectionWriteFile => {
         if (
-          Number(moment.origin_seq) !== first + index || moment.op_kind !== "moment.append" ||
-          moment.operation !== "write" || moment.author_kind !== row.author_kind || moment.author_grant_id !== input.grantId ||
-          !identifier(moment.moment_id) || !identifier(moment.object_id) || moment.path !== paths[index] ||
+          Number(moment.origin_seq) !== first + index ||
+          moment.op_kind !== "moment.append" ||
+          moment.operation !== "write" ||
+          moment.author_kind !== row.author_kind ||
+          moment.author_grant_id !== input.grantId ||
+          !identifier(moment.moment_id) ||
+          !identifier(moment.object_id) ||
+          moment.path !== paths[index] ||
           (moment.before_present !== "present" && moment.before_present !== "null")
         ) {
           damaged();
@@ -115,7 +135,9 @@ export function readOwnerCollectionWrites(
           objectId: moment.object_id,
           momentId: moment.moment_id,
           created: moment.before_present === "null",
-          ...(row.public_principal_id === null ? {} : { publicPrincipalId: String(row.public_principal_id) }),
+          ...(row.public_principal_id === null
+            ? {}
+            : { publicPrincipalId: String(row.public_principal_id) }),
         };
       });
       const write: OwnerCollectionWrite = {
@@ -132,6 +154,9 @@ export function readOwnerCollectionWrites(
       pageBytes += size;
       writes.push(write);
     }
-    return { writes, nextAfterOriginSeq: rows.length > input.limit ? writes.at(-1)!.firstOriginSeq : null };
+    return {
+      writes,
+      nextAfterOriginSeq: rows.length > input.limit ? writes.at(-1)!.firstOriginSeq : null,
+    };
   });
 }

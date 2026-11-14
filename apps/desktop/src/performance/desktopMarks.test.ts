@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  SWITCH_TIMELINE_LIMIT,
-  createMarkRecorder,
-} from "./desktopMarks";
+import { SWITCH_TIMELINE_LIMIT, createMarkRecorder } from "./desktopMarks";
 
 function fakeClock(start = 1000) {
   let t = start;

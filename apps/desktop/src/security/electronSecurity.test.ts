@@ -15,14 +15,13 @@ describe("main window web preferences", () => {
     expect(prefs.sandbox).toBe(true);
     expect(prefs.additionalArguments).toEqual([]);
     expect(
-      createMainWindowWebPreferences("/abs/path/preload.js", ["--dohc-dev-tools"]).additionalArguments,
+      createMainWindowWebPreferences("/abs/path/preload.js", ["--dohc-dev-tools"])
+        .additionalArguments,
     ).toEqual(["--dohc-dev-tools"]);
   });
 
   it("requires an absolute preload path", () => {
-    expect(() => createMainWindowWebPreferences("relative/preload.js")).toThrow(
-      /absolute/i,
-    );
+    expect(() => createMainWindowWebPreferences("relative/preload.js")).toThrow(/absolute/i);
   });
 });
 
@@ -33,24 +32,18 @@ describe("navigation policy", () => {
   };
 
   it("allows in-app navigation", () => {
-    expect(
-      decideNavigation("file:///app/dist/renderer/index.html", policy),
-    ).toEqual({ action: "allow" });
-    expect(
-      decideNavigation("http://localhost:5173/route", policy),
-    ).toEqual({ action: "allow" });
+    expect(decideNavigation("file:///app/dist/renderer/index.html", policy)).toEqual({
+      action: "allow",
+    });
+    expect(decideNavigation("http://localhost:5173/route", policy)).toEqual({ action: "allow" });
   });
 
   it("denies navigation to arbitrary external URLs", () => {
-    expect(decideNavigation("https://evil.example.com", policy).action).toBe(
-      "deny",
-    );
+    expect(decideNavigation("https://evil.example.com", policy).action).toBe("deny");
   });
 
   it("denies origin prefix-spoofing (localhost:5173.evil.com)", () => {
-    expect(
-      decideNavigation("http://localhost:5173.evil.com/x", policy).action,
-    ).toBe("deny");
+    expect(decideNavigation("http://localhost:5173.evil.com/x", policy).action).toBe("deny");
   });
 
   it("denies local files outside the renderer bundle", () => {
@@ -72,20 +65,14 @@ describe("navigation policy", () => {
 
   it("denies about:blank and javascript: URLs", () => {
     expect(decideNavigation("about:blank", policy).action).toBe("deny");
-    expect(decideNavigation("javascript:alert(1)", policy).action).toBe(
-      "deny",
-    );
+    expect(decideNavigation("javascript:alert(1)", policy).action).toBe("deny");
   });
 });
 
 describe("dev server URL validation", () => {
   it("accepts loopback dev servers in unpackaged builds", () => {
-    expect(validateDevServerUrl("http://localhost:5173", false)).toBe(
-      "http://localhost:5173",
-    );
-    expect(validateDevServerUrl("http://127.0.0.1:5173", false)).toBe(
-      "http://127.0.0.1:5173",
-    );
+    expect(validateDevServerUrl("http://localhost:5173", false)).toBe("http://localhost:5173");
+    expect(validateDevServerUrl("http://127.0.0.1:5173", false)).toBe("http://127.0.0.1:5173");
   });
 
   it("rejects everything in packaged builds", () => {

@@ -26,7 +26,8 @@ describe("workspace engine effective policy parsing", () => {
     expect(parseFilesPolicy(text)).toEqual({ ok: true, rules });
     expect(parseFilesPolicy(text.replace(/^version = 1\r?\n/, ""))).toEqual({ ok: true, rules });
     expect(parseFilesPolicy(text.replace("version = 1", "version = 2"))).toEqual({
-      ok: false, errors: ["files.toml uses a newer version. Update dohc to read this file."],
+      ok: false,
+      errors: ["files.toml uses a newer version. Update dohc to read this file."],
     });
   });
   it("accepts well-formed files and visibility policy files", () => {
@@ -64,17 +65,14 @@ describe("workspace engine effective policy parsing", () => {
 
   it("rejects malformed files policy shapes without partial application", () => {
     const cases: Array<[string, RegExp]> = [
-      ["[[rule]\npath = \"x.md\"\n", /invalid TOML/],
-      ["version = true\n[[rule]]\npath = \"x.md\"\n", /files.toml has an invalid version/],
-      ["rule = \"not-array\"\n", /array/],
+      ['[[rule]\npath = "x.md"\n', /invalid TOML/],
+      ['version = true\n[[rule]]\npath = "x.md"\n', /files.toml has an invalid version/],
+      ['rule = "not-array"\n', /array/],
       ["[[rule]]\ntracked = false\n", /path is required/],
-      ["[[rule]]\npath = \"x.md\"\nmode = true\n", /unknown key/],
-      ["[[rule]]\npath = \"x.md\"\ntracked = \"false\"\n", /tracked must be a boolean/],
-      ["[[rule]]\npath = \"bad/**/x.md\"\ntracked = false\n", /invalid path glob/],
-      [
-        "[[rule]]\npath = \"ok.md\"\ntracked = false\n[[rule]]\npath = \"bad[\"\n",
-        /invalid path glob/,
-      ],
+      ['[[rule]]\npath = "x.md"\nmode = true\n', /unknown key/],
+      ['[[rule]]\npath = "x.md"\ntracked = "false"\n', /tracked must be a boolean/],
+      ['[[rule]]\npath = "bad/**/x.md"\ntracked = false\n', /invalid path glob/],
+      ['[[rule]]\npath = "ok.md"\ntracked = false\n[[rule]]\npath = "bad["\n', /invalid path glob/],
     ];
     for (const [text, pattern] of cases) {
       expectReject(parseFilesPolicy(text), pattern);
@@ -83,15 +81,15 @@ describe("workspace engine effective policy parsing", () => {
 
   it("rejects malformed visibility policy shapes without partial application", () => {
     const cases: Array<[string, RegExp]> = [
-      ["other = true\n[[rule]]\npath = \"x.md\"\n", /unknown top-level key/],
-      ["rule = \"not-array\"\n", /array/],
-      ["[[rule]]\nexport = \"included\"\n", /path is required/],
-      ["[[rule]]\npath = \"x.md\"\ntracked = true\n", /unknown key/],
-      ["[[rule]]\npath = \"x.md\"\nvisibility = true\n", /visibility/],
-      ["[[rule]]\npath = \"x.md\"\nexport = \"public\"\n", /export/],
-      ["[[rule]]\npath = \"../x.md\"\nvisibility = \"hidden\"\n", /invalid path glob/],
+      ['other = true\n[[rule]]\npath = "x.md"\n', /unknown top-level key/],
+      ['rule = "not-array"\n', /array/],
+      ['[[rule]]\nexport = "included"\n', /path is required/],
+      ['[[rule]]\npath = "x.md"\ntracked = true\n', /unknown key/],
+      ['[[rule]]\npath = "x.md"\nvisibility = true\n', /visibility/],
+      ['[[rule]]\npath = "x.md"\nexport = "public"\n', /export/],
+      ['[[rule]]\npath = "../x.md"\nvisibility = "hidden"\n', /invalid path glob/],
       [
-        "[[rule]]\npath = \"ok.md\"\nvisibility = \"hidden\"\n[[rule]]\npath = \"bad?\"\n",
+        '[[rule]]\npath = "ok.md"\nvisibility = "hidden"\n[[rule]]\npath = "bad?"\n',
         /invalid path glob/,
       ],
     ];
@@ -113,8 +111,6 @@ describe("workspace engine policy globs", () => {
     ["secrets/**", "secrets", false],
     ["**", "anything/deep.md", true],
     ["**", ".dohc/files.toml", true],
-    // `*` matches zero or more characters, never fewer than zero: a pattern
-    // whose prefix and suffix overlap in the candidate must not match.
     ["draft*draft.md", "draftdraft.md", true],
     ["draft*draft.md", "draft-1-draft.md", true],
     ["draft*draft.md", "draft.md", false],

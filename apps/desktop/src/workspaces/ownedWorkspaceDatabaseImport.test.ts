@@ -77,8 +77,7 @@ function ownerFiles(input: {
   };
   return createShareViewFiles({
     ...unused,
-    resolveTarget: (target) =>
-      resolveRegisteredShareViewFilesTarget(input.workspace, target),
+    resolveTarget: (target) => resolveRegisteredShareViewFilesTarget(input.workspace, target),
     openStore: () => store,
   });
 }
@@ -136,10 +135,7 @@ describe("owned database import", () => {
     await mkdir(join(rootPath, "shared-with-me", record.label), {
       recursive: true,
     });
-    await writeFile(
-      join(rootPath, SOURCE_PATH),
-      "id,value\n1,edited projection\n",
-    );
+    await writeFile(join(rootPath, SOURCE_PATH), "id,value\n1,edited projection\n");
     const files = ownerFiles({
       workspace,
       sourceText: "id,value\n1,canonical owner\n",
@@ -162,14 +158,8 @@ describe("owned database import", () => {
     const rootPath = await createTestScratch("dohc-owned-db-local-alias-");
     const sourceDir = join(rootPath, "imports");
     await mkdir(sourceDir, { recursive: true });
-    await writeFile(
-      join(sourceDir, "data.csv"),
-      "id,value\n1,canonical local\n",
-    );
-    await symlink(
-      join(sourceDir, "data.csv"),
-      join(sourceDir, "notes.json"),
-    );
+    await writeFile(join(sourceDir, "data.csv"), "id,value\n1,canonical local\n");
+    await symlink(join(sourceDir, "data.csv"), join(sourceDir, "notes.json"));
     const unexpectedRead = vi.fn(async () => {
       throw new Error("A local source must not read a share owner.");
     });
@@ -190,10 +180,7 @@ describe("owned database import", () => {
       mediaType: "text/csv",
       body: "id,value\n1,canonical local\n",
     });
-    const snapshot = await readDatabaseSnapshot(
-      rootPath,
-      "local-alias.sqlite",
-    );
+    const snapshot = await readDatabaseSnapshot(rootPath, "local-alias.sqlite");
     expect(snapshot.tables[0]?.rows).toEqual([
       expect.objectContaining({ value: "canonical local" }),
     ]);
@@ -211,10 +198,7 @@ describe("owned database import", () => {
     const mountRoot = join(rootPath, "shared-with-me", record.label);
     await mkdir(mountRoot, { recursive: true });
     await writeFile(join(mountRoot, "data.csv"), "stale projection");
-    await symlink(
-      join(mountRoot, "data.csv"),
-      join(mountRoot, "notes.json"),
-    );
+    await symlink(join(mountRoot, "data.csv"), join(mountRoot, "notes.json"));
     const files = ownerFiles({
       workspace,
       sourceText: "id,value\n1,canonical owner alias\n",
@@ -236,10 +220,7 @@ describe("owned database import", () => {
       mediaType: "text/csv",
       body: "id,value\n1,canonical owner alias\n",
     });
-    const snapshot = await readDatabaseSnapshot(
-      rootPath,
-      "mount-alias.sqlite",
-    );
+    const snapshot = await readDatabaseSnapshot(rootPath, "mount-alias.sqlite");
     expect(snapshot.tables[0]?.rows).toEqual([
       expect.objectContaining({ value: "canonical owner alias" }),
     ]);

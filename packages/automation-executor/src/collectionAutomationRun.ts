@@ -3,7 +3,11 @@ import { AutomationCreationSkipped } from "./collectionRecordEdits";
 import { coordinateSourceRun } from "./automationStepRun";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type { AutomationTimeSpent, JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
+import type {
+  AutomationTimeSpent,
+  JsonObject,
+  JsonValue,
+} from "@dohc/app-backend-runtime/automation";
 import type { Automation } from "@dohc/workspace-contracts/automations";
 import type {
   CollectionGetRecordParams,
@@ -30,7 +34,13 @@ import {
   type RunContext,
   type RunRecord,
 } from "./automationPlan";
-import { checkAutomationReach, type ReachCollection, type ReachRoster, type ReachStep, type StepReach } from "./automationReach";
+import {
+  checkAutomationReach,
+  type ReachCollection,
+  type ReachRoster,
+  type ReachStep,
+  type StepReach,
+} from "./automationReach";
 import {
   AutomationWakeSent,
   NoticeNotSentError,
@@ -40,11 +50,7 @@ import {
   type ChatNeeds,
 } from "./automationChat";
 import type { AutomationRunStore, RunWrite, StoredRun, StoredStep } from "./automationRunStore";
-import {
-  KEPT_CHANGING_ERROR,
-  type EffectMode,
-  type StepBackend,
-} from "./automationStepRun";
+import { KEPT_CHANGING_ERROR, type EffectMode, type StepBackend } from "./automationStepRun";
 
 // One run of one claim: check reach, check the trigger and its conditions,
 // then run the steps in order (automationStepRun.ts). The executor settles
@@ -72,7 +78,8 @@ export function groupChangedOutcome(
   if (claim.change.kind !== "message") return null;
   const trigger = automation.when;
   const group = trigger.kind === "group-message" ? chat?.group(trigger.group) : undefined;
-  if (group && !("problem" in group) && group.channelId === claim.change.message.groupId) return null;
+  if (group && !("problem" in group) && group.channelId === claim.change.message.groupId)
+    return null;
   return planned ? failed(GROUP_CHANGED_ERROR) : { kind: "skipped" };
 }
 
@@ -88,16 +95,15 @@ export const UNREADABLE_RUN_ERROR =
   "dohc could not read this run's saved progress in .dohc/local/automations, so it did not run again. Move that folder aside, then try again.";
 export const UNDONE_RUN_ERROR = "You undid this run, so dohc does not run it again.";
 export const UNFINISHED_UNDO_ERROR = "dohc has not finished undoing this run.";
-export const LOST_COLLECTION_ERROR = "A Collection this run changes is no longer in this workspace, so the run stopped.";
+export const LOST_COLLECTION_ERROR =
+  "A Collection this run changes is no longer in this workspace, so the run stopped.";
 export const RULES_CHANGED_ERROR = "Collection rules changed after this run started.";
 
-/** The engine reads a run makes. VersionedLiveAdapter satisfies it. */
 export interface CollectionAutomationReads {
   getCollectionRecord(input: CollectionGetRecordParams): Promise<CollectionGetRecordResult>;
   queryCollectionRecords(input: CollectionQueryParams): Promise<CollectionQueryResult>;
 }
 
-/** What a field write did. */
 interface RecordFieldsWritten {
   sharedFileUpdates?: Record<string, import("@dohc/workspace-engine-client").SharedFileUpdate>;
   /**
@@ -134,8 +140,13 @@ export interface CollectionRecordWrites {
    * Collection already has with it. The answer names the id the engine gave
    * the file.
    */
-  create(input: { collectionPath: string; name: string; author: ChangeAuthor; recordId: string;
-    onPartial?(record: { path: string; recordId: string }): Promise<void> }): Promise<{ path: string; recordId: string }>;
+  create(input: {
+    collectionPath: string;
+    name: string;
+    author: ChangeAuthor;
+    recordId: string;
+    onPartial?(record: { path: string; recordId: string }): Promise<void>;
+  }): Promise<{ path: string; recordId: string }>;
 }
 
 export interface CollectionAutomationRunDependencies {
@@ -150,22 +161,30 @@ export interface CollectionAutomationRunDependencies {
   checkPresser?(): Promise<void>;
   /** Whether the document Collection still has this Button field. */
   isButtonField(path: string, field: string): Promise<boolean>;
-  authorizeDataset?(datasetId: string, operationId: string): Promise<import("./buttonPresser").DatasetOperationCeiling>;
+  authorizeDataset?(
+    datasetId: string,
+    operationId: string,
+  ): Promise<import("./buttonPresser").DatasetOperationCeiling>;
   withHost?: import("./datasetAutomationRun").DatasetAutomationRunDependencies["withHost"];
   cachedRoster?(): Promise<ReachRoster>;
-  checkReach?(steps: readonly ReachStep[], roster: Exclude<ReachRoster, { kind: "unknown" }>): Promise<boolean>;
+  checkReach?(
+    steps: readonly ReachStep[],
+    roster: Exclude<ReachRoster, { kind: "unknown" }>,
+  ): Promise<boolean>;
   targets: AutomationTargets;
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
   /** Record writes with the workspace's write authority, ending at `signal`. */
-  withRecordWrites<T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>): Promise<T>;
+  withRecordWrites<T>(
+    signal: AbortSignal,
+    work: (writes: CollectionRecordWrites) => Promise<T>,
+  ): Promise<T>;
   /** A document Collection's id, the object id of its collection.yaml, or null when the folder is not one. */
   collectionIdOf(path: string): string | null;
   /** Where the document Collection with this id is now, or null when this workspace has none. */
   collectionPathOf(collectionId: string): string | null;
   /** Whether the Collection index is still being read, so missing paths can be temporary. */
   isIndexReading?(): boolean;
-  /** A code file a step runs, as text; null when it does not exist. */
   readCode(path: string): Promise<{ text: string; truncated: boolean } | null>;
   /** The name a formula's `person` shows for the person who pressed a button. */
   personName(userId: string): string;
@@ -213,19 +232,32 @@ export interface AutomationChatDependencies {
   /** Whether this effect's message already exists. Only called while resuming. */
   hasMessage(messageId: string): Promise<boolean>;
   /** What `needs` names under this roster; null when the engine is unavailable. */
-  directory(roster: Exclude<ReachRoster, { kind: "unknown" }>, needs: ChatNeeds): Promise<ChatDirectory | null>;
+  directory(
+    roster: Exclude<ReachRoster, { kind: "unknown" }>,
+    needs: ChatNeeds,
+  ): Promise<ChatDirectory | null>;
   /**
    * Writes one message as the automation, ending at `signal`. Throws
    * AutomationChatSessionWait when a synced workspace has no session.
    */
-  write(signal: AbortSignal, message: AutomationChatMessage, run: Pick<StoredRun, "claimId" | "keySeed" | "startedAtMs">): Promise<unknown>;
+  write(
+    signal: AbortSignal,
+    message: AutomationChatMessage,
+    run: Pick<StoredRun, "claimId" | "keySeed" | "startedAtMs">,
+  ): Promise<unknown>;
 }
 
 /** Whether any step posts, sends a direct message, or notifies someone. */
 export function sendsMessages(automation: Automation): boolean {
-  const walk = (steps: Automation["do"]): boolean => steps.some((step) =>
-    step.kind === "post" || step.kind === "direct-message" || step.kind === "notify" || step.kind === "wake-agent" ||
-    (step.kind === "if" && (walk(step.do) || walk(step.otherwise))));
+  const walk = (steps: Automation["do"]): boolean =>
+    steps.some(
+      (step) =>
+        step.kind === "post" ||
+        step.kind === "direct-message" ||
+        step.kind === "notify" ||
+        step.kind === "wake-agent" ||
+        (step.kind === "if" && (walk(step.do) || walk(step.otherwise))),
+    );
   return walk(automation.do);
 }
 
@@ -244,12 +276,14 @@ export type CollectionAutomationRunOutcome =
   // Or who can edit the Collection could not be read just before a record effect.
   // Or the automation's Collection moved while the run wrote: the next drain
   // checks the run again where the Collection is now.
-  | { kind: "wait"; reason: "busy" | "engine" | "stopped" | "session" | "held" | "roster" | "moved" };
+  | {
+      kind: "wait";
+      reason: "busy" | "engine" | "stopped" | "session" | "held" | "roster" | "moved";
+    };
 
 export interface CollectionAutomationRunInput {
   claim: AutomationClaim;
   automation: Automation;
-  /** The automation's Collection, where it is now. */
   collection: ReachCollection;
   /** Who can edit what now; the executor waits while it is unknown. */
   roster: Exclude<ReachRoster, { kind: "unknown" }>;
@@ -259,11 +293,11 @@ export interface CollectionAutomationRunInput {
   stopped: AbortSignal;
 }
 
-const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
-const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped" };
-
-/** A Collection as reach and messages name it, from its workspace path. */
-const collectionNamed = (path: string): ReachCollection => ({ path, name: path.split("/").at(-1) ?? path });
+const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({
+  kind: "failed",
+  error,
+  timedOut,
+});
 
 export type ClaimRuns =
   | { unreadable: true }
@@ -298,7 +332,7 @@ export async function runsForClaim(
   return {
     unreadable: false,
     undo: runs.some((run) => run.undo !== null),
-    undoUnfinished: runs.some(run => run.undo === "started"),
+    undoUnfinished: runs.some((run) => run.undo === "started"),
     done: live.find((run) => run.outcome?.state === "done") ?? null,
     current: live.find((run) => run.definitionHash === hash) ?? null,
     // A run is saved only once its plan is ready to write, so any saved run
@@ -323,10 +357,12 @@ export async function savedRunOf(
   // It finished before this computer could settle the claim, whatever the
   // automation says now.
   if (done !== null) return { outcome: { kind: "done" } };
-  if (runs.undo) return { outcome: failed(runs.undoUnfinished ? UNFINISHED_UNDO_ERROR : UNDONE_RUN_ERROR) };
+  if (runs.undo)
+    return { outcome: failed(runs.undoUnfinished ? UNFINISHED_UNDO_ERROR : UNDONE_RUN_ERROR) };
   // Running another definition from the start could repeat the changes the
   // earlier one made. A person has to choose that with Try again.
-  if (current === null && changedSince !== null) return { outcome: failed(DEFINITION_CHANGED_ERROR) };
+  if (current === null && changedSince !== null)
+    return { outcome: failed(DEFINITION_CHANGED_ERROR) };
   // The ledger handed the claim out again without a Try again, as after a
   // crash before the failure reached it: the run stays failed.
   if (current?.outcome?.state === "failed" && current.outcome.run === claim.run) {
@@ -336,7 +372,12 @@ export async function savedRunOf(
 }
 
 /** A new run's record, before anything of it is saved. */
-export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, nowMs: number): StoredRun {
+export function newRun(
+  claim: Pick<AutomationClaim, "automationId" | "claimId">,
+  automation: Automation,
+  keySeed: string,
+  nowMs: number,
+): StoredRun {
   return {
     version: 13,
     durableEffects: 0,
@@ -387,8 +428,8 @@ export async function startRun(
   if (read === null) return { kind: "wait", reason: "engine" };
   if (read === "changed") return failed(KEPT_CHANGING_ERROR);
   const { record } = read;
-  // The record was removed before its automation ran.
-  if (record === null && claim.change.kind !== "removed" && hasTriggerRecord(claim)) return { kind: "skipped" };
+  if (record === null && claim.change.kind !== "removed" && hasTriggerRecord(claim))
+    return { kind: "skipped" };
   if (!triggerMatches(automation, claim, record)) return { kind: "skipped" };
   const request = conditionsRequest(ctx, record);
   if (request.items.length === 0) return null;
@@ -414,51 +455,110 @@ function hasTriggerRecord(claim: RunClaim): boolean {
  */
 export async function checkPlannedMessages(
   dependencies: Pick<CollectionAutomationRunDependencies, "chat" | "recipientVerdicts">,
-  input: { automationId: string; automation: Automation; collection: ReachCollection; roster: Exclude<ReachRoster, { kind: "unknown" }> },
+  input: {
+    automationId: string;
+    automation: Automation;
+    collection: ReachCollection;
+    roster: Exclude<ReachRoster, { kind: "unknown" }>;
+  },
   planned: readonly StoredStep[],
   chat: ChatDirectory | null,
 ): Promise<{ chat: ChatDirectory | null } | { outcome: CollectionAutomationRunOutcome }> {
   const { automation, collection, roster } = input;
-  const effects = planned.flatMap((step) => step.effects.map((effect) => ({ ordinal: step.ordinal, effect })));
-  const messages = effects.flatMap(({ ordinal, effect }): Array<{ ordinal: number; effect: PlannedEffect; step: ReachStep }> => {
-    if (effect.kind === "message") {
-      return [{ ordinal, effect, step: { kind: "post", group: { channelWireId: effect.channelWireId, name: effect.name } } }];
-    }
-    if (effect.kind === "notice") {
-      return [{ ordinal, effect, step: { kind: "notify", person: { userId: effect.notice.recipientUserId, name: effect.name } } }];
-    }
-    return [];
-  });
+  const effects = planned.flatMap((step) =>
+    step.effects.map((effect) => ({ ordinal: step.ordinal, effect })),
+  );
+  const messages = effects.flatMap(
+    ({ ordinal, effect }): Array<{ ordinal: number; effect: PlannedEffect; step: ReachStep }> => {
+      if (effect.kind === "message") {
+        return [
+          {
+            ordinal,
+            effect,
+            step: {
+              kind: "post",
+              group: { channelWireId: effect.channelWireId, name: effect.name },
+            },
+          },
+        ];
+      }
+      if (effect.kind === "notice") {
+        return [
+          {
+            ordinal,
+            effect,
+            step: {
+              kind: "notify",
+              person: { userId: effect.notice.recipientUserId, name: effect.name },
+            },
+          },
+        ];
+      }
+      return [];
+    },
+  );
   if (messages.length === 0) return { chat };
   const verdicts = checkAutomationReach(roster, {
-    id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: messages.map(({ step }) => step),
+    id: automation.id,
+    collection,
+    codeFiles: codeFilesOf(automation, collection.path),
+    steps: messages.map(({ step }) => step),
   });
   const recipients: RecipientReach[] = [];
   for (const [index, { ordinal, effect }] of messages.entries()) {
     if (effect.kind === "message" && effect.byFormula && effect.to.kind === "direct-message") {
-      recipients.push({ step: ordinal, id: effect.to.userId, name: effect.name, action: "post", reach: verdicts[index]! });
+      recipients.push({
+        step: ordinal,
+        id: effect.to.userId,
+        name: effect.name,
+        action: "post",
+        reach: verdicts[index]!,
+      });
     } else if (effect.kind === "notice" && effect.byFormula) {
-      recipients.push({ step: ordinal, id: effect.notice.recipientUserId, name: effect.name, action: "notify", reach: verdicts[index]! });
+      recipients.push({
+        step: ordinal,
+        id: effect.notice.recipientUserId,
+        name: effect.name,
+        action: "notify",
+        reach: verdicts[index]!,
+      });
     }
   }
   // Kept before anything fails, so a stop is remembered for the next run.
-  const kept = recipients.length === 0 ? [] : await dependencies.recipientVerdicts({
-    automationId: input.automationId, definitionHash: definitionHash(automation), recipients,
-  });
+  const kept =
+    recipients.length === 0
+      ? []
+      : await dependencies.recipientVerdicts({
+          automationId: input.automationId,
+          definitionHash: definitionHash(automation),
+          recipients,
+        });
   const stoppedReach = verdicts.find((reach) => !reach.allowed);
   if (stoppedReach && !stoppedReach.allowed) return { outcome: failed(stoppedReach.reason) };
   if (kept.includes("held")) return { outcome: { kind: "wait", reason: "held" } };
-  const planPeople = new Set(effects.flatMap(({ effect }) =>
-    effect.kind === "message" && effect.to.kind === "direct-message" ? [effect.to.userId] : []));
+  const planPeople = new Set(
+    effects.flatMap(({ effect }) =>
+      effect.kind === "message" && effect.to.kind === "direct-message" ? [effect.to.userId] : [],
+    ),
+  );
   if (planPeople.size === 0) return { chat };
-  const sendChat = await dependencies.chat.directory(roster, { groups: new Set(), people: planPeople });
+  const sendChat = await dependencies.chat.directory(roster, {
+    groups: new Set(),
+    people: planPeople,
+  });
   return sendChat === null ? { outcome: { kind: "wait", reason: "engine" } } : { chat: sendChat };
 }
 
 /** A document record by its id, or null when it left the Collection. */
-export async function readDocumentRecord(reads: CollectionAutomationReads, collectionPath: string, recordId: string): Promise<RunRecord | null> {
+export async function readDocumentRecord(
+  reads: CollectionAutomationReads,
+  collectionPath: string,
+  recordId: string,
+): Promise<RunRecord | null> {
   try {
-    return runRecordOf((await reads.getCollectionRecord({ collectionPath, recordId, historyLimit: 1 })).record);
+    return runRecordOf(
+      (await reads.getCollectionRecord({ collectionPath, recordId, historyLimit: 1 })).record,
+    );
   } catch (error) {
     if (error instanceof Error && error.message === RECORD_NOT_FOUND) return null;
     throw error;
@@ -501,7 +601,8 @@ export async function groupMessage(
     body = whole;
   }
   const startsWith = trigger.startsWith;
-  if (startsWith !== null && !body.replace(/^[\s\uFEFF]+/u, "").startsWith(startsWith)) return { outcome: { kind: "skipped" } };
+  if (startsWith !== null && !body.replace(/^[\s\uFEFF]+/u, "").startsWith(startsWith))
+    return { outcome: { kind: "skipped" } };
   return { message: { ...claimed, body } };
 }
 
@@ -513,7 +614,10 @@ async function locate(
 ): Promise<string | null> {
   const found = await dependencies.withReads(async (reads) => {
     try {
-      return { path: (await reads.getCollectionRecord({ collectionPath, recordId, historyLimit: 1 })).record.path };
+      return {
+        path: (await reads.getCollectionRecord({ collectionPath, recordId, historyLimit: 1 }))
+          .record.path,
+      };
     } catch (error) {
       if (error instanceof Error && error.message === RECORD_NOT_FOUND) return { path: null };
       throw error;
@@ -538,9 +642,20 @@ function fieldWrites(
     const draft = result.sharedFileUpdates?.[field];
     const settlement = draft ? { sharedFileUpdate: draft } : {};
     if (Object.hasOwn(result.replaced, field)) {
-      writes.push({ kind: "field", ...base, ...settlement, before: (result.replaced[field] ?? null) as JsonValue, after });
+      writes.push({
+        kind: "field",
+        ...base,
+        ...settlement,
+        before: (result.replaced[field] ?? null) as JsonValue,
+        after,
+      });
     } else if (Object.hasOwn(result.kept, field)) {
-      writes.push({ kind: "kept", ...base, planned: after, current: (result.kept[field] ?? null) as JsonValue });
+      writes.push({
+        kind: "kept",
+        ...base,
+        planned: after,
+        current: (result.kept[field] ?? null) as JsonValue,
+      });
     } else if (mode === "may-have-landed" && !isDeepStrictEqual(before, after)) {
       // The earlier attempt wrote it before the run stopped.
       writes.push({ kind: "field", ...base, ...settlement, before, after });
@@ -567,11 +682,17 @@ export async function applyDocumentEffect(
   mode: EffectMode,
 ): Promise<RunWrite[]> {
   const { run, author, signal, ordinal } = context;
-  if (effect.kind === "message" || effect.kind === "wake" || effect.kind === "notice") return await applyChatEffect(dependencies, context, effect);
+  if (effect.kind === "message" || effect.kind === "wake" || effect.kind === "notice")
+    return await applyChatEffect(dependencies, context, effect);
   // A document Collection's automation that names an action never runs (unsupportedReason).
   if (effect.kind === "invoke") throw new Error("Only a dataset Collection has actions.");
   const key = stepKey(run.claimId, run.keySeed, ordinal);
-  const seam = (edit: CollectionRecordWrites, path: string, recordId: string, fields: readonly PlannedField[]) =>
+  const seam = (
+    edit: CollectionRecordWrites,
+    path: string,
+    recordId: string,
+    fields: readonly PlannedField[],
+  ) =>
     edit.setFields({
       recordPath: path,
       fields: Object.fromEntries(fields.map(({ field, after }) => [field, after])),
@@ -592,29 +713,44 @@ export async function applyDocumentEffect(
       if (!known || known.recordId !== record.recordId || known.path !== record.path) {
         const entry = { ordinal, planned: effect.recordId, ...record };
         await dependencies.store.recordCreated(run, entry);
-        run.created = [...run.created.filter(existing => existing.planned !== effect.recordId), entry];
+        run.created = [
+          ...run.created.filter((existing) => existing.planned !== effect.recordId),
+          entry,
+        ];
       }
     };
     let created;
-    try { created = await dependencies.withRecordWrites(signal, (edit) =>
-      edit.create({
-        collectionPath: effect.collectionPath,
-        name: effect.name,
-        author,
-        recordId: known?.recordId ?? effect.recordId,
-        onPartial: remember,
-      }),
-    ); }
-    catch (error) {
-      if (error instanceof AutomationCreationSkipped) return [{ kind: "skipped", recordId: known?.recordId ?? effect.recordId,
-        path: known?.path ?? `${effect.collectionPath}/${effect.name}.md`, reason: error.message }];
+    try {
+      created = await dependencies.withRecordWrites(signal, (edit) =>
+        edit.create({
+          collectionPath: effect.collectionPath,
+          name: effect.name,
+          author,
+          recordId: known?.recordId ?? effect.recordId,
+          onPartial: remember,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof AutomationCreationSkipped)
+        return [
+          {
+            kind: "skipped",
+            recordId: known?.recordId ?? effect.recordId,
+            path: known?.path ?? `${effect.collectionPath}/${effect.name}.md`,
+            reason: error.message,
+          },
+        ];
       throw error;
     }
     await remember(created);
     const fields = effect.fields.map(({ field, value }) => ({ field, before: null, after: value }));
-    const writes: RunWrite[] = [{ kind: "created", recordId: created.recordId, path: created.path }];
+    const writes: RunWrite[] = [
+      { kind: "created", recordId: created.recordId, path: created.path },
+    ];
     if (fields.length === 0) return writes;
-    const result = await dependencies.withRecordWrites(signal, (edit) => seam(edit, created.path, created.recordId, fields));
+    const result = await dependencies.withRecordWrites(signal, (edit) =>
+      seam(edit, created.path, created.recordId, fields),
+    );
     return [...writes, ...fieldWrites(created, fields, result, mode)];
   }
 
@@ -623,10 +759,19 @@ export async function applyDocumentEffect(
   const planned = effect.target;
   const path = await locate(dependencies, planned.collectionPath, planned.recordId);
   if (path === null) {
-    return [{ kind: "skipped", recordId: planned.recordId, path: planned.path, reason: "The record is no longer in the Collection." }];
+    return [
+      {
+        kind: "skipped",
+        recordId: planned.recordId,
+        path: planned.path,
+        reason: "The record is no longer in the Collection.",
+      },
+    ];
   }
   const target = { recordId: planned.recordId, path };
-  const result = await dependencies.withRecordWrites(signal, (edit) => seam(edit, path, planned.recordId, effect.fields));
+  const result = await dependencies.withRecordWrites(signal, (edit) =>
+    seam(edit, path, planned.recordId, effect.fields),
+  );
   return fieldWrites(target, effect.fields, result, mode);
 }
 
@@ -637,7 +782,13 @@ export async function applyDocumentEffect(
  */
 export async function applyChatEffect(
   dependencies: Pick<CollectionAutomationRunDependencies, "chat" | "postNotice">,
-  context: { run: StoredRun; signal: AbortSignal; automationName: string; depth: number; chat: ChatDirectory | null },
+  context: {
+    run: StoredRun;
+    signal: AbortSignal;
+    automationName: string;
+    depth: number;
+    chat: ChatDirectory | null;
+  },
   effect: Extract<PlannedEffect, { kind: "message" | "wake" | "notice" }>,
 ): Promise<RunWrite[]> {
   const { run, signal } = context;
@@ -647,34 +798,60 @@ export async function applyChatEffect(
     if (effect.to.kind === "direct-message") {
       const now = context.chat?.directMessage(effect.to.userId);
       if (!now || "problem" in now || now.threadId !== effect.to.threadId) {
-        throw new Error(`The people in ${effect.name} changed since this run began, so dohc did not send its message.`);
+        throw new Error(
+          `The people in ${effect.name} changed since this run began, so dohc did not send its message.`,
+        );
       }
     }
     // The engine records the message under its effect id, so a retry, or an
     // attempt that stopped after the write landed, replays it.
-    await dependencies.chat.write(signal, {
-      target: effect.to.kind === "group"
-        ? { kind: "group", channelId: effect.to.channelId, lane: effect.to.lane }
-        : { kind: "direct-message", threadId: effect.to.threadId },
-      effectId: effect.effectId,
-      messageId: effect.messageId,
-      threadId: effect.threadId,
-      automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
-      body: effect.body,
-    }, run);
+    await dependencies.chat.write(
+      signal,
+      {
+        target:
+          effect.to.kind === "group"
+            ? { kind: "group", channelId: effect.to.channelId, lane: effect.to.lane }
+            : { kind: "direct-message", threadId: effect.to.threadId },
+        effectId: effect.effectId,
+        messageId: effect.messageId,
+        threadId: effect.threadId,
+        automation: {
+          automationId: run.automationId,
+          name: context.automationName,
+          depth: context.depth,
+        },
+        body: effect.body,
+      },
+      run,
+    );
     return [{ kind: "message", messageId: effect.messageId, name: effect.name }];
   }
   if (effect.kind === "wake") {
-    const result = await dependencies.chat.write(signal, {
-      target: { kind: "agent" },
-      effectId: effect.effectId,
-      messageId: effect.messageId,
-      threadId: effect.threadId,
-      automation: { automationId: run.automationId, name: context.automationName, depth: context.depth },
-      body: effect.body,
-    }, run);
+    const result = await dependencies.chat.write(
+      signal,
+      {
+        target: { kind: "agent" },
+        effectId: effect.effectId,
+        messageId: effect.messageId,
+        threadId: effect.threadId,
+        automation: {
+          automationId: run.automationId,
+          name: context.automationName,
+          depth: context.depth,
+        },
+        body: effect.body,
+      },
+      run,
+    );
     return result instanceof AutomationWakeSent
-      ? [{ kind: "notice", noticeId: result.noticeId, name: result.name, ...(result.supersededBy ? { supersededBy: result.supersededBy } : {}) }]
+      ? [
+          {
+            kind: "notice",
+            noticeId: result.noticeId,
+            name: result.name,
+            ...(result.supersededBy ? { supersededBy: result.supersededBy } : {}),
+          },
+        ]
       : [{ kind: "message", messageId: effect.messageId, name: WAKE_TARGET_NAME }];
   }
   // Each person's notice is its own effect, recorded once it is sent, so a
@@ -683,7 +860,8 @@ export async function applyChatEffect(
   try {
     await dependencies.postNotice(effect.notice, signal);
   } catch (error) {
-    if (error instanceof NoticeNotSentError) throw new Error(`dohc could not notify ${effect.name}. ${error.message}`);
+    if (error instanceof NoticeNotSentError)
+      throw new Error(`dohc could not notify ${effect.name}. ${error.message}`);
     throw error;
   }
   return [{ kind: "notice", noticeId: effect.notice.noticeId, name: effect.name }];
@@ -696,7 +874,10 @@ export async function applyChatEffect(
  * writes is no longer in this workspace; its paths stay, and its records
  * are not found there.
  */
-export function rebaseRun(run: StoredRun, collectionPathOf: (collectionId: string) => string | null): { moved: boolean; lost: boolean } {
+export function rebaseRun(
+  run: StoredRun,
+  collectionPathOf: (collectionId: string) => string | null,
+): { moved: boolean; lost: boolean } {
   const moves = new Map<string, string>();
   let lost = false;
   run.collections = run.collections.map((entry) => {
@@ -714,20 +895,55 @@ export function rebaseRun(run: StoredRun, collectionPathOf: (collectionId: strin
   };
   run.steps = run.steps.map((step) => ({
     ...step,
-    ...(step.destinations ? { destinations: step.destinations.map((target) => ({ ...target, path: folder(target.path) })) } : {}),
-    ...(step.collections ? { collections: step.collections.map((target) => ({ ...target, path: folder(target.path) })) } : {}),
+    ...(step.destinations
+      ? {
+          destinations: step.destinations.map((target) => ({
+            ...target,
+            path: folder(target.path),
+          })),
+        }
+      : {}),
+    ...(step.collections
+      ? {
+          collections: step.collections.map((target) => ({ ...target, path: folder(target.path) })),
+        }
+      : {}),
     effects: step.effects.map((effect) => {
-      if (effect.kind === "add") return { ...effect, collectionPath: folder(effect.collectionPath) };
-      if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") return effect.collectionPath === undefined ? effect : { ...effect, collectionPath: folder(effect.collectionPath) };
+      if (effect.kind === "add")
+        return { ...effect, collectionPath: folder(effect.collectionPath) };
+      if (
+        effect.kind === "dataset-edit" ||
+        effect.kind === "dataset-create" ||
+        effect.kind === "dataset-action"
+      )
+        return effect.collectionPath === undefined
+          ? effect
+          : { ...effect, collectionPath: folder(effect.collectionPath) };
       if (effect.kind !== "set") return effect;
-      return { ...effect, target: { ...effect.target, collectionPath: folder(effect.target.collectionPath), path: record(effect.target.path) } };
+      return {
+        ...effect,
+        target: {
+          ...effect.target,
+          collectionPath: folder(effect.target.collectionPath),
+          path: record(effect.target.path),
+        },
+      };
     }),
     // A Find's records live in their Collection's folder too.
-    ...(step.output?.kind === "find" ? { output: { kind: "find" as const, records: step.output.records.map((ref) => ({ ...ref, path: record(ref.path) })) } } : {}),
+    ...(step.output?.kind === "find"
+      ? {
+          output: {
+            kind: "find" as const,
+            records: step.output.records.map((ref) => ({ ...ref, path: record(ref.path) })),
+          },
+        }
+      : {}),
   }));
   run.applied = run.applied.map((entry) => ({
     ...entry,
-    writes: entry.writes.map((write) => "path" in write ? { ...write, path: record(write.path) } : write),
+    writes: entry.writes.map((write) =>
+      "path" in write ? { ...write, path: record(write.path) } : write,
+    ),
   }));
   run.created = run.created.map((entry) => ({ ...entry, path: record(entry.path) }));
   return { moved: true, lost };
@@ -736,11 +952,16 @@ export function rebaseRun(run: StoredRun, collectionPathOf: (collectionId: strin
 function documentSource(input: CollectionAutomationRunInput): RunSource {
   const { claim, collection } = input;
   return {
-    kind: "document", engineClaim: claim, personId: claim.change.kind === "message" ? null : claimPerson(claim),
+    kind: "document",
+    engineClaim: claim,
+    personId: claim.change.kind === "message" ? null : claimPerson(claim),
     writeAuthorId: claimPerson(claim),
     decode: () => ({ ...claim, collectionPath: collection.path }),
     reads: ({ document }) => ({
-      trigger: () => claim.change.kind === "removed" || claim.recordId === null ? Promise.resolve(null) : document(collection.path, claim.recordId),
+      trigger: () =>
+        claim.change.kind === "removed" || claim.recordId === null
+          ? Promise.resolve(null)
+          : document(collection.path, claim.recordId),
     }),
   };
 }

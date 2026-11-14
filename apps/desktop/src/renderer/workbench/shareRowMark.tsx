@@ -6,7 +6,13 @@ import { useLayoutEffect, useRef } from "react";
 export type ShareRowReport = ((shareId: string, row: HTMLElement) => void) | null;
 
 // Place inside the row's element. The row is the mark's parent.
-export function ShareRowMark({ shareId, report }: { shareId: string | null | undefined; report: ShareRowReport }) {
+export function ShareRowMark({
+  shareId,
+  report,
+}: {
+  shareId: string | null | undefined;
+  report: ShareRowReport;
+}) {
   const mark = useRef<HTMLSpanElement>(null);
   useLayoutEffect(() => {
     const row = mark.current?.parentElement;

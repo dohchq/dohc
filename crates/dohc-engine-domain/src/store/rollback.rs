@@ -118,15 +118,14 @@ impl<'a> VersionedTextStore<'a> {
 
             let before_state = moment_before_state(conn, ws, &input.mutation_moment_id)?;
             let before = resolve_rollback_before(conn, input, &moment, before_state)?;
-            if let Some(before) = &before {
-                if before.version_id != input.version_id
+            if let Some(before) = &before
+                && (before.version_id != input.version_id
                     || before.object_id != moment.object_id
-                    || (before.path != input.path && moment.operation != MomentOp::Rename)
-                {
-                    return Err(DomainError::InvalidInput {
-                        reason: "rollback snapshot does not match the target file",
-                    });
-                }
+                    || (before.path != input.path && moment.operation != MomentOp::Rename))
+            {
+                return Err(DomainError::InvalidInput {
+                    reason: "rollback snapshot does not match the target file",
+                });
             }
             if later_materialized_object_moment_exists(conn, ws, &moment)? {
                 return Err(DomainError::InvalidInput {
@@ -1297,7 +1296,7 @@ fn lineage_has_independent_object_mutation(
         if !seen.insert(version.version_id.as_str()) {
             return false;
         }
-        // TS value 2 is a concrete preimage (reachable for R05 update/delete/
+        // TS value 2 is a concrete preimage (reachable for update/delete/
         // rename); Rust's bool represents it as `true`. Rust intentionally
         // collapses TS unrecorded (0) and explicit-absent (1) to `false`;
         // this dependency check only needs the concrete-preimage distinction.

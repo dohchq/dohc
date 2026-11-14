@@ -12,26 +12,42 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR;
 const BLEED = 16;
-const BUTTON_STYLE = ["height", "borderTopWidth", "borderTopColor", "borderRadius", "fontSize", "paddingLeft", "color"] as const;
+const BUTTON_STYLE = [
+  "height",
+  "borderTopWidth",
+  "borderTopColor",
+  "borderRadius",
+  "fontSize",
+  "paddingLeft",
+  "color",
+] as const;
 
 async function buttonStyle(button: Locator) {
-  return button.evaluate((node, keys) => {
-    const style = getComputedStyle(node);
-    return Object.fromEntries(keys.map((key) => [key, style[key]]));
-  }, [...BUTTON_STYLE]);
+  return button.evaluate(
+    (node, keys) => {
+      const style = getComputedStyle(node);
+      return Object.fromEntries(keys.map((key) => [key, style[key]]));
+    },
+    [...BUTTON_STYLE],
+  );
 }
 
-// Both parts, toasts above rows, with room for their shadows.
 async function shoot(page: Page, pane: Locator, name: string) {
   if (!SHOT_DIR) return;
-  const boxes = await Promise.all(["toasts", "notices"].map((part) => pane.locator(`[data-part="${part}"]`).boundingBox()));
+  const boxes = await Promise.all(
+    ["toasts", "notices"].map((part) => pane.locator(`[data-part="${part}"]`).boundingBox()),
+  );
   const [toasts, notices] = boxes;
   if (!toasts || !notices) throw new Error("the toasts and notices parts must both be on the page");
   const x = Math.min(toasts.x, notices.x) - BLEED;
   const y = Math.min(toasts.y, notices.y) - BLEED;
   const right = Math.max(toasts.x + toasts.width, notices.x + notices.width) + BLEED;
   const bottom = Math.max(toasts.y + toasts.height, notices.y + notices.height) + BLEED;
-  await page.screenshot({ scale: "css", clip: { x, y, width: right - x, height: Math.ceil(bottom - y) }, path: join(SHOT_DIR, `${name}.png`) });
+  await page.screenshot({
+    scale: "css",
+    clip: { x, y, width: right - x, height: Math.ceil(bottom - y) },
+    path: join(SHOT_DIR, `${name}.png`),
+  });
 }
 
 test("a Notices row's actions are the toast's buttons, in line with its text, and a row with nowhere to go draws no hover", async () => {
@@ -47,26 +63,37 @@ test("a Notices row's actions are the toast's buttons, in line with its text, an
     // No animation or transition, so a hover reads its end state at once.
     await page.evaluate(() => {
       const style = document.createElement("style");
-      style.textContent = "html { scrollbar-width: none; } *, ::before, ::after { animation: none !important; transition: none !important; }";
+      style.textContent =
+        "html { scrollbar-width: none; } *, ::before, ::after { animation: none !important; transition: none !important; }";
       document.head.append(style);
     });
     await expect(page.getByTestId("first-run-open-share")).toBeVisible();
-    await page.evaluate(() => { window.location.hash = "#/dev/states"; });
+    await page.evaluate(() => {
+      window.location.hash = "#/dev/states";
+    });
     await expect(page.getByTestId("states-page")).toBeVisible();
     await page.evaluate(() => document.fonts.ready);
     // The viewport takes the whole page, so nothing scrolls under a capture.
-    await page.setViewportSize({ width: 1440, height: await page.evaluate(() => document.documentElement.scrollHeight) });
+    await page.setViewportSize({
+      width: 1440,
+      height: await page.evaluate(() => document.documentElement.scrollHeight),
+    });
 
     for (const theme of ["light", "dark"] as const) {
       const pane = page.getByTestId(`states-${theme}`);
       const rows = pane.locator('[data-part="notices"]');
       const failed = rows.getByTestId("notice-sync");
       const rowAction = failed.getByRole("button", { name: "Try again" });
-      const toastAction = pane.locator('[data-part="toasts"]').getByTestId("workspace-shell-error-retry").first();
+      const toastAction = pane
+        .locator('[data-part="toasts"]')
+        .getByTestId("workspace-shell-error-retry")
+        .first();
 
       await page.mouse.move(2, 2);
-      expect(await buttonStyle(rowAction), `a row's Try again draws as the toast's (${theme})`).toEqual(await buttonStyle(toastAction));
-      // The button's edge, not its words, starts where the title's words start.
+      expect(
+        await buttonStyle(rowAction),
+        `a row's Try again draws as the toast's (${theme})`,
+      ).toEqual(await buttonStyle(toastAction));
       const edges = await failed.evaluate((row) => {
         const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
         let node = walker.nextNode();
@@ -74,23 +101,36 @@ test("a Notices row's actions are the toast's buttons, in line with its text, an
         if (!node) throw new Error("the row has no title text");
         const range = document.createRange();
         range.selectNodeContents(node);
-        const button = [...row.querySelectorAll("button")].find((each) => each.textContent === "Try again");
-        return { title: range.getBoundingClientRect().left, button: button!.getBoundingClientRect().left };
+        const button = [...row.querySelectorAll("button")].find(
+          (each) => each.textContent === "Try again",
+        );
+        return {
+          title: range.getBoundingClientRect().left,
+          button: button!.getBoundingClientRect().left,
+        };
       });
-      expect(Math.abs(edges.button - edges.title), `a row's Try again starts at its text (${theme})`).toBeLessThanOrEqual(0.5);
+      expect(
+        Math.abs(edges.button - edges.title),
+        `a row's Try again starts at its text (${theme})`,
+      ).toBeLessThanOrEqual(0.5);
       await shoot(page, pane, `notices-row-parts-${theme}-rest`);
 
       await rowAction.hover();
       await shoot(page, pane, `notices-row-parts-${theme}-button-hover`);
 
-      // The moved row has nowhere to go: hovering it changes nothing.
       const moved = rows.getByTestId("notice-moved");
-      const look = () => moved.evaluate((row) => ({ background: getComputedStyle(row).backgroundColor, cursor: getComputedStyle(row).cursor }));
+      const look = () =>
+        moved.evaluate((row) => ({
+          background: getComputedStyle(row).backgroundColor,
+          cursor: getComputedStyle(row).cursor,
+        }));
       await page.mouse.move(2, 2);
       const before = await look();
       await moved.hover();
       expect(await look(), `a row with nowhere to go draws no hover (${theme})`).toEqual(before);
-      expect(before.cursor, `a row with nowhere to go has no pointer (${theme})`).not.toBe("pointer");
+      expect(before.cursor, `a row with nowhere to go has no pointer (${theme})`).not.toBe(
+        "pointer",
+      );
       await shoot(page, pane, `notices-row-parts-${theme}-nowhere-hover`);
     }
   } finally {

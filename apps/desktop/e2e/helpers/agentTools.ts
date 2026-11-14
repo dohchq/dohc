@@ -18,9 +18,12 @@ export async function installFakeAgentTools(
   // folder it always searches, such as /opt/homebrew/bin.
   for (const { id, command } of AGENT_TOOLS) {
     const executable = join(bin, `${command}${process.platform === "win32" ? ".cmd" : ""}`);
-    await writeFile(executable, process.platform === "win32"
-      ? `@echo off\r\n"${process.execPath}" "${fakeRunner}" profile-${id} %*\r\n`
-      : `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' '${fakeRunner.replaceAll("'", "'\\''")}' profile-${id} "$@"\n`);
+    await writeFile(
+      executable,
+      process.platform === "win32"
+        ? `@echo off\r\n"${process.execPath}" "${fakeRunner}" profile-${id} %*\r\n`
+        : `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' '${fakeRunner.replaceAll("'", "'\\''")}' profile-${id} "$@"\n`,
+    );
     await chmod(executable, 0o755);
   }
   const path = `${bin}${delimiter}${testSearchPath}`;
@@ -40,21 +43,25 @@ export async function openAgentChat(page: Page, agentId: string, name: string): 
   await expect
     .poll(() =>
       page.evaluate(async (id) => {
-        const api = (window as unknown as {
-          dohcDesktop: {
-            getWorkspaceRegistry(): Promise<{
-              workspaces: Array<{ workspaceId: string }>;
-            }>;
-            listChatChannels(payload: { workspaceId: string }): Promise<{
-              channels: Array<{ kind: string; agentId?: string }>;
-            }>;
-          };
-        }).dohcDesktop;
+        const api = (
+          window as unknown as {
+            dohcDesktop: {
+              getWorkspaceRegistry(): Promise<{
+                workspaces: Array<{ workspaceId: string }>;
+              }>;
+              listChatChannels(payload: { workspaceId: string }): Promise<{
+                channels: Array<{ kind: string; agentId?: string }>;
+              }>;
+            };
+          }
+        ).dohcDesktop;
         const registry = await api.getWorkspaceRegistry();
         const workspace = registry.workspaces[0];
         if (!workspace) return false;
         const result = await api.listChatChannels({ workspaceId: workspace.workspaceId });
-        return result.channels.some((channel) => channel.kind === "agent" && channel.agentId === id);
+        return result.channels.some(
+          (channel) => channel.kind === "agent" && channel.agentId === id,
+        );
       }, agentId),
     )
     .toBe(true);
@@ -68,14 +75,31 @@ export async function openAgentChat(page: Page, agentId: string, name: string): 
 // Starts e2e/fixtures/agentYouRun.mjs as the agent you run with this id. It
 // connects with the arguments Copy MCP config gives that agent, and answers
 // its first message with `reply`. Stop it with stopAgentYouRun.
-export async function startAgentYouRun(page: Page, workspaceId: string, agentId: string, reply: string): Promise<ChildProcess> {
-  const config = await page.evaluate((id) => (window as unknown as {
-    dohcDesktop: { getMcpConfig(payload: { workspaceId: string }): Promise<McpConfigResult> };
-  }).dohcDesktop.getMcpConfig({ workspaceId: id }), workspaceId);
+export async function startAgentYouRun(
+  page: Page,
+  workspaceId: string,
+  agentId: string,
+  reply: string,
+): Promise<ChildProcess> {
+  const config = await page.evaluate(
+    (id) =>
+      (
+        window as unknown as {
+          dohcDesktop: { getMcpConfig(payload: { workspaceId: string }): Promise<McpConfigResult> };
+        }
+      ).dohcDesktop.getMcpConfig({ workspaceId: id }),
+    workspaceId,
+  );
   if ("unavailable" in config) throw new Error(`The MCP config is unavailable: ${config.message}`);
   return spawn(
     process.execPath,
-    [resolve(desktopRoot, "e2e/fixtures/agentYouRun.mjs"), reply, ...config.args, "--agent-id", agentId],
+    [
+      resolve(desktopRoot, "e2e/fixtures/agentYouRun.mjs"),
+      reply,
+      ...config.args,
+      "--agent-id",
+      agentId,
+    ],
     { stdio: ["pipe", "inherit", "inherit"], windowsHide: true },
   );
 }
@@ -90,8 +114,14 @@ export async function stopAgentYouRun(agent: ChildProcess | null): Promise<void>
 
 // The agents you run that wait for messages now, as main reports them.
 export async function agentsListening(page: Page): Promise<string[]> {
-  const { agentIds } = await page.evaluate(() => (window as unknown as {
-    dohcDesktop: { readAgentsListening(payload: Record<string, never>): Promise<{ agentIds: string[] }> };
-  }).dohcDesktop.readAgentsListening({}));
+  const { agentIds } = await page.evaluate(() =>
+    (
+      window as unknown as {
+        dohcDesktop: {
+          readAgentsListening(payload: Record<string, never>): Promise<{ agentIds: string[] }>;
+        };
+      }
+    ).dohcDesktop.readAgentsListening({}),
+  );
   return agentIds;
 }

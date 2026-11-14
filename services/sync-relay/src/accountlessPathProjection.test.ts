@@ -13,13 +13,15 @@ describe("accountless path projection", () => {
 
     expect(projection.selector.paths).toEqual(["docs"]);
     expect(selector.paths).toEqual(["clients/acme/private/docs"]);
-    expect(projection.projectPayload({
-      path: realPath,
-      payloadBeforePath: realPath,
-      payloadAfterPath: realPath,
-      beforePath: realPath,
-      forkSnapshots: [{ path: realPath, blobSha256: "a".repeat(64) }],
-    })).toEqual({
+    expect(
+      projection.projectPayload({
+        path: realPath,
+        payloadBeforePath: realPath,
+        payloadAfterPath: realPath,
+        beforePath: realPath,
+        forkSnapshots: [{ path: realPath, blobSha256: "a".repeat(64) }],
+      }),
+    ).toEqual({
       path: "docs/guides/start.md",
       payloadBeforePath: "docs/guides/start.md",
       payloadAfterPath: "docs/guides/start.md",
@@ -35,10 +37,8 @@ describe("accountless path projection", () => {
       access: "view",
     });
 
-    expect(projection.projectPath("clients/acme/private/docs/start.md"))
-      .toBe("docs/start.md");
-    expect(projection.projectPath("clients/other/readme.md"))
-      .toBe("clients/other/readme.md");
+    expect(projection.projectPath("clients/acme/private/docs/start.md")).toBe("docs/start.md");
+    expect(projection.projectPath("clients/other/readme.md")).toBe("clients/other/readme.md");
     expect(projection.projectPath("teams/private/readme.md")).toBeNull();
     expect(projection.resolvePath("docs/start.md")).toBe("clients/acme/private/docs/start.md");
     expect(projection.resolvePath("clients/acme/private/docs/start.md")).toBeNull();
@@ -51,9 +51,7 @@ describe("accountless path projection", () => {
       access: "view",
     });
 
-    expect(
-      projection.projectPayload({ path: "teams/private/readme.md" }),
-    ).toBeNull();
+    expect(projection.projectPayload({ path: "teams/private/readme.md" })).toBeNull();
   });
 
   it("fails closed when a version snapshot names a path outside every root", () => {
@@ -63,24 +61,22 @@ describe("accountless path projection", () => {
       access: "view",
     });
 
-    expect(projection.projectPayload({
-      versionId: "snapshot-1",
-      forkSnapshots: [
-        {
-          path: "teams/private/readme.md",
-          blobSha256: "a".repeat(64),
-        },
-      ],
-    })).toBeNull();
+    expect(
+      projection.projectPayload({
+        versionId: "snapshot-1",
+        forkSnapshots: [
+          {
+            path: "teams/private/readme.md",
+            blobSha256: "a".repeat(64),
+          },
+        ],
+      }),
+    ).toBeNull();
   });
 
   it("disambiguates duplicate visible names without colliding with natural names", () => {
     const projection = createAccountlessPathProjection({
-      paths: [
-        "clients/acme/docs",
-        "clients/other/docs",
-        "teams/blue/2~docs",
-      ],
+      paths: ["clients/acme/docs", "clients/other/docs", "teams/blue/2~docs"],
       versionId: null,
       access: "view",
     });
@@ -104,7 +100,14 @@ describe("accountless path projection", () => {
     expect(projection.selector.paths).toEqual(["report.md", "2~report.md"]);
     expect(projection.projectPath("teams/blue/report.md")).toBe("2~report.md");
     expect(projection.resolvePath("2~report.md")).toBe("teams/blue/report.md");
-    for (const path of ["../report.md", "report.md/../report.md", "./report.md", "/report.md", "report.md\\..\\report.md", "teams/blue/report.md"])
+    for (const path of [
+      "../report.md",
+      "report.md/../report.md",
+      "./report.md",
+      "/report.md",
+      "report.md\\..\\report.md",
+      "teams/blue/report.md",
+    ])
       expect(projection.resolvePath(path)).toBeNull();
   });
 
@@ -116,18 +119,25 @@ describe("accountless path projection", () => {
     });
 
     expect(projection.selector.paths).toEqual([]);
-    expect(projection.projectPath("clients/acme/report.md"))
-      .toBe("clients/acme/report.md");
+    expect(projection.projectPath("clients/acme/report.md")).toBe("clients/acme/report.md");
     expect(projection.resolvePath("clients/acme/report.md")).toBe("clients/acme/report.md");
     expect(projection.resolvePath("../report.md")).toBeNull();
   });
 
   it("validates reserved names against the real workspace path", () => {
-    const projection = createAccountlessPathProjection({paths: ["docs/shared-with-me"], versionId: null, access: "edit"});
+    const projection = createAccountlessPathProjection({
+      paths: ["docs/shared-with-me"],
+      versionId: null,
+      access: "edit",
+    });
     expect(projection.resolvePath("shared-with-me/a.md")).toBe("docs/shared-with-me/a.md");
     expect(projection.resolvePath("shared-with-me/../a.md")).toBeNull();
     expect(projection.resolvePath("shared-with-me/.dohc/a.md")).toBeNull();
-    const workspace = createAccountlessPathProjection({paths: [], versionId: null, access: "edit"});
+    const workspace = createAccountlessPathProjection({
+      paths: [],
+      versionId: null,
+      access: "edit",
+    });
     expect(workspace.resolvePath("shared-with-me/a.md")).toBeNull();
   });
 });

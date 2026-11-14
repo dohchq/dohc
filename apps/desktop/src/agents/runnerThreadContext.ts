@@ -7,7 +7,11 @@ import type {
   LinkedChatStore,
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
-import { cliGroupKind, FILES_GROUP, readThreadDispatchState } from "@dohc/workspace-operations/chats";
+import {
+  cliGroupKind,
+  FILES_GROUP,
+  readThreadDispatchState,
+} from "@dohc/workspace-operations/chats";
 
 // A run sees the message that asked for it and every message after it, since
 // its claim answers each request queued there. Older messages fill the rest
@@ -56,9 +60,7 @@ function messageForMarkdown(
   };
 }
 
-export async function buildRunnerThreadContext(
-  input: RunnerThreadContextInput,
-): Promise<string> {
+export async function buildRunnerThreadContext(input: RunnerThreadContextInput): Promise<string> {
   const { workspaceId, threadId } = input;
   const { thread, channel, messageCount } = await input.store.getThread({ workspaceId, threadId });
   // The engine cuts a page at a byte budget, so long messages take more than one.
@@ -77,7 +79,10 @@ export async function buildRunnerThreadContext(
     return read;
   };
   const [newestMessages, decisions, dispatch] = await Promise.all([
-    read(messageCount > RUNNER_CONTEXT_MESSAGES ? messageCount - RUNNER_CONTEXT_MESSAGES - 1 : null, RUNNER_CONTEXT_MESSAGES),
+    read(
+      messageCount > RUNNER_CONTEXT_MESSAGES ? messageCount - RUNNER_CONTEXT_MESSAGES - 1 : null,
+      RUNNER_CONTEXT_MESSAGES,
+    ),
     input.store.listThreadDecisions(workspaceId, threadId),
     readThreadDispatchState(input.dispatchStore, workspaceId, threadId),
   ]);
@@ -90,7 +95,14 @@ export async function buildRunnerThreadContext(
     const all = await read(null, Number.POSITIVE_INFINITY);
     const branch = thread.lane === "chat" ? threadBranch(all, input.askingMessageId) : null;
     inThread = branch !== null;
-    messages = branch ?? all.slice(Math.max(0, all.findIndex((message) => message.id === input.askingMessageId)));
+    messages =
+      branch ??
+      all.slice(
+        Math.max(
+          0,
+          all.findIndex((message) => message.id === input.askingMessageId),
+        ),
+      );
   }
   const decisionByMessage = new Map(
     decisions.map((decision) => [
@@ -123,7 +135,9 @@ export async function buildRunnerThreadContext(
     });
     const omitted = messageCount - shown.length;
     if (omitted <= 0) return markdown;
-    const readThem = input.readEarlier ? ` Read ${omitted === 1 ? "it" : "them"} with \`${input.readEarlier}\`.` : "";
+    const readThem = input.readEarlier
+      ? ` Read ${omitted === 1 ? "it" : "them"} with \`${input.readEarlier}\`.`
+      : "";
     const note = inThread
       ? `This request was asked in a thread of this conversation, so only that thread is shown. ${omitted} other ${omitted === 1 ? "message isn't" : "messages aren't"} shown.${readThem}`
       : `${omitted} earlier ${omitted === 1 ? "message in this thread isn't" : "messages in this thread aren't"} shown.${readThem}`;
@@ -133,7 +147,11 @@ export async function buildRunnerThreadContext(
   // A thread keeps the message it hangs from; its oldest replies go first.
   const kept = inThread ? 1 : 0;
   let markdown = render(messages);
-  while (markdown.length > RUNNER_CONTEXT_CHARS && messages.length > kept + 1 && messages[kept]?.id !== input.askingMessageId) {
+  while (
+    markdown.length > RUNNER_CONTEXT_CHARS &&
+    messages.length > kept + 1 &&
+    messages[kept]?.id !== input.askingMessageId
+  ) {
     messages = [...messages.slice(0, kept), ...messages.slice(kept + 1)];
     markdown = render(messages);
   }
@@ -159,5 +177,8 @@ function threadBranch(all: readonly ChatMessage[], askingMessageId: string): Cha
   if (!asking?.parentMessageId) return null;
   const root = rootOf(asking);
   if (root.id === asking.id) return null;
-  return all.filter((message) => message.id === root.id || (message.parentMessageId && rootOf(message).id === root.id));
+  return all.filter(
+    (message) =>
+      message.id === root.id || (message.parentMessageId && rootOf(message).id === root.id),
+  );
 }

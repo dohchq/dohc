@@ -27,7 +27,7 @@ pub enum DomainError {
     WorkspaceNotFound,
 
     /// The referenced version id does not exist in this workspace (fails closed;
-    /// history/read/restore never invent a version — `TEST_ORACLE.md` §1).
+    /// history/read/restore never invent a version).
     #[error("version not found")]
     VersionNotFound,
 
@@ -206,9 +206,6 @@ pub enum DomainError {
         observed_bytes: usize,
     },
 
-    /// A retry reused an idempotency key with a *different* payload than the
-    /// originally recorded request. Fails closed rather than replaying a stale
-    /// result (mirrors the storage core's exactly-once guard).
     #[error("idempotency key was reused with a different payload")]
     IdempotencyKeyReuseMismatch,
 
@@ -227,13 +224,6 @@ pub enum DomainError {
     #[error("protected history moment not found")]
     SecretMomentNotFound,
 
-    /// A chat-domain failure carrying the TS `LinkedChatStoreError` stable code
-    /// verbatim (`linkedChatStore.ts`). One variant keeps the large chat
-    /// code-space (`invalid-channel-name`, `channel-exists`, `message-not-found`,
-    /// `read-state-revision-mismatch`, `invalid-follow-target`,
-    /// `invalid-bookmark-target`, …) on the compatibility surface without a
-    /// per-code enum explosion; `code()` returns the embedded string so ported
-    /// tests that switch on `.code` stay byte-identical.
     #[error("chat error [{code}]: {reason}")]
     Chat {
         code: &'static str,

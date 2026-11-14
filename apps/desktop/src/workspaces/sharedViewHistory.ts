@@ -1,7 +1,10 @@
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
-type HistoryStore = Pick<ReturnType<typeof createCaptureLiveStores>["store"], "listHistoryPage" | "getMoment">;
+type HistoryStore = Pick<
+  ReturnType<typeof createCaptureLiveStores>["store"],
+  "listHistoryPage" | "getMoment"
+>;
 
 /**
  * A received share's imported history, read from its own share-mount store.
@@ -10,13 +13,17 @@ type HistoryStore = Pick<ReturnType<typeof createCaptureLiveStores>["store"], "l
  * and nothing else: a shared view keeps no capture, so it neither records nor
  * restores. Protected files never reach a received share's store.
  */
-export function sharedViewHistory(store: HistoryStore, workspaceId: string):
-  Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> {
+export function sharedViewHistory(
+  store: HistoryStore,
+  workspaceId: string,
+): Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> {
   return {
     async listMoments(input = {}) {
       const history = await store.listHistoryPage({
         workspaceId,
-        ...(input.versionId !== undefined || input.cursor !== undefined ? { versionId: input.versionId ?? input.cursor!.versionId } : {}),
+        ...(input.versionId !== undefined || input.cursor !== undefined
+          ? { versionId: input.versionId ?? input.cursor!.versionId }
+          : {}),
         ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),

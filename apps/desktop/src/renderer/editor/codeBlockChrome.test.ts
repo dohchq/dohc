@@ -8,18 +8,24 @@ import { codeBlock, doc, paragraph, randomEdit, schema, seededRandom } from "./t
 function toolbars(state: EditorState, plugin: Plugin) {
   return (plugin.getState(state) as DecorationSet)
     .find()
-    .map((toolbar) => ({ pos: toolbar.from, key: String(toolbar.spec.key), owner: String(toolbar.spec.ownerKey) }))
+    .map((toolbar) => ({
+      pos: toolbar.from,
+      key: String(toolbar.spec.key),
+      owner: String(toolbar.spec.ownerKey),
+    }))
     .sort((a, b) => a.pos - b.pos);
 }
 
-/** Each code block's toolbar position and language, as a full rebuild makes them. */
 function expected(document: PMNode) {
   const plugin = makeCodeBlockChromePlugin();
   return shown(EditorState.create({ doc: document, plugins: [plugin] }), plugin);
 }
 
 function shown(state: EditorState, plugin: Plugin) {
-  return toolbars(state, plugin).map(({ pos, key, owner }) => ({ pos, language: key.slice(`code-lang-${owner}-`.length) }));
+  return toolbars(state, plugin).map(({ pos, key, owner }) => ({
+    pos,
+    language: key.slice(`code-lang-${owner}-`.length),
+  }));
 }
 
 describe("makeCodeBlockChromePlugin — edits", () => {
@@ -58,7 +64,10 @@ describe("makeCodeBlockChromePlugin — edits", () => {
     const plugin = makeCodeBlockChromePlugin();
     const lead = paragraph("lead");
     const block = codeBlock("x", "go");
-    const start = EditorState.create({ doc: doc(lead, block, paragraph("after")), plugins: [plugin] });
+    const start = EditorState.create({
+      doc: doc(lead, block, paragraph("after")),
+      plugins: [plugin],
+    });
     const [before] = toolbars(start, plugin);
     const state = start.apply(start.tr.insert(lead.nodeSize, block));
     const [copy, original] = toolbars(state, plugin);
@@ -71,7 +80,10 @@ describe("makeCodeBlockChromePlugin — edits", () => {
     const [firstBefore] = toolbars(first, plugin);
     const tr = first.tr.insert(0, block);
     const both = first.apply(tr.insert(tr.doc.content.size, paragraph("end")));
-    expect(toolbars(both, plugin).map(({ owner }) => owner === firstBefore!.owner)).toEqual([false, true]);
+    expect(toolbars(both, plugin).map(({ owner }) => owner === firstBefore!.owner)).toEqual([
+      false,
+      true,
+    ]);
     expect(shown(both, plugin)).toEqual(expected(both.doc));
   });
 
@@ -101,9 +113,10 @@ describe("makeCodeBlockChromePlugin — edits", () => {
     const widget = vi.spyOn(Decoration, "widget");
     try {
       state = state.apply(state.tr.insertText("x", 1));
-      const middle = state.doc.child(0).nodeSize + blocks.slice(0, 1000).reduce((pos, block) => pos + block.nodeSize, 0);
+      const middle =
+        state.doc.child(0).nodeSize +
+        blocks.slice(0, 1000).reduce((pos, block) => pos + block.nodeSize, 0);
       state = state.apply(state.tr.insertText("y", middle + 1));
-      // Before this bound, each key made all 2,000 toolbars again.
       expect(widget).not.toHaveBeenCalled();
     } finally {
       widget.mockRestore();

@@ -1,23 +1,5 @@
 import { Directory, File, Paths } from "expo-file-system";
 
-// The read cache's copy on disk, so that after a relaunch the phone shows what it read last while it reads again. Each
-// scope, a server, account and workspace, has one file in the app's Caches folder, named for a hash of the scope so
-// no name holds an account detail. The account's workspace list has one more, named for its server and account. iOS
-// doesn't back up Caches and may empty it, which costs only a read.
-//
-// A file holds its format, the scope it was written for, and either each view's value, cursor and staleness, or the
-// list. A file of another format or scope, one that doesn't parse, and one that can't be read count as absent, and
-// are deleted.
-//
-// A scope's first write waits until it stops changing for WRITE_DELAY_MS, and at most WRITE_MAX_DELAY_MS after the
-// first change. Later writes of it wait WRITE_INTERVAL_MS from the last, so a reply streaming into a chat costs one
-// write every 30 s, not one per change. `flush`, when the app goes to the background, writes everything at once. Each
-// write goes to a temporary file that then replaces the scope's file, so a read never finds half a file. A scope keeps
-// the views that fit in SCOPE_MAX_BYTES, in the order given, and leaves out the rest without writing them out. The
-// scopes' files together stay within TOTAL_MAX_BYTES: the scopes used least recently go first. Writes and deletes run
-// one at a time, in order, so a delete lands after any write it raced, and no file comes back after a sign-out. A
-// write that fails is dropped without a word: the next change writes again.
-
 /** One view as a scope's file keeps it. */
 export interface SavedView {
   readonly id: string;
@@ -64,12 +46,14 @@ interface Waiting {
   readonly due: number;
 }
 
-export function createCacheFiles(options: {
-  readonly folder?: Directory;
-  readonly scopeMaxBytes?: number;
-  readonly totalMaxBytes?: number;
-  readonly now?: () => number;
-} = {}): CacheFiles {
+export function createCacheFiles(
+  options: {
+    readonly folder?: Directory;
+    readonly scopeMaxBytes?: number;
+    readonly totalMaxBytes?: number;
+    readonly now?: () => number;
+  } = {},
+): CacheFiles {
   const folder = options.folder ?? new Directory(Paths.cache, CACHE_FOLDER);
   const scopeMaxBytes = options.scopeMaxBytes ?? SCOPE_MAX_BYTES;
   const totalMaxBytes = options.totalMaxBytes ?? TOTAL_MAX_BYTES;
@@ -102,7 +86,12 @@ export function createCacheFiles(options: {
   }
 
   /** Writes `text` beside the file, then puts it in the file's place, unless the scope was deleted meanwhile. */
-  async function replace(scope: string, extension: string, text: string, expected: string): Promise<boolean> {
+  async function replace(
+    scope: string,
+    extension: string,
+    text: string,
+    expected: string,
+  ): Promise<boolean> {
     const name = fileName(scope);
     const temp = fileOf(name, `${extension}.tmp`);
     try {
@@ -115,13 +104,21 @@ export function createCacheFiles(options: {
       await temp.move(fileOf(name, extension), { overwrite: true });
       return true;
     } catch {
-      try { if (temp.exists) temp.delete(); } catch { /* the next batch deletes it */ }
+      try {
+        if (temp.exists) temp.delete();
+      } catch {
+        /* the next batch deletes it */
+      }
       return false;
     }
   }
 
   /** The file's content for `scope`, picked out by `pick`, or null. A file that isn't one is deleted. */
-  async function readFile<T>(scope: string, extension: string, pick: (data: Record<string, unknown>) => T | null): Promise<T | null> {
+  async function readFile<T>(
+    scope: string,
+    extension: string,
+    pick: (data: Record<string, unknown>) => T | null,
+  ): Promise<T | null> {
     const expected = version(scope);
     const name = fileName(scope);
     let found: T | null = null;
@@ -138,7 +135,6 @@ export function createCacheFiles(options: {
     return found;
   }
 
-  /** Deletes temporary files a closed app left, then the least recently used scopes past the cap. */
   function trim() {
     if (!folder.exists) return;
     const saved: { file: File; size: number; usedAt: number }[] = [];
@@ -146,7 +142,11 @@ export function createCacheFiles(options: {
       if (!(item instanceof File)) continue;
       if (item.name.endsWith(".tmp")) item.delete();
       else if (item.name.endsWith(VIEWS)) {
-        saved.push({ file: item, size: item.size, usedAt: used.get(item.name.slice(0, -VIEWS.length)) ?? item.modificationTime ?? 0 });
+        saved.push({
+          file: item,
+          size: item.size,
+          usedAt: used.get(item.name.slice(0, -VIEWS.length)) ?? item.modificationTime ?? 0,
+        });
       }
     }
     let total = saved.reduce((sum, entry) => sum + entry.size, 0);
@@ -163,11 +163,10 @@ export function createCacheFiles(options: {
     if (timer !== null) clearTimeout(timer);
     timer = null;
     if (pending.size === 0) return;
-    const next = Math.min(...[...pending.values()].map(waiting => waiting.due));
+    const next = Math.min(...[...pending.values()].map((waiting) => waiting.due));
     timer = setTimeout(() => void save(false), Math.max(0, next - now()));
   }
 
-  /** Writes every waiting scope, or only those due. */
   function save(everything: boolean): Promise<void> {
     const at = now();
     const batch: { scope: string; views: () => readonly SavedView[]; expected: string }[] = [];
@@ -182,7 +181,15 @@ export function createCacheFiles(options: {
     return serial(async () => {
       for (const job of batch) {
         if (version(job.scope) !== job.expected) continue;
-        if (await replace(job.scope, VIEWS, serialize(job.scope, job.views(), scopeMaxBytes), job.expected)) used.set(fileName(job.scope), now());
+        if (
+          await replace(
+            job.scope,
+            VIEWS,
+            serialize(job.scope, job.views(), scopeMaxBytes),
+            job.expected,
+          )
+        )
+          used.set(fileName(job.scope), now());
       }
       trim();
     });
@@ -190,7 +197,9 @@ export function createCacheFiles(options: {
 
   return {
     async read(scope) {
-      const views = await readFile(scope, VIEWS, data => Array.isArray(data.views) ? savedViews(data.views) : null);
+      const views = await readFile(scope, VIEWS, (data) =>
+        Array.isArray(data.views) ? savedViews(data.views) : null,
+      );
       if (views) used.set(fileName(scope), now());
       return views ?? [];
     },
@@ -199,7 +208,11 @@ export function createCacheFiles(options: {
       const at = now();
       const first = pending.get(scope)?.first ?? at;
       const quiet = Math.min(at + WRITE_DELAY_MS, first + WRITE_MAX_DELAY_MS);
-      pending.set(scope, { views, first, due: Math.max(quiet, (written.get(scope) ?? -Infinity) + WRITE_INTERVAL_MS) });
+      pending.set(scope, {
+        views,
+        first,
+        due: Math.max(quiet, (written.get(scope) ?? -Infinity) + WRITE_INTERVAL_MS),
+      });
       arm();
     },
 
@@ -246,13 +259,18 @@ export function createCacheFiles(options: {
       });
     },
 
-    readList: scope => readFile(scope, LIST, data => data.workspaces ?? null),
+    readList: (scope) => readFile(scope, LIST, (data) => data.workspaces ?? null),
 
     writeList(scope, workspaces) {
       const expected = version(scope);
       return serial(async () => {
         if (version(scope) !== expected) return;
-        await replace(scope, LIST, JSON.stringify({ format: CACHE_FORMAT, scope, workspaces }), expected);
+        await replace(
+          scope,
+          LIST,
+          JSON.stringify({ format: CACHE_FORMAT, scope, workspaces }),
+          expected,
+        );
       });
     },
   };
@@ -324,9 +342,9 @@ export function leastJsonBytes(value: unknown, limit: number): number {
   return total;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** A file's fields when it is of this format and for `scope`, or null. */
 function parseFile(text: string, scope: string): Record<string, unknown> | null {
   let data: unknown;
   try {
@@ -340,8 +358,15 @@ function parseFile(text: string, scope: string): Record<string, unknown> | null 
 function savedViews(items: readonly unknown[]): readonly SavedView[] | null {
   const views: SavedView[] = [];
   for (const item of items) {
-    if (!isRecord(item) || typeof item.id !== "string" || typeof item.cursor !== "string" || typeof item.stale !== "boolean" ||
-      item.value === undefined || item.value === null) return null;
+    if (
+      !isRecord(item) ||
+      typeof item.id !== "string" ||
+      typeof item.cursor !== "string" ||
+      typeof item.stale !== "boolean" ||
+      item.value === undefined ||
+      item.value === null
+    )
+      return null;
     views.push({ id: item.id, value: item.value, cursor: item.cursor, stale: item.stale });
   }
   return views;

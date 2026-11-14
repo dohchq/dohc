@@ -1,5 +1,8 @@
 import {
-  PresencePublishRequestPayload, PresencePollPayload, PresenceCancelPayload, PresenceResult,
+  PresencePublishRequestPayload,
+  PresencePollPayload,
+  PresenceCancelPayload,
+  PresenceResult,
   type PresenceScopeInput,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
@@ -8,9 +11,13 @@ import { PresenceMutationOwner } from "../collab/presenceMutationOwner";
 // The relay presence transport has no DOM or React dependency. Main reuses its
 // wire contract and holds the bearer token; renderers call these IPC handlers.
 import {
-  createRelayPresenceTransport, type PresenceScope as RelayPresenceScope,
+  createRelayPresenceTransport,
+  type PresenceScope as RelayPresenceScope,
 } from "../renderer/collab/presenceChannel";
-import type { RendererWorkspaceSender, RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
+import type {
+  RendererWorkspaceSender,
+  RendererWorkspaceSessionOwner,
+} from "../window/rendererWorkspaceSessionOwner";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
@@ -22,9 +29,10 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
   normalizeServerUrl(url: string): string;
   findWorkspace(workspaceId: string): RegistryEntry | null;
 }) {
-  const { warmCredentialCache, currentCredentials, normalizeServerUrl, findWorkspace } = dependencies;
+  const { warmCredentialCache, currentCredentials, normalizeServerUrl, findWorkspace } =
+    dependencies;
 
-  // Presence (MU-C5) relay bounds. Publish/leave are quick, so a 15s cap frees a
+  // Presence relay bounds. Publish/leave are quick, so a 15s cap frees a
   // hung socket. The poll is a long-poll: its own AbortSignal (presenceCancel)
   // governs, and this safety cap only fires if the relay stalls past its hold
   // (<=30s) so an IPC invoke can never dangle forever.
@@ -44,11 +52,7 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
     );
   }
 
-  function presenceMutationKey(
-    scope: PresenceScopeInput,
-    topic: string,
-    clientId: string,
-  ): string {
+  function presenceMutationKey(scope: PresenceScopeInput, topic: string, clientId: string): string {
     return JSON.stringify([presenceScopeTopicKey(scope, topic), clientId]);
   }
   async function presenceRelayTransportForScope(
@@ -73,8 +77,7 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
       };
     } else {
       const joined = (findWorkspace(scope.workspaceId)?.sharedChannels ?? []).some(
-        (channel) =>
-          channel.shareId === scope.shareId && channel.ended !== true,
+        (channel) => channel.shareId === scope.shareId && channel.ended !== true,
       );
       if (!joined) return null;
       relayScope = { kind: "share", shareId: scope.shareId };
@@ -90,11 +93,14 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
   function registerPresenceIpcHandlers<Event extends { sender: Sender }>(dependencies: {
     registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
     assertTrustedSender(event: Event): void;
-    rendererWorkspaceSessions: Pick<RendererWorkspaceSessionOwner<Sender>, "current" | "currentForDocument">;
+    rendererWorkspaceSessions: Pick<
+      RendererWorkspaceSessionOwner<Sender>,
+      "current" | "currentForDocument"
+    >;
   }): void {
     const { registerHandler, assertTrustedSender, rendererWorkspaceSessions } = dependencies;
 
-    // Ephemeral presence (MU-C5): the renderer never receives the relay bearer
+    // Ephemeral presence: the renderer never receives the relay bearer
     // token — its presence transport calls presencePublish/presencePoll/
     // presenceCancel, and MAIN (the sole token holder) makes the actual relay
     // presence request. Scope is authorized here before the relay (which
@@ -110,18 +116,14 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
         event.sender,
         input.rendererDocumentId,
       );
-      if (
-        !rendererSession ||
-        input.scope.workspaceId !== rendererSession.workspaceId
-      ) {
+      if (!rendererSession || input.scope.workspaceId !== rendererSession.workspaceId) {
         return PresenceResult.parse({ ok: false, reason: "unavailable" });
       }
       const key = presenceMutationKey(input.scope, input.topic, input.clientId);
       const resolveLeave = async (): Promise<() => Promise<void>> => {
         const transport = await presenceRelayTransportForScope(input.scope);
         if (!transport) throw new Error("Presence scope is unavailable");
-        return () =>
-          transport.leave({ topic: input.topic, clientId: input.clientId });
+        return () => transport.leave({ topic: input.topic, clientId: input.clientId });
       };
       try {
         if (input.leave === true) {
@@ -177,10 +179,7 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
       assertTrustedSender(event);
       const input = PresencePollPayload.parse(payload);
       const rendererSession = rendererWorkspaceSessions.current(event.sender);
-      if (
-        !rendererSession ||
-        input.scope.workspaceId !== rendererSession.workspaceId
-      ) {
+      if (!rendererSession || input.scope.workspaceId !== rendererSession.workspaceId) {
         return PresenceResult.parse({ ok: false, reason: "aborted" });
       }
       // Register the controller before any await: scope resolution warms the

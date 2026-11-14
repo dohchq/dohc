@@ -61,7 +61,9 @@ const SEEN_KEY = "dohc.whatsNew.seen";
 
 // True once per new release. A first launch records the newest release
 // without opening it, so a new install starts on the person's work.
-export function takeUnseenWhatsNew(storage: Pick<Storage, "getItem" | "setItem"> = localStorage): boolean {
+export function takeUnseenWhatsNew(
+  storage: Pick<Storage, "getItem" | "setItem"> = localStorage,
+): boolean {
   const newest = WHATS_NEW[0]?.version;
   if (newest === undefined) return false;
   try {
@@ -78,7 +80,10 @@ export function takeUnseenWhatsNew(storage: Pick<Storage, "getItem" | "setItem">
 // Windows open together after a restart; the lock lets only one of them
 // take the new release, and it opens the tab before the lock lets go. A
 // window that cannot open the tab leaves the release unseen.
-export async function openUnseenWhatsNewOnce(canOpen: () => boolean, open: () => void): Promise<boolean> {
+export async function openUnseenWhatsNewOnce(
+  canOpen: () => boolean,
+  open: () => void,
+): Promise<boolean> {
   try {
     return await navigator.locks.request(SEEN_KEY, () => {
       if (!canOpen() || !takeUnseenWhatsNew()) return false;

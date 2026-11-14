@@ -15,17 +15,23 @@ type Rgb = [number, number, number];
 // A CSS color as the page paints it over Canvas, the fill forced colors give
 // every surface. macOS resolves the forced Highlight with alpha.
 async function resolveColor(page: Page, css: string): Promise<Rgb> {
-  const [color, canvas] = await page.evaluate((value) => [value, "Canvas"].map((entry) => {
-    const probe = document.createElement("span");
-    probe.style.color = entry;
-    document.body.append(probe);
-    const resolved = getComputedStyle(probe).color;
-    probe.remove();
-    return resolved;
-  }), css);
+  const [color, canvas] = await page.evaluate(
+    (value) =>
+      [value, "Canvas"].map((entry) => {
+        const probe = document.createElement("span");
+        probe.style.color = entry;
+        document.body.append(probe);
+        const resolved = getComputedStyle(probe).color;
+        probe.remove();
+        return resolved;
+      }),
+    css,
+  );
   const [r, g, b, alpha = 1] = color.match(/[\d.]+/g)!.map(Number);
   const backdrop = canvas.match(/[\d.]+/g)!.map(Number);
-  return [r, g, b].map((channel, index) => Math.round(channel * alpha + backdrop[index] * (1 - alpha))) as Rgb;
+  return [r, g, b].map((channel, index) =>
+    Math.round(channel * alpha + backdrop[index] * (1 - alpha)),
+  ) as Rgb;
 }
 
 function near(actual: Rgb, expected: Rgb): boolean {
@@ -49,8 +55,14 @@ async function edgesShowing(page: Page, group: Locator, color: Rgb): Promise<Edg
   const band = Math.round(2 * scale);
   const inward = Array.from({ length: band + 2 }, (_, index) => index - 1);
   const [left, top] = [Math.round(box.x * scale), Math.round(box.y * scale)];
-  const [right, bottom] = [Math.round((box.x + box.width) * scale) - 1, Math.round((box.y + box.height) * scale) - 1];
-  const [middleX, middleY] = [Math.round((box.x + box.width / 2) * scale), Math.round((box.y + box.height / 2) * scale)];
+  const [right, bottom] = [
+    Math.round((box.x + box.width) * scale) - 1,
+    Math.round((box.y + box.height) * scale) - 1,
+  ];
+  const [middleX, middleY] = [
+    Math.round((box.x + box.width / 2) * scale),
+    Math.round((box.y + box.height / 2) * scale),
+  ];
   const found: Edge[] = [];
   if (inward.some((step) => shows(middleX, top + step))) found.push("top");
   if (inward.some((step) => shows(right - step, middleY))) found.push("right");
@@ -63,19 +75,25 @@ async function edgesShowing(page: Page, group: Locator, color: Rgb): Promise<Edg
 // shows its mark, so only the other three edges must lose the ring.
 async function expectRing(page: Page, group: Locator, color: Rgb, shown: boolean) {
   await expect
-    .poll(async () => {
-      const edges = await edgesShowing(page, group, color);
-      return shown ? edges : edges.filter((edge) => edge !== "top");
-    }, { message: `edges showing the ring` })
+    .poll(
+      async () => {
+        const edges = await edgesShowing(page, group, color);
+        return shown ? edges : edges.filter((edge) => edge !== "top");
+      },
+      { message: `edges showing the ring` },
+    )
     .toEqual(shown ? ["top", "right", "bottom", "left"] : []);
 }
 
 async function expectActiveMark(page: Page, active: Locator, inactive: Locator, color: Rgb) {
   await expect
-    .poll(async () => [
-      (await edgesShowing(page, active, color)).includes("top"),
-      (await edgesShowing(page, inactive, color)).includes("top"),
-    ], { message: "the mark on the active group, then on the other" })
+    .poll(
+      async () => [
+        (await edgesShowing(page, active, color)).includes("top"),
+        (await edgesShowing(page, inactive, color)).includes("top"),
+      ],
+      { message: "the mark on the active group, then on the other" },
+    )
     .toEqual([true, false]);
 }
 
@@ -184,8 +202,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     const group = (number: number) => page.getByRole("region", { name: `Editor group ${number}` });
     const accent = await resolveColor(page, "var(--dohc-accent)");
 
-    // One group: closing its last tab from the keyboard leaves it empty and
-    // focused, with the ring on every edge.
     await explorerRow(page, "a.md").click();
     const onlyTab = page.getByTestId(editorTabTestId("a.md"));
     await expect(onlyTab).toHaveAttribute("aria-selected", "true");
@@ -195,9 +211,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await expect(group(1)).toBeFocused();
     await expectRing(page, group(1), accent, true);
 
-    // A split of two groups with a tab each. Closing the right group's last
-    // tab from the keyboard collapses it, and the left group takes focus
-    // with its ring drawn over its open file.
     await explorerRow(page, "a.md").click();
     await group(1).getByTestId("create-editor-group-right").click();
     await tabToGroupTab(page, group(2), group(2).getByTestId(editorTabTestId("a.md")));
@@ -207,10 +220,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await expect(group(1).getByTestId("view-markdown")).toBeVisible();
     await expectRing(page, group(1), accent, true);
 
-    // Three groups, the middle one emptied by moving its tab to the left
-    // group. Closing the right group's last tab from the keyboard collapses
-    // it and focuses the empty middle group, still split beside a group with
-    // a tab.
     await group(1).getByTestId("create-editor-group-right").click();
     await group(2).getByTestId("create-editor-group-right").click();
     await expect(group(3)).toBeVisible();
@@ -223,8 +232,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await expect(group(2)).toHaveAttribute("aria-current", "true");
     await expectRing(page, group(2), accent, true);
 
-    // Focus leaves the groups: the ring goes, and the active group's mark
-    // stays on the empty group alone.
     await explorerRow(page, "a.md").focus();
     await expectRing(page, group(2), accent, false);
     await expectActiveMark(page, group(2), group(1), accent);
@@ -240,8 +247,6 @@ test("a group focused by a keyboard close shows its whole ring, and the active g
     await explorerRow(page, "a.md").focus();
     await expectActiveMark(page, group(1), group(2), highlight);
 
-    // A keyboard close in forced colors: the left group collapses and the
-    // empty group left alone takes focus with its ring on every edge.
     await tabToGroupTab(page, group(1), group(1).getByTestId(editorTabTestId("a.md")));
     await page.keyboard.press("Delete");
     await expect(group(2)).toHaveCount(0);

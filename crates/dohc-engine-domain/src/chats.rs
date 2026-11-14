@@ -1,41 +1,31 @@
-//! [`LinkedChatStore`]: the chats domain over the R04 storage core.
+//! [`LinkedChatStore`]: the chats domain over the storage core.
 //!
-//! The chat surface — channels, threads, messages, per-thread read state,
-//! receiver-private follows / personal feed / bookmarks, and the durable agent
-//! dispatch ledger — composed ON the storage seam exactly like the versioning
-//! domain: reads via [`EngineStore::read_with`], every compound mutation via
-//! [`EngineStore::write_with`] so each compound write commits in one
-//! `BEGIN IMMEDIATE` transaction. Storage
-//! owns the connection, open ritual, transaction boundary, and the crash
-//! fault seam; this crate owns what a channel / thread / message / read-cursor /
-//! follow / bookmark / dispatch claim *means* (the TS `linkedChatStore.ts` +
-//! `agentDispatchStore.ts` oracle behavior).
+//! The chat surface is channels, threads, messages, per-thread read state,
+//! receiver-private follows, personal feed, bookmarks, and the durable agent
+//! dispatch ledger. It is composed on the storage seam like the versioning
+//! domain: reads go through [`EngineStore::read_with`], and every compound
+//! mutation goes through [`EngineStore::write_with`], so it commits in one
+//! `BEGIN IMMEDIATE` transaction. Storage owns the connection, open ritual,
+//! transaction boundary, and the crash fault seam. This crate owns what a
+//! channel, thread, message, read cursor, follow, bookmark, and dispatch claim
+//! mean.
 //!
 //! Content identity is caller-supplied: `channel_id`, `thread_id`,
-//! `message_id`, and `run_id` are inputs — the same determinism the
-//! versioning domain uses (`object_id`/`moment_id` are inputs). This keeps the
-//! differential harness able to pin exact rows. Local replication origins are
-//! store-owned and initialized lazily, while bookmark ids are deterministically
-//! derived from their owner and target, matching the TS store.
+//! `message_id`, and `run_id` are inputs, as `object_id` and `moment_id` are
+//! in the versioning domain. This lets the differential harness pin exact
+//! rows. Local replication origins are store-owned and initialized lazily.
+//! Bookmark ids are derived deterministically from their owner and target.
 //!
-//! **Parity-critical, non-tautological surfaces** (validated against real TS
-//! output, not Rust's own):
-//! - [`channel_slug_for_name`] — NFC + lowercase + dash-collapse slug (matrix
-//!   4.1b). A rename never forks channel state (durable rows key on
-//!   `channel_id`; the slug is a lookup alias).
-//! - [`linked_chat_projection_path`] — NFC projection fields feed a
-//!   `sha256` + base32-lowercase digest into `.dohc/chats/v1-<b32>.md` (matrix
-//!   4.1b). An NFD input yields the byte-identical path as the NFC input.
-//! - [`encode_feed_cursor`] / [`decode_feed_cursor`] — unpadded base64url of a
-//!   JSON `[createdAtMs, messageId]` body (matrix 4.8). A TS-minted cursor
-//!   round-trips; any decode/shape failure fails closed as `invalid-follow-target`.
-//!
-//! **Scoped to R10 (sync) or later, with notes in the crate docs**: the
-//! replication-op apply arms (`chat.*` receiver-private LWW application),
-//! reactions/decisions/attachment/mention indexing detail, and the desktop-side
-//! bookmark projection materialization. R09 ships the LOCAL write/read/list
-//! primitives, the atomic-send + read-CAS models, the generation-CAS bookmark
-//! outbox, and the single-writer dispatch ledger.
+//! Parity-critical surfaces, validated against real TS output:
+//! - [`channel_slug_for_name`]: NFC + lowercase + dash-collapse slug. A rename
+//!   never forks channel state (durable rows key on `channel_id`; the slug is
+//!   a lookup alias).
+//! - [`linked_chat_projection_path`]: NFC projection fields feed a
+//!   `sha256` + base32-lowercase digest into `.dohc/chats/v1-<b32>.md`. An NFD
+//!   input yields the byte-identical path as the NFC input.
+//! - [`encode_feed_cursor`] / [`decode_feed_cursor`]: unpadded base64url of a
+//!   JSON `[createdAtMs, messageId]` body. A TS-minted cursor round-trips; any
+//!   decode/shape failure fails closed as `invalid-follow-target`.
 
 mod dispatch;
 mod pending_replay;
@@ -70,8 +60,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use unicode_normalization::UnicodeNormalization as _;
 
-// ------------------------------------------------------------------- constants
-
 /// The auto-created default channel's display name.
 pub const GENERAL_CHANNEL_NAME: &str = "general";
 /// Deterministic cross-machine wire id for the auto-created `general` channel,
@@ -89,7 +77,6 @@ pub const DEFAULT_AGENT_ID: &str = "default";
 /// An agent chat's slug, and every slug that starts with it and a dash, is
 /// reserved for agent chats.
 const AGENT_CHANNEL_SLUG: &str = "my-agent";
-/// At most this many agents wake for one message.
 const MAX_WAKE_AGENTS: usize = 64;
 /// Workspace-only emptiness probe used to skip the full pending replay scan.
 pub const PENDING_CHAT_WORKSPACE_EXISTS_SQL: &str = "\
@@ -111,7 +98,6 @@ pub const LINK_MESSAGE_ID_PREFIX: &str = "link-message:";
 pub const LINK_THREAD_ID_PREFIX: &str = "link-thread:";
 /// The relay's origin for one link holder's posts.
 pub const LINK_ORIGIN_PREFIX: &str = "relay:share-link:";
-/// The relay's origin for one personal agent's chat: its DM and its posts.
 pub const PERSONAL_AGENT_ORIGIN_PREFIX: &str = "relay:personal-agent:";
 /// The relay names a personal agent's messages and new threads with these
 /// prefixes; no other message or thread may use them.
@@ -120,9 +106,14 @@ pub const PERSONAL_THREAD_ID_PREFIX: &str = "personal-thread:";
 /// Every personal agent's id starts with this. A settings file can't use it,
 /// so only the agent's relay origin names one as an author.
 pub const PERSONAL_AGENT_ID_PREFIX: &str = "p-";
-/// Thread title char cap (`normalizeThreadTitle`).
+/// The payload field that declares a record owner-private: it changes only
+/// the named account's own state, and a copy can leave it out without changing
+/// shared content, permissions, history, or any other record's meaning. A
+/// reader that doesn't know such a record's kind keeps it quietly and applies
+/// it once it does. The relay admits the field only on the kinds it registers
+/// as owner-private, and only naming the account that pushed the record.
+pub const OWNER_PRIVATE_MARKER: &str = "ownerPrivateAccountId";
 const MAX_THREAD_TITLE_CHARS: usize = 200;
-/// Channel name char cap (`normalizeChannelName`).
 const MAX_CHANNEL_NAME_CHARS: usize = 80;
 /// Group purpose char cap: one line.
 const MAX_CHANNEL_PURPOSE_CHARS: usize = 200;
@@ -130,9 +121,7 @@ const MAX_CHANNEL_PURPOSE_CHARS: usize = 200;
 /// many characters.
 const MAX_POLL_OPTIONS: usize = 12;
 const MAX_POLL_OPTION_CHARS: usize = 200;
-/// Group folder path char cap.
 const MAX_CHANNEL_FOLDER_PATH_CHARS: usize = 512;
-/// Display-name char cap (`normalizeDisplayName`).
 const MAX_DISPLAY_NAME_CHARS: usize = 200;
 /// Opaque relay user-id char cap (`normalizeAuthorUserId`).
 const MAX_AUTHOR_USER_ID_CHARS: usize = 200;
@@ -143,9 +132,7 @@ const MAX_ATTACHMENT_HEADING_TEXT_UTF16_UNITS: usize = 300;
 const MAX_ATTACHMENT_HEADING_ANCHOR_UTF16_UNITS: usize = 400;
 /// Opening-message preview bound used by channel summaries.
 const OPENING_MESSAGE_BODY_SNIPPET_UTF16_UNITS: usize = 500;
-/// Feed cursor string cap (`decodeFeedCursor`).
 const MAX_FEED_CURSOR_LEN: usize = 512;
-/// Feed cursor message-id char cap (`decodeFeedCursor`).
 const MAX_FEED_CURSOR_MESSAGE_ID_CHARS: usize = 256;
 /// Maximum UTF-8 bytes available to a message id in a worst-case feed cursor.
 /// A 512-byte unpadded-base64url value decodes to at most 384 bytes. The JSON
@@ -165,20 +152,17 @@ pub const CHAT_THREAD_HEADER_MESSAGE_ID: &str = "__thread__";
 pub const THREAD_SNIPPET_TITLE_MAX_CHARS: usize = 80;
 /// Untitled-thread fallback (`UNTITLED_THREAD_FALLBACK_TITLE`).
 const UNTITLED_THREAD_FALLBACK_TITLE: &str = "New chat";
-/// Feed page limit bounds (`listPersonalFeed`).
 const FEED_LIMIT_MAX: i64 = 100;
 const FEED_LIMIT_DEFAULT: i64 = 20;
 /// Hard upper bound on a single [`LinkedChatStore::list_messages`] page. A caller
 /// asking for more is clamped to this; the returned `next_after_message_order`
-/// cursor pages the rest. Keeps every read bounded (plan §Rust policy).
+/// cursor pages the rest. Keeps every read bounded.
 pub const MAX_MESSAGE_PAGE: i64 = 500;
 /// Maximum rows in one convenience list read. Channel and follow RPC lists
 /// use bounded keyset pages to continue beyond it.
 const MAX_LIST_ROWS: i64 = 10_000;
 /// base32 lowercase (RFC 4648, no padding) alphabet (`linkedChatStore.ts:557`).
 const BASE32_LOWERCASE_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-
-// --------------------------------------------------------------------- records
 
 /// A chat channel kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -948,8 +932,6 @@ pub struct MentionCursor {
     pub message_id: String,
 }
 
-// ---------------------------------------------------------------------- inputs
-
 /// Inputs to [`LinkedChatStore::start_channel_thread`].
 #[derive(Debug, Clone)]
 pub struct StartChannelThread {
@@ -1134,9 +1116,6 @@ pub struct ChatMessagePage {
     pub agent_requests: HashMap<String, Vec<StreamAgentRequest>>,
 }
 
-// --------------------------------------------------------------- parity helpers
-
-/// NFC-normalize a string (matrix 4.1b identity normalization).
 fn nfc(value: &str) -> String {
     value.nfc().collect()
 }
@@ -1519,8 +1498,6 @@ pub fn bookmark_id_for(
     format!("bookmark_{}", base32_lowercase_no_padding(&digest[..16]))
 }
 
-/// The control-char class shared by the projection/heading/channel validators
-/// (`PROJECTION_FIELD_CONTROL_CHAR = /[\x00-\x1f\x7f]/u`).
 pub fn has_projection_control_char(value: &str) -> bool {
     value
         .chars()
@@ -1528,7 +1505,7 @@ pub fn has_projection_control_char(value: &str) -> bool {
 }
 
 /// Encode a personal-feed cursor: unpadded base64url of the JSON body
-/// `[createdAtMs, messageId]` (`encodeFeedCursor`, matrix 4.8). Byte-parity with
+/// `[createdAtMs, messageId]` (`encodeFeedCursor`). Byte-parity with
 /// the TS `Buffer.from(JSON.stringify([...]), "utf8").toString("base64url")`.
 pub fn encode_feed_cursor(value: &FeedCursorValue) -> String {
     // serde_json serializes an i64 as an integer literal and a tuple as a JSON
@@ -1539,7 +1516,7 @@ pub fn encode_feed_cursor(value: &FeedCursorValue) -> String {
 }
 
 /// Decode a personal-feed cursor, failing closed as `invalid-follow-target` on
-/// any decode/shape violation (`decodeFeedCursor`, matrix 4.8). Accepts exactly
+/// any decode/shape violation (`decodeFeedCursor`). Accepts exactly
 /// the strings the TS engine emits (unpadded url-safe base64 of the JSON body).
 ///
 /// Deliberate divergence (Rust is stricter, fail-closed, on NON-engine-minted
@@ -1551,7 +1528,7 @@ pub fn encode_feed_cursor(value: &FeedCursorValue) -> String {
 /// string near the 256 boundary can be rejected on one engine and accepted on
 /// the other. Engine-MINTED cursors round-trip byte-exact on both sides (pinned
 /// by the differential); the divergence only tightens acceptance of adversarial
-/// client input, which is the safe direction. R10/differential must treat this
+/// client input, which is the safe direction. The differential must treat this
 /// as intended, not a bug.
 pub fn decode_feed_cursor(cursor: &str) -> Result<FeedCursorValue, DomainError> {
     let invalid = || DomainError::chat("invalid-follow-target", "Feed cursor is invalid.");
@@ -1586,8 +1563,6 @@ pub fn decode_feed_cursor(cursor: &str) -> Result<FeedCursorValue, DomainError> 
         message_id: message_id.to_owned(),
     })
 }
-
-// --------------------------------------------------------------- normalization
 
 fn validate_chat_page_limit(limit: i64) -> Result<(), DomainError> {
     if !(1..=501).contains(&limit) {
@@ -2844,8 +2819,6 @@ fn normalize_mention_handle(handle: &str) -> Result<String, DomainError> {
         .ok_or_else(|| DomainError::chat("invalid-message-body", "Mention handle is invalid."))
 }
 
-// ----------------------------------------------------------------------- store
-
 /// The chats domain bound to one workspace store. Cheap to construct per call;
 /// holds only a mutable borrow of the writer.
 pub struct LinkedChatStore<'a> {
@@ -2921,8 +2894,6 @@ impl<'a> LinkedChatStore<'a> {
             TxnOutcome::Crashed { committed } => TxnOutcome::Crashed { committed },
         })
     }
-
-    // -------------------------------------------------------------- channels
 
     /// Create a channel: reserved-slug rules, per-workspace slug uniqueness, and
     /// a wire-id mapping to its own channel id (`createChannel`). `agent` kind is
@@ -3299,8 +3270,6 @@ impl<'a> LinkedChatStore<'a> {
             wire_id_for_channel_id(conn, workspace_id, &channel.channel_id)
         })
     }
-
-    // ------------------------------------------------------- threads/messages
 
     /// Create one file-linked thread with exactly one owner. The row, search
     /// header, relay-visible op, compatibility journal row, and request ledger
@@ -5291,8 +5260,6 @@ impl<'a> LinkedChatStore<'a> {
             .read_with(|conn| chat_conversation_revision(conn, workspace_id, thread_id))
     }
 
-    // ------------------------------------------------------------- read state
-
     /// Mark a thread read up to `up_to_sequence` (`markThreadRead`). The local
     /// cursor takes an optional CAS against `expected_revision`, is monotonic
     /// (never moves backwards), is clamped to the thread's real message count,
@@ -5578,8 +5545,6 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    // ---------------------------------------------------------- follows/feed
-
     /// LWW-upsert a follow register (`setFollow`). Relay journaling is gated on
     /// a verified replication owner matching the local feed owner.
     /// The winner is decided by `(updated_at_ms, unfollowed>following,
@@ -5597,13 +5562,13 @@ impl<'a> LinkedChatStore<'a> {
             .as_deref()
             .map(|owner| normalize_feed_identity(owner, "Replication feed owner"))
             .transpose()?;
-        if let Some(replication_owner_user_id) = &replication_owner_user_id {
-            if replication_owner_user_id != &owner_user_id {
-                return Err(DomainError::chat(
-                    "invalid-follow-target",
-                    "Replication feed owner must match the local feed owner.",
-                ));
-            }
+        if let Some(replication_owner_user_id) = &replication_owner_user_id
+            && replication_owner_user_id != &owner_user_id
+        {
+            return Err(DomainError::chat(
+                "invalid-follow-target",
+                "Replication feed owner must match the local feed owner.",
+            ));
         }
         let target_id = normalize_feed_identity(&input.target_id, "Follow target")?;
         let mut input = input.clone();
@@ -5711,13 +5676,14 @@ impl<'a> LinkedChatStore<'a> {
         // Oracle `listFollows`: an omitted state returns all rows — unfollow
         // tombstones included, which reseeding flows inspect — and a present
         // state must be one of the two follow states.
-        if let Some(state) = state {
-            if state != "following" && state != "unfollowed" {
-                return Err(DomainError::chat(
-                    "invalid-follow-target",
-                    "Follow state is invalid.",
-                ));
-            }
+        if let Some(state) = state
+            && state != "following"
+            && state != "unfollowed"
+        {
+            return Err(DomainError::chat(
+                "invalid-follow-target",
+                "Follow state is invalid.",
+            ));
         }
         self.store.read_with(|conn| {
             let mut stmt = conn
@@ -5898,13 +5864,13 @@ impl<'a> LinkedChatStore<'a> {
         let replication_owner_user_id = replication_owner_user_id
             .map(|owner| normalize_feed_identity(owner, "Replication feed owner"))
             .transpose()?;
-        if let Some(replication_owner_user_id) = &replication_owner_user_id {
-            if replication_owner_user_id != &owner_user_id {
-                return Err(DomainError::chat(
-                    "invalid-follow-target",
-                    "Replication feed owner must match the local feed owner.",
-                ));
-            }
+        if let Some(replication_owner_user_id) = &replication_owner_user_id
+            && replication_owner_user_id != &owner_user_id
+        {
+            return Err(DomainError::chat(
+                "invalid-follow-target",
+                "Replication feed owner must match the local feed owner.",
+            ));
         }
         let cursor = decode_feed_cursor(head_cursor)?;
         let ws = workspace_id.to_owned();
@@ -5959,18 +5925,20 @@ impl<'a> LinkedChatStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             if replication_owner_user_id.is_some() {
+                let mut payload = serde_json::json!({
+                    "ownerUserId": owner,
+                    "lastSeenCreatedAtMs": last_seen_created_at_ms,
+                    "lastSeenMessageId": msg,
+                    "atMs": at_ms,
+                });
+                payload[OWNER_PRIVATE_MARKER] = serde_json::Value::from(owner.as_str());
                 insert_local_replication_op(
                     tx,
                     &ws,
                     &origin_id,
                     origin_seq,
                     "chat.feed.read.set",
-                    &serde_json::json!({
-                        "ownerUserId": owner,
-                        "lastSeenCreatedAtMs": last_seen_created_at_ms,
-                        "lastSeenMessageId": msg,
-                        "atMs": at_ms,
-                    }),
+                    &payload,
                     at_ms,
                 )?;
             }
@@ -6205,8 +6173,6 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    // ------------------------------------------------------------- bookmarks
-
     /// Save (upsert) a workspace-backed bookmark keyed by `(owner, target)` and
     /// queue a projection generation (`saveBookmark`). A new bookmark seeds an
     /// outbox row at generation 1 (`pending`); an existing bookmark bumps the
@@ -6249,7 +6215,6 @@ impl<'a> LinkedChatStore<'a> {
         input.destination_path = destination_path;
         let now = input.now_ms;
         let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
-            // Resolve the thread (+ message) the bookmark targets.
             let (thread_id, message_id) = match input.target_kind {
                 BookmarkTargetKind::Thread => {
                     let thread = require_thread(tx, &input.workspace_id, &input.target_id)?;
@@ -6360,13 +6325,14 @@ impl<'a> LinkedChatStore<'a> {
         state: Option<&str>,
     ) -> Result<Vec<ChatBookmark>, DomainError> {
         let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
-        if let Some(state) = state {
-            if state != "active" && state != "archived" {
-                return Err(DomainError::chat(
-                    "invalid-bookmark-target",
-                    "Bookmark state is invalid.",
-                ));
-            }
+        if let Some(state) = state
+            && state != "active"
+            && state != "archived"
+        {
+            return Err(DomainError::chat(
+                "invalid-bookmark-target",
+                "Bookmark state is invalid.",
+            ));
         }
         self.store.read_with(|conn| {
             let mut stmt = conn
@@ -6797,10 +6763,6 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 }
-
-// ============================================================================
-// Free helpers (SQL over a borrowed connection/transaction).
-// ============================================================================
 
 /// The personal-feed candidate query: exact TS visibility predicate with a
 /// keyset cursor gated by `?3` (has_cursor). Newest first.
@@ -8310,19 +8272,21 @@ fn advance_account_thread_read(
         )?;
     }
     if let Some((published_at_ms, published_id)) = publish {
+        let mut payload = serde_json::json!({
+            "accountUserId": account_user_id,
+            "threadId": thread_id,
+            "lastReadCreatedAtMs": published_at_ms,
+            "lastReadMessageId": published_id,
+            "atMs": at_ms,
+        });
+        payload[OWNER_PRIVATE_MARKER] = serde_json::Value::from(account_user_id);
         insert_local_replication_op(
             tx,
             workspace_id,
             &origin_id,
             origin_seq,
             "chat.thread.read.set",
-            &serde_json::json!({
-                "accountUserId": account_user_id,
-                "threadId": thread_id,
-                "lastReadCreatedAtMs": published_at_ms,
-                "lastReadMessageId": published_id,
-                "atMs": at_ms,
-            }),
+            &payload,
             at_ms,
         )?;
     }
@@ -9249,8 +9213,6 @@ fn mention_backfill_marker_id(workspace_id: &str) -> String {
         hash_fields(&[workspace_id.as_bytes()])
     )
 }
-
-// -------------------------------------------------------------------- mappers
 
 fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChannel, DomainError>> {
     let workspace_id: String = row.get(0)?;

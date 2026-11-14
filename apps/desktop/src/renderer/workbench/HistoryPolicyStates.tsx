@@ -1,6 +1,10 @@
 import { EyeOff, TriangleAlert, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
-import type { HistoryPolicyUnreadableResult, WorkspacePolicyFile, WorkspacePolicyPath } from "../../ipc/bridgeContract";
+import type {
+  HistoryPolicyUnreadableResult,
+  WorkspacePolicyFile,
+  WorkspacePolicyPath,
+} from "../../ipc/bridgeContract";
 import { errorDetails } from "../shell/copyDetails";
 import { CopyButton } from "../ui/CopyButton";
 import { EmptyState, SecondaryButton } from "../ui/controls";
@@ -14,7 +18,10 @@ function unreadableFiles(unreadable: readonly WorkspacePolicyPath[]): WorkspaceP
 }
 
 // What dohc can't read, and what the person fixes.
-function unreadableWords(unreadable: readonly WorkspacePolicyPath[]): { what: string; fix: string } {
+function unreadableWords(unreadable: readonly WorkspacePolicyPath[]): {
+  what: string;
+  fix: string;
+} {
   const files = unreadableFiles(unreadable);
   if (files.length === 0) return { what: "this workspace's .dohc folder", fix: "Fix the folder" };
   return { what: files.join(" and "), fix: files.length > 1 ? "Fix the files" : "Fix the file" };
@@ -32,7 +39,10 @@ export function restoreRulesUnreadableWords(unreadable: readonly WorkspacePolicy
 }
 
 // The first step on each panel: the rules file to fix, named on its button.
-function OpenRulesFile(props: { file: WorkspacePolicyFile; onOpenFile: (file: WorkspacePolicyFile) => void }) {
+function OpenRulesFile(props: {
+  file: WorkspacePolicyFile;
+  onOpenFile: (file: WorkspacePolicyFile) => void;
+}) {
   return (
     <SecondaryButton onClick={() => props.onOpenFile(props.file)}>
       {`Open ${props.file.slice(".dohc/".length)}`}
@@ -68,12 +78,7 @@ export function HistoryHiddenState(props: {
   const words = historyHiddenWords(props.result.unreadable);
   const file = unreadableFiles(props.result.unreadable)[0];
   return (
-    <PolicyState
-      testId={props.testId}
-      icon={TriangleAlert}
-      tone="danger"
-      words={words}
-    >
+    <PolicyState testId={props.testId} icon={TriangleAlert} tone="danger" words={words}>
       {file ? <OpenRulesFile file={file} onOpenFile={props.onOpenFile} /> : null}
       <SecondaryButton onClick={props.onRetry}>Try again</SecondaryButton>
       <CopyButton
@@ -81,7 +86,10 @@ export function HistoryHiddenState(props: {
         pinName
         label="Copy details"
         getText={() =>
-          errorDetails([["Error", words], ...props.result.policyErrors.map((error) => ["Cause", error] as const)])
+          errorDetails([
+            ["Error", words],
+            ...props.result.policyErrors.map((error) => ["Cause", error] as const),
+          ])
         }
       />
     </PolicyState>

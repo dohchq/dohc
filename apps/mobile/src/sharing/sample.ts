@@ -44,23 +44,75 @@ const maya = { email: "maya@example.com", initials: "MC", hue: "#b4583e" };
 const priya = { email: "priya@example.com", initials: "PR", hue: "#8a5aa0" };
 const leo = { email: "leo@example.com", initials: "LP", hue: "#5f7a3a" };
 
-const named = (person: SamplePerson, level: ShareLevel): ShareGrant => ({ via: "named", level, who: person.email });
+const named = (person: SamplePerson, level: ShareLevel): ShareGrant => ({
+  via: "named",
+  level,
+  who: person.email,
+});
 
 export const sampleGranted: readonly GrantedShare[] = [
-  { shareId: "s-packing", kind: "file", name: "packing-list.md", title: "trip/packing-list.md",
-    grants: [named(sam, "edit")], people: [sam], invitation: "https://drive.example.com/invite/sample-packing-list",
-    waiting: { count: 2, senders: [sam.email] } },
-  { shareId: "s-itinerary", kind: "file", name: "days.md +2", title: "itinerary/days.md, itinerary/stays.md, itinerary/food.md",
-    grants: [named(maya, "edit"), named(priya, "view"), named(leo, "view")], people: [maya, priya, leo], invitation: null, waiting: null },
-  { shareId: "s-budget", kind: "file", name: "budget.md", title: "trip/budget.md",
-    grants: [{ via: "link", level: "comment", who: "" }], people: [], invitation: null, waiting: null },
+  {
+    shareId: "s-packing",
+    kind: "file",
+    name: "packing-list.md",
+    title: "trip/packing-list.md",
+    grants: [named(sam, "edit")],
+    people: [sam],
+    invitation: "https://drive.example.com/invite/sample-packing-list",
+    waiting: { count: 2, senders: [sam.email] },
+  },
+  {
+    shareId: "s-itinerary",
+    kind: "file",
+    name: "days.md +2",
+    title: "itinerary/days.md, itinerary/stays.md, itinerary/food.md",
+    grants: [named(maya, "edit"), named(priya, "view"), named(leo, "view")],
+    people: [maya, priya, leo],
+    invitation: null,
+    waiting: null,
+  },
+  {
+    shareId: "s-budget",
+    kind: "file",
+    name: "budget.md",
+    title: "trip/budget.md",
+    grants: [{ via: "link", level: "comment", who: "" }],
+    people: [],
+    invitation: null,
+    waiting: null,
+  },
 ];
 
 export const sampleReceived: readonly ReceivedShare[] = [
-  { shareId: "r-roster", kind: "folder", name: "Volunteer roster", sender: "Priya Raman", senderPerson: priya, level: "comment", status: null },
-  { shareId: "r-photos", kind: "folder", name: "Photo picks", sender: "Maya Chen", senderPerson: maya, level: null, status: "ended" },
-  { shareId: "r-garden", kind: "file", name: "garden-plan.md", sender: "Leo Park", senderPerson: leo, level: null, status: "damaged" },
+  {
+    shareId: "r-roster",
+    kind: "folder",
+    name: "Volunteer roster",
+    sender: "Priya Raman",
+    senderPerson: priya,
+    level: "comment",
+    status: null,
+  },
+  {
+    shareId: "r-photos",
+    kind: "folder",
+    name: "Photo picks",
+    sender: "Maya Chen",
+    senderPerson: maya,
+    level: null,
+    status: "ended",
+  },
+  {
+    shareId: "r-garden",
+    kind: "file",
+    name: "garden-plan.md",
+    sender: "Leo Park",
+    senderPerson: leo,
+    level: null,
+    status: "damaged",
+  },
 ];
 
 /** Shares this phone can end: those named to people. Links and chats end where they were made. */
-export const endable = (share: GrantedShare) => share.grants.length > 0 && share.grants.every(grant => grant.via === "named");
+export const endable = (share: GrantedShare) =>
+  share.grants.length > 0 && share.grants.every((grant) => grant.via === "named");

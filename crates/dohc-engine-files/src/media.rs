@@ -1,7 +1,6 @@
-//! Extension → media-type mapping, ported byte-for-byte from the retired
-//! reference accelerator's `media_type_for_path` so a CAL-3 scan listing is
-//! comparable to the accelerator's documented output (`tests/fixtures/workspace-kernel/`)
-//! in the differential harness. The mapping is deliberately small and
+//! Extension → media-type mapping. It matches the documented output in
+//! `tests/fixtures/workspace-kernel/`, which the differential harness compares
+//! a scan listing against. The mapping is deliberately small and
 //! extension-driven; unknown extensions are `application/octet-stream`.
 
 /// The media type for a workspace-relative path, by its lowercased extension.
@@ -36,7 +35,6 @@ pub fn media_type_for_path(rel_path: &str) -> &'static str {
 /// still stored as binary. `TEXT_EXTENSIONS` in
 /// `packages/workspace-fs/src/metadata.ts` is the same list.
 const TEXT_EXTENSIONS: &[&str] = &[
-    // Data and documents.
     "json",
     "geojson",
     "json5",
@@ -48,7 +46,6 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "md",
     "markdown",
     "txt",
-    // Code.
     "ts",
     "tsx",
     "cts",
@@ -107,7 +104,6 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "psm1",
     "bat",
     "cmd",
-    // Configuration.
     "toml",
     "yaml",
     "yml",

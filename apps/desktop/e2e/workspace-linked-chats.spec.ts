@@ -14,7 +14,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// PR 0M-5 linked Chats rail E2E: create a chat about a file, send a message,
+// Linked Chats rail E2E: create a chat about a file, send a message,
 // survive a relaunch and a rename (stable engine object id), and render
 // agent-authored messages as "their stored name".
 
@@ -38,10 +38,8 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     await explorerRow(page, "notes/topic.md").click();
     await openAboutPanel(page);
 
-    // Calm empty state, then create.
     await expect(page.getByTestId("about-chats-count")).toHaveText("0");
     await expect(page.getByTestId("linked-chat-open")).toHaveCount(0);
-    // A comment on the whole file: its first line titles the chat.
     await page.getByTestId("linked-chat-new").click();
     const comment = page.getByTestId("linked-chat-new-composer");
     await comment.fill("Naming discussion\nShould we rename this topic?");
@@ -50,10 +48,8 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     await expect(page.getByTestId("linked-chat-message-body")).toContainText(
       "Should we rename this topic?",
     );
-    // Signed-out desktop: the human author displays as "You".
     await expect(page.getByTestId("linked-chat-message-author")).toHaveText("You");
 
-    // Relaunch: the chat is durable in the engine store.
     await desktop.close();
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
@@ -62,9 +58,7 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     await revealExplorerPath(page, "notes/topic.md");
     await explorerRow(page, "notes/topic.md").click();
     await openAboutPanel(page);
-    await expect(page.getByTestId("linked-chat-open")).toContainText(
-      "Naming discussion",
-    );
+    await expect(page.getByTestId("linked-chat-open")).toContainText("Naming discussion");
     await page.getByTestId("linked-chat-open").click();
     await expect(page.getByTestId("linked-chat-message-body")).toContainText(
       "Should we rename this topic?",
@@ -74,15 +68,17 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
     // stable engine object id to its new path.
     await page.evaluate(
       async ({ id }) => {
-        const api = (window as unknown as {
-          dohcDesktop: {
-            moveWorkspacePath(payload: {
-              workspaceId: string;
-              fromPath: string;
-              toPath: string;
-            }): Promise<unknown>;
-          };
-        }).dohcDesktop;
+        const api = (
+          window as unknown as {
+            dohcDesktop: {
+              moveWorkspacePath(payload: {
+                workspaceId: string;
+                fromPath: string;
+                toPath: string;
+              }): Promise<unknown>;
+            };
+          }
+        ).dohcDesktop;
         await api.moveWorkspacePath({
           workspaceId: id,
           fromPath: "notes/topic.md",
@@ -91,20 +87,18 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
       },
       { id: workspace.workspaceId },
     );
-    await waitForWorkspaceFile(
-      page,
-      workspace.workspaceId,
-      "notes/renamed-topic.md",
-    );
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/renamed-topic.md");
     await page.waitForFunction(
       async ({ id }) => {
-        const api = (window as unknown as {
-          dohcDesktop?: {
-            listFileChats(payload: { workspaceId: string; path: string }): Promise<{
-              threads: Array<{ title: string }>;
-            }>;
-          };
-        }).dohcDesktop;
+        const api = (
+          window as unknown as {
+            dohcDesktop?: {
+              listFileChats(payload: { workspaceId: string; path: string }): Promise<{
+                threads: Array<{ title: string }>;
+              }>;
+            };
+          }
+        ).dohcDesktop;
         if (!api) return false;
         const result = await api.listFileChats({
           workspaceId: id,
@@ -119,53 +113,47 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
   }
 });
 
-test("agent-authored messages render as \"their stored name\"", async () => {
+test('agent-authored messages render as "their stored name"', async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "chats-agent-render";
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    // Seed BEFORE launch, through the engine daemon (post-cutover the
-    // retired TS in-process store is refused): the file exists in the engine
+    // Seed before launch, through the engine daemon: the file exists in the engine
     // (and identically on disk so startup reconciliation is a no-op), with a
     // linked chat that already carries one human and one agent message.
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/agenda.md", contents: "# Agenda\n" },
-    ]);
-    await seedThroughDaemon(
-      { workspaceId, rootPath: temp.rootPath },
-      async ({ chats, files }) => {
-        await files.ensureMainVersion({ workspaceId });
-        const seeded = await files.writeTextFile({
-          workspaceId,
-          versionId: "main",
-          path: "notes/agenda.md",
-          text: "# Agenda\n",
-          metadata: { origin: "local-file" },
-        });
-        const thread = await chats.createThread({
-          workspaceId,
-          title: "Agenda review",
-          linkedFile: { objectId: seeded.object.id, pathHint: "notes/agenda.md" },
-        });
-        await chats.sendMessage({
-          authorActorKey: null,
-          workspaceId,
-          threadId: thread.id,
-          author: { kind: "human", displayName: "Sam Rivera" },
-          body: "Can you tighten the agenda?",
-        });
-        await chats.sendMessage({
-          authorActorKey: null,
-          workspaceId,
-          threadId: thread.id,
-          author: { kind: "agent", displayName: "Nova" },
-          authorOwnerDisplayName: "Sam Rivera",
-          body: "Done — trimmed it to three items.",
-        });
-      },
-    );
+    await writeWorkspaceFiles(temp, [{ path: "notes/agenda.md", contents: "# Agenda\n" }]);
+    await seedThroughDaemon({ workspaceId, rootPath: temp.rootPath }, async ({ chats, files }) => {
+      await files.ensureMainVersion({ workspaceId });
+      const seeded = await files.writeTextFile({
+        workspaceId,
+        versionId: "main",
+        path: "notes/agenda.md",
+        text: "# Agenda\n",
+        metadata: { origin: "local-file" },
+      });
+      const thread = await chats.createThread({
+        workspaceId,
+        title: "Agenda review",
+        linkedFile: { objectId: seeded.object.id, pathHint: "notes/agenda.md" },
+      });
+      await chats.sendMessage({
+        authorActorKey: null,
+        workspaceId,
+        threadId: thread.id,
+        author: { kind: "human", displayName: "Sam Rivera" },
+        body: "Can you tighten the agenda?",
+      });
+      await chats.sendMessage({
+        authorActorKey: null,
+        workspaceId,
+        threadId: thread.id,
+        author: { kind: "agent", displayName: "Nova" },
+        authorOwnerDisplayName: "Sam Rivera",
+        body: "Done — trimmed it to three items.",
+      });
+    });
 
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);

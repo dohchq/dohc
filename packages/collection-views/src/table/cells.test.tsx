@@ -6,13 +6,7 @@ import type { CollectionValue, FieldDefinition } from "@dohc/workspace-contracts
 import type { CollectionQueryExecutor } from "../store";
 import type { CarriedSelection } from "../useAcknowledgedSelection";
 import { CellEditor, FieldCell, fieldDisplayText, FLAGGED_REASON_TITLES } from "./cells";
-import {
-  V1_FIELDS,
-  flaggedValue,
-  indexedValue,
-  makeQueryResult,
-  makeRecord,
-} from "../testSupport";
+import { V1_FIELDS, flaggedValue, indexedValue, makeQueryResult, makeRecord } from "../testSupport";
 
 afterEach(() => {
   cleanup();
@@ -22,8 +16,8 @@ afterEach(() => {
 const option = (name: string | RegExp) => screen.getByRole("option", { name });
 const picked = (name: string) => option(name).getAttribute("aria-selected") === "true";
 const search = () => screen.getByRole<HTMLInputElement>("combobox");
-/** The option the search box's keys act on. */
-const highlighted = () => document.getElementById(search().getAttribute("aria-activedescendant") ?? "")?.textContent;
+const highlighted = () =>
+  document.getElementById(search().getAttribute("aria-activedescendant") ?? "")?.textContent;
 /**
  * Picks or removes a tag, then saves as closing the picker does. These tests
  * mock `close`, so the picker stays mounted the way a second edit finds the
@@ -34,48 +28,82 @@ function setTag(name: string) {
   fireEvent.keyDown(search(), { key: "Tab" });
 }
 
-it.each(["relation", "multi-select"] as const)("keeps a later %s write intact when an earlier write is discarded", async (kind) => {
-  let nextId = 0;
-  let discard!: (writeId: number) => void;
-  const emit = vi.fn((_value: CollectionValue, _previous?: readonly CollectionValue[]) => ++nextId);
-  const selectionField: FieldDefinition = kind === "relation"
-    ? { name: "links", type: "relation", collection: "tasks", many: true }
-    : field("tags");
-  const names = kind === "relation" ? ["a", "b", "c"] : ["alpha", "beta", "gamma"];
-  const executor = vi.fn(async () => makeQueryResult(names.map(id => makeRecord(id, [indexedValue("title", id)]))));
-  const editor = (value: string[], acknowledgedWriteId = 0) => <CellEditor
-    field={selectionField} indexed={indexedValue(selectionField.name, value)} acknowledgedWriteId={acknowledgedWriteId}
-    subscribeToDiscardedWrites={listener => { discard = listener; return () => {}; }}
-    emit={emit} close={() => {}} relationExecutor={executor} />;
-  const toggle = async (name: string) =>
-    kind === "relation" ? fireEvent.click(await screen.findByRole("checkbox", { name })) : setTag(name);
-  const chosen = (name: string) =>
-    kind === "relation" ? screen.getByRole<HTMLInputElement>("checkbox", { name }).checked : picked(name);
-  const view = render(editor([]));
-  await toggle(names[0]!);
-  await toggle(names[1]!);
-  expect(emit.mock.calls[1]?.[0]).toEqual(names.slice(0, 2));
-  // The queue retains failed write 1 while the full value of write 2 waits.
-  act(() => discard(1));
-  expect(chosen(names[0]!)).toBe(true);
-  // An external selection must still survive replay of the remaining write.
-  view.rerender(editor([names[2]!]));
-  expect(chosen(names[2]!)).toBe(true);
-  await toggle(names[2]!);
-  expect(emit.mock.calls.at(-1)?.[0]).toEqual(names.slice(0, 2));
-  view.rerender(editor(names.slice(0, 2), 2));
-  expect(chosen(names[0]!)).toBe(true);
-  expect(chosen(names[1]!)).toBe(true);
-});
+it.each(["relation", "multi-select"] as const)(
+  "keeps a later %s write intact when an earlier write is discarded",
+  async (kind) => {
+    let nextId = 0;
+    let discard!: (writeId: number) => void;
+    const emit = vi.fn(
+      (_value: CollectionValue, _previous?: readonly CollectionValue[]) => ++nextId,
+    );
+    const selectionField: FieldDefinition =
+      kind === "relation"
+        ? { name: "links", type: "relation", collection: "tasks", many: true }
+        : field("tags");
+    const names = kind === "relation" ? ["a", "b", "c"] : ["alpha", "beta", "gamma"];
+    const executor = vi.fn(async () =>
+      makeQueryResult(names.map((id) => makeRecord(id, [indexedValue("title", id)]))),
+    );
+    const editor = (value: string[], acknowledgedWriteId = 0) => (
+      <CellEditor
+        field={selectionField}
+        indexed={indexedValue(selectionField.name, value)}
+        acknowledgedWriteId={acknowledgedWriteId}
+        subscribeToDiscardedWrites={(listener) => {
+          discard = listener;
+          return () => {};
+        }}
+        emit={emit}
+        close={() => {}}
+        relationExecutor={executor}
+      />
+    );
+    const toggle = async (name: string) =>
+      kind === "relation"
+        ? fireEvent.click(await screen.findByRole("checkbox", { name }))
+        : setTag(name);
+    const chosen = (name: string) =>
+      kind === "relation"
+        ? screen.getByRole<HTMLInputElement>("checkbox", { name }).checked
+        : picked(name);
+    const view = render(editor([]));
+    await toggle(names[0]!);
+    await toggle(names[1]!);
+    expect(emit.mock.calls[1]?.[0]).toEqual(names.slice(0, 2));
+    act(() => discard(1));
+    expect(chosen(names[0]!)).toBe(true);
+    view.rerender(editor([names[2]!]));
+    expect(chosen(names[2]!)).toBe(true);
+    await toggle(names[2]!);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(names.slice(0, 2));
+    view.rerender(editor(names.slice(0, 2), 2));
+    expect(chosen(names[0]!)).toBe(true);
+    expect(chosen(names[1]!)).toBe(true);
+  },
+);
 
 it("keeps later relation choices across partial acknowledgments", async () => {
   let nextId = 0;
   const emit = vi.fn((_value: CollectionValue, _previous?: readonly CollectionValue[]) => ++nextId);
-  const relation: FieldDefinition = { name: "links", type: "relation", collection: "tasks", many: true };
-  const executor = vi.fn(async () => makeQueryResult(["a", "b", "c"].map(id => makeRecord(id, [indexedValue("title", id)]))));
-  const editor = (value: string[], acknowledgedWriteId: number) => <CellEditor
-    field={relation} indexed={indexedValue("links", value)} acknowledgedWriteId={acknowledgedWriteId}
-    emit={emit} close={() => {}} relationExecutor={executor} />;
+  const relation: FieldDefinition = {
+    name: "links",
+    type: "relation",
+    collection: "tasks",
+    many: true,
+  };
+  const executor = vi.fn(async () =>
+    makeQueryResult(["a", "b", "c"].map((id) => makeRecord(id, [indexedValue("title", id)]))),
+  );
+  const editor = (value: string[], acknowledgedWriteId: number) => (
+    <CellEditor
+      field={relation}
+      indexed={indexedValue("links", value)}
+      acknowledgedWriteId={acknowledgedWriteId}
+      emit={emit}
+      close={() => {}}
+      relationExecutor={executor}
+    />
+  );
   const { rerender } = render(editor([], 0));
   fireEvent.click(await screen.findByRole("checkbox", { name: "a" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "b" }));
@@ -88,10 +116,19 @@ it("keeps later relation choices across partial acknowledgments", async () => {
 it("keeps a later removal after discarding its predecessor and retires it on discard", () => {
   let discard!: (writeId: number) => void;
   const emit = writeEmitter();
-  const editor = (value: string[]) => <CellEditor
-    field={field("tags")} indexed={indexedValue("tags", value)} acknowledgedWriteId={0}
-    subscribeToDiscardedWrites={listener => { discard = listener; return () => {}; }}
-    emit={emit} close={() => {}} />;
+  const editor = (value: string[]) => (
+    <CellEditor
+      field={field("tags")}
+      indexed={indexedValue("tags", value)}
+      acknowledgedWriteId={0}
+      subscribeToDiscardedWrites={(listener) => {
+        discard = listener;
+        return () => {};
+      }}
+      emit={emit}
+      close={() => {}}
+    />
+  );
   const view = render(editor(["alpha", "beta"]));
   setTag("alpha");
   setTag("gamma");
@@ -142,7 +179,12 @@ describe("FieldCell display", () => {
   });
 
   it("renders a select value as a pill in its chosen color", () => {
-    const status: FieldDefinition = { name: "status", type: "select", options: ["todo", "doing"], colors: { doing: "amber" } };
+    const status: FieldDefinition = {
+      name: "status",
+      type: "select",
+      options: ["todo", "doing"],
+      colors: { doing: "amber" },
+    };
     render(<FieldCell field={status} indexed={indexedValue("status", "doing")} />);
     expect(screen.getByText("doing").parentElement?.dataset.optionColor).toBe("amber");
   });
@@ -153,8 +195,11 @@ describe("FieldCell display", () => {
     expect(alpha).toBeDefined();
     expect(screen.getByText("gamma").parentElement?.dataset.optionColor).toBeDefined();
     cleanup();
-    // The same name keeps its color in another field, so reordering never recolors it.
-    const other: FieldDefinition = { name: "labels", type: "multi-select", options: ["zeta", "alpha"] };
+    const other: FieldDefinition = {
+      name: "labels",
+      type: "multi-select",
+      options: ["zeta", "alpha"],
+    };
     render(<FieldCell field={other} indexed={indexedValue("labels", ["alpha"])} />);
     expect(screen.getByText("alpha").parentElement?.dataset.optionColor).toBe(alpha);
   });
@@ -197,9 +242,7 @@ describe("FieldCell display", () => {
   it("shows a button field's name and never a value kept under it", () => {
     const button: FieldDefinition = { name: "Mark paid", type: "button" };
     const stray = flaggedValue("Mark paid", true, "expected-empty");
-    const { container } = render(
-      <FieldCell field={button} indexed={stray} editable />,
-    );
+    const { container } = render(<FieldCell field={button} indexed={stray} editable />);
     expect(screen.getByText("Mark paid")).toBeDefined();
     expect(screen.queryByText("true")).toBeNull();
     expect(screen.queryByRole("button")).toBeNull();
@@ -254,16 +297,24 @@ describe("FieldCell display", () => {
 
 describe("FieldCell editing", () => {
   it("draws an editable value as a button that Tab skips", () => {
-    render(<FieldCell field={field("title")} indexed={indexedValue("title", "Ship it")} editable />);
+    render(
+      <FieldCell field={field("title")} indexed={indexedValue("title", "Ship it")} editable />,
+    );
     expect(screen.getByRole("button", { name: "Ship it" }).tabIndex).toBe(-1);
   });
 
   it("names a checkbox and a button by the field's label, not its key", () => {
     const { rerender } = render(
-      <FieldCell field={{ name: "f-3", type: "checkbox" }} label="Shipped" indexed={indexedValue("f-3", true)} />,
+      <FieldCell
+        field={{ name: "f-3", type: "checkbox" }}
+        label="Shipped"
+        indexed={indexedValue("f-3", true)}
+      />,
     );
     expect(screen.getByRole("checkbox", { name: "Shipped" })).toBeDefined();
-    rerender(<FieldCell field={{ name: "f-4", type: "button" }} label="Mark paid" indexed={undefined} />);
+    rerender(
+      <FieldCell field={{ name: "f-4", type: "button" }} label="Mark paid" indexed={undefined} />,
+    );
     expect(screen.getByText("Mark paid")).toBeDefined();
     expect(screen.queryByText("f-4")).toBeNull();
   });
@@ -284,13 +335,11 @@ describe("FieldCell editing", () => {
     );
     fireEvent.click(screen.getByRole("link", { name: "https://dohc.dev" }));
     expect(onOpenLink).toHaveBeenCalledExactlyOnceWith("https://dohc.dev");
-    // The table edits a cell from a click that reaches it. The link's click does not.
     expect(onCellClick).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Edit link" }));
     expect(onCellClick).toHaveBeenCalledOnce();
     expect(onOpenLink).toHaveBeenCalledOnce();
 
-    // A cell nobody can edit still opens its link.
     view.rerender(<FieldCell field={field("link")} indexed={link} onOpenLink={onOpenLink} />);
     expect(screen.getByRole("link")).toBeDefined();
     expect(screen.queryByRole("button")).toBeNull();
@@ -298,16 +347,36 @@ describe("FieldCell editing", () => {
 
   it("shows no link without a way to open one, for an empty url, or for a value that is not a url", () => {
     const onOpenLink = vi.fn();
-    const view = render(<FieldCell field={field("link")} indexed={indexedValue("link", "https://dohc.dev")} editable />);
-    expect(screen.queryByRole("link")).toBeNull();
-    expect(screen.getByRole("button", { name: "https://dohc.dev" })).toBeDefined();
-    view.rerender(<FieldCell field={field("link")} indexed={undefined} editable onOpenLink={onOpenLink} />);
-    expect(screen.queryByRole("link")).toBeNull();
-    view.rerender(
-      <FieldCell field={field("link")} indexed={flaggedValue("link", "not a url", "invalid-url")} editable onOpenLink={onOpenLink} />,
+    const view = render(
+      <FieldCell
+        field={field("link")}
+        indexed={indexedValue("link", "https://dohc.dev")}
+        editable
+      />,
     );
     expect(screen.queryByRole("link")).toBeNull();
-    view.rerender(<FieldCell field={field("title")} indexed={indexedValue("title", "https://dohc.dev")} editable onOpenLink={onOpenLink} />);
+    expect(screen.getByRole("button", { name: "https://dohc.dev" })).toBeDefined();
+    view.rerender(
+      <FieldCell field={field("link")} indexed={undefined} editable onOpenLink={onOpenLink} />,
+    );
+    expect(screen.queryByRole("link")).toBeNull();
+    view.rerender(
+      <FieldCell
+        field={field("link")}
+        indexed={flaggedValue("link", "not a url", "invalid-url")}
+        editable
+        onOpenLink={onOpenLink}
+      />,
+    );
+    expect(screen.queryByRole("link")).toBeNull();
+    view.rerender(
+      <FieldCell
+        field={field("title")}
+        indexed={indexedValue("title", "https://dohc.dev")}
+        editable
+        onOpenLink={onOpenLink}
+      />,
+    );
     expect(screen.queryByRole("link")).toBeNull();
   });
 
@@ -323,7 +392,9 @@ describe("FieldCell editing", () => {
 
 function writeEmitter() {
   let writeId = 0;
-  return vi.fn((_value: CollectionValue, _previousValues?: readonly CollectionValue[]) => ++writeId);
+  return vi.fn(
+    (_value: CollectionValue, _previousValues?: readonly CollectionValue[]) => ++writeId,
+  );
 }
 
 interface EditorCase {
@@ -486,18 +557,27 @@ describe("CellEditor", () => {
     expect(close).toHaveBeenCalledExactlyOnceWith(undefined);
   });
 
-  it.each(["title", "estimate", "owner", "link"])("starts a %s edit from the typed character, with the caret after it", (fieldName) => {
-    const emit = writeEmitter();
-    render(
-      <CellEditor acknowledgedWriteId={0} field={field(fieldName)} typed="7"
-        indexed={indexedValue(fieldName, fieldName === "estimate" ? 1 : "Old")} emit={emit} close={vi.fn()} />,
-    );
-    const input = screen.getByRole<HTMLInputElement>("textbox");
-    expect(input.value).toBe("7");
-    expect([input.selectionStart, input.selectionEnd]).toEqual([1, 1]);
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(emit).toHaveBeenCalledExactlyOnceWith(fieldName === "estimate" ? 7 : "7");
-  });
+  it.each(["title", "estimate", "owner", "link"])(
+    "starts a %s edit from the typed character, with the caret after it",
+    (fieldName) => {
+      const emit = writeEmitter();
+      render(
+        <CellEditor
+          acknowledgedWriteId={0}
+          field={field(fieldName)}
+          typed="7"
+          indexed={indexedValue(fieldName, fieldName === "estimate" ? 1 : "Old")}
+          emit={emit}
+          close={vi.fn()}
+        />,
+      );
+      const input = screen.getByRole<HTMLInputElement>("textbox");
+      expect(input.value).toBe("7");
+      expect([input.selectionStart, input.selectionEnd]).toEqual([1, 1]);
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(emit).toHaveBeenCalledExactlyOnceWith(fieldName === "estimate" ? 7 : "7");
+    },
+  );
 
   it("compounds multi-select saves before any refresh lands", () => {
     // Starting at ["alpha"], adding beta then removing alpha must retain beta.
@@ -515,14 +595,19 @@ describe("CellEditor", () => {
     const emit = writeEmitter();
     let discard!: (writeId: number) => void;
     const unsubscribe = vi.fn();
-    const view = render(<CellEditor
-      field={field("tags")}
-      indexed={indexedValue("tags", ["alpha"])}
-      acknowledgedWriteId={0}
-      subscribeToDiscardedWrites={(listener) => { discard = listener; return unsubscribe; }}
-      emit={emit}
-      close={vi.fn()}
-    />);
+    const view = render(
+      <CellEditor
+        field={field("tags")}
+        indexed={indexedValue("tags", ["alpha"])}
+        acknowledgedWriteId={0}
+        subscribeToDiscardedWrites={(listener) => {
+          discard = listener;
+          return unsubscribe;
+        }}
+        emit={emit}
+        close={vi.fn()}
+      />,
+    );
     setTag("beta");
     setTag("gamma");
     act(() => discard(2));
@@ -567,7 +652,13 @@ describe("CellEditor", () => {
   it("includes an observed remote selection in the next multi-select edit", () => {
     const emit = writeEmitter();
     const editor = (value: string[]) => (
-      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+      <CellEditor
+        acknowledgedWriteId={0}
+        field={field("tags")}
+        indexed={indexedValue("tags", value)}
+        emit={emit}
+        close={vi.fn()}
+      />
     );
     const view = render(editor(["alpha"]));
 
@@ -580,11 +671,16 @@ describe("CellEditor", () => {
   it("keeps a remote change that arrives between a pick and the save", () => {
     const emit = writeEmitter();
     const editor = (value: string[]) => (
-      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+      <CellEditor
+        acknowledgedWriteId={0}
+        field={field("tags")}
+        indexed={indexedValue("tags", value)}
+        emit={emit}
+        close={vi.fn()}
+      />
     );
     const view = render(editor(["alpha"]));
     fireEvent.click(option("gamma"));
-    // Someone else adds beta while the picker is open, with gamma picked and not saved.
     view.rerender(editor(["alpha", "beta"]));
     expect([picked("beta"), picked("gamma")]).toEqual([true, true]);
     fireEvent.keyDown(search(), { key: "Tab" });
@@ -594,7 +690,13 @@ describe("CellEditor", () => {
   it("combines observed remote additions with a pending local removal", () => {
     const emit = writeEmitter();
     const editor = (value: string[]) => (
-      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+      <CellEditor
+        acknowledgedWriteId={0}
+        field={field("tags")}
+        indexed={indexedValue("tags", value)}
+        emit={emit}
+        close={vi.fn()}
+      />
     );
     const view = render(editor(["alpha", "beta"]));
     setTag("alpha");
@@ -610,7 +712,13 @@ describe("CellEditor", () => {
   it("combines observed remote removals with a pending local addition", () => {
     const emit = writeEmitter();
     const editor = (value: string[]) => (
-      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+      <CellEditor
+        acknowledgedWriteId={0}
+        field={field("tags")}
+        indexed={indexedValue("tags", value)}
+        emit={emit}
+        close={vi.fn()}
+      />
     );
     const view = render(editor(["alpha", "beta"]));
     setTag("gamma");
@@ -625,7 +733,13 @@ describe("CellEditor", () => {
   it("acknowledges earlier saves without undoing a later save of the same option", () => {
     const emit = writeEmitter();
     const editor = (value: string[], acknowledgedWriteId = 0) => (
-      <CellEditor acknowledgedWriteId={acknowledgedWriteId} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+      <CellEditor
+        acknowledgedWriteId={acknowledgedWriteId}
+        field={field("tags")}
+        indexed={indexedValue("tags", value)}
+        emit={emit}
+        close={vi.fn()}
+      />
     );
     const view = render(editor(["alpha"]));
     setTag("beta");
@@ -657,9 +771,7 @@ describe("CellEditor", () => {
     setTag("beta");
     expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha"]);
 
-    // Both writes finish before one coalesced index query returns.
     view.rerender(editor(["alpha"], 2));
-    // A later external addition must not match and revive the retired add.
     view.rerender(editor(["alpha", "beta"], 2));
     expect(picked("beta")).toBe(true);
     setTag("gamma");
@@ -681,7 +793,13 @@ describe("CellEditor", () => {
   it("rebases pending predecessor values on newly observed remote props", () => {
     const emit = writeEmitter();
     const editor = (value: string[]) => (
-      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+      <CellEditor
+        acknowledgedWriteId={0}
+        field={field("tags")}
+        indexed={indexedValue("tags", value)}
+        emit={emit}
+        close={vi.fn()}
+      />
     );
     const view = render(editor(["alpha"]));
     setTag("beta");
@@ -689,7 +807,10 @@ describe("CellEditor", () => {
     setTag("alpha");
     expect(emit).toHaveBeenLastCalledWith(
       ["gamma", "beta"],
-      [["alpha", "gamma"], ["alpha", "gamma", "beta"]],
+      [
+        ["alpha", "gamma"],
+        ["alpha", "gamma", "beta"],
+      ],
     );
   });
 
@@ -725,7 +846,13 @@ describe("CellEditor", () => {
   it("keeps a typed person id when the people list arrives during the edit", () => {
     const emit = writeEmitter();
     const close = vi.fn();
-    const props = { acknowledgedWriteId: 0, field: field("owner"), indexed: undefined, emit, close };
+    const props = {
+      acknowledgedWriteId: 0,
+      field: field("owner"),
+      indexed: undefined,
+      emit,
+      close,
+    };
     const view = render(<CellEditor {...props} />);
     const input = screen.getByRole<HTMLInputElement>("textbox");
     fireEvent.change(input, { target: { value: "user-7" } });
@@ -741,11 +868,21 @@ describe("CellEditor", () => {
     const close = vi.fn();
     const text = renderEditor({ fieldName: "title", value: "Old", emit, close });
     // fireEvent returns true when the editor left the key to the browser.
-    expect(fireEvent.keyDown(screen.getByDisplayValue("Old"), { key: "Tab", ctrlKey: true })).toBe(true);
-    expect(fireEvent.keyDown(screen.getByDisplayValue("Old"), { key: "Tab", ctrlKey: true, shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(screen.getByDisplayValue("Old"), { key: "Tab", ctrlKey: true })).toBe(
+      true,
+    );
+    expect(
+      fireEvent.keyDown(screen.getByDisplayValue("Old"), {
+        key: "Tab",
+        ctrlKey: true,
+        shiftKey: true,
+      }),
+    ).toBe(true);
     text.unmount();
     renderEditor({ fieldName: "status", value: "todo", emit, close });
-    expect(fireEvent.keyDown(screen.getByRole("combobox"), { key: "Tab", ctrlKey: true })).toBe(true);
+    expect(fireEvent.keyDown(screen.getByRole("combobox"), { key: "Tab", ctrlKey: true })).toBe(
+      true,
+    );
     expect(emit).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
   });
@@ -788,7 +925,9 @@ describe("option picker", () => {
     expect(options()).toEqual(["todo", "doing", "shipped", "Clear"]);
     expect(option("doing").querySelector("[data-option-color]")).not.toBeNull();
     expect([picked("todo"), picked("doing")]).toEqual([false, true]);
-    expect(screen.getByRole("listbox", { name: "status options" }).hasAttribute("aria-multiselectable")).toBe(false);
+    expect(
+      screen.getByRole("listbox", { name: "status options" }).hasAttribute("aria-multiselectable"),
+    ).toBe(false);
   });
 
   it("saves a picked option and closes, keeping the selection where it is", () => {
@@ -833,13 +972,11 @@ describe("option picker", () => {
     const close = vi.fn();
     renderEditor({ fieldName: "status", value: "todo", emit, close });
     expect(document.activeElement).toBe(search());
-    // The highlight starts on the current value, so Enter alone changes nothing.
     expect(highlighted()).toBe("todo");
     expect(fireEvent.keyDown(search(), { key: "ArrowDown" })).toBe(false);
     expect(highlighted()).toBe("doing");
     fireEvent.keyDown(search(), { key: "ArrowUp" });
     fireEvent.keyDown(search(), { key: "ArrowUp" });
-    // Past the first row the highlight wraps to the last.
     expect(highlighted()).toBe("Clear");
     fireEvent.keyDown(search(), { key: "ArrowUp" });
     expect(highlighted()).toBe("shipped");
@@ -876,7 +1013,6 @@ describe("option picker", () => {
     const view = renderEditor({ fieldName: "status", value: "todo", emit, close, onCreateOption });
     fireEvent.change(search(), { target: { value: " later " } });
     expect(options()).toEqual(["Create later"]);
-    // The new option shows as the pill it will be.
     expect(option("Create later").querySelector("[data-option-color]")?.textContent).toBe("later");
     fireEvent.keyDown(search(), { key: "Enter" });
     expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("later", "later");
@@ -886,7 +1022,6 @@ describe("option picker", () => {
 
     renderEditor({ fieldName: "status", value: "todo", onCreateOption });
     fireEvent.change(search(), { target: { value: "ship" } });
-    // A partial match still offers the new name, after the option it matches.
     expect(options()).toEqual(["shipped", "Create ship"]);
     fireEvent.click(option("Create ship"));
     expect(onCreateOption).toHaveBeenLastCalledWith("ship", "ship");
@@ -912,7 +1047,14 @@ describe("option picker", () => {
   it("changes an option's color from its menu button, and shows no button when the host cannot save it", () => {
     const onOptionColorChange = vi.fn();
     const editor = (extra: { onOptionColorChange?: typeof onOptionColorChange }) => (
-      <CellEditor acknowledgedWriteId={0} field={colored} indexed={indexedValue("status", "todo")} emit={writeEmitter()} close={vi.fn()} {...extra} />
+      <CellEditor
+        acknowledgedWriteId={0}
+        field={colored}
+        indexed={indexedValue("status", "todo")}
+        emit={writeEmitter()}
+        close={vi.fn()}
+        {...extra}
+      />
     );
     const view = render(editor({}));
     expect(screen.queryByRole("button", { name: "todo options" })).toBeNull();
@@ -923,7 +1065,6 @@ describe("option picker", () => {
     fireEvent.click(menu);
     const colors = screen.getByRole("radiogroup", { name: "Color for todo" });
     expect(colors.querySelector('[aria-checked="true"]')?.getAttribute("aria-label")).toBe("Teal");
-    // Choosing the color it has changes nothing.
     fireEvent.click(screen.getByRole("radio", { name: "Teal" }));
     expect(onOptionColorChange).not.toHaveBeenCalled();
     expect(screen.queryByRole("radiogroup")).toBeNull();
@@ -932,15 +1073,20 @@ describe("option picker", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Amber" }));
     expect(onOptionColorChange).toHaveBeenCalledExactlyOnceWith("todo", "amber");
     expect(screen.queryByRole("radiogroup")).toBeNull();
-    // The picker stays open on the search box.
     expect(document.activeElement).toBe(search());
   });
 
   it("closes open colors with the first Escape in the search box, and the picker with the next", () => {
     const close = vi.fn();
     render(
-      <CellEditor acknowledgedWriteId={0} field={colored} indexed={indexedValue("status", "todo")}
-        emit={writeEmitter()} close={close} onOptionColorChange={vi.fn()} />,
+      <CellEditor
+        acknowledgedWriteId={0}
+        field={colored}
+        indexed={indexedValue("status", "todo")}
+        emit={writeEmitter()}
+        close={close}
+        onOptionColorChange={vi.fn()}
+      />,
     );
     fireEvent.click(screen.getByRole("button", { name: "doing options" }));
     fireEvent.keyDown(search(), { key: "Escape" });
@@ -954,8 +1100,14 @@ describe("option picker", () => {
     const close = vi.fn();
     const onOptionColorChange = vi.fn();
     render(
-      <CellEditor acknowledgedWriteId={0} field={colored} indexed={indexedValue("status", "todo")}
-        emit={writeEmitter()} close={close} onOptionColorChange={onOptionColorChange} />,
+      <CellEditor
+        acknowledgedWriteId={0}
+        field={colored}
+        indexed={indexedValue("status", "todo")}
+        emit={writeEmitter()}
+        close={close}
+        onOptionColorChange={onOptionColorChange}
+      />,
     );
     fireEvent.keyDown(search(), { key: "ArrowRight" });
     const teal = screen.getByRole("radio", { name: "Teal" });
@@ -964,7 +1116,6 @@ describe("option picker", () => {
     expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(close).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(search());
-    // The right arrow moves the caret while it is inside the typed text.
     fireEvent.change(search(), { target: { value: "to" } });
     search().setSelectionRange(0, 0);
     expect(fireEvent.keyDown(search(), { key: "ArrowRight" })).toBe(true);
@@ -990,13 +1141,19 @@ describe("option picker", () => {
 });
 
 describe("tags picker", () => {
-  const chips = () => screen.getAllByRole("button", { name: /^Remove / }).map((chip) => chip.getAttribute("aria-label")?.slice(7));
-  const tags = (value: string[], extra: Partial<EditorCase> = {}) => renderEditor({ fieldName: "tags", value, ...extra });
+  const chips = () =>
+    screen
+      .getAllByRole("button", { name: /^Remove / })
+      .map((chip) => chip.getAttribute("aria-label")?.slice(7));
+  const tags = (value: string[], extra: Partial<EditorCase> = {}) =>
+    renderEditor({ fieldName: "tags", value, ...extra });
 
   it("shows the chosen tags as chips before the search box, over a list that allows many picks", () => {
     tags(["beta", "alpha"]);
     expect(chips()).toEqual(["beta", "alpha"]);
-    expect(screen.getByRole("listbox", { name: "tags options" }).getAttribute("aria-multiselectable")).toBe("true");
+    expect(
+      screen.getByRole("listbox", { name: "tags options" }).getAttribute("aria-multiselectable"),
+    ).toBe("true");
     expect([picked("alpha"), picked("beta"), picked("gamma")]).toEqual([true, true, false]);
     expect(document.activeElement).toBe(search());
   });
@@ -1007,7 +1164,6 @@ describe("tags picker", () => {
     tags(["alpha"], { emit, close });
     fireEvent.click(option("gamma"));
     fireEvent.click(option("beta"));
-    // The picker stays open and shows the picks in the order they were made.
     expect(chips()).toEqual(["alpha", "gamma", "beta"]);
     expect(emit).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
@@ -1058,14 +1214,12 @@ describe("tags picker", () => {
     fireEvent.click(option("beta"));
     expect(chips()).toEqual(["gamma"]);
 
-    // Backspace edits typed text first, and removes a chip only from an empty box.
     fireEvent.change(search(), { target: { value: "a" } });
     expect(fireEvent.keyDown(search(), { key: "Backspace" })).toBe(true);
     expect(chips()).toEqual(["gamma"]);
     fireEvent.change(search(), { target: { value: "" } });
     expect(fireEvent.keyDown(search(), { key: "Backspace" })).toBe(false);
     expect(screen.queryByRole("button", { name: /^Remove / })).toBeNull();
-    // With no chip left, Backspace has nothing to remove.
     fireEvent.keyDown(search(), { key: "Backspace" });
 
     fireEvent.keyDown(search(), { key: "Tab" });
@@ -1106,12 +1260,15 @@ describe("tags picker", () => {
     fireEvent.change(search(), { target: { value: "delta" } });
     fireEvent.keyDown(search(), { key: "Enter" });
     expect(chips()).toEqual(["alpha", "beta", "delta"]);
-    // The new option joins the list, where a second pick removes it again.
     expect(picked("delta")).toBe(true);
     expect(onCreateOption).not.toHaveBeenCalled();
 
     fireEvent.keyDown(search(), { key: "Tab" });
-    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "beta", "delta"], [["alpha"]]);
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith(
+      "delta",
+      ["alpha", "beta", "delta"],
+      [["alpha"]],
+    );
     expect(emit).not.toHaveBeenCalled();
   });
 
@@ -1138,7 +1295,6 @@ describe("tags picker", () => {
     const held = option(/^Create epsilon/);
     expect(held.getAttribute("aria-disabled")).toBe("true");
     expect(held.textContent).toContain('Click away to save "delta" first.');
-    // Enter has no row to pick, so the search text stays.
     fireEvent.keyDown(search(), { key: "Enter" });
     expect(chips()).toEqual(["alpha", "delta"]);
     expect(search().value).toBe("epsilon");
@@ -1160,10 +1316,15 @@ describe("tags picker", () => {
     expect(emit).toHaveBeenLastCalledWith(["beta"], [["alpha"], ["alpha", "beta"]]);
     second.unmount();
 
-    // Once the index shows both saves, the cell's value stands alone.
     render(
-      <CellEditor acknowledgedWriteId={2} field={field("tags")} indexed={indexedValue("tags", ["beta"])}
-        emit={emit} close={vi.fn()} carried={carried} />,
+      <CellEditor
+        acknowledgedWriteId={2}
+        field={field("tags")}
+        indexed={indexedValue("tags", ["beta"])}
+        emit={emit}
+        close={vi.fn()}
+        carried={carried}
+      />,
     );
     expect(chips()).toEqual(["beta"]);
     setTag("gamma");
@@ -1183,14 +1344,20 @@ describe("tags picker", () => {
     tags(["alpha"], { emit, carried });
     expect(chips()).toEqual(["alpha", "delta"]);
     setTag("beta");
-    expect(emit).toHaveBeenCalledExactlyOnceWith(["alpha", "delta", "beta"], [["alpha"], ["alpha", "delta"]]);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(
+      ["alpha", "delta", "beta"],
+      [["alpha"], ["alpha", "delta"]],
+    );
   });
 });
 
 describe("date picker", () => {
   const day = (name: string) => screen.getByRole("gridcell", { name });
   const month = () => screen.getByRole("grid", { name: "due" });
-  const cursor = () => document.getElementById(month().getAttribute("aria-activedescendant") ?? "")?.getAttribute("aria-label");
+  const cursor = () =>
+    document
+      .getElementById(month().getAttribute("aria-activedescendant") ?? "")
+      ?.getAttribute("aria-label");
   const due = (value: string | null, extra: Partial<EditorCase> = {}) => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date(2026, 10, 11, 12));
@@ -1204,12 +1371,14 @@ describe("date picker", () => {
     expect(day("November 11, 2026").getAttribute("aria-selected")).toBe("false");
     expect(day("November 11, 2026").getAttribute("aria-current")).toBe("date");
     expect(day("November 20, 2026").hasAttribute("aria-current")).toBe(false);
-    expect(screen.getAllByRole("columnheader").map((header) => header.getAttribute("aria-label"))).toEqual([
-      "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
-    ]);
+    expect(
+      screen.getAllByRole("columnheader").map((header) => header.getAttribute("aria-label")),
+    ).toEqual(["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]);
     // November 2026 starts on a Sunday and ends on a Monday: five whole weeks.
     expect(screen.getAllByRole("gridcell")).toHaveLength(35);
-    expect(screen.getAllByRole("gridcell").at(-1)?.getAttribute("aria-label")).toBe("December 5, 2026");
+    expect(screen.getAllByRole("gridcell").at(-1)?.getAttribute("aria-label")).toBe(
+      "December 5, 2026",
+    );
     expect(screen.getAllByRole("gridcell")[0]?.getAttribute("aria-label")).toBe("November 1, 2026");
     expect(document.activeElement).toBe(month());
   });
@@ -1262,7 +1431,6 @@ describe("date picker", () => {
     fireEvent.click(screen.getByRole("button", { name: "Previous month" }));
     fireEvent.click(screen.getByRole("button", { name: "Previous month" }));
     expect(screen.getByText("October 2026")).toBeDefined();
-    // The stored day stays marked in a month that still shows it.
     fireEvent.click(screen.getByRole("button", { name: "Next month" }));
     expect(day("November 20, 2026").getAttribute("aria-selected")).toBe("true");
     expect(emit).not.toHaveBeenCalled();
@@ -1291,7 +1459,6 @@ describe("date picker", () => {
     press("PageUp");
     expect(cursor()).toBe("October 27, 2026");
     expect(emit).not.toHaveBeenCalled();
-    // A key the calendar does not use stays with the browser.
     expect(press("a")).toBe(true);
 
     press("Enter");
@@ -1315,14 +1482,16 @@ describe("date picker", () => {
 });
 
 describe("people picker", () => {
-  const people = [{ id: "user-7", name: "Ada" }, { id: "user-9", name: "Grace" }];
+  const people = [
+    { id: "user-7", name: "Ada" },
+    { id: "user-9", name: "Grace" },
+  ];
   const names = () => screen.getAllByRole("option").map((row) => row.textContent);
 
   it("lists the host's people by name, with a check on the current one and a row that sets no one", () => {
     renderEditor({ fieldName: "owner", value: "user-9", people });
     expect(screen.getByRole("combobox", { name: "Search people" })).toBe(document.activeElement);
     expect(screen.getByRole("listbox", { name: "People for owner" })).toBeDefined();
-    // Each row starts with the person's initial.
     expect(names()).toEqual(["AAda", "GGrace", "No one"]);
     expect([picked("Ada"), picked("Grace")]).toEqual([false, true]);
     expect(highlighted()).toBe("GGrace");
@@ -1363,7 +1532,6 @@ describe("people picker", () => {
     renderEditor({ fieldName: "owner", value: "user-x", people, emit, close });
     expect(names()).toEqual(["Uuser-x", "AAda", "GGrace", "No one"]);
     expect(picked("user-x")).toBe(true);
-    // Enter keeps it, and so does every way of closing without a pick.
     fireEvent.keyDown(search(), { key: "Enter" });
     fireEvent.keyDown(search(), { key: "Tab" });
     fireEvent.keyDown(search(), { key: "Escape" });

@@ -1,4 +1,10 @@
-import { SAVED_HERE, SAVING, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
+import {
+  SAVED_HERE,
+  SAVING,
+  saveProblem,
+  saveStateEqual,
+  type SaveState,
+} from "@dohc/workspace-contracts/save-state";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { bridge } from "./bridge";
@@ -18,20 +24,16 @@ export function publishOwnedUnmountDraft(
   buffer.publishDraft(body, source);
 }
 
-
-
 export type DraftFlushOptions = { captureOnFailure?: boolean };
 
 export type DraftFlush = (options?: DraftFlushOptions) => Promise<void>;
 
-// The plain-text autosave, used by every NON-markdown editable view (CSV,
-// JSON, text). It carries the same three write seams as MarkdownView — an
-// armed timer, an unmount flush, and the shell's flush — and until #579's
-// adversarial review it carried none of the opening gate, because `opening`
-// only ever existed inside MarkdownView. A version switch bumps `reopenKey`,
-// the reread it triggers leaves the PRE-switch body on screen, and the armed
-// timer landed that body on the POST-switch tree. That is the exact
-// mechanism on the surfaces #567 never covered.
+// The plain-text autosave, used by every non-markdown editable view (CSV,
+// JSON, text). It carries the same three write seams as MarkdownView (an
+// armed timer, an unmount flush, and the shell's flush) and the same opening
+// gate. A version switch bumps `reopenKey`, the reread it triggers leaves the
+// pre-switch body on screen, and without the gate the armed timer would land
+// that body on the post-switch tree.
 //
 // Every gate here reads a REF at call time, never a prop. Routing the signal
 // through `disabled` (or any dep) is actively worse: the unmount-flush effect
@@ -62,7 +64,7 @@ export function useAutosavedTextDraft(props: {
   const [draft, setDraft] = useState(props.body);
   const [saveState, setSaveStateValue] = useState<SaveState>(SAVED_HERE);
   const setSaveState = (state: SaveState) => {
-    setSaveStateValue((current) => saveStateEqual(current, state) ? current : state);
+    setSaveStateValue((current) => (saveStateEqual(current, state) ? current : state));
   };
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
@@ -144,14 +146,19 @@ export function useAutosavedTextDraft(props: {
   const saveNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const reportSave = (failure: { cause?: unknown } | null) => {
     const written = props.localBuffer;
-    reportTextSave(props.workspaceId, props.path, failure && {
-      ...failure,
-      retry: () => {
-        if (unmounted.current || activeLocalBuffer.current !== written || writesBlocked()) return false;
-        void saveNowRef.current();
-        return true;
+    reportTextSave(
+      props.workspaceId,
+      props.path,
+      failure && {
+        ...failure,
+        retry: () => {
+          if (unmounted.current || activeLocalBuffer.current !== written || writesBlocked())
+            return false;
+          void saveNowRef.current();
+          return true;
+        },
       },
-    });
+    );
   };
 
   useEffect(() => {
@@ -169,21 +176,14 @@ export function useAutosavedTextDraft(props: {
     const bodyChanged = latestDraft.current !== sharedSnapshot.body;
     latestDraft.current = sharedSnapshot.body;
     setSaveState(sharedSnapshot.saveState);
-    if (
-      sharedSnapshot.saveState.kind === "saved-here" &&
-      !sharedSnapshot.dirty &&
-      !bodyChanged
-    ) {
+    if (sharedSnapshot.saveState.kind === "saved-here" && !sharedSnapshot.dirty && !bodyChanged) {
       if (saveTimer.current) {
         clearTimeout(saveTimer.current);
         saveTimer.current = null;
       }
       unsavedDraft.current = false;
     }
-    if (
-      sharedSnapshot.source === localSource.current ||
-      !bodyChanged
-    ) {
+    if (sharedSnapshot.source === localSource.current || !bodyChanged) {
       return;
     }
     valueRevision.current += 1;
@@ -192,11 +192,7 @@ export function useAutosavedTextDraft(props: {
 
   function captureLatestConflictDraft(text = latestDraft.current) {
     if (capturedConflictDraft.current === text) return;
-    conflictDraftId.current = captureOrphanedDraft(
-      props.workspaceId,
-      props.path,
-      text,
-    );
+    conflictDraftId.current = captureOrphanedDraft(props.workspaceId, props.path, text);
     capturedConflictDraft.current = text;
   }
 
@@ -206,12 +202,10 @@ export function useAutosavedTextDraft(props: {
       saveTimer.current = null;
     }
     unsavedDraft.current = false;
-    blockedEditGeneration.current = Math.max(
-      blockedEditGeneration.current,
-      editGeneration.current,
-    );
+    blockedEditGeneration.current = Math.max(blockedEditGeneration.current, editGeneration.current);
     captureLatestConflictDraft();
-    if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
+    if (!unmounted.current)
+      setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
   }
 
   function acceptSnapshot(
@@ -256,10 +250,7 @@ export function useAutosavedTextDraft(props: {
       captureLatestConflictDraft();
     }
     unsavedDraft.current = false;
-    blockedEditGeneration.current = Math.max(
-      blockedEditGeneration.current,
-      editGeneration.current,
-    );
+    blockedEditGeneration.current = Math.max(blockedEditGeneration.current, editGeneration.current);
     staleBaseline.current = false;
     baseContentRequestId.current = snapshot.requestId;
     if (
@@ -268,10 +259,7 @@ export function useAutosavedTextDraft(props: {
     ) {
       verifyAfterRequestId.current = null;
     }
-    acceptedRequestFloor.current = Math.max(
-      acceptedRequestFloor.current,
-      snapshot.requestId,
-    );
+    acceptedRequestFloor.current = Math.max(acceptedRequestFloor.current, snapshot.requestId);
     if (latestDraft.current !== snapshot.body) valueRevision.current += 1;
     setDraft(snapshot.body);
     latestDraft.current = snapshot.body;
@@ -286,22 +274,20 @@ export function useAutosavedTextDraft(props: {
     if (
       (snapshot.contentHash !== conflictContentHash.current &&
         snapshot.requestId <= conflictRequestId.current) ||
-      (shared.initialized &&
-        !shared.dirty &&
-        shared.contentHash !== snapshot.contentHash)
+      (shared.initialized && !shared.dirty && shared.contentHash !== snapshot.contentHash)
     ) {
       return false;
     }
-    return acceptSnapshot(snapshot, saveProblem("error", "dohc could not confirm the file was saved."));
+    return acceptSnapshot(
+      snapshot,
+      saveProblem("error", "dohc could not confirm the file was saved."),
+    );
   }
 
   function reconcileConflictSnapshot() {
     if (acceptConflictSnapshotIfCurrent()) return;
     const shared = props.localBuffer.getSnapshot();
-    if (
-      shared.dirty &&
-      (shared.source !== localSource.current || writersLive.current > 0)
-    ) {
+    if (shared.dirty && (shared.source !== localSource.current || writersLive.current > 0)) {
       return;
     }
     const requestId = latestSnapshot.current.requestId;
@@ -348,7 +334,6 @@ export function useAutosavedTextDraft(props: {
     acceptLandedRead();
     // acceptSnapshot reads mutable write state and the exact body/hash pair
     // above. The dependencies name the authoritative snapshot identity.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     props.body,
     props.contentHash,
@@ -360,19 +345,17 @@ export function useAutosavedTextDraft(props: {
     writerSettledEpoch,
   ]);
 
-  // Cancel-and-restore, during the render that first sees the new version
-  // (#567, extended to these views by the adversarial review). The armed
-  // write would land the previous version's text on the tree the switch just
-  // bound; dropping it silently would lose keystrokes. So it is set aside into
-  // the same store the markdown notice reads, and the surface goes back to the
-  // document.
+  // Cancel-and-restore, during the render that first sees the new version.
+  // The armed write would land the previous version's text on the tree the
+  // switch just bound; dropping it silently would lose keystrokes. So it is
+  // set aside into the same store the markdown notice reads, and the surface
+  // goes back to the document.
   const reopenKeyRef = useRef(props.reopenKey);
   const wasRefused = useRef(props.switchReadPending);
   // Two moments, one transition: the switch itself, and the reread landing
   // with something typed while writes were refused. Both leave a draft built
   // on the version the user has left.
-  const refusalLifted =
-    wasRefused.current === true && props.switchReadPending !== true;
+  const refusalLifted = wasRefused.current === true && props.switchReadPending !== true;
   wasRefused.current = props.switchReadPending;
   if (props.reopenKey !== reopenKeyRef.current || refusalLifted) {
     reopenKeyRef.current = props.reopenKey;
@@ -392,17 +375,12 @@ export function useAutosavedTextDraft(props: {
         // ownership rule the markdown resync applies.
         const sharedBeforeResync = props.localBuffer.getSnapshot();
         const peerDraftPending =
-          sharedBeforeResync.dirty &&
-          sharedBeforeResync.source !== localSource.current;
+          sharedBeforeResync.dirty && sharedBeforeResync.source !== localSource.current;
         if (peerDraftPending) {
           resyncBody = sharedBeforeResync.body;
           resyncSaveState = sharedBeforeResync.saveState;
         } else {
-          props.localBuffer.reset(
-            props.body,
-            props.contentHash,
-            localSource.current,
-          );
+          props.localBuffer.reset(props.body, props.contentHash, localSource.current);
         }
       }
       valueRevision.current += 1;
@@ -410,10 +388,7 @@ export function useAutosavedTextDraft(props: {
       setDraft(resyncBody);
       latestDraft.current = resyncBody;
       baseContentRequestId.current = props.contentRequestId;
-      acceptedRequestFloor.current = Math.max(
-        acceptedRequestFloor.current,
-        props.contentRequestId,
-      );
+      acceptedRequestFloor.current = Math.max(acceptedRequestFloor.current, props.contentRequestId);
     }
   }
 
@@ -462,11 +437,7 @@ export function useAutosavedTextDraft(props: {
         return;
       }
       if (options.textSnapshot !== undefined) {
-        publishOwnedUnmountDraft(
-          props.localBuffer,
-          options.textSnapshot,
-          localSource.current,
-        );
+        publishOwnedUnmountDraft(props.localBuffer, options.textSnapshot, localSource.current);
       }
       const issuedBaseRequestId = baseContentRequestId.current;
       unsavedDraft.current = false;
@@ -507,7 +478,8 @@ export function useAutosavedTextDraft(props: {
           if (options.captureOnFailure && options.textSnapshot !== undefined) {
             captureLatestConflictDraft(options.textSnapshot);
           }
-          if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
+          if (!unmounted.current)
+            setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
           if (options.rejectOnError) {
             throw new Error("dohc cannot save this draft without a content hash.");
           }
@@ -537,10 +509,7 @@ export function useAutosavedTextDraft(props: {
           }
           return;
         }
-        acceptedRequestFloor.current = Math.max(
-          acceptedRequestFloor.current,
-          issuedBaseRequestId,
-        );
+        acceptedRequestFloor.current = Math.max(acceptedRequestFloor.current, issuedBaseRequestId);
         if (latestContentRequestId.current > issuedBaseRequestId) {
           verifyAfterRequestId.current = latestContentRequestId.current;
           if (!unmounted.current) {
@@ -570,18 +539,17 @@ export function useAutosavedTextDraft(props: {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
-        if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
+        if (!unmounted.current)
+          setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         if (options.rejectOnError) throw error;
       }
     };
     const runsNow = writersLive.current === 0;
     writersLive.current += 1;
-    const queued = (runsNow ? run() : writeChain.current.then(run)).finally(
-      () => {
-        writersLive.current -= 1;
-        if (!unmounted.current) setWriterSettledEpoch((epoch) => epoch + 1);
-      },
-    );
+    const queued = (runsNow ? run() : writeChain.current.then(run)).finally(() => {
+      writersLive.current -= 1;
+      if (!unmounted.current) setWriterSettledEpoch((epoch) => epoch + 1);
+    });
     writeChain.current = queued.then(
       () => undefined,
       () => undefined,
@@ -702,21 +670,16 @@ export function useAutosavedTextDraft(props: {
         releaseUnusedDraft: true,
       }).then(() => {
         if (operationSettlement) {
-          void operationSettlement.then(
-            retireAfterSettlement,
-            retireAfterSettlement,
-          );
+          void operationSettlement.then(retireAfterSettlement, retireAfterSettlement);
         } else {
           retireAfterSettlement();
         }
       });
     };
-    // `disabled` is deliberately not a dep: as one it made every flip run this
-    // cleanup with the previous render's value captured, so turning writes off
-    // was itself a write (the lesson, and the adversarial review found
-    // the same trap waiting here). The ref carries the current value to a real
-    // unmount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // `disabled` is deliberately not a dep: as one it would make every flip
+    // run this cleanup with the previous render's value captured, so turning
+    // writes off would itself be a write. The ref carries the current value
+    // to a real unmount.
   }, [workspaceId, path, localBuffer]);
 
   useEffect(() => {
@@ -769,16 +732,20 @@ export function useAutosavedTextDraft(props: {
     exitFlush.current = flushDraft;
     return () => registerDraftFlush?.(null);
     // writeDraftNow uses refs for the draft; workspace/path are stable per keyed inspector.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
 
-  useEffect(() => registerPendingEditorDraft(
-      () => (unsavedDraft.current || writersLive.current > 0) &&
-        (exitCapturedDraft.current?.generation !== editGeneration.current ||
-          exitCapturedDraft.current.text !== latestDraft.current),
-      options => exitFlush.current(options),
-      () => captureStalledExit.current(),
-    ), []);
+  useEffect(
+    () =>
+      registerPendingEditorDraft(
+        () =>
+          (unsavedDraft.current || writersLive.current > 0) &&
+          (exitCapturedDraft.current?.generation !== editGeneration.current ||
+            exitCapturedDraft.current.text !== latestDraft.current),
+        (options) => exitFlush.current(options),
+        () => captureStalledExit.current(),
+      ),
+    [],
+  );
 
   return {
     draft,

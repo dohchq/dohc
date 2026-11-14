@@ -12,8 +12,8 @@ if (process.platform !== "win32") process.env.TMPDIR = realpathSync(tmpdir());
 
 // At most 8 concurrent workers. Fifteen of these suites open their own temp
 // `.dohc/engine/engine.db`, and past roughly eight the filesystem is the
-// constraint rather than the CPU — so a bigger machine must not buy more
-// contention. Evidence and the failure modes are on #392.
+// constraint rather than the CPU, so a bigger machine must not buy more
+// contention.
 const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4)));
 const require = createRequire(import.meta.url);
 const PURE_INSPECTOR_TEST = "src/renderer/FileInspector.test.tsx";
@@ -38,17 +38,14 @@ const ISOLATE_ALL = process.env.DOHC_DESKTOP_TEST_ISOLATION === "all";
 
 const common = {
   // Source-backed examples outside this package use the same React instance as their desktop tests.
-  resolve: { alias: {
-    react: dirname(require.resolve("react/package.json")),
-    "react-dom": dirname(require.resolve("react-dom/package.json")),
-  } },
+  resolve: {
+    alias: {
+      react: dirname(require.resolve("react/package.json")),
+      "react-dom": dirname(require.resolve("react-dom/package.json")),
+    },
+  },
   test: {
     css: { include: [/[?&]raw(?:&|$)/] },
-    // A loaded machine stretches honest work: on a 24-process load the slowest
-    // share-code test took 1.73 s and site-runner tests took up to 2.3 s.
-    // vitest.setup.ts gives Testing Library waits 10 s to match.
-    // In a full gate beside other work, the 100-tab-limit shell tests took over
-    // 15 s; each passes alone. 30 s matches the storage and service packages.
     testTimeout: 30_000,
     // expect.poll's own default is 1 s; waits get the same 10 s as vitest.setup.ts.
     expect: { poll: { timeout: 10_000 } },
@@ -81,35 +78,43 @@ export default defineConfig({
         test: {
           ...desktop,
           name: "desktop",
-          include: ISOLATE_ALL ? [...tests.isolated, ...tests.sharedDom, ...tests.sharedNode] : tests.isolated,
+          include: ISOLATE_ALL
+            ? [...tests.isolated, ...tests.sharedDom, ...tests.sharedNode]
+            : tests.isolated,
         },
       },
       // Files in a shared project run one after another in the same worker.
       // Each file starts from the worker's baseline: its environment
       // variables, globals, and real timers, and in jsdom an empty document,
       // empty storage, and its DOM prototypes.
-      ...ISOLATE_ALL ? [] : [
-        {
-          ...common,
-          test: {
-            ...desktop,
-            name: "desktop-shared-dom",
-            include: tests.sharedDom,
-            isolate: false,
-            setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP, "./src/testSharedDomSetup.ts"],
-          },
-        },
-        {
-          ...common,
-          test: {
-            ...desktop,
-            name: "desktop-shared-node",
-            include: tests.sharedNode,
-            isolate: false,
-            setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP],
-          },
-        },
-      ],
+      ...(ISOLATE_ALL
+        ? []
+        : [
+            {
+              ...common,
+              test: {
+                ...desktop,
+                name: "desktop-shared-dom",
+                include: tests.sharedDom,
+                isolate: false,
+                setupFiles: [
+                  ...desktop.setupFiles,
+                  SHARED_WORKER_SETUP,
+                  "./src/testSharedDomSetup.ts",
+                ],
+              },
+            },
+            {
+              ...common,
+              test: {
+                ...desktop,
+                name: "desktop-shared-node",
+                include: tests.sharedNode,
+                isolate: false,
+                setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP],
+              },
+            },
+          ]),
       {
         ...common,
         test: {

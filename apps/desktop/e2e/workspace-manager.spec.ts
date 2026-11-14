@@ -3,10 +3,14 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { revealInFileManagerLabel } from "../src/workspaces/explorerMenu";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedWorkspaceManifest, seedWorkspaceRegistry } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  openWorkspaceFromFirstRun,
+  seedWorkspaceManifest,
+  seedWorkspaceRegistry,
+} from "./helpers/workspace";
 
-// With UI_AUDIT_SHOT_DIR set, the tests for a workspace dohc can't open save
-// the window in both themes.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR;
 
 async function shootBothThemes(page: Page, name: string) {
@@ -28,7 +32,9 @@ test("workspace manager creates another window and removes a workspace from the 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     desktop = await launchDesktopApp({ workspace });
-    await expect(desktop.page.getByRole("button", { name: "Create workspace", exact: true })).toBeVisible();
+    await expect(
+      desktop.page.getByRole("button", { name: "Create workspace", exact: true }),
+    ).toBeVisible();
     await desktop.page.screenshot({ path: testInfo.outputPath("first-run.png") });
     const first = await openWorkspaceFromFirstRun(desktop.page, workspace);
     const switcher = desktop.page.getByTestId("workspace-switcher");
@@ -49,23 +55,25 @@ test("workspace manager creates another window and removes a workspace from the 
     await manager.keyboard.press("ArrowRight");
     await expect(resize).toHaveAttribute("aria-valuenow", "320");
     for (const theme of ["light", "dark"] as const) {
-      await manager.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+      await manager.evaluate((value) => {
+        document.documentElement.dataset.theme = value;
+      }, theme);
       await manager.emulateMedia({ reducedMotion: "reduce" });
       await manager.screenshot({ path: testInfo.outputPath(`manager-${theme}.png`) });
     }
-    // A cut path puts "…" right after its first folder, at every width.
-    const cutPath = () => manager.getByTestId("workspace-manager-row").evaluate((row) => {
-      const dots = row.querySelector("[data-path-cut]");
-      const first = dots?.previousElementSibling;
-      const folders = dots?.nextElementSibling;
-      const name = folders?.nextElementSibling;
-      if (!dots || !first || !folders || !name) return null;
-      return {
-        afterFirst: dots.getBoundingClientRect().left - first.getBoundingClientRect().right,
-        beforeFolders: folders.getBoundingClientRect().left - dots.getBoundingClientRect().right,
-        nameCut: name.scrollWidth > name.clientWidth,
-      };
-    });
+    const cutPath = () =>
+      manager.getByTestId("workspace-manager-row").evaluate((row) => {
+        const dots = row.querySelector("[data-path-cut]");
+        const first = dots?.previousElementSibling;
+        const folders = dots?.nextElementSibling;
+        const name = folders?.nextElementSibling;
+        if (!dots || !first || !folders || !name) return null;
+        return {
+          afterFirst: dots.getBoundingClientRect().left - first.getBoundingClientRect().right,
+          beforeFolders: folders.getBoundingClientRect().left - dots.getBoundingClientRect().right,
+          nameCut: name.scrollWidth > name.clientWidth,
+        };
+      });
     await resize.focus();
     await manager.keyboard.press("Home");
     for (const width of ["220", "236", "252"]) {
@@ -101,14 +109,22 @@ test("workspace manager creates another window and removes a workspace from the 
     await reopenedManager.getByRole("button", { name: "More for second", exact: true }).click();
     await reopenedManager.getByRole("menuitem", { name: "Remove from list", exact: true }).click();
     await expect(reopenedManager.getByTestId("workspace-manager-row")).toHaveCount(1);
-    await expect.poll(async () => second.evaluate(async () => {
-      if (!window.dohcDesktop) throw new Error("Desktop bridge is unavailable");
-      return (await window.dohcDesktop.getWorkspaceRegistry()).workspaces.map((entry) => entry.workspaceId);
-    })).toEqual([first.workspaceId]);
+    await expect
+      .poll(async () =>
+        second.evaluate(async () => {
+          if (!window.dohcDesktop) throw new Error("Desktop bridge is unavailable");
+          return (await window.dohcDesktop.getWorkspaceRegistry()).workspaces.map(
+            (entry) => entry.workspaceId,
+          );
+        }),
+      )
+      .toEqual([first.workspaceId]);
     expect(await readFile(retainedFile, "utf8")).toBe("Keep this file.\n");
     await expect(second.getByTestId("workspace-switcher")).not.toContainText("second");
     const quit = desktop.app.waitForEvent("close");
-    await desktop.app.evaluate(({ app }) => { app.quit(); });
+    await desktop.app.evaluate(({ app }) => {
+      app.quit();
+    });
     await quit;
   } finally {
     await cleanupDesktopWorkspace(desktop, workspace);
@@ -138,21 +154,29 @@ test("workspace manager keeps bottom-row menus reachable by keyboard and follows
     await desktop.page.getByTestId("workspace-switcher-manage").click();
     const manager = await managerOpened;
     await expect(manager.getByTestId("workspace-manager-row")).toHaveCount(13);
-    const zoomLevels = () => desktop!.app.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows().filter((window) => !window.isDestroyed())
-        .map((window) => window.webContents.getZoomLevel()),
-    );
+    const zoomLevels = () =>
+      desktop!.app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()
+          .filter((window) => !window.isDestroyed())
+          .map((window) => window.webContents.getZoomLevel()),
+      );
     await expect.poll(zoomLevels).toEqual([1, 1]);
     await manager.evaluate(async () => {
       if (!window.dohcDesktop) throw new Error("Desktop bridge is unavailable");
       await window.dohcDesktop.stepWindowZoom({ step: "out" });
     });
     await expect.poll(zoomLevels).toEqual([0, 0]);
-    const trigger = manager.getByTestId("workspace-manager-row").last().getByRole("button", { name: /^More for / });
+    const trigger = manager
+      .getByTestId("workspace-manager-row")
+      .last()
+      .getByRole("button", { name: /^More for / });
     await trigger.scrollIntoViewIfNeeded();
     await trigger.focus();
     await manager.keyboard.press("Enter");
-    const reveal = manager.getByRole("menuitem", { name: revealInFileManagerLabel(process.platform), exact: true });
+    const reveal = manager.getByRole("menuitem", {
+      name: revealInFileManagerLabel(process.platform),
+      exact: true,
+    });
     const remove = manager.getByRole("menuitem", { name: "Remove from list", exact: true });
     await expect(reveal).toBeFocused();
     await expect(remove).toBeInViewport();
@@ -170,16 +194,12 @@ test("workspace manager keeps bottom-row menus reachable by keyboard and follows
   }
 });
 
-// A folder that can never be a workspace: the startup screen offers Remove
-// from list in place of Try again, and the next workspace opens. Open folder
-// on the same folder leads with why and offers another folder.
 test("a listed workspace inside dohc's state folder offers Remove from list, then the next workspace opens", async () => {
   test.setTimeout(120_000);
   const workspace = await createTempWorkspace();
-  // Listed before dohc refused such folders: a workspace inside the test
-  // home, which is dohc's state folder.
   const rootPath = join(workspace.homeDir, "notes");
-  const refusal = "This folder is inside the folder that holds dohc's own settings, so it cannot be a workspace.";
+  const refusal =
+    "This folder is inside the folder that holds dohc's own settings, so it cannot be a workspace.";
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     await seedWorkspaceManifest({ rootPath }, "notes-in-state");
@@ -192,7 +212,6 @@ test("a listed workspace inside dohc's state folder offers Remove from list, the
     const before = await files();
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
-    // dohc reopens the first listed workspace at startup and refuses it there.
     const failed = page.getByTestId("workspace-open-failed");
     await expect(failed).toContainText(refusal);
     await expect(failed).not.toContainText("Manage workspaces");
@@ -202,19 +221,26 @@ test("a listed workspace inside dohc's state folder offers Remove from list, the
     expect(await files()).toEqual(before);
     await shootBothThemes(page, "open-failed-not-a-workspace");
 
-    // A plain row leaves the list at once, without asking first.
     await remove.click();
     await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
     await expect(failed).toHaveCount(0);
-    await expect.poll(async () => {
-      const listed = JSON.parse(await readFile(join(workspace.homeDir, "dohc-workspaces.json"), "utf8")) as { workspaces: Array<{ workspaceId: string }> };
-      return listed.workspaces.map((entry) => entry.workspaceId);
-    }).toEqual(["notes-next"]);
+    await expect
+      .poll(async () => {
+        const listed = JSON.parse(
+          await readFile(join(workspace.homeDir, "dohc-workspaces.json"), "utf8"),
+        ) as { workspaces: Array<{ workspaceId: string }> };
+        return listed.workspaces.map((entry) => entry.workspaceId);
+      })
+      .toEqual(["notes-next"]);
     expect(await files()).toEqual(before);
 
     // Open folder picks DOHC_TEST_PICK_PATH, which the launch set to the other workspace.
-    await desktop.app.evaluate((_electron, folder) => { process.env.DOHC_TEST_PICK_PATH = folder; }, rootPath);
-    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "open-workspace"));
+    await desktop.app.evaluate((_electron, folder) => {
+      process.env.DOHC_TEST_PICK_PATH = folder;
+    }, rootPath);
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "open-workspace"),
+    );
     const toast = page.getByTestId("workspace-shell-error");
     await expect(toast).toContainText(refusal);
     await expect(toast).not.toContainText(rootPath);
@@ -222,7 +248,9 @@ test("a listed workspace inside dohc's state folder offers Remove from list, the
     await expect(toast.getByRole("button", { name: "Try again" })).toHaveCount(0);
     await expect(toast.getByTestId("workspace-shell-error-copy")).toHaveCount(0);
     await toast.getByRole("button", { name: "Details" }).click();
-    await expect(toast.getByTestId("workspace-shell-error-details-text")).toContainText(`Chosen folder: ${rootPath}`);
+    await expect(toast.getByTestId("workspace-shell-error-details-text")).toContainText(
+      `Chosen folder: ${rootPath}`,
+    );
     await shootBothThemes(page, "open-folder-toast-details");
     expect(await files()).toEqual(before);
   } finally {
@@ -230,8 +258,6 @@ test("a listed workspace inside dohc's state folder offers Remove from list, the
   }
 });
 
-// A folder that may come back, such as on a drive that is not connected,
-// keeps Try again and Remove from list stays in Manage workspaces.
 test("a listed workspace whose folder is missing keeps Try again", async () => {
   test.setTimeout(120_000);
   const workspace = await createTempWorkspace();

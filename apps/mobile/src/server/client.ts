@@ -9,17 +9,28 @@ import type { ServerProblemKind } from "@dohc/interface-words/account";
  * Why a request gave no usable answer:
  * - `signed-out`: the server answered 401, so this sign-in has ended;
  * - `not-found`: 404, which the server also answers for something this account doesn't own;
- * - `server-busy`: 503 or 429;
+ * - `server-busy`: 429, or any 5xx: the server failed for now, and the same request may work later;
  * - `offline`: no answer, or none in time;
- * - `refused`: any other status;
+ * - `refused`: any other status, such as a 400 for a request the server won't take;
  * - `invalid`: an answer the phone could not read;
  * - `cancelled`: the sign-in or the request was superseded first.
  */
-export type ServerProblem = "signed-out" | "not-found" | "server-busy" | "offline" | "refused" | "invalid" | "cancelled";
+export type ServerProblem =
+  | "signed-out"
+  | "not-found"
+  | "server-busy"
+  | "offline"
+  | "refused"
+  | "invalid"
+  | "cancelled";
 
 export class ServerError extends Error {
   /** `code` is the error code a refusal's answer named, such as `restore-in-progress`. */
-  constructor(readonly problem: ServerProblem, readonly status: number | null = null, readonly code: string | null = null) {
+  constructor(
+    readonly problem: ServerProblem,
+    readonly status: number | null = null,
+    readonly code: string | null = null,
+  ) {
     super(status === null ? problem : `${problem} (${status})`);
     this.name = "ServerError";
   }
@@ -52,7 +63,10 @@ export interface FetchInit {
   readonly redirect: "error";
   readonly signal: AbortSignal;
 }
-export type Fetch = (url: string, init: FetchInit) => Promise<{ readonly status: number; json(): Promise<unknown> }>;
+export type Fetch = (
+  url: string,
+  init: FetchInit,
+) => Promise<{ readonly status: number; json(): Promise<unknown> }>;
 
 export const REQUEST_TIMEOUT_MS = 15_000;
 
@@ -62,14 +76,18 @@ export const REQUEST_TIMEOUT_MS = 15_000;
  * `keepAnswer` is set. Then a request already sent is never aborted, only timed out, and its answer is returned for
  * the caller to act on: an answer that made something on the server, such as a session, is never lost.
  */
-export async function exchange(fetch: Fetch, url: string, request: {
-  readonly method: "GET" | "POST" | "PATCH";
-  readonly headers?: Readonly<Record<string, string>>;
-  readonly body?: unknown;
-  readonly signal: AbortSignal;
-  readonly timeoutMs?: number;
-  readonly keepAnswer?: boolean;
-}): Promise<{ readonly status: number; readonly body: unknown }> {
+export async function exchange(
+  fetch: Fetch,
+  url: string,
+  request: {
+    readonly method: "GET" | "POST" | "PATCH";
+    readonly headers?: Readonly<Record<string, string>>;
+    readonly body?: unknown;
+    readonly signal: AbortSignal;
+    readonly timeoutMs?: number;
+    readonly keepAnswer?: boolean;
+  },
+): Promise<{ readonly status: number; readonly body: unknown }> {
   const { signal } = request;
   if (signal.aborted) throw new ServerError("cancelled");
   const own = new AbortController();
@@ -111,10 +129,12 @@ export async function exchange(fetch: Fetch, url: string, request: {
 }
 
 /** The problem for a status that isn't a success. */
-export function statusProblem(status: number): Exclude<ServerProblem, "offline" | "invalid" | "cancelled"> {
+export function statusProblem(
+  status: number,
+): Exclude<ServerProblem, "offline" | "invalid" | "cancelled"> {
   if (status === 401) return "signed-out";
   if (status === 404) return "not-found";
-  if (status === 429 || status === 503) return "server-busy";
+  if (status === 429 || status >= 500) return "server-busy";
   return "refused";
 }
 
@@ -130,7 +150,13 @@ export interface ServerClient {
    * Sends a request with the sign-in's token, and resolves its answer as `read` validates it. `read` returns null
    * for an answer it can't use. A 401 ends the sign-in.
    */
-  send<T>(method: "GET" | "POST" | "PATCH", path: string, read: (body: unknown) => T | null, body?: unknown, options?: SendOptions): Promise<T>;
+  send<T>(
+    method: "GET" | "POST" | "PATCH",
+    path: string,
+    read: (body: unknown) => T | null,
+    body?: unknown,
+    options?: SendOptions,
+  ): Promise<T>;
 }
 
 /** The error code a refusal's answer names, as the server's errors carry it: `{ ok: false, error, code }`. */
@@ -161,7 +187,10 @@ export function createServerClient(options: {
       }
       try {
         const answer = await exchange(options.fetch, `${options.origin}${path}`, {
-          method, body, signal: ending.signal, timeoutMs: request?.timeoutMs ?? options.timeoutMs,
+          method,
+          body,
+          signal: ending.signal,
+          timeoutMs: request?.timeoutMs ?? options.timeoutMs,
           headers: { authorization: `Bearer ${options.token}` },
         });
         if (answer.status < 200 || answer.status > 299) {
@@ -185,6 +214,6 @@ export function requestGenerations(): { next(): number; isLatest(request: number
   let latest = 0;
   return {
     next: () => ++latest,
-    isLatest: request => request === latest,
+    isLatest: (request) => request === latest,
   };
 }

@@ -19,9 +19,6 @@ function lane<T>(initial: T) {
 }
 
 describe("snapshot lane", () => {
-  // Latest-COMMITTED-wins. A request that is merely in flight has answered
-  // nothing, and one that fails never will, so only an answer older than what
-  // is displayed is dropped.
   it("writes a newer answer and drops an older one", () => {
     const it0 = lane<string | null>(null);
     const older = it0.take();
@@ -36,9 +33,6 @@ describe("snapshot lane", () => {
     expect(it0.handle().latest()).toBe("newer");
   });
 
-  // The owner went away. Everything outstanding is stale, and a lane that
-  // still believed nothing had answered would let any of it write. The lane
-  // invalidates itself, so nobody has to remember to.
   it("stops every read in flight from writing once its owner unmounts", async () => {
     const it0 = lane<string | null>(null);
     const outstanding = it0.take();

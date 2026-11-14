@@ -6,7 +6,11 @@ import { EditorState } from "@tiptap/pm/state";
 import { DecorationSet, type EditorView } from "@tiptap/pm/view";
 import { StarterKit } from "@tiptap/starter-kit";
 import type { MenuItemConstructorOptions } from "electron";
-import { EDITOR_MENU_COMMANDS, isEditorMenuCommand, type EditorMenuCommand } from "../../ipc/channels";
+import {
+  EDITOR_MENU_COMMANDS,
+  isEditorMenuCommand,
+  type EditorMenuCommand,
+} from "../../ipc/channels";
 import { shortcutAccelerators } from "../../shortcuts/shortcutRegistry";
 import { buildMenuTemplate } from "../../window/applicationMenu";
 import { boldText, codeBlock, doc, hardBreak, paragraph, schema } from "./testDocs";
@@ -47,8 +51,6 @@ describe("computeMatches", () => {
   });
 
   it("spans adjacent text nodes within the same textblock (**bo**ld)", () => {
-    // A bold "bo" (pos 1-3) directly followed by a plain "ld" (pos 3-5)
-    // inside one paragraph — two text nodes, positionally contiguous.
     const d = doc(paragraph(boldText("bo"), "ld"));
     expect(computeMatches(d, "old", false)).toEqual([{ from: 2, to: 5 }]);
     expect(computeMatches(d, "bold", false)).toEqual([{ from: 1, to: 5 }]);
@@ -62,8 +64,6 @@ describe("computeMatches", () => {
     expect(computeMatches(d, "end", false)).toEqual([{ from: 1, to: 4 }]);
     expect(computeMatches(d, "start", false)).toEqual([{ from: 6, to: 11 }]);
 
-    // A non-text leaf (hardBreak) between two text nodes in the same
-    // paragraph also breaks the run.
     const withBreak = doc(paragraph("end", hardBreak(), "start"));
     expect(computeMatches(withBreak, "endstart", false)).toEqual([]);
   });
@@ -160,7 +160,9 @@ describe("findReplaceReducer", () => {
       { type: "open", replace: true, query: "cat" },
       catDoc,
     );
-    expect(findReplaceReducer(opened, { type: "close" }, catDoc)).toEqual(CLOSED_FIND_REPLACE_STATE);
+    expect(findReplaceReducer(opened, { type: "close" }, catDoc)).toEqual(
+      CLOSED_FIND_REPLACE_STATE,
+    );
   });
 
   it("sync keeps the same match active by position when the doc changes elsewhere", () => {
@@ -190,10 +192,6 @@ describe("findReplaceReducer", () => {
     const onSecond = findReplaceReducer(opened, { type: "next" }, catDoc);
     expect(onSecond.activeIndex).toBe(1);
 
-    // The "sat" occurrence (the active match) is gone; only "cat" (before the
-    // old position) and "mat" (after it) remain. Forward progression should
-    // land on "mat" — the nearest match at/after where we were — not snap
-    // back to "cat" at the top of the doc.
     const editedDoc = doc(paragraph("the cat ran on the mat"));
     const synced = findReplaceReducer(onSecond, { type: "sync" }, editedDoc);
     expect(synced.matches).toHaveLength(2);
@@ -226,7 +224,11 @@ describe("buildReplaceActiveTransaction / buildReplaceAllTransaction", () => {
 
   it("replace-active is a no-op (null transaction) with no active match", () => {
     const state = stateFor("no match here");
-    const tr = buildReplaceActiveTransaction(state, { matches: [], activeIndex: -1, replacement: "x" });
+    const tr = buildReplaceActiveTransaction(state, {
+      matches: [],
+      activeIndex: -1,
+      replacement: "x",
+    });
     expect(tr).toBeNull();
   });
 
@@ -262,9 +264,7 @@ describe("makeFindReplacePlugin (registered plugin, real EditorState)", () => {
       doc: doc(paragraph("the cat sat on the mat")),
       plugins: [plugin],
     });
-    state = state.apply(
-      state.tr.setMeta(findReplaceKey, { type: "open", replace: false, query }),
-    );
+    state = state.apply(state.tr.setMeta(findReplaceKey, { type: "open", replace: false, query }));
     return { plugin, state };
   }
 
@@ -297,7 +297,10 @@ describe("findReplaceExtension keys", () => {
   // jsdom reports no Mac navigator, so ProseMirror reads Mod as Control here.
   function replaceOpenAfter(platform: string, init: KeyboardEventInit): boolean {
     vi.stubGlobal("dohcDesktop", { platform });
-    const editor = new Editor({ extensions: [StarterKit, findReplaceExtension], content: "<p>the cat</p>" });
+    const editor = new Editor({
+      extensions: [StarterKit, findReplaceExtension],
+      content: "<p>the cat</p>",
+    });
     try {
       const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
       editor.view.someProp("handleKeyDown", (handle) => handle(editor.view, event));
@@ -308,46 +311,74 @@ describe("findReplaceExtension keys", () => {
   }
 
   it("opens Replace with ⌥⌘F on macOS and leaves ⌘H to Hide", () => {
-    expect(replaceOpenAfter("darwin", { key: "ƒ", keyCode: 70, ctrlKey: true, altKey: true })).toBe(true);
+    expect(replaceOpenAfter("darwin", { key: "ƒ", keyCode: 70, ctrlKey: true, altKey: true })).toBe(
+      true,
+    );
     expect(replaceOpenAfter("darwin", { key: "h", keyCode: 72, ctrlKey: true })).toBe(false);
   });
 
   it.each(["win32", "linux"])("opens Replace with Ctrl+H on %s", (platform) => {
     expect(replaceOpenAfter(platform, { key: "h", keyCode: 72, ctrlKey: true })).toBe(true);
-    expect(replaceOpenAfter(platform, { key: "f", keyCode: 70, ctrlKey: true, altKey: true })).toBe(false);
+    expect(replaceOpenAfter(platform, { key: "f", keyCode: 70, ctrlKey: true, altKey: true })).toBe(
+      false,
+    );
   });
 
   it.each([
-    ["darwin", { key: "g", metaKey: true }, { key: "G", metaKey: true, shiftKey: true }, [{ key: "g", ctrlKey: true }, { key: "F3" }]],
-    ["win32", { key: "F3" }, { key: "F3", shiftKey: true }, [{ key: "g", ctrlKey: true }, { key: "g", metaKey: true }]],
+    [
+      "darwin",
+      { key: "g", metaKey: true },
+      { key: "G", metaKey: true, shiftKey: true },
+      [{ key: "g", ctrlKey: true }, { key: "F3" }],
+    ],
+    [
+      "win32",
+      { key: "F3" },
+      { key: "F3", shiftKey: true },
+      [
+        { key: "g", ctrlKey: true },
+        { key: "g", metaKey: true },
+      ],
+    ],
     ["linux", { key: "F3" }, { key: "F3", shiftKey: true }, [{ key: "g", ctrlKey: true }]],
-  ] as const)("finds again from the document on %s while the bar has a query", (platform, next, previous, others) => {
-    vi.stubGlobal("dohcDesktop", { platform });
-    const editor = new Editor({ extensions: [StarterKit, findReplaceExtension], content: "<p>the cat, the mat, the hat</p>" });
-    try {
-      const press = (init: KeyboardEventInit) => editor.view.someProp("handleKeyDown", (handle) =>
-        handle(editor.view, new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }))) ?? false;
-      const find = (action: FindReplaceAction) => editor.view.dispatch(editor.state.tr.setMeta(findReplaceKey, action));
-      const active = () => findReplaceKey.getState(editor.state)?.activeIndex;
-      // With the bar closed, the key is left to anything else that wants it.
-      expect(press(next)).toBe(false);
-      find({ type: "open", replace: false, query: "the" });
-      expect(active()).toBe(0);
-      expect(press(next)).toBe(true);
-      expect(active()).toBe(1);
-      press(next);
-      press(next);
-      expect(active()).toBe(0);
-      expect(press(previous)).toBe(true);
-      expect(active()).toBe(2);
-      for (const other of others) expect(press(other), JSON.stringify(other)).toBe(false);
-      expect(active()).toBe(2);
-      find({ type: "setQuery", query: "" });
-      expect(press(next)).toBe(false);
-    } finally {
-      editor.destroy();
-    }
-  });
+  ] as const)(
+    "finds again from the document on %s while the bar has a query",
+    (platform, next, previous, others) => {
+      vi.stubGlobal("dohcDesktop", { platform });
+      const editor = new Editor({
+        extensions: [StarterKit, findReplaceExtension],
+        content: "<p>the cat, the mat, the hat</p>",
+      });
+      try {
+        const press = (init: KeyboardEventInit) =>
+          editor.view.someProp("handleKeyDown", (handle) =>
+            handle(
+              editor.view,
+              new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }),
+            ),
+          ) ?? false;
+        const find = (action: FindReplaceAction) =>
+          editor.view.dispatch(editor.state.tr.setMeta(findReplaceKey, action));
+        const active = () => findReplaceKey.getState(editor.state)?.activeIndex;
+        expect(press(next)).toBe(false);
+        find({ type: "open", replace: false, query: "the" });
+        expect(active()).toBe(0);
+        expect(press(next)).toBe(true);
+        expect(active()).toBe(1);
+        press(next);
+        press(next);
+        expect(active()).toBe(0);
+        expect(press(previous)).toBe(true);
+        expect(active()).toBe(2);
+        for (const other of others) expect(press(other), JSON.stringify(other)).toBe(false);
+        expect(active()).toBe(2);
+        find({ type: "setQuery", query: "" });
+        expect(press(next)).toBe(false);
+      } finally {
+        editor.destroy();
+      }
+    },
+  );
 
   it("matches ⌥⌘F through the keymap's keyCode fallback, where macOS reports ƒ", () => {
     // On macOS, prosemirror-keymap normalizes Mod-Alt-f to Meta-Alt-f.
@@ -379,15 +410,24 @@ describe("Edit > Find on macOS", () => {
   function mount() {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
     const element = document.body.appendChild(document.createElement("div"));
-    const editor = new Editor({ element, extensions: [StarterKit, findReplaceExtension], content: "<p>the cat, the mat, the hat</p>" });
+    const editor = new Editor({
+      element,
+      extensions: [StarterKit, findReplaceExtension],
+      content: "<p>the cat, the mat, the hat</p>",
+    });
     const actions: FindReplaceAction["type"][] = [];
     editor.on("transaction", ({ transaction }) => {
       const action = transaction.getMeta(findReplaceKey) as FindReplaceAction | undefined;
       if (action) actions.push(action.type);
     });
-    const find = (action: FindReplaceAction) => editor.view.dispatch(editor.state.tr.setMeta(findReplaceKey, action));
+    const find = (action: FindReplaceAction) =>
+      editor.view.dispatch(editor.state.tr.setMeta(findReplaceKey, action));
     const press = (command: EditorMenuCommand) => {
-      const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...KEYS[command] });
+      const event = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        ...KEYS[command],
+      });
       editor.view.dom.dispatchEvent(event);
       return event;
     };
@@ -398,16 +438,27 @@ describe("Edit > Find on macOS", () => {
     const byKey = mount();
     const byMenu = mount();
     try {
-      // Find again steps through an open search.
       if (command.startsWith("find-again")) {
-        for (const { find } of [byKey, byMenu]) find({ type: "open", replace: false, query: "the" });
+        for (const { find } of [byKey, byMenu])
+          find({ type: "open", replace: false, query: "the" });
       }
       expect(byKey.press(command).defaultPrevented).toBe(true);
       expect(runFindCommand(byMenu.editor, command)).toBe(true);
-      expect(byKey.actions.at(-1)).toBe({ "editor-find": "open", "editor-replace": "open", "find-again-next": "next", "find-again-previous": "prev" }[command]);
+      expect(byKey.actions.at(-1)).toBe(
+        {
+          "editor-find": "open",
+          "editor-replace": "open",
+          "find-again-next": "next",
+          "find-again-previous": "prev",
+        }[command],
+      );
       expect(byMenu.actions).toEqual(byKey.actions);
-      expect(findReplaceKey.getState(byMenu.editor.state)).toEqual(findReplaceKey.getState(byKey.editor.state));
-      expect(findReplaceKey.getState(byMenu.editor.state)?.replaceOpen).toBe(command === "editor-replace");
+      expect(findReplaceKey.getState(byMenu.editor.state)).toEqual(
+        findReplaceKey.getState(byKey.editor.state),
+      );
+      expect(findReplaceKey.getState(byMenu.editor.state)?.replaceOpen).toBe(
+        command === "editor-replace",
+      );
     } finally {
       byKey.editor.destroy();
       byMenu.editor.destroy();
@@ -428,27 +479,34 @@ describe("Edit > Find on macOS", () => {
       stepZoom: vi.fn(),
       showAbout: vi.fn(),
     });
-    const edit = menu.find((entry) => entry.label === "Edit")!.submenu as MenuItemConstructorOptions[];
-    const findItems = edit.find((entry) => entry.label === "Find")!.submenu as MenuItemConstructorOptions[];
+    const edit = menu.find((entry) => entry.label === "Edit")!
+      .submenu as MenuItemConstructorOptions[];
+    const findItems = edit.find((entry) => entry.label === "Find")!
+      .submenu as MenuItemConstructorOptions[];
     // macOS offers a key to the menu only when the page leaves it unhandled.
     const type = (command: EditorMenuCommand) => {
       actions.length = 0;
       sent.length = 0;
       if (!press(command).defaultPrevented) {
-        const item = findItems.find((entry) => entry.accelerator === shortcutAccelerators(command, "darwin")[0])!;
+        const item = findItems.find(
+          (entry) => entry.accelerator === shortcutAccelerators(command, "darwin")[0],
+        )!;
         (item.click as (item: unknown, window: unknown) => void)(undefined, undefined);
       }
       return { actions: [...actions], sent: [...sent] };
     };
     try {
-      // With no search open, find again reaches the menu, which finds nothing.
       expect(type("find-again-next")).toEqual({ actions: [], sent: ["find-again-next"] });
       expect(type("editor-find")).toEqual({ actions: ["open"], sent: [] });
       find({ type: "setQuery", query: "the" });
       expect(type("find-again-next")).toEqual({ actions: ["next"], sent: [] });
       expect(type("find-again-previous")).toEqual({ actions: ["prev"], sent: [] });
       expect(type("editor-replace")).toEqual({ actions: ["open"], sent: [] });
-      expect(findReplaceKey.getState(editor.state)).toMatchObject({ open: true, replaceOpen: true, activeIndex: 0 });
+      expect(findReplaceKey.getState(editor.state)).toMatchObject({
+        open: true,
+        replaceOpen: true,
+        activeIndex: 0,
+      });
     } finally {
       editor.destroy();
     }

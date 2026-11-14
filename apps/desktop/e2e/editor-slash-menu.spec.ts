@@ -9,21 +9,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// Slash-menu flicker regression (engine editor). Two failure modes are pinned:
-//
-// 1. Remount churn — if typing a query ever closes+reopens the menu (state
-//    passing through closed, plugin re-registration, editor recreation), the
-//    element remounts and the dohc-pop-in entrance animation replays on every
-//    keystroke: visible flicker. The MutationObserver + animationstart
-//    counters must stay at exactly one mount / one entrance.
-//
-// 2. Above-placement detachment — a menu opened above the cursor (typing in
-//    the lower part of the window) used to be TOP-anchored at
-//    `cursorTop - gap - maxHeight`, assuming full maxHeight content. Filtering
-//    shrinks the list, so the box hung detached above the caret and its bottom
-//    edge leapt up/down (~180px) with every keystroke. It is now anchored by
-//    its bottom edge, which must stay glued next to the caret at any query.
-
 declare global {
   interface Window {
     __slashDiag?: {
@@ -44,9 +29,7 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
       { length: 60 },
       (_, i) => `Paragraph ${i + 1} with a fair amount of running text in it.`,
     ).join("\n\n");
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/doc.md", contents: `# Doc\n\n${longBody}\n` },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/doc.md", contents: `# Doc\n\n${longBody}\n` }]);
 
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
@@ -54,7 +37,6 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
 
     await explorerRow(page, "notes").click();
     await explorerRow(page, "notes/doc.md").click();
-    // Engine mode: WYSIWYG is the whole surface, no Edit gate.
     await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, {
       timeout: 15_000,
     });
@@ -86,7 +68,6 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
       );
     });
 
-    // ── 1. remount churn while typing and erasing a query ──
     await editor.click();
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
@@ -105,15 +86,12 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
     expect(diag?.removed).toBe(0);
     expect(diag?.animStarts).toBe(1);
 
-    // ── 2. above placement stays glued to the caret while filtering ──
     await page.keyboard.press("Escape");
     await page.keyboard.press("Backspace");
     // Click at the end of a paragraph low in the viewport so the menu must
     // open above the caret.
     const target = await page.evaluate(() => {
-      const paragraphs = Array.from(
-        document.querySelectorAll('[data-testid="markdown-editor"] p'),
-      );
+      const paragraphs = Array.from(document.querySelectorAll('[data-testid="markdown-editor"] p'));
       const viewportHeight = window.innerHeight;
       const candidate = paragraphs.find((p) => {
         const rect = p.getBoundingClientRect();
@@ -140,13 +118,11 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
     // Entrance animation settles first (it translates the box slightly).
     await page.waitForTimeout(250);
     const anchoredBottom = await menuBottom();
-    // The bottom edge sits just above the caret line the user typed on.
     expect(Math.abs(anchoredBottom - target!.y)).toBeLessThan(40);
 
     for (const ch of "head") {
       await page.keyboard.type(ch, { delay: 20 });
       await page.waitForTimeout(60);
-      // Filtering shrinks the menu; its caret-side edge must not move.
       expect(Math.abs((await menuBottom()) - anchoredBottom)).toBeLessThan(1.5);
     }
     for (let i = 0; i < 4; i++) {

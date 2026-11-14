@@ -4,11 +4,24 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { signInLinkAgent, startAgentCallback, stopAgentCallback, type AgentCallback } from "./helpers/linkAgent";
+import {
+  signInLinkAgent,
+  startAgentCallback,
+  stopAgentCallback,
+  type AgentCallback,
+} from "./helpers/linkAgent";
 import { claimRelayWorkspace } from "./helpers/relayPeer";
-import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
+import {
+  sharedDatasetViewerOrigin,
+  startSharedDatasetBrowser,
+} from "./helpers/sharedDatasetBrowser";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
-import { relayAdoptedIdentity, spawnSyncRelay, type RelayWorkspaceIdentity, type SyncRelayHandle } from "./helpers/syncRelay";
+import {
+  relayAdoptedIdentity,
+  spawnSyncRelay,
+  type RelayWorkspaceIdentity,
+  type SyncRelayHandle,
+} from "./helpers/syncRelay";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -52,8 +65,14 @@ async function expectFitsWindow(page: Page, dialog: Locator): Promise<void> {
   const box = await dialog.boundingBox();
   const fit = await page.evaluate(() => {
     const scrim = document.querySelector<HTMLElement>("[data-dohc-modal]")!;
-    const room = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--dohc-toast-room")) || 0;
-    return { limit: window.innerHeight - room, scrimScrolls: scrim.scrollHeight > scrim.clientHeight };
+    const room =
+      parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue("--dohc-toast-room"),
+      ) || 0;
+    return {
+      limit: window.innerHeight - room,
+      scrimScrolls: scrim.scrollHeight > scrim.clientHeight,
+    };
   });
   expect(box).not.toBeNull();
   expect(box!.y).toBeGreaterThanOrEqual(0);
@@ -77,7 +96,6 @@ async function openLinkPane(page: Page): Promise<Locator> {
   await page.getByTestId("explorer-menu-item-share").click();
   const dialog = page.getByTestId("share-dialog");
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("radio", { name: "Anyone with the link" }).click();
   return dialog;
 }
 
@@ -96,12 +114,31 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     await writeWorkspaceFiles(temp, [{ path: PATH, contents: "# Trip plan\n\nPack light.\n" }]);
     relay = await spawnSyncRelay({
       dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
-      linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin },
+      linkBoundary: {
+        linkKey: randomBytes(32).toString("base64url"),
+        relayExchangeKey,
+        publicViewerOrigin: sharedDatasetViewerOrigin,
+      },
     });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: TOKEN, workspaceId: WORKSPACE_ID });
-    await seedWorkspaceRegistry(temp, [{ workspaceId: WORKSPACE_ID, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER } }]);
-    await seedCloudCredentials(temp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: `${OWNER}@dohc.test`, userId: OWNER, token: TOKEN });
-    shared = await startSharedDatasetBrowser({ relayUrl: relay.baseUrl, exchangeKey: relayExchangeKey });
+    await seedWorkspaceRegistry(temp, [
+      {
+        workspaceId: WORKSPACE_ID,
+        rootPath: temp.rootPath,
+        remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER },
+      },
+    ]);
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: `${OWNER}@dohc.test`,
+      userId: OWNER,
+      token: TOKEN,
+    });
+    shared = await startSharedDatasetBrowser({
+      relayUrl: relay.baseUrl,
+      exchangeKey: relayExchangeKey,
+    });
     desktop = await launchDesktopApp({
       workspace: temp,
       env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" },
@@ -111,18 +148,30 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
 
     // A link shares what the relay holds, so the file reaches it first.
     let identity: RelayWorkspaceIdentity | null = null;
-    await expect.poll(async () => {
-      identity ??= relayAdoptedIdentity(relay!.dbPath, WORKSPACE_ID);
-      if (identity === null) return false;
-      const query = new URLSearchParams({ since: "0", limit: "500", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity });
-      const response = await fetch(`${relay!.baseUrl}/sync/${encodeURIComponent(WORKSPACE_ID)}/log?${query.toString()}`, { headers: { authorization: `Bearer ${TOKEN}` } });
-      if (response.status === 409) identity = null;
-      if (!response.ok) return false;
-      const body = (await response.json()) as { ops: Array<{ payload?: { path?: string } }> };
-      return body.ops.some((op) => op.payload?.path === PATH);
-    }, { timeout: 90_000, intervals: [1_000] }).toBe(true);
+    await expect
+      .poll(
+        async () => {
+          identity ??= relayAdoptedIdentity(relay!.dbPath, WORKSPACE_ID);
+          if (identity === null) return false;
+          const query = new URLSearchParams({
+            since: "0",
+            limit: "500",
+            replicationEpoch: identity.replicationEpoch,
+            streamIdentity: identity.streamIdentity,
+          });
+          const response = await fetch(
+            `${relay!.baseUrl}/sync/${encodeURIComponent(WORKSPACE_ID)}/log?${query.toString()}`,
+            { headers: { authorization: `Bearer ${TOKEN}` } },
+          );
+          if (response.status === 409) identity = null;
+          if (!response.ok) return false;
+          const body = (await response.json()) as { ops: Array<{ payload?: { path?: string } }> };
+          return body.ops.some((op) => op.payload?.path === PATH);
+        },
+        { timeout: 90_000, intervals: [1_000] },
+      )
+      .toBe(true);
 
-    // The new link: its URL with Copy, and Copy for an agent beside it.
     let dialog = await openLinkPane(page);
     await dialog.getByRole("button", { name: "Create link", exact: true }).click();
     const linkUrl = new URL((await dialog.getByTestId("share-link-url").textContent()) ?? "");
@@ -139,11 +188,23 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
       expect(await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(address);
     });
 
-    // Two agents sign in with the copied address, and each makes a call.
-    const named = await signInLinkAgent({ handle: shared.handle, browser: shared.browser, callback, address, clientName: "Claude Code" });
-    const unnamed = await signInLinkAgent({ handle: shared.handle, browser: shared.browser, callback, address });
+    const named = await signInLinkAgent({
+      handle: shared.handle,
+      browser: shared.browser,
+      callback,
+      address,
+      clientName: "Claude Code",
+    });
+    const unnamed = await signInLinkAgent({
+      handle: shared.handle,
+      browser: shared.browser,
+      callback,
+      address,
+    });
     for (const agent of [named, unnamed]) {
-      expect((await agent.rpc("tools/call", { name: "dohc_share_status", arguments: {} })).status).toBe(200);
+      expect(
+        (await agent.rpc("tools/call", { name: "dohc_share_status", arguments: {} })).status,
+      ).toBe(200);
     }
 
     await dialog.getByRole("button", { name: "Close", exact: true }).click();
@@ -153,21 +214,22 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     await expect(agents).toContainText("Claude Code");
     await expect(agents).toContainText("Name reported by the agent");
     await expect(agents).toContainText("The agent reported no name");
-    // Two agents make the pane taller than the window: the body scrolls to
-    // them while the title and the backdrop stay put.
     await expect(dialog).toHaveAttribute("data-scrolls", "");
     await agents.scrollIntoViewIfNeeded();
     const body = dialog.getByTestId("share-dialog-body");
     expect(await body.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-    expect(await page.locator("[data-dohc-modal]").evaluate((element) => element.scrollTop)).toBe(0);
+    expect(await page.locator("[data-dohc-modal]").evaluate((element) => element.scrollTop)).toBe(
+      0,
+    );
     await expect(dialog.getByRole("heading", { name: "Share" })).toBeInViewport();
     // Toasts take room at the bottom, and the dialog gives it up.
-    await page.evaluate(() => document.documentElement.style.setProperty("--dohc-toast-room", "160px"));
+    await page.evaluate(() =>
+      document.documentElement.style.setProperty("--dohc-toast-room", "160px"),
+    );
     await expectFitsWindow(page, dialog);
     await page.evaluate(() => document.documentElement.style.removeProperty("--dohc-toast-room"));
     await shoot(page, dialog, "share-link-b-agents-two");
 
-    // Disconnect ends the agent's connection: its next call is refused.
     await agents.getByRole("button", { name: "Disconnect Claude Code" }).click();
     await expect(agents.getByRole("listitem")).toHaveCount(1);
     expect((await named.rpc("tools/list")).status).toBe(401);
@@ -180,9 +242,17 @@ test("@ui-audit Copy for an agent and a link's Agents list", async () => {
     expect(desktop.logs.filter((entry) => entry.text.includes(secret))).toEqual([]);
     expect(shared.failures).toEqual([]);
   } finally {
-    try { await shared?.close(); } finally {
-      try { await stopAgentCallback(callback); } finally {
-        try { await relay?.stop(); } finally { await cleanupDesktopWorkspace(desktop, temp); }
+    try {
+      await shared?.close();
+    } finally {
+      try {
+        await stopAgentCallback(callback);
+      } finally {
+        try {
+          await relay?.stop();
+        } finally {
+          await cleanupDesktopWorkspace(desktop, temp);
+        }
       }
     }
   }

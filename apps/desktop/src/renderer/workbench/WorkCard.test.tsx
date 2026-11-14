@@ -27,7 +27,13 @@ describe("linkHost", () => {
   });
 
   it("is null for anything that is not a web address", () => {
-    for (const url of ["javascript:alert(1)", "mailto:ada@example.com", "https://[bad", "https://‮x/moc.buhtig", ""]) {
+    for (const url of [
+      "javascript:alert(1)",
+      "mailto:ada@example.com",
+      "https://[bad",
+      "https://‮x/moc.buhtig",
+      "",
+    ]) {
       expect(linkHost(url), url).toBeNull();
     }
   });
@@ -36,7 +42,13 @@ describe("linkHost", () => {
 describe("WorkStatus", () => {
   it("shows the status in words with a plain mark, and says who reported it", () => {
     const atMs = new Date(2026, 6, 8, 14, 43).getTime();
-    render(<WorkStatus testIdPrefix="chats-post" work={{ status: "done" }} reportedBy={{ name: "Nova", owner: "Ada", atMs }} />);
+    render(
+      <WorkStatus
+        testIdPrefix="chats-post"
+        work={{ status: "done" }}
+        reportedBy={{ name: "Nova", owner: "Ada", atMs }}
+      />,
+    );
     const status = screen.getByTestId("chats-post-work");
     expect(status.getAttribute("data-status")).toBe("done");
     const mark = status.querySelector("svg.lucide-circle-check");
@@ -51,7 +63,14 @@ describe("WorkStatus", () => {
   });
 
   it("names the agent beside the status where the row shows another author", () => {
-    render(<WorkStatus testIdPrefix="chats-post" work={{ status: "working" }} reportedBy={{ name: "Nova", atMs: 1 }} showReporter />);
+    render(
+      <WorkStatus
+        testIdPrefix="chats-post"
+        work={{ status: "working" }}
+        reportedBy={{ name: "Nova", atMs: 1 }}
+        showReporter
+      />,
+    );
     expect(screen.getByTestId("chats-post-work-reporter").textContent).toBe("Nova");
     expect(screen.getByTestId("chats-post-work").querySelector(".bg-agent")).not.toBeNull();
   });
@@ -72,7 +91,10 @@ describe("WorkStatus", () => {
     const onRow = vi.fn();
     render(
       <div onClick={onRow}>
-        <WorkStatus testIdPrefix="chats-post" work={{ status: "waiting", url: "https://github.com/dohchq/dohc/pull/7" }} />
+        <WorkStatus
+          testIdPrefix="chats-post"
+          work={{ status: "waiting", url: "https://github.com/dohchq/dohc/pull/7" }}
+        />
       </div>,
     );
     const open = screen.getByRole("button", { name: "Open github.com, as reported" });
@@ -84,7 +106,12 @@ describe("WorkStatus", () => {
   });
 
   it("offers no button for a link that is not a web address", () => {
-    render(<WorkStatus testIdPrefix="chats-post" work={{ status: "done", url: "javascript:alert(1)" }} />);
+    render(
+      <WorkStatus
+        testIdPrefix="chats-post"
+        work={{ status: "done", url: "javascript:alert(1)" }}
+      />,
+    );
     expect(screen.queryByTestId("chats-post-work-open")).toBeNull();
   });
 });

@@ -157,20 +157,21 @@ describe("MarkdownContent link navigation", () => {
   it("handles a ctrl-click on a resolved shared file but passes through an unresolved link", async () => {
     const navigatedPaths: string[] = [];
     await act(() => {
-      root?.render(createElement(MarkdownContent, {
-        markdown: [
-          "[Shared file](/docs/next.md)",
-          "[Unresolved](#section)",
-        ].join("\n\n"),
-        resolveLink: (href: string) => href === "/docs/next.md" ? "docs/next.md" : null,
-        onNavigate: (path: string) => navigatedPaths.push(path),
-      }));
+      root?.render(
+        createElement(MarkdownContent, {
+          markdown: ["[Shared file](/docs/next.md)", "[Unresolved](#section)"].join("\n\n"),
+          resolveLink: (href: string) => (href === "/docs/next.md" ? "docs/next.md" : null),
+          onNavigate: (path: string) => navigatedPaths.push(path),
+        }),
+      );
     });
 
-    const sharedFileLink = [...container.querySelectorAll("a")]
-      .find((anchor) => anchor.textContent === "Shared file");
-    const unresolvedLink = [...container.querySelectorAll("a")]
-      .find((anchor) => anchor.textContent === "Unresolved");
+    const sharedFileLink = [...container.querySelectorAll("a")].find(
+      (anchor) => anchor.textContent === "Shared file",
+    );
+    const unresolvedLink = [...container.querySelectorAll("a")].find(
+      (anchor) => anchor.textContent === "Unresolved",
+    );
     if (!sharedFileLink || !unresolvedLink) throw new Error("links did not render");
 
     let followedSharedFileLink = true;
@@ -224,9 +225,11 @@ describe("MarkdownContent image retries", () => {
 
   async function renderImage(): Promise<HTMLImageElement> {
     await act(() => {
-      root?.render(createElement(MarkdownContent, {
-        markdown: `![Shared image](${imageSource})`,
-      }));
+      root?.render(
+        createElement(MarkdownContent, {
+          markdown: `![Shared image](${imageSource})`,
+        }),
+      );
     });
     const image = container.querySelector("img");
     if (!(image instanceof HTMLImageElement)) throw new Error("image did not render");
@@ -258,17 +261,7 @@ describe("MarkdownContent image retries", () => {
     const image = await renderImage();
     const requests = trackImageSourceRequests(image);
     const retryDelays = [
-      1_000,
-      2_000,
-      4_000,
-      8_000,
-      15_000,
-      15_000,
-      15_000,
-      15_000,
-      15_000,
-      15_000,
-      15_000,
+      1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000,
     ];
 
     act(() => image.dispatchEvent(new Event("error")));
@@ -278,18 +271,7 @@ describe("MarkdownContent image retries", () => {
     }
 
     expect(requests.times).toEqual([
-      0,
-      1_000,
-      3_000,
-      7_000,
-      15_000,
-      30_000,
-      45_000,
-      60_000,
-      75_000,
-      90_000,
-      105_000,
-      120_000,
+      0, 1_000, 3_000, 7_000, 15_000, 30_000, 45_000, 60_000, 75_000, 90_000, 105_000, 120_000,
     ]);
     await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(requests.sources).toHaveLength(12);

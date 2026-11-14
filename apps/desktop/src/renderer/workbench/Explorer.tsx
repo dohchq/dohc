@@ -1,4 +1,8 @@
-import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
+import {
+  FILE_KIND_RECORDS,
+  fileKindForPath,
+  type FileKindRecord,
+} from "@dohc/workspace-contracts/kinds";
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
 import { isComposingKey, isContextMenuKey, isDeleteKey } from "../ui/keys";
@@ -8,11 +12,23 @@ import { IconButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { deleteConfirmText } from "./deleteConfirm";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
-import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
+import {
+  FileGlyph,
+  KindGlyph,
+  listedFileKind,
+  ObjectGlyph,
+  type ObjectKind,
+} from "../ui/KindGlyph";
 import { MiddleCutName } from "../ui/MiddleCutName";
 import { SAVE_STATE } from "../ui/StateMark";
 import { usePendingShareMark } from "./pendingShareMarks";
-import { NOT_VERSIONED, NOT_VERSIONED_TITLE, NotVersionedMarks, notVersionedConfirmText, useNotVersionedMark } from "./notVersionedMarks";
+import {
+  NOT_VERSIONED,
+  NOT_VERSIONED_TITLE,
+  NotVersionedMarks,
+  notVersionedConfirmText,
+  useNotVersionedMark,
+} from "./notVersionedMarks";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -86,7 +102,20 @@ import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
 import { fileManagerName } from "../../workspaces/explorerMenu";
-import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, namedList, notVersionedPaths, readError, USE_THIS_COMPUTER, withErrorWords, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import {
+  isLiveEditingRefusal,
+  isLiveFolderRefusal,
+  isLivePageOwnedRefusal,
+  KEEPABLE_COLLECTIONS_REFUSALS,
+  livePageTitle,
+  namedList,
+  notVersionedPaths,
+  readError,
+  USE_THIS_COMPUTER,
+  withErrorWords,
+  type CollectionsElsewhere,
+  type CollectionsRefusalRead,
+} from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
@@ -104,20 +133,10 @@ export type TreeChangeOperation = {
 export type LivePageRefused =
   // An "undo" refusal brings its own words.
   | { path: string; action: "move" | "rename" | "delete" | "replace" | "undo" }
-  // Several pages one move or delete could not change.
   | { paths: string[]; action: "move" | "delete" };
-
-// The explorer: a real nested tree over the flat (files, folders) lists with
-// inline create/rename editboxes, optimistic pending ops (rollback on error),
-// multi-select, drag-move, pins, keyboard nav (ported file-tree-nav), and the
-// context menu, drawn here from the entries main returns. The explorer is
-// never a privileged writer: every mutation is an IPC the watcher observes,
-// so each op lands in history as an ordinary change set, and a rename, move
-// or delete main recorded offers Undo on its notice.
 
 export interface ExplorerProps {
   workspaceId: string;
-  // Which view the Explorer shows: Home, by kind, or Files, the folder tree.
   mode: ExplorerMode;
   onModeChange: (mode: ExplorerMode) => void;
   // Whether the workspace's first listing has landed. Home waits for it.
@@ -171,8 +190,6 @@ export interface ExplorerProps {
   // deleted one leaves. Home shows their files.
   unclaimedDatasetFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
-  // The workspace's apps, for Home's Apps section. Without it Home has no
-  // Apps section.
   apps?: ExplorerApps;
   dataCollections?: readonly DataCollection[];
   includeArchivedCollections?: boolean;
@@ -214,7 +231,6 @@ export interface ExplorerProps {
   // "Share…": offered by the main-owned context menu on synced,
   // non-shared-view workspaces; opens the shell's share dialog for the path.
   onShare: (path: string) => void;
-  // Asks for a listing and answers its request.
   onRefresh: () => number;
   // Failed tree operations go to the shell's error toast and Notices row,
   // with Try again when asking again can succeed. `change` is the tree
@@ -222,7 +238,13 @@ export interface ExplorerProps {
   // happens. A notice for several failed changes gets all of them, and goes
   // once one of them happens. `livePage` names the pages whose change was
   // refused because they have live editing on.
-  onError: (message: string, cause?: unknown, retry?: () => void, change?: PendingTreeChange | PendingTreeChange[], livePage?: LivePageRefused) => void;
+  onError: (
+    message: string,
+    cause?: unknown,
+    retry?: () => void,
+    change?: PendingTreeChange | PendingTreeChange[],
+    livePage?: LivePageRefused,
+  ) => void;
   // A finished rename, move or delete: a toast and a Notices row, with Undo
   // while main can still reverse it.
   onNotice: (message: string, undo?: () => void) => void;
@@ -259,10 +281,8 @@ function draftFileKind(value: string, renameFrom: string): FileKindRecord {
   return fileKindForPath(withRenameDefault(renameFrom, name));
 }
 
-// Every Explorer row draws its glyph at the drawing's 15px.
 const GLYPH_SIZE = 15;
 
-// The glyph is ink on an active or picked row and subtle elsewhere.
 function glyphTone(marked: boolean): string {
   return marked ? "text-ink" : "text-subtle";
 }
@@ -305,7 +325,6 @@ function ancestorsOf(path: string): string[] {
   return out;
 }
 
-// The rows from one key to another, both included, in `order`'s order.
 export function rangeBetween(order: readonly string[], from: string, to: string): string[] | null {
   const a = order.indexOf(from);
   const b = order.indexOf(to);
@@ -333,7 +352,6 @@ export function editorTitle(path: string, label?: string): string {
   return TAB_KINDS[tab.kind].explorerTitle(tab, label);
 }
 
-// Home names a page by its title, as its Pages section does.
 function homeEditorTitle(path: string, label?: string): string {
   const page = parseTab(path).kind === "file" && fileKindForPath(path).displayKind === "markdown";
   return page ? pageTitle(path) : editorTitle(path, label);
@@ -366,20 +384,12 @@ function IndentGuides({ depth }: { depth: number }) {
   return (
     <>
       {Array.from({ length: depth }, (_, i) => (
-        <span
-          key={i}
-          aria-hidden
-          className="ml-1.5 h-7 w-[9px] shrink-0 border-l border-line/60"
-        />
+        <span key={i} aria-hidden className="ml-1.5 h-7 w-[9px] shrink-0 border-l border-line/60" />
       ))}
     </>
   );
 }
 
-// The rendered Open Editors cap is additionally bounded to a fraction of the
-// viewport: a height saved in a tall window must never push the Files section
-// and the resize handle below the fold of a shorter one (the list is its own
-// overscroll-contained scroller — wheel scrolling would trap inside it).
 const OPEN_EDITORS_VIEWPORT_FRACTION = 0.6;
 const TREE_ROW_HEIGHT = 28;
 const TREE_VIRTUALIZATION_THRESHOLD = 200;
@@ -417,14 +427,11 @@ export const TreeRow = memo(function TreeRow(props: {
   // views. Exposed as data-collection so tests can gate on the state before
   // clicking.
   collection: boolean;
-  // Main recognizes this folder as an app: the row draws the app glyph in
-  // the folder glyph's place, and says so as data-app.
   app: boolean;
   // In the selection, for aria-selected.
   selected: boolean;
   // In a selection an action would act on that is not just the open file.
   picked: boolean;
-  // The active editor's file.
   active: boolean;
   tabbable: boolean;
   dropPreview: RowDropPreview | null;
@@ -449,8 +456,6 @@ export const TreeRow = memo(function TreeRow(props: {
   const notVersioned = useNotVersionedMark(row.fullPath, !row.isFolder);
   const blocked = props.dropPreview?.kind === "blocked";
   const target = props.dropPreview?.role === "target";
-  // A drop preview colors the whole row, glyph included. An allowed target's
-  // glyph takes the success color.
   const glyphClass = props.dropPreview
     ? target && !blocked
       ? "text-success"
@@ -481,7 +486,13 @@ export const TreeRow = memo(function TreeRow(props: {
         aria-selected={props.selected}
         // The whole name, read once, though MiddleCutName draws it in two
         // parts. The tooltip shows what a cut row hides.
-        aria-label={pendingShare ? `${name}, ${SAVE_STATE["pending-share"].label}` : notVersioned ? `${name}, ${NOT_VERSIONED}` : name}
+        aria-label={
+          pendingShare
+            ? `${name}, ${SAVE_STATE["pending-share"].label}`
+            : notVersioned
+              ? `${name}, ${NOT_VERSIONED}`
+              : name
+        }
         title={
           pendingShare
             ? `${name}\n${SAVE_STATE["pending-share"].label}. ${SAVE_STATE["pending-share"].title}`
@@ -503,15 +514,6 @@ export const TreeRow = memo(function TreeRow(props: {
         onDrop={(event) => props.onRowDrop(row.fullPath, event)}
         onDragLeave={props.onRowDragLeave}
         onDragEnd={props.onRowDragEnd}
-        // The open file's row is active: the selected fill and medium weight.
-        // Picked rows, the ones Delete and drag would act on when they are
-        // not just the open file, take the text-selection tint instead. An
-        // open file among them keeps its weight and gains a 2px ink edge. The
-        // keyboard-focused row draws the 1px accent line inside its own
-        // rounded box, so the tree's scroller cannot clip it on a row
-        // scrolled to an edge. An allowed drop target is a success tint with
-        // no ring or bar, so it never reads as focus. A blocked target adds a
-        // danger ring and a danger bar. A drop preview hides the edge.
         style={{ height: TREE_ROW_HEIGHT }}
         className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview
@@ -526,7 +528,10 @@ export const TreeRow = memo(function TreeRow(props: {
         }`}
       >
         {blocked && target ? (
-          <span aria-hidden className="absolute bottom-1 left-0 top-1 w-0.5 rounded-full bg-danger" />
+          <span
+            aria-hidden
+            className="absolute bottom-1 left-0 top-1 w-0.5 rounded-full bg-danger"
+          />
         ) : null}
         {openEdge ? (
           <span
@@ -567,18 +572,28 @@ export const TreeRow = memo(function TreeRow(props: {
               kind={listedFileKind(row.fullPath, row.kind)}
               icon={row.icon}
               size={GLYPH_SIZE}
-              className={notVersioned && !props.dropPreview ? `${glyphClass} opacity-60` : glyphClass}
+              className={
+                notVersioned && !props.dropPreview ? `${glyphClass} opacity-60` : glyphClass
+              }
             />
           </>
         )}
         <MiddleCutName name={name} />
         {notVersioned && !pendingShare ? (
-          <span aria-hidden data-testid="tree-row-not-versioned" className="shrink-0 text-[11px] text-subtle">
+          <span
+            aria-hidden
+            data-testid="tree-row-not-versioned"
+            className="shrink-0 text-[11px] text-subtle"
+          >
             {NOT_VERSIONED}
           </span>
         ) : null}
         {pendingShare ? (
-          <span aria-hidden data-testid="tree-row-pending-share" className="ml-auto size-2 shrink-0 rounded-full border-[1.5px] border-current text-subtle" />
+          <span
+            aria-hidden
+            data-testid="tree-row-pending-share"
+            className="ml-auto size-2 shrink-0 rounded-full border-[1.5px] border-current text-subtle"
+          />
         ) : null}
       </button>
     </li>
@@ -608,7 +623,9 @@ type OpenMenu = {
 };
 
 // The keys the tree itself answers, shown beside the rows that run the same action.
-function explorerMenuShortcut(id: ExplorerMenuCommand): { label: string; keys: string } | undefined {
+function explorerMenuShortcut(
+  id: ExplorerMenuCommand,
+): { label: string; keys: string } | undefined {
   if (id === "rename") return { label: "F2", keys: "F2" };
   if (id !== "delete") return undefined;
   return window.dohcDesktop?.platform === "darwin"
@@ -646,8 +663,11 @@ function undoableKind(change: PendingTreeChange): change is RecordedTreeChange["
 }
 
 // What a rename, move or delete answers about its History operation.
-type OperationAnswer = Pick<MoveWorkspacePathResult & DeleteWorkspacePathResult, "operationId" | "undo">
-  & Partial<Pick<DeleteWorkspacePathResult, "trashed">>;
+type OperationAnswer = Pick<
+  MoveWorkspacePathResult & DeleteWorkspacePathResult,
+  "operationId" | "undo"
+> &
+  Partial<Pick<DeleteWorkspacePathResult, "trashed">>;
 
 // A change main recorded as a History operation, which its notice can undo.
 function recordedChange(
@@ -678,7 +698,13 @@ function fromMenuKey(keyboardMenu: { current: boolean }): boolean {
 class UndoRefusedError extends Error {
   // `livePage` is the page this computer owns live, when that refused it.
   // `mayHaveRun` is false only when main named what refused it before any change.
-  constructor(reason: string, readonly retry: boolean, readonly words = reason, readonly livePage?: string, readonly mayHaveRun = true) {
+  constructor(
+    reason: string,
+    readonly retry: boolean,
+    readonly words = reason,
+    readonly livePage?: string,
+    readonly mayHaveRun = true,
+  ) {
     super(reason);
     this.name = "UndoRefusedError";
   }
@@ -704,12 +730,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onRevealed,
   } = props;
   const activeTab =
-    props.editorGroups.find((group) => group.id === props.activeEditorGroup)?.activeTab ??
-    null;
-  const openEditorCount = props.editorGroups.reduce(
-    (count, group) => count + group.tabs.length,
-    0,
-  );
+    props.editorGroups.find((group) => group.id === props.activeEditorGroup)?.activeTab ?? null;
+  const openEditorCount = props.editorGroups.reduce((count, group) => count + group.tabs.length, 0);
   const [pending, setPending] = useState<AnsweredTreeChange[]>([]);
   const [openEditorsExpanded, setOpenEditorsExpanded] = useState(true);
   const [viewportCap, setViewportCap] = useState(viewportOpenEditorsCap);
@@ -743,8 +765,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     setNotVersionedAsks((asks) => asks.filter((ask) => ask.workspaceId === workspaceId));
   }
   const askNotVersioned = notVersionedAsks[0] ?? null;
-  const queueNotVersioned = useCallback((ask: AskNotVersioned) => setNotVersionedAsks((asks) =>
-    asks.some((queued) => queued.action === ask.action && queued.sources.join("\n") === ask.sources.join("\n")) ? asks : [...asks, ask]), []);
+  const queueNotVersioned = useCallback(
+    (ask: AskNotVersioned) =>
+      setNotVersionedAsks((asks) =>
+        asks.some(
+          (queued) =>
+            queued.action === ask.action && queued.sources.join("\n") === ask.sources.join("\n"),
+        )
+          ? asks
+          : [...asks, ask],
+      ),
+    [],
+  );
   const answerNotVersioned = useCallback(() => setNotVersionedAsks((asks) => asks.slice(1)), []);
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   // The newest menu request is the only one that may open; closing the menu
@@ -762,12 +794,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const fileTreeRef = useRef<HTMLElement>(null);
   const renameFocus = useRef<{ from: string; to: string } | null>(null);
   // A rename in Home returns focus to Home's row for the path.
-  const rowFor = useCallback((path: string) => rowRefs.current.get(path) ??
-    [...fileTreeRef.current?.querySelectorAll<HTMLElement>("[data-home-key]") ?? []].find((row) => row.dataset.path === path), []);
+  const rowFor = useCallback(
+    (path: string) =>
+      rowRefs.current.get(path) ??
+      [...(fileTreeRef.current?.querySelectorAll<HTMLElement>("[data-home-key]") ?? [])].find(
+        (row) => row.dataset.path === path,
+      ),
+    [],
+  );
   useFocusSurface(fileTreeRef, () => {
     const paths = renameFocus.current;
     renameFocus.current = null;
-    return paths ? rowFor(paths.to) ?? rowFor(paths.from) : null;
+    return paths ? (rowFor(paths.to) ?? rowFor(paths.from)) : null;
   });
   const workspaceTreeRef = useRef<HTMLUListElement>(null);
   const openEditorsListRef = useRef<HTMLUListElement>(null);
@@ -779,12 +817,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // from the list's edges: the list is max-height (shorter lists shrink to
   // fit), so the handle can sit above the cap and an edge-based height would
   // collapse the saved cap to the content height on the first move.
-  const openEditorsDrag = useRef<{ startY: number; startHeight: number } | null>(
-    null,
-  );
-  const openEditorsResize = useCommitOnRelease(
-    props.onOpenEditorsHeightChange,
-  );
+  const openEditorsDrag = useRef<{ startY: number; startHeight: number } | null>(null);
+  const openEditorsResize = useCommitOnRelease(props.onOpenEditorsHeightChange);
   const openEditorsHeight = Math.min(
     openEditorsResize.previewValue ?? props.openEditorsHeight,
     viewportCap,
@@ -851,13 +885,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     } else if (rowRect.bottom > listRect.bottom) {
       list.scrollTop += rowRect.bottom - listRect.bottom;
     }
-  }, [
-    activeTab,
-    props.editorGroups,
-    openEditorsExpanded,
-    props.openEditorsHeight,
-    viewportCap,
-  ]);
+  }, [activeTab, props.editorGroups, openEditorsExpanded, props.openEditorsHeight, viewportCap]);
 
   // A drag abandoned mid-hover must not expand a folder after unmount.
   useEffect(
@@ -884,10 +912,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     return map;
   }, [projected.files]);
 
-  const expandedSet = useMemo(
-    () => new Set(props.expandedFolders),
-    [props.expandedFolders],
-  );
+  const expandedSet = useMemo(() => new Set(props.expandedFolders), [props.expandedFolders]);
 
   // Home draws no folder tree, so it builds none.
   const home = props.mode === "home";
@@ -979,16 +1004,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       renderItems.length - 1,
       Math.floor(viewportTop / TREE_ROW_HEIGHT),
     );
-    const visibleCount = Math.max(
-      1,
-      Math.ceil(container.clientHeight / TREE_ROW_HEIGHT),
-    );
+    const visibleCount = Math.max(1, Math.ceil(container.clientHeight / TREE_ROW_HEIGHT));
     const next = {
       start: Math.max(0, firstVisible - TREE_VIRTUAL_OVERSCAN),
-      end: Math.min(
-        renderItems.length,
-        firstVisible + visibleCount + TREE_VIRTUAL_OVERSCAN,
-      ),
+      end: Math.min(renderItems.length, firstVisible + visibleCount + TREE_VIRTUAL_OVERSCAN),
     };
     setVirtualRange((current) =>
       current.start === next.start && current.end === next.end ? current : next,
@@ -1009,10 +1028,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const folderPathSet = useMemo(() => new Set(projected.folders), [projected]);
 
-  const isFolderPath = useCallback(
-    (path: string) => folderPathSet.has(path),
-    [folderPathSet],
-  );
+  const isFolderPath = useCallback((path: string) => folderPathSet.has(path), [folderPathSet]);
 
   // A path another person, agent or device removes leaves the selection, so
   // the count and Delete name only rows that are still there.
@@ -1084,17 +1100,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     return isFolderPath(target) ? target : dirnameOf(target);
   }, [activeTab, focusedPath, isFolderPath, selection]);
 
-
-  const beginRename = useCallback(
-    (path: string, isFolder: boolean) => {
-      setEditValue(basenameOf(path));
-      setEditError(null);
-      editDone.current = false;
-      setEditPending(false);
-      setEditing({ mode: "rename", path, isFolder });
-    },
-    [],
-  );
+  const beginRename = useCallback((path: string, isFolder: boolean) => {
+    setEditValue(basenameOf(path));
+    setEditError(null);
+    editDone.current = false;
+    setEditPending(false);
+    setEditing({ mode: "rename", path, isFolder });
+  }, []);
 
   useEffect(() => {
     if (props.newFolderRequest !== null) beginCreateFolder("");
@@ -1113,7 +1125,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       }
     }
     // Only when the editing TARGET changes — not per keystroke.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing]);
 
   // Optimistic op runner: stage pending changes, run the IPCs, roll back the
@@ -1160,7 +1171,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       try {
         setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
         // The rest still go when some fail, and the failures report once.
-        const failed: Array<{ change: PendingTreeChange; cause: unknown; livePage?: LivePageRefused; again?: () => void }> = [];
+        const failed: Array<{
+          change: PendingTreeChange;
+          cause: unknown;
+          livePage?: LivePageRefused;
+          again?: () => void;
+        }> = [];
         // Changes main refused because they reach files the version does not
         // track. They ask once, together, and run again if the person agrees.
         const unversioned: Array<{ change: PendingTreeChange; paths: string[] }> = [];
@@ -1183,79 +1199,137 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               continue;
             }
             // A move onto a page this computer owns live is refused for that page.
-            const replaced = change.kind === "file" && readError(cause).title === livePageTitle(change.toPath, "replace");
-            const livePage: LivePageRefused | undefined = !isLivePageOwnedRefusal(cause) ? undefined
-              : change.kind === "file" ? (replaced ? { path: change.toPath, action: "replace" } : { path: change.fromPath, action })
-              : change.kind === "delete-file" ? { path: change.path, action: "delete" }
-              : undefined;
+            const replaced =
+              change.kind === "file" &&
+              readError(cause).title === livePageTitle(change.toPath, "replace");
+            const livePage: LivePageRefused | undefined = !isLivePageOwnedRefusal(cause)
+              ? undefined
+              : change.kind === "file"
+                ? replaced
+                  ? { path: change.toPath, action: "replace" }
+                  : { path: change.fromPath, action }
+                : change.kind === "delete-file"
+                  ? { path: change.path, action: "delete" }
+                  : undefined;
             // Try again reruns a change refused for live editing, but not one
             // refused while History is off. It reruns any other failed move as
             // it was asked.
             const refused = isLiveEditingRefusal(cause);
             const isMove = change.kind === "file" || change.kind === "folder";
             const rerun = () =>
-              void runChangesOnce([{ ...change, id: nextChangeId() }], run, { answered: options.answered, action, confirmed: options.confirmed });
-            const again = isLiveFolderRefusal(cause) || livePage ? rerun : !refused && isMove ? rerun : undefined;
-            failed.push({ change, cause, ...(livePage ? { livePage } : {}), ...(again ? { again } : {}) });
+              void runChangesOnce([{ ...change, id: nextChangeId() }], run, {
+                answered: options.answered,
+                action,
+                confirmed: options.confirmed,
+              });
+            const again =
+              isLiveFolderRefusal(cause) || livePage
+                ? rerun
+                : !refused && isMove
+                  ? rerun
+                  : undefined;
+            failed.push({
+              change,
+              cause,
+              ...(livePage ? { livePage } : {}),
+              ...(again ? { again } : {}),
+            });
           }
         }
         if (unversioned.length > 0) {
           const asked = unversioned.map(({ change }) => change);
           queueNotVersioned({
             workspaceId,
-            action: asked.every(({ kind }) => kind === "delete-file" || kind === "delete-folder") ? "delete" : action,
+            action: asked.every(({ kind }) => kind === "delete-file" || kind === "delete-folder")
+              ? "delete"
+              : action,
             sources: asked.map(sourcePath),
             paths: [...new Set(unversioned.flatMap(({ paths }) => paths))],
-            go: () => void runChangesOnce(asked.map((change) => ({ ...change, id: nextChangeId() })), run, { ...options, confirmed: true }),
+            go: () =>
+              void runChangesOnce(
+                asked.map((change) => ({ ...change, id: nextChangeId() })),
+                run,
+                { ...options, confirmed: true },
+              ),
           });
         }
         // Pages live editing refused report together, with the way to Live
         // documents. Each folder it refused reports alone, so its notice keeps
         // that way too. Any other failures report together apart from them.
-        const live = failed.filter(({ livePage }) => livePage?.action === "delete" || livePage?.action === "move");
-        const folders = failed.filter((entry) => !live.includes(entry) && isLiveFolderRefusal(entry.cause));
+        const live = failed.filter(
+          ({ livePage }) => livePage?.action === "delete" || livePage?.action === "move",
+        );
+        const folders = failed.filter(
+          (entry) => !live.includes(entry) && isLiveFolderRefusal(entry.cause),
+        );
         const rest = failed.filter((entry) => !live.includes(entry) && !folders.includes(entry));
         for (const group of [live, ...folders.map((entry) => [entry]), rest]) {
           const [first] = group;
           if (!first) continue;
-          const verb = group.every(({ change }) => change.kind === "delete-file" || change.kind === "delete-folder") ? "delete" : "move";
+          const verb = group.every(
+            ({ change }) => change.kind === "delete-file" || change.kind === "delete-folder",
+          )
+            ? "delete"
+            : "move";
           if (group.length === 1) {
             // A row that failed beside others names itself, since the rest went.
-            const message = group === rest && changes.length > 1
-              ? [`dohc could not ${verb} ${namedList([sourcePath(first.change)])}.`, ipcErrorMessage(first.cause, "")].filter(Boolean).join(" ")
-              : ipcErrorMessage(first.cause, "dohc could not change these files.");
+            const message =
+              group === rest && changes.length > 1
+                ? [
+                    `dohc could not ${verb} ${namedList([sourcePath(first.change)])}.`,
+                    ipcErrorMessage(first.cause, ""),
+                  ]
+                    .filter(Boolean)
+                    .join(" ")
+                : ipcErrorMessage(first.cause, "dohc could not change these files.");
             onError(message, first.cause, first.again, first.change, first.livePage);
             continue;
           }
-          const names = group.map(({ change, livePage }) => (livePage && "path" in livePage ? livePage.path : sourcePath(change)));
-          const retried = group.filter((entry) => entry.again).map(({ change }) => ({ ...change, id: nextChangeId() }));
+          const names = group.map(({ change, livePage }) =>
+            livePage && "path" in livePage ? livePage.path : sourcePath(change),
+          );
+          const retried = group
+            .filter((entry) => entry.again)
+            .map(({ change }) => ({ ...change, id: nextChangeId() }));
           // The reason, when every failure gives the same one.
           const reasons = new Set(group.map(({ cause }) => ipcErrorMessage(cause, "")));
           const reason = reasons.size === 1 ? [...reasons][0]! : "";
           onError(
             [`dohc could not ${verb} ${namedList(names)}.`, reason].filter(Boolean).join(" "),
             first.cause,
-            retried.length > 0 ? () => void runChangesOnce(retried, run, { answered: options.answered, action, confirmed: options.confirmed }) : undefined,
+            retried.length > 0
+              ? () =>
+                  void runChangesOnce(retried, run, {
+                    answered: options.answered,
+                    action,
+                    confirmed: options.confirmed,
+                  })
+              : undefined,
             group.map(({ change }) => change),
             group === live ? { paths: names, action: verb } : undefined,
           );
         }
-        const changedExistingPath = mayHaveRun || succeeded.some(
-          ({ change }) => change.kind !== "create-file" && change.kind !== "create-folder",
-        );
-        try {
-          await operation?.settle(
-            changedExistingPath ? { captureOnFailure: true } : undefined,
+        const changedExistingPath =
+          mayHaveRun ||
+          succeeded.some(
+            ({ change }) => change.kind !== "create-file" && change.kind !== "create-folder",
           );
+        try {
+          await operation?.settle(changedExistingPath ? { captureOnFailure: true } : undefined);
         } catch (cause) {
           // The disk change already completed. Surface the settlement error,
           // then project the successful paths so the shell matches storage.
-          onError(ipcErrorMessage(cause, "dohc changed these files, but could not confirm the change."), cause);
+          onError(
+            ipcErrorMessage(cause, "dohc changed these files, but could not confirm the change."),
+            cause,
+          );
         }
         if (succeeded.length > 0) onPathsChanged(succeeded.map(({ change }) => change));
         const listing = onRefresh();
         const answered = new Set(succeeded.map(({ change }) => change.id));
-        setPending((current) => current.map((change) => (answered.has(change.id) ? { ...change, listing } : change)));
+        setPending((current) =>
+          current.map((change) => (answered.has(change.id) ? { ...change, listing } : change)),
+        );
       } finally {
         // Cell edits resume only after the successful paths are projected,
         // so nothing can enqueue against a path this operation just changed.
@@ -1279,7 +1353,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         byChange.set(id, entry);
         const { change } = entry;
         if ("path" in change) {
-          return { id, kind: change.kind === "delete-folder" ? "create-folder" : "create-file", path: change.path };
+          return {
+            id,
+            kind: change.kind === "delete-folder" ? "create-folder" : "create-file",
+            path: change.path,
+          };
         }
         return { id, kind: change.kind, fromPath: change.toPath, toPath: change.fromPath };
       });
@@ -1292,15 +1370,30 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             operationId: entry.operationId,
           });
           if (!result.ok) {
-            throw new UndoRefusedError(result.reason, true, undoRefusedNotice(entry.change, result.refusal),
-              result.refusal.code === "live-page-owned" ? result.refusal.path : undefined, result.refusal.code === "unexplained");
+            throw new UndoRefusedError(
+              result.reason,
+              true,
+              undoRefusedNotice(entry.change, result.refusal),
+              result.refusal.code === "live-page-owned" ? result.refusal.path : undefined,
+              result.refusal.code === "unexplained",
+            );
           }
           const reasons = result.remaining.map((left) => left.reason).join(" ");
           // A move whose row went back is undone even when other pages keep
           // their links, so tabs follow the row and the links report alone.
-          const moved = "fromPath" in entry.change ? [entry.change.fromPath, entry.change.toPath] : [];
-          if (result.remaining.some((left) => moved.length === 0 || moved.some((path) => left.path === path || left.path.startsWith(`${path}/`)))) {
-            throw new UndoRefusedError(reasons, result.remaining.some((left) => left.retry));
+          const moved =
+            "fromPath" in entry.change ? [entry.change.fromPath, entry.change.toPath] : [];
+          if (
+            result.remaining.some(
+              (left) =>
+                moved.length === 0 ||
+                moved.some((path) => left.path === path || left.path.startsWith(`${path}/`)),
+            )
+          ) {
+            throw new UndoRefusedError(
+              reasons,
+              result.remaining.some((left) => left.retry),
+            );
           }
           if (reasons) onError(reasons);
           // The change is undone, so it no longer waits for a listing.
@@ -1314,12 +1407,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             const entry = byChange.get(change.id)!;
             const refused = cause instanceof UndoRefusedError;
             const report = [
-              refused ? cause.words : ipcErrorMessage(cause, `dohc could not undo the ${operationWord(entry.change)}.`),
+              refused
+                ? cause.words
+                : ipcErrorMessage(cause, `dohc could not undo the ${operationWord(entry.change)}.`),
               refused && cause.words === cause.message ? undefined : cause,
               !refused || cause.retry ? () => undoChanges([entry]) : undefined,
             ] as const;
             // A page this computer owns live also offers Live documents.
-            if (refused && cause.livePage !== undefined) onError(...report, undefined, { path: cause.livePage, action: "undo" });
+            if (refused && cause.livePage !== undefined)
+              onError(...report, undefined, { path: cause.livePage, action: "undo" });
             else onError(...report);
           },
         },
@@ -1350,7 +1446,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // In a version, a change that reaches files it does not track asks first,
   // since those files have one copy and the change happens in Main too.
   const askedNotVersioned = useCallback(
-    (action: AskNotVersioned["action"], sources: string[], confirmed: boolean, go: () => void): boolean => {
+    (
+      action: AskNotVersioned["action"],
+      sources: string[],
+      confirmed: boolean,
+      go: () => void,
+    ): boolean => {
       if (confirmed) return false;
       const paths = notVersionedMarks.under(sources);
       if (paths.length === 0) return false;
@@ -1373,17 +1474,24 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           toPath: action.toPath,
         });
       }
-      if (askedNotVersioned("move", changes.map(sourcePath), confirmed, () => performMovesAs(sources, targetDir, true))) return;
+      if (
+        askedNotVersioned("move", changes.map(sourcePath), confirmed, () =>
+          performMovesAs(sources, targetDir, true),
+        )
+      )
+        return;
       if (changes.length > 0) setSelection(new Set());
-      void runChanges(changes, (change, confirmedRun) =>
-        change.kind === "file" || change.kind === "folder"
-          ? bridge().moveWorkspacePath({
-              workspaceId,
-              fromPath: change.fromPath,
-              toPath: change.toPath,
-              ...(confirmedRun ? { confirmNotVersioned: true as const } : {}),
-            })
-          : Promise.resolve(undefined),
+      void runChanges(
+        changes,
+        (change, confirmedRun) =>
+          change.kind === "file" || change.kind === "folder"
+            ? bridge().moveWorkspacePath({
+                workspaceId,
+                fromPath: change.fromPath,
+                toPath: change.toPath,
+                ...(confirmedRun ? { confirmNotVersioned: true as const } : {}),
+              })
+            : Promise.resolve(undefined),
         { answered: announce, confirmed },
       );
     },
@@ -1391,7 +1499,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 
   const commitRename = useCallback(
-    function commitRenameAs(edit: Extract<EditingState, { mode: "rename" }>, value: string, confirmed = false) {
+    function commitRenameAs(
+      edit: Extract<EditingState, { mode: "rename" }>,
+      value: string,
+      confirmed = false,
+    ) {
       const { path, isFolder } = edit;
       const typed = resolveTypedPath(value, dirnameOf(path));
       const toPath = typed && !isFolder ? withRenameDefault(path, typed) : typed;
@@ -1428,7 +1540,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           }
         },
         // Remove this input in the same commit that stages the renamed row.
-        { afterBegin: () => setEditing(current => current === edit ? null : current), answered: announce, action: "rename", confirmed },
+        {
+          afterBegin: () => setEditing((current) => (current === edit ? null : current)),
+          answered: announce,
+          action: "rename",
+          confirmed,
+        },
       );
     },
     [announce, askedNotVersioned, rowFor, runChanges, workspaceId],
@@ -1451,21 +1568,24 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   const performDeletes = useCallback(
     function performDeletesAs(paths: string[], confirmed = false) {
-      if (askedNotVersioned("delete", paths, confirmed, () => performDeletesAs(paths, true))) return;
+      if (askedNotVersioned("delete", paths, confirmed, () => performDeletesAs(paths, true)))
+        return;
       const changes: PendingTreeChange[] = paths.map((path) => ({
         id: nextChangeId(),
         kind: isFolderPath(path) ? "delete-folder" : "delete-file",
         path,
       }));
       setSelection(new Set());
-      void runChanges(changes, (change, confirmedRun) =>
-        "path" in change
-          ? bridge().deleteWorkspacePath({
-              workspaceId,
-              relativePath: change.path,
-              ...(confirmedRun ? { confirmNotVersioned: true as const } : {}),
-            })
-          : Promise.resolve(undefined),
+      void runChanges(
+        changes,
+        (change, confirmedRun) =>
+          "path" in change
+            ? bridge().deleteWorkspacePath({
+                workspaceId,
+                relativePath: change.path,
+                ...(confirmedRun ? { confirmNotVersioned: true as const } : {}),
+              })
+            : Promise.resolve(undefined),
         { answered: announce, confirmed },
       );
     },
@@ -1525,7 +1645,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       setSelection(new Set());
     }
   }
-  const selectionIsOpenFile = activeTab !== null && selection.size === 1 && selection.has(activeTab);
+  const selectionIsOpenFile =
+    activeTab !== null && selection.size === 1 && selection.has(activeTab);
 
   // Home's Show in Files asks for a reveal of its own; the shell's comes in
   // revealPaths. Either one switches to Files first.
@@ -1550,19 +1671,31 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     }
     const shown = reveal.filter((path) => renderIndexByPath.has(path));
     if (shown.length === 0) return;
-    const first = shown.reduce((a, b) => (renderIndexByPath.get(a)! <= renderIndexByPath.get(b)! ? a : b));
+    const first = shown.reduce((a, b) =>
+      renderIndexByPath.get(a)! <= renderIndexByPath.get(b)! ? a : b,
+    );
     setFilesExpanded(true);
     setSelection(new Set(shown));
     setAnchorPath(first);
     focusRow(first);
     done();
-  }, [fileByPath, focusRow, home, isFolderPath, onModeChange, onRevealed, renderIndexByPath, reveal]);
+  }, [
+    fileByPath,
+    focusRow,
+    home,
+    isFolderPath,
+    onModeChange,
+    onRevealed,
+    renderIndexByPath,
+    reveal,
+  ]);
 
   const showInFiles = useCallback(
     (paths: readonly string[] | null) => {
       onModeChange("files");
       if (paths === null) return;
-      for (const path of paths) for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
+      for (const path of paths)
+        for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
       setHomeReveal(paths);
     },
     [onModeChange, onSetFolderExpanded],
@@ -1572,8 +1705,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     (path: string, event: MouseEvent) => {
       pendingFocusPath.current = null;
       const rowList = rowsRef.current;
-      const isFolder =
-        rowList.find((row) => row.fullPath === path)?.isFolder ?? false;
+      const isFolder = rowList.find((row) => row.fullPath === path)?.isFolder ?? false;
       if (hasPrimaryModifier(event, window.dohcDesktop?.platform)) {
         setSelection((current) => {
           const next = new Set(current);
@@ -1586,7 +1718,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         return;
       }
       const anchor = anchorPathRef.current;
-      const range = event.shiftKey && anchor ? rangeBetween(rowList.map((row) => row.fullPath), anchor, path) : null;
+      const range =
+        event.shiftKey && anchor
+          ? rangeBetween(
+              rowList.map((row) => row.fullPath),
+              anchor,
+              path,
+            )
+          : null;
       if (range) {
         setSelection(new Set(range));
         setFocusedPath(path);
@@ -1657,14 +1796,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   // two or more selected rows; main then offers only what acts on all of
   // them.
   const openMenu = useCallback(
-    (
-      kind: OpenMenu["kind"],
-      path: string | undefined,
-      at: OpenMenu["at"],
-      keyboard: boolean,
-    ) => {
+    (kind: OpenMenu["kind"], path: string | undefined, at: OpenMenu["at"], keyboard: boolean) => {
       const selected = selectionRef.current;
-      const many = path !== undefined && selected.size > 1 && selected.has(path) ? [...selected] : undefined;
+      const many =
+        path !== undefined && selected.size > 1 && selected.has(path) ? [...selected] : undefined;
       const pinnedRow = many ? many.every(isPinned) : path !== undefined && isPinned(path);
       const request = menuRequests.next();
       // Escape or a press anywhere before main answers retires this open, as
@@ -1674,9 +1809,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         if (menuRequests.isCurrent(request)) menuRequests.next();
       };
       window.addEventListener("pointerdown", retire, { capture: true, signal: waiting.signal });
-      window.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") retire();
-      }, { capture: true, signal: waiting.signal });
+      window.addEventListener(
+        "keydown",
+        (event) => {
+          if (event.key === "Escape") retire();
+        },
+        { capture: true, signal: waiting.signal },
+      );
       void bridge()
         .readExplorerMenu({
           workspaceId,
@@ -1689,7 +1828,16 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         .then(
           (entries) => {
             if (!menuRequests.isCurrent(request) || entries.length === 0) return;
-            setMenu({ id: request, workspaceId, kind, ...(path !== undefined ? { path } : {}), ...(many ? { many } : {}), at, keyboard, entries });
+            setMenu({
+              id: request,
+              workspaceId,
+              kind,
+              ...(path !== undefined ? { path } : {}),
+              ...(many ? { many } : {}),
+              at,
+              keyboard,
+              entries,
+            });
           },
           (cause) => {
             if (menuRequests.isCurrent(request)) {
@@ -1785,10 +1933,15 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       if (fromMenuKey(keyboardMenu)) return;
       if (!selectionRef.current.has(path)) selectSingle(path);
       rowRefs.current.get(path)?.focus({ preventScroll: true });
-      openMenu(isFolderPath(path) ? "folder" : "file", path, {
-        x: event.clientX,
-        y: event.clientY,
-      }, false);
+      openMenu(
+        isFolderPath(path) ? "folder" : "file",
+        path,
+        {
+          x: event.clientX,
+          y: event.clientY,
+        },
+        false,
+      );
     },
     [selectSingle, isFolderPath, openMenu],
   );
@@ -1810,7 +1963,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       // browser's event for these keys comes without one.
       if (!keyboardMenu.current) {
         keyboardMenu.current = true;
-        window.addEventListener("pointerdown", () => { keyboardMenu.current = false; }, { capture: true, once: true });
+        window.addEventListener(
+          "pointerdown",
+          () => {
+            keyboardMenu.current = false;
+          },
+          { capture: true, once: true },
+        );
       }
       const row =
         target instanceof HTMLElement
@@ -1818,14 +1977,23 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           : null;
       // A Home row with its own menu, such as a Collection that can't open, opens it itself.
       // A Home row with no menu, such as a Collection a share leaves out, opens none, as a right-click does.
-      if (row?.dataset.ownMenu !== undefined || (row?.dataset.homeKey !== undefined && row.dataset.path === undefined)) return;
+      if (
+        row?.dataset.ownMenu !== undefined ||
+        (row?.dataset.homeKey !== undefined && row.dataset.path === undefined)
+      )
+        return;
       const path = row?.dataset.path;
       if (row && path !== undefined) {
         const box = row.getBoundingClientRect();
         // A Home row names its own kind and leaves the tree's selection alone.
         const homeKind = row.dataset.menuKind;
         if (homeKind === undefined && !selectionRef.current.has(path)) selectSingle(path);
-        const kind = homeKind === "file" || homeKind === "folder" ? homeKind : isFolderPath(path) ? "folder" : "file";
+        const kind =
+          homeKind === "file" || homeKind === "folder"
+            ? homeKind
+            : isFolderPath(path)
+              ? "folder"
+              : "file";
         openMenu(kind, path, { x: box.left, y: box.bottom }, true);
         return;
       }
@@ -1930,14 +2098,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         }, 600);
       }
     },
-    [
-      targetDirFor,
-      previewForDrop,
-      isFolderPath,
-      showDropPreview,
-      expandedSet,
-      onSetFolderExpanded,
-    ],
+    [targetDirFor, previewForDrop, isFolderPath, showDropPreview, expandedSet, onSetFolderExpanded],
   );
 
   const onRowDragLeave = useCallback(() => {
@@ -1984,7 +2145,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // Home's Pages drag as Files' rows do.
   const homeDrag = useMemo(
-    () => ({ start: onRowDragStart, over: onRowDragOver, drop: onRowDrop, leave: onRowDragLeave, end: onRowDragEnd }),
+    () => ({
+      start: onRowDragStart,
+      over: onRowDragOver,
+      drop: onRowDrop,
+      leave: onRowDragLeave,
+      end: onRowDragEnd,
+    }),
     [onRowDragEnd, onRowDragLeave, onRowDragOver, onRowDragStart, onRowDrop],
   );
   // Home focuses the row first, so the menu gives focus back to it.
@@ -2012,10 +2179,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [previewForDrop, showDropPreview],
   );
 
-  const onContainerDrop = useCallback(
-    (event: DragEvent) => handleDrop("", event),
-    [handleDrop],
-  );
+  const onContainerDrop = useCallback((event: DragEvent) => handleDrop("", event), [handleDrop]);
 
   const onContainerDragLeave = useCallback(
     (event: DragEvent<HTMLElement>) => {
@@ -2072,7 +2236,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         event.preventDefault();
         // The selection, or the focused row alone when it is outside the
         // selection, as a row's menu acts.
-        const targets = focusedPath !== null && !selection.has(focusedPath) ? [focusedPath] : [...selection];
+        const targets =
+          focusedPath !== null && !selection.has(focusedPath) ? [focusedPath] : [...selection];
         if (targets.length > 0) requestDelete(targets);
         return;
       }
@@ -2084,7 +2249,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           if (event.shiftKey && RANGE_KEYS.has(event.key)) {
             const order = rows.map((row) => row.fullPath);
             const kept = anchorPathRef.current;
-            const anchor = kept !== null && order.includes(kept) ? kept : (focusedPath ?? action.path);
+            const anchor =
+              kept !== null && order.includes(kept) ? kept : (focusedPath ?? action.path);
             setAnchorPath(anchor);
             setSelection(new Set(rangeBetween(order, anchor, action.path) ?? [action.path]));
           }
@@ -2176,7 +2342,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           aria-invalid={editError ? true : undefined}
           aria-describedby={editError ? "tree-name-error" : undefined}
           readOnly={editPending}
-          onChange={(event) => { setEditValue(event.target.value); setEditError(null); }}
+          onChange={(event) => {
+            setEditValue(event.target.value);
+            setEditError(null);
+          }}
           onKeyDown={(event) => {
             event.stopPropagation();
             if (isComposingKey(event)) return;
@@ -2186,7 +2355,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             event.preventDefault();
             finishEdit(event.key === "Enter", true);
           }}
-          onBlur={() => { renameFocus.current = null; finishEdit(true); }}
+          onBlur={() => {
+            renameFocus.current = null;
+            finishEdit(true);
+          }}
           // The name field takes the text menu, not the tree's menu.
           onContextMenu={(event) => event.stopPropagation()}
           // The name keeps the row's exact type (13px sans, square) — F2
@@ -2197,7 +2369,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         />
       </div>
       {editError && (
-        <div ref={editErrorRef} id="tree-name-error" role="alert" className="absolute left-6 right-2 top-full z-20 rounded-md border border-danger bg-panel px-2 py-1.5 text-[12px] text-danger">
+        <div
+          ref={editErrorRef}
+          id="tree-name-error"
+          role="alert"
+          className="absolute left-6 right-2 top-full z-20 rounded-md border border-danger bg-panel px-2 py-1.5 text-[12px] text-danger"
+        >
           {editError}
         </div>
       )}
@@ -2208,9 +2385,17 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     if (editDone.current || !editing) return;
     if (commit && editValue.trim()) {
       const platform = window.dohcDesktop?.platform ?? "";
-      const typed = resolveTypedPath(editValue, editing.mode === "rename" ? dirnameOf(editing.path) : editing.parentPath);
-      const destination = editing.mode === "rename" && !editing.isFolder ? withRenameDefault(editing.path, typed) : typed;
-      const error = workspaceDestinationError(editValue, platform) ?? workspaceDestinationError(destination, platform);
+      const typed = resolveTypedPath(
+        editValue,
+        editing.mode === "rename" ? dirnameOf(editing.path) : editing.parentPath,
+      );
+      const destination =
+        editing.mode === "rename" && !editing.isFolder
+          ? withRenameDefault(editing.path, typed)
+          : typed;
+      const error =
+        workspaceDestinationError(editValue, platform) ??
+        workspaceDestinationError(destination, platform);
       if (error) {
         setEditError(error);
         return;
@@ -2223,7 +2408,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       const typed = commit ? resolveTypedPath(editValue, dirnameOf(editing.path)) : null;
       renameFocus.current = {
         from: editing.path,
-        to: typed ? (editing.isFolder ? typed : withRenameDefault(editing.path, typed)) : editing.path,
+        to: typed
+          ? editing.isFolder
+            ? typed
+            : withRenameDefault(editing.path, typed)
+          : editing.path,
       };
     }
     if (!commit || editValue.trim() === "") {
@@ -2245,10 +2434,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     if (dropPreview.targetPath === path) {
       return { kind: dropPreview.kind, role: "target" };
     }
-    if (
-      dropPreview.targetIsFolder &&
-      path.startsWith(`${dropPreview.targetPath}/`)
-    ) {
+    if (dropPreview.targetIsFolder && path.startsWith(`${dropPreview.targetPath}/`)) {
       return { kind: dropPreview.kind, role: "contained" };
     }
     return null;
@@ -2364,11 +2550,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             : ""
         }`}
       >
-        <section
-          data-testid="open-editors-section"
-          aria-label="Open editors"
-          className="relative"
-        >
+        <section data-testid="open-editors-section" aria-label="Open editors" className="relative">
           <header
             data-testid="open-editors-header"
             className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
@@ -2377,7 +2559,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               type="button"
               data-testid="open-editors-toggle"
               aria-expanded={openEditorsExpanded}
-              aria-describedby={openEditorsExpanded && openEditorCount === 0 ? openEditorsEmptyId : undefined}
+              aria-describedby={
+                openEditorsExpanded && openEditorCount === 0 ? openEditorsEmptyId : undefined
+              }
               onClick={() => setOpenEditorsExpanded((expanded) => !expanded)}
               className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
             >
@@ -2420,13 +2604,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 className="m-0 list-none overflow-y-auto overscroll-contain p-0"
               >
                 {props.editorGroups.map((group, groupIndex) => (
-                  <li
-                    key={group.id}
-                    data-testid="open-editor-group"
-                    data-group-id={group.id}
-                  >
+                  <li key={group.id} data-testid="open-editor-group" data-group-id={group.id}>
                     {props.editorGroups.length > 1 ? (
-                      <SectionLabel as="div"
+                      <SectionLabel
+                        as="div"
                         role="heading"
                         aria-level={3}
                         className="h-6 px-3 pt-1"
@@ -2444,11 +2625,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                     >
                       {group.tabs.map((tab) => {
                         const active =
-                          group.id === props.activeEditorGroup &&
-                          group.activeTab === tab.path;
+                          group.id === props.activeEditorGroup && group.activeTab === tab.path;
                         const dirty =
-                          props.dirtyPaths.has(tab.path) ||
-                          props.recoveryPaths.has(tab.path);
+                          props.dirtyPaths.has(tab.path) || props.recoveryPaths.has(tab.path);
                         const title = (home ? homeEditorTitle : editorTitle)(
                           tab.path,
                           props.tabLabels?.get(tab.path),
@@ -2515,7 +2694,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 ))}
               </ul>
             ) : (
-              <p id={openEditorsEmptyId} data-testid="open-editors-empty" className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
+              <p
+                id={openEditorsEmptyId}
+                data-testid="open-editors-empty"
+                className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted"
+              >
                 No files open.
               </p>
             )
@@ -2547,19 +2730,13 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 }
                 openEditorsResize.update(
                   event.pointerId,
-                  clampOpenEditorsHeight(
-                    drag.startHeight + event.clientY - drag.startY,
-                  ),
+                  clampOpenEditorsHeight(drag.startHeight + event.clientY - drag.startY),
                   event.buttons,
                 );
               }}
               onPointerUp={(event) => openEditorsResize.commit(event.pointerId)}
-              onPointerCancel={(event) =>
-                openEditorsResize.commit(event.pointerId)
-              }
-              onLostPointerCapture={(event) =>
-                openEditorsResize.commit(event.pointerId)
-              }
+              onPointerCancel={(event) => openEditorsResize.commit(event.pointerId)}
+              onLostPointerCapture={(event) => openEditorsResize.commit(event.pointerId)}
               className="absolute -bottom-1 left-0 z-10 h-2 w-full cursor-row-resize bg-transparent transition-colors hover:bg-line/80"
             />
           ) : null}
@@ -2586,68 +2763,71 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             dropPreviewFor={dropPreviewFor}
           />
         ) : (
-        <section data-testid="explorer-files-section" aria-label="Files" className="mt-4">
-          <header
-            data-testid="explorer-files-header"
-            className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
-          >
-            <button
-              type="button"
-              data-testid="explorer-files-toggle"
-              aria-expanded={filesExpanded}
-              onClick={() => setFilesExpanded((expanded) => !expanded)}
-              className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
+          <section data-testid="explorer-files-section" aria-label="Files" className="mt-4">
+            <header
+              data-testid="explorer-files-header"
+              className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
             >
-              <span className="min-w-0 truncate">Files</span>
-              <ChevronRight
-                size={11}
-                aria-hidden
-                className={`shrink-0 dark:text-muted transition-transform ${filesExpanded ? "rotate-90" : ""}`}
-              />
-            </button>
-            <div className="flex shrink-0 items-center gap-0.5">
-              <SectionActionButton label="New file" onClick={() => props.onNewPage(creationParentPath())}>
-                <FilePlus2 size={13} aria-hidden />
-              </SectionActionButton>
-              <SectionActionButton
-                label="New folder"
-                onClick={() => beginCreateFolder(creationParentPath())}
+              <button
+                type="button"
+                data-testid="explorer-files-toggle"
+                aria-expanded={filesExpanded}
+                onClick={() => setFilesExpanded((expanded) => !expanded)}
+                className="dohc-focus-row flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left dohc-section-label group-hover:text-muted"
               >
-                <FolderPlus size={13} aria-hidden />
-              </SectionActionButton>
-              <SectionActionButton label="Refresh explorer" onClick={props.onRefresh}>
-                <RefreshCw size={13} aria-hidden />
-              </SectionActionButton>
-              <SectionActionButton
-                label="Collapse folders in explorer"
-                onClick={props.onCollapseFolders}
-              >
-                <ChevronsUp size={13} aria-hidden />
-              </SectionActionButton>
-            </div>
-          </header>
-
-          {filesExpanded ? (
-            <>
-              {empty ? (
-                props.listed ? (
-                  <p className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
-                    No files yet.
-                  </p>
-                ) : null
-              ) : (
-                <ul
-                  ref={workspaceTreeRef}
-                  role="tree"
-                  aria-label="Workspace files"
-                  className="m-0 list-none p-0"
+                <span className="min-w-0 truncate">Files</span>
+                <ChevronRight
+                  size={11}
+                  aria-hidden
+                  className={`shrink-0 dark:text-muted transition-transform ${filesExpanded ? "rotate-90" : ""}`}
+                />
+              </button>
+              <div className="flex shrink-0 items-center gap-0.5">
+                <SectionActionButton
+                  label="New file"
+                  onClick={() => props.onNewPage(creationParentPath())}
                 >
-                  {renderedRows}
-                </ul>
-              )}
-            </>
-          ) : null}
-        </section>
+                  <FilePlus2 size={13} aria-hidden />
+                </SectionActionButton>
+                <SectionActionButton
+                  label="New folder"
+                  onClick={() => beginCreateFolder(creationParentPath())}
+                >
+                  <FolderPlus size={13} aria-hidden />
+                </SectionActionButton>
+                <SectionActionButton label="Refresh explorer" onClick={props.onRefresh}>
+                  <RefreshCw size={13} aria-hidden />
+                </SectionActionButton>
+                <SectionActionButton
+                  label="Collapse folders in explorer"
+                  onClick={props.onCollapseFolders}
+                >
+                  <ChevronsUp size={13} aria-hidden />
+                </SectionActionButton>
+              </div>
+            </header>
+
+            {filesExpanded ? (
+              <>
+                {empty ? (
+                  props.listed ? (
+                    <p className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
+                      No files yet.
+                    </p>
+                  ) : null
+                ) : (
+                  <ul
+                    ref={workspaceTreeRef}
+                    role="tree"
+                    aria-label="Workspace files"
+                    className="m-0 list-none p-0"
+                  >
+                    {renderedRows}
+                  </ul>
+                )}
+              </>
+            ) : null}
+          </section>
         )}
       </nav>
 
@@ -2664,7 +2844,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           onOpenChange={(open) => {
             if (!open) closeMenu();
           }}
-          items={explorerMenuItems(menu.entries, (id) => runMenuCommand(menu.kind, menu.path, menu.many, id))}
+          items={explorerMenuItems(menu.entries, (id) =>
+            runMenuCommand(menu.kind, menu.path, menu.many, id),
+          )}
           width={EXPLORER_MENU_WIDTH}
           menuTestId="explorer-menu"
         />
@@ -2677,7 +2859,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           className="flex h-8 shrink-0 items-center gap-2 border-t border-line px-3 text-[12px] text-muted"
         >
           <span className="min-w-0 flex-1 truncate tabular-nums">{selection.size} selected</span>
-          <IconButton aria-label="Clear selection" title="Clear selection" onClick={() => setSelection(new Set())}>
+          <IconButton
+            aria-label="Clear selection"
+            title="Clear selection"
+            onClick={() => setSelection(new Set())}
+          >
             <X size={13} aria-hidden />
           </IconButton>
         </div>
@@ -2712,9 +2898,21 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 });
 
-function NotVersionedConfirm({ ask, onCancel, onConfirm }: { ask: AskNotVersioned; onCancel: () => void; onConfirm: () => void }) {
+function NotVersionedConfirm({
+  ask,
+  onCancel,
+  onConfirm,
+}: {
+  ask: AskNotVersioned;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
   const { title, body, confirmLabel } = notVersionedConfirmText(ask.action, ask.sources, ask.paths);
-  const listed = !(ask.paths.length === 1 && ask.sources.length === 1 && ask.paths[0] === ask.sources[0]);
+  const listed = !(
+    ask.paths.length === 1 &&
+    ask.sources.length === 1 &&
+    ask.paths[0] === ask.sources[0]
+  );
   return (
     <ConfirmDialog
       title={title}
@@ -2726,17 +2924,23 @@ function NotVersionedConfirm({ ask, onCancel, onConfirm }: { ask: AskNotVersione
       confirmTestId="confirm-not-versioned"
       onCancel={onCancel}
       onConfirm={onConfirm}
-      details={listed ? (
-        // Seven rows show; the rest scroll.
-        <ul className="m-0 max-h-[204px] list-none overflow-auto rounded-lg border border-line bg-bg p-1">
-          {ask.paths.map((path) => (
-            <li key={path} title={path} className="flex h-7 items-center gap-2 rounded-md px-2">
-              <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{basenameOf(path)}</span>
-              <span className="max-w-[45%] shrink-0 truncate text-[12px] text-subtle">{dirnameOf(path)}</span>
-            </li>
-          ))}
-        </ul>
-      ) : undefined}
+      details={
+        listed ? (
+          // Seven rows show; the rest scroll.
+          <ul className="m-0 max-h-[204px] list-none overflow-auto rounded-lg border border-line bg-bg p-1">
+            {ask.paths.map((path) => (
+              <li key={path} title={path} className="flex h-7 items-center gap-2 rounded-md px-2">
+                <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
+                  {basenameOf(path)}
+                </span>
+                <span className="max-w-[45%] shrink-0 truncate text-[12px] text-subtle">
+                  {dirnameOf(path)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : undefined
+      }
     >
       {body}
     </ConfirmDialog>
@@ -2747,7 +2951,12 @@ function NotVersionedConfirm({ ask, onCancel, onConfirm }: { ask: AskNotVersione
 // and show it as a tooltip on hover or keyboard focus. The row that holds
 // this is the `@container` the tooltip's width keeps within, so the sidebar
 // never scrolls sideways to show it.
-function CollectionsNote({ icon: Icon, iconClassName, words, detail }: {
+function CollectionsNote({
+  icon: Icon,
+  iconClassName,
+  words,
+  detail,
+}: {
   icon: typeof Laptop;
   iconClassName: string;
   words: string;
@@ -2756,12 +2965,25 @@ function CollectionsNote({ icon: Icon, iconClassName, words, detail }: {
   const tooltip = useTooltip();
   return (
     <p {...tooltip.hoverProps} className="relative m-0 flex gap-1.5 text-[12px] text-muted">
-      <Icon size={12} strokeWidth={1.9} aria-hidden className={`mt-0.5 shrink-0 ${iconClassName}`} />
-      {detail === null ? <span className="wrap-anywhere">{words}</span> : <>
-        <span {...tooltip.focusProps} tabIndex={0} className="wrap-anywhere rounded">{words}</span>
-        {/* 18px: the tooltip's padding and border, around these words. */}
-        <Tooltip {...tooltip.tooltipProps}><span className="block max-w-[calc(100cqw-18px)]">{detail}</span></Tooltip>
-      </>}
+      <Icon
+        size={12}
+        strokeWidth={1.9}
+        aria-hidden
+        className={`mt-0.5 shrink-0 ${iconClassName}`}
+      />
+      {detail === null ? (
+        <span className="wrap-anywhere">{words}</span>
+      ) : (
+        <>
+          <span {...tooltip.focusProps} tabIndex={0} className="wrap-anywhere rounded">
+            {words}
+          </span>
+          {/* 18px: the tooltip's padding and border, around these words. */}
+          <Tooltip {...tooltip.tooltipProps}>
+            <span className="block max-w-[calc(100cqw-18px)]">{detail}</span>
+          </Tooltip>
+        </>
+      )}
     </p>
   );
 }
@@ -2770,13 +2992,30 @@ function CollectionsNote({ icon: Icon, iconClassName, words, detail }: {
 // the workspace's other Collections, where a move to a server starts. The
 // whole sentence is the row's tooltip, or the row itself when main named no
 // computer.
-export function CollectionsElsewhereRow({ elsewhere, onKeep }: { elsewhere: CollectionsElsewhere; onKeep?: () => void }) {
+export function CollectionsElsewhereRow({
+  elsewhere,
+  onKeep,
+}: {
+  elsewhere: CollectionsElsewhere;
+  onKeep?: () => void;
+}) {
   const { computer, others, words } = elsewhere;
   return (
-    <div data-testid="collections-elsewhere" className="@container flex flex-col items-start gap-1.5 px-2 py-1">
-      <CollectionsNote icon={Laptop} iconClassName="" words={computer === null ? words : `${others ? "Others on" : "On"} ${computer}`}
-        detail={computer === null ? null : words} />
-      {onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{USE_THIS_COMPUTER}</SecondaryButton>}
+    <div
+      data-testid="collections-elsewhere"
+      className="@container flex flex-col items-start gap-1.5 px-2 py-1"
+    >
+      <CollectionsNote
+        icon={Laptop}
+        iconClassName=""
+        words={computer === null ? words : `${others ? "Others on" : "On"} ${computer}`}
+        detail={computer === null ? null : words}
+      />
+      {onKeep && (
+        <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>
+          {USE_THIS_COMPUTER}
+        </SecondaryButton>
+      )}
     </div>
   );
 }
@@ -2785,21 +3024,44 @@ export function CollectionsElsewhereRow({ elsewhere, onKeep }: { elsewhere: Coll
 // are, or what went wrong, and the one step that helps. Where another
 // computer keeps them, the whole sentence is the row's tooltip, or the row
 // itself when main named no computer.
-export function CollectionsRefusalRow({ refusal, onKeep, onRetry }: {
+export function CollectionsRefusalRow({
+  refusal,
+  onKeep,
+  onRetry,
+}: {
   refusal: CollectionsRefusalRead;
   onKeep?: () => void;
   onRetry?: () => void;
 }) {
   const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
   const named = refusal.kind === "elsewhere" && refusal.computer !== null ? refusal.computer : null;
-  const words = refusal.kind === "unclaimed" ? "Which computer keeps these Collections?" : named !== null ? `On ${named}` : refusal.words;
+  const words =
+    refusal.kind === "unclaimed"
+      ? "Which computer keeps these Collections?"
+      : named !== null
+        ? `On ${named}`
+        : refusal.words;
   return (
-    <div role="status" data-testid="collections-refusal" className="@container flex flex-col items-start gap-1.5 px-2 py-1">
-      <CollectionsNote icon={held ? Laptop : TriangleAlert} iconClassName={held ? "text-warning" : "text-danger"} words={words}
-        detail={named === null ? null : refusal.words} />
+    <div
+      role="status"
+      data-testid="collections-refusal"
+      className="@container flex flex-col items-start gap-1.5 px-2 py-1"
+    >
+      <CollectionsNote
+        icon={held ? Laptop : TriangleAlert}
+        iconClassName={held ? "text-warning" : "text-danger"}
+        words={words}
+        detail={named === null ? null : refusal.words}
+      />
       <div className="flex flex-wrap gap-1.5">
-        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeep && <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>{USE_THIS_COMPUTER}</SecondaryButton>}
-        {refusal.kind !== "unclaimed" && onRetry && <SecondaryButton onClick={() => onRetry()}>Try again</SecondaryButton>}
+        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeep && (
+          <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>
+            {USE_THIS_COMPUTER}
+          </SecondaryButton>
+        )}
+        {refusal.kind !== "unclaimed" && onRetry && (
+          <SecondaryButton onClick={() => onRetry()}>Try again</SecondaryButton>
+        )}
       </div>
     </div>
   );

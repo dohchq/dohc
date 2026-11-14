@@ -20,9 +20,6 @@ import {
   mergeShareSkippedOps,
   type RemoteIdentity,
 } from "./registryStore";
-// The predicate the RENDERER acts on, asserted here against the records this
-// store produces: one rule, and the surfaces that show the warning read it
-// from the same place.
 import { hasUnacknowledgedShareSkips } from "../renderer/shareSkipNotice";
 import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
@@ -53,8 +50,9 @@ const personal = {
   mode: "local-first" as const,
 };
 
-type RemoteIdentityHasWorkspaceAlias =
-  "remoteWorkspaceId" extends keyof RemoteIdentity ? true : false;
+type RemoteIdentityHasWorkspaceAlias = "remoteWorkspaceId" extends keyof RemoteIdentity
+  ? true
+  : false;
 
 const remoteIdentityHasWorkspaceAlias: RemoteIdentityHasWorkspaceAlias = false;
 
@@ -91,7 +89,12 @@ describe("missing workspace messages", () => {
     const writes = [
       () => store.pauseRemote("missing"),
       () => store.setRemote("missing", { serverUrl: "https://relay.test", ownerUserId: "owner" }),
-      () => store.setShareRoster("missing", { grants: [], links: [], formerGrants: [], endedGrants: [] }, false),
+      () =>
+        store.setShareRoster(
+          "missing",
+          { grants: [], links: [], formerGrants: [], endedGrants: [] },
+          false,
+        ),
       () => store.markShareRosterPulled("missing"),
     ];
     for (const write of writes) {
@@ -104,34 +107,48 @@ describe("missing workspace messages", () => {
   });
 });
 
-// A relay listing applied to the received-share records: the reconcile runs
-// on the record as the file holds it, the result is persisted, and the caller
-// learns whether anything changed.
 describe("received share reconciliation", () => {
   it("persists the reconciled entry and reports whether it changed", () => {
     store.register({
       ...personal,
-      sharedChannels: [{
-        shareId: "gone", channelWireId: "wire", access: "read-only", granterEmail: null,
-        relayUrl: "https://relay.test", recipientUserId: "me", ended: true,
-      }],
+      sharedChannels: [
+        {
+          shareId: "gone",
+          channelWireId: "wire",
+          access: "read-only",
+          granterEmail: null,
+          relayUrl: "https://relay.test",
+          recipientUserId: "me",
+          ended: true,
+        },
+      ],
     });
     expect(store.reconcileRecipientShares("ws-1", () => null)).toBe(false);
-    expect(store.reconcileRecipientShares("ws-1", (entry) => ({
-      ...entry,
-      sharedChannels: entry.sharedChannels!.map(({ ended: _ended, ...row }) => row),
-      confirmedRemovedShares: [{ shareId: "other", removedAtMs: 5 }],
-    }))).toBe(true);
+    expect(
+      store.reconcileRecipientShares("ws-1", (entry) => ({
+        ...entry,
+        sharedChannels: entry.sharedChannels!.map(({ ended: _ended, ...row }) => row),
+        confirmedRemovedShares: [{ shareId: "other", removedAtMs: 5 }],
+      })),
+    ).toBe(true);
     const reread = createRegistryStore(registryPath).find("ws-1");
     expect(reread?.sharedChannels?.[0]?.ended).toBeUndefined();
     expect(reread?.confirmedRemovedShares).toEqual([{ shareId: "other", removedAtMs: 5 }]);
-    expect(() => store.reconcileRecipientShares("missing", () => null)).toThrow("This workspace is not open. Open it again.");
+    expect(() => store.reconcileRecipientShares("missing", () => null)).toThrow(
+      "This workspace is not open. Open it again.",
+    );
   });
 });
 
 describe("share roster", () => {
   const grant = (grantId: string) => ({
-    shareId: "share", generation: 1, status: "active" as const, granterUserId: "owner", granterEmail: null, subjectName: null, sharerName: null,
+    shareId: "share",
+    generation: 1,
+    status: "active" as const,
+    granterUserId: "owner",
+    granterEmail: null,
+    subjectName: null,
+    sharerName: null,
     grantId,
     recipientUserId: "u-ana",
     recipientEmail: "ana@dohc.test",
@@ -142,8 +159,15 @@ describe("share roster", () => {
   it("retains grants and their roster while paused and after resuming the same owner", () => {
     const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
     store.register({ ...personal, remote });
-    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] }, true);
-    const syncPause = { atMs: 42, author: { kind: "agent" as const, agentId: "Claude", onBehalfOf: "person-local", depth: 0 } };
+    store.setShareRoster(
+      "ws-1",
+      { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] },
+      true,
+    );
+    const syncPause = {
+      atMs: 42,
+      author: { kind: "agent" as const, agentId: "Claude", onBehalfOf: "person-local", depth: 0 },
+    };
     store.pauseRemote("ws-1", syncPause);
     const paused = createRegistryStore(registryPath).find("ws-1")!;
     expect(paused.remote).toBeUndefined();
@@ -160,18 +184,47 @@ describe("share roster", () => {
 
   it("raises the version only when the listing changes, and survives a reopen", () => {
     store.register(personal);
-    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] }, false);
-    expect(store.find("ws-1")?.shareRoster).toMatchObject({ version: 1, grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] });
+    store.setShareRoster(
+      "ws-1",
+      { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] },
+      false,
+    );
+    expect(store.find("ws-1")?.shareRoster).toMatchObject({
+      version: 1,
+      grants: [grant("g-1")],
+      links: [],
+      formerGrants: [],
+      endedGrants: [],
+    });
 
     vi.mocked(renameSync).mockClear();
-    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] }, false);
+    store.setShareRoster(
+      "ws-1",
+      { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] },
+      false,
+    );
     expect(renameSync, "an unchanged listing rewrote the registry").not.toHaveBeenCalled();
 
     store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } }, false);
     store.setShareRoster("ws-1", { grants: null, problem: { kind: "damaged-link" } }, true);
-    expect(store.find("ws-1")?.shareRoster).toMatchObject({ version: 2, grants: null, problem: { kind: "damaged-link" }, pulledAfter: true });
-    store.setShareRoster("ws-1", { grants: [grant("g-1"), grant("g-2")], links: [], formerGrants: [], endedGrants: [] }, false);
-    expect(store.find("ws-1")?.shareRoster).toMatchObject({ version: 3, grants: [grant("g-1"), grant("g-2")], links: [], formerGrants: [], endedGrants: [] });
+    expect(store.find("ws-1")?.shareRoster).toMatchObject({
+      version: 2,
+      grants: null,
+      problem: { kind: "damaged-link" },
+      pulledAfter: true,
+    });
+    store.setShareRoster(
+      "ws-1",
+      { grants: [grant("g-1"), grant("g-2")], links: [], formerGrants: [], endedGrants: [] },
+      false,
+    );
+    expect(store.find("ws-1")?.shareRoster).toMatchObject({
+      version: 3,
+      grants: [grant("g-1"), grant("g-2")],
+      links: [],
+      formerGrants: [],
+      endedGrants: [],
+    });
     expect(createRegistryStore(registryPath).find("ws-1")?.shareRoster?.version).toBe(3);
   });
 
@@ -179,14 +232,28 @@ describe("share roster", () => {
     store.register(personal);
     store.markShareRosterPulled("ws-1");
     expect(store.find("ws-1")?.shareRoster, "a mark with no listing").toBeUndefined();
-    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] }, false);
+    store.setShareRoster(
+      "ws-1",
+      { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] },
+      false,
+    );
     store.markShareRosterPulled("ws-1");
     expect(createRegistryStore(registryPath).find("ws-1")?.shareRoster?.pulledAfter).toBe(true);
     vi.mocked(renameSync).mockClear();
     store.markShareRosterPulled("ws-1");
     expect(renameSync, "a second pull rewrote the registry").not.toHaveBeenCalled();
-    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] }, false);
-    expect(store.find("ws-1")?.shareRoster).toMatchObject({ version: 1, grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] });
+    store.setShareRoster(
+      "ws-1",
+      { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] },
+      false,
+    );
+    expect(store.find("ws-1")?.shareRoster).toMatchObject({
+      version: 1,
+      grants: [grant("g-1")],
+      links: [],
+      formerGrants: [],
+      endedGrants: [],
+    });
   });
 });
 
@@ -226,7 +293,6 @@ describe("share skip records", () => {
       atMs: 1000,
     };
     const recorded = mergeShareSkippedOps(undefined, [twoRefusedSnapshots]);
-    // The restart: the page is re-fetched and the identical record arrives again.
     const afterRestart = mergeShareSkippedOps(recorded, [twoRefusedSnapshots]);
 
     expect(afterRestart.ops).toHaveLength(1);
@@ -236,18 +302,12 @@ describe("share skip records", () => {
       "the record loses a refused file, or its count, or its measurements",
     ).toContain("2 files in this operation were not applied");
     for (const path of ["docs/first.bin", "docs/second.bin"]) {
-      expect(
-        afterRestart.ops[0]?.detail,
-        `${path} vanished from the durable record`,
-      ).toContain(path);
+      expect(afterRestart.ops[0]?.detail, `${path} vanished from the durable record`).toContain(
+        path,
+      );
     }
   });
 
-  // Why the engine has to aggregate, stated as a fact about this function
-  // rather than a claim in a comment. Two records sharing one coordinate are
-  // not two records here: the second is dropped and never counted, so `more`
-  // does not rise to cover it either. Nothing downstream can recover what this
-  // merge discards, which is what makes the engine the only place to fix it.
   it("cannot hold two refusals that share an origin coordinate", () => {
     const perBlob = (path: string) => ({
       originId: "origin-granter",
@@ -268,10 +328,7 @@ describe("share skip records", () => {
       collapsed.ops[0]?.detail,
       "the FIRST refusal is the one kept, so a per-blob engine loses the rest",
     ).toContain("docs/first.bin");
-    expect(
-      collapsed.more,
-      "and the dropped refusal is not even counted as overflow",
-    ).toBe(0);
+    expect(collapsed.more, "and the dropped refusal is not even counted as overflow").toBe(0);
   });
 
   it("merges the same skipped op once, however often its page is refetched", () => {
@@ -302,10 +359,7 @@ describe("share skip records", () => {
       second: typeof relayOrigin,
     ): ReturnType<typeof mergeShareSkippedOps> => {
       const first = mergeShareSkippedOps(undefined, [relayOrigin]);
-      return mergeShareSkippedOps(
-        acknowledgeShareSkips(first, first.generation),
-        [second],
-      );
+      return mergeShareSkippedOps(acknowledgeShareSkips(first, first.generation), [second]);
     };
 
     const namespaced = afterAcknowledgingTheRelayOrigin(pagePosition);
@@ -313,15 +367,11 @@ describe("share skip records", () => {
       hasUnacknowledgedShareSkips(namespaced),
       "a page position shares a relay origin's coordinate, so acknowledging one hides the other",
     ).toBe(true);
-    expect(namespaced.ops.map((entry) => entry.detail)).toEqual([
-      "relay",
-      "page position",
-    ]);
+    expect(namespaced.ops.map((entry) => entry.detail)).toEqual(["relay", "page position"]);
 
     // What the collision costs, stated as its own case: with one coordinate
     // the merge is right to read the second as a retry, and the warning stays
-    // hidden. The separation has to come from the engine, which is where it
-    // is proved — `a_relay_origin_named_like_a_page_position_stays_a_separate_refusal`.
+    // hidden. The engine must give these sources separate coordinates.
     const colliding = afterAcknowledgingTheRelayOrigin({
       ...pagePosition,
       originId: relayOrigin.originId,
@@ -330,14 +380,8 @@ describe("share skip records", () => {
     expect(colliding.ops).toHaveLength(1);
   });
 
-  // Idempotence has to survive the CAP. Beyond the retained list an op is
-  // dropped, so the list alone can no longer answer "have I counted this
-  // one?" — and a refetched page would re-count it on every retry, inflating
-  // the number the banner shows.
   it("counts an overflowed op once, however often its page is refetched", () => {
-    const many = Array.from({ length: MAX_RETAINED_SKIPPED_OPS + 5 }, (_, index) =>
-      op(index),
-    );
+    const many = Array.from({ length: MAX_RETAINED_SKIPPED_OPS + 5 }, (_, index) => op(index));
     const first = mergeShareSkippedOps(undefined, many);
     expect(first.more).toBe(5);
     const retried = mergeShareSkippedOps(first, many);
@@ -346,7 +390,6 @@ describe("share skip records", () => {
       "without a per-origin watermark every retry re-counts the ops the cap dropped",
     ).toBe(5);
     expect(retried.ops).toHaveLength(MAX_RETAINED_SKIPPED_OPS);
-    // A genuinely new op past the cap still counts.
     expect(mergeShareSkippedOps(retried, [op(9999)]).more).toBe(6);
   });
 
@@ -354,23 +397,16 @@ describe("share skip records", () => {
   // the app rewrites on every workspace change. So the list is retained up to
   // the cap and the rest are counted.
   it("retains up to the cap and counts the rest", () => {
-    const many = Array.from({ length: MAX_RETAINED_SKIPPED_OPS + 5 }, (_, index) =>
-      op(index),
-    );
+    const many = Array.from({ length: MAX_RETAINED_SKIPPED_OPS + 5 }, (_, index) => op(index));
     const merged = mergeShareSkippedOps(undefined, many);
     expect(merged.ops).toHaveLength(MAX_RETAINED_SKIPPED_OPS);
     expect(
       merged.more,
       "an unbounded list lets a misbehaving relay grow the registry file without limit",
     ).toBe(5);
-    // And a later batch keeps counting rather than dropping the fact.
     expect(mergeShareSkippedOps(merged, [op(999)]).more).toBe(6);
   });
 
-  // A dismissal names the generation the user saw. So a write that adds
-  // something must move it — otherwise a refusal recorded between the render
-  // and the click is cleared unseen, and the cursor has already committed
-  // past that op.
   it("moves the generation only when a merge adds something", () => {
     const first = mergeShareSkippedOps(undefined, [op(4)]);
     expect(first.generation).toBe(1);
@@ -401,9 +437,6 @@ describe("share skip records", () => {
     ).toEqual([4]);
   });
 
-  // The race a destructive clear had to guard against does not exist here: a
-  // refusal recorded after the render has a higher generation, so the click
-  // cannot acknowledge it and the warning comes back on its own.
   it("leaves a refusal recorded after the render unacknowledged", () => {
     const seen = mergeShareSkippedOps(undefined, [op(4)]);
     const afterRefresh = mergeShareSkippedOps(seen, [op(9)]);
@@ -414,46 +447,28 @@ describe("share skip records", () => {
       hasUnacknowledgedShareSkips(acknowledged),
       "acknowledging the whole record hides a refusal the user never saw",
     ).toBe(true);
-    // Seeing it and clicking again settles it, and still keeps both ops.
     const settled = acknowledgeShareSkips(acknowledged, afterRefresh.generation);
     expect(hasUnacknowledgedShareSkips(settled)).toBe(false);
     expect(settled.ops).toHaveLength(2);
   });
 
-  // An acknowledgement never moves backwards, so a click on a stale render
-  // cannot un-see a newer one.
   it("never lowers an acknowledgement", () => {
-    const record = mergeShareSkippedOps(
-      mergeShareSkippedOps(undefined, [op(4)]),
-      [op(9)],
-    );
+    const record = mergeShareSkippedOps(mergeShareSkippedOps(undefined, [op(4)]), [op(9)]);
     const settled = acknowledgeShareSkips(record, record.generation);
-    expect(acknowledgeShareSkips(settled, 1).acknowledgedGeneration).toBe(
-      record.generation,
-    );
+    expect(acknowledgeShareSkips(settled, 1).acknowledgedGeneration).toBe(record.generation);
   });
 
-  // Retries stay exact far past the retained list: the record remembers the
-  // coordinates it counted, not just the ops it kept.
   it("keeps counting exact for far more ops than it retains", () => {
-    const many = Array.from({ length: MAX_RETAINED_SKIPPED_OPS + 40 }, (_, index) =>
-      op(index),
-    );
+    const many = Array.from({ length: MAX_RETAINED_SKIPPED_OPS + 40 }, (_, index) => op(index));
     const first = mergeShareSkippedOps(undefined, many);
     const retried = mergeShareSkippedOps(first, many);
-    expect(
-      retried.more,
-      "forgetting a counted coordinate re-counts it on every retry",
-    ).toBe(first.more);
+    expect(retried.more, "forgetting a counted coordinate re-counts it on every retry").toBe(
+      first.more,
+    );
     expect(retried.inexact).toBeUndefined();
     expect(retried.generation).toBe(first.generation);
   });
 
-  // A per-origin high-water mark reads "everything below this is counted",
-  // which is only true while ops arrive in sequence order — and nothing
-  // checks that. A relay serving seq 100 and then a genuinely new seq 99
-  // would have had 99 dismissed as a retry, leaving newly missing content
-  // silent behind an acknowledged warning.
   it("does not read a lower sequence as a duplicate of a higher one", () => {
     const first = mergeShareSkippedOps(undefined, [op(100)]);
     const outOfOrder = mergeShareSkippedOps(first, [op(99)]);
@@ -468,14 +483,8 @@ describe("share skip records", () => {
     ).toBe(first.generation + 1);
   });
 
-  // Past the coordinate bound there is nowhere left to remember an op, so a
-  // duplicate is indistinguishable from a new one. Counting it would make the
-  // total drift upward while the copy claims a lower bound, so the count
-  // stops and says it is incomplete.
   it("stops counting where it can no longer tell a duplicate from a new op", () => {
-    const many = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES + 5 }, (_, index) =>
-      op(index),
-    );
+    const many = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES + 5 }, (_, index) => op(index));
     const first = mergeShareSkippedOps(undefined, many);
     expect(first.inexact).toBe(true);
     expect(first.more + first.ops.length).toBe(MAX_TRACKED_SKIP_COORDINATES);
@@ -492,12 +501,8 @@ describe("share skip records", () => {
     ).toBe(first.generation);
   });
 
-  // The exact -> inexact transition is itself news: content is missing that
-  // the total does not name, and the cursor has committed past it.
   it("moves the generation once when the count stops being complete", () => {
-    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) =>
-      op(index),
-    );
+    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) => op(index));
     const exact = mergeShareSkippedOps(undefined, upToCap);
     expect(exact.inexact).toBeUndefined();
 
@@ -510,9 +515,7 @@ describe("share skip records", () => {
     ).toBe(exact.generation + 1);
     // The same batch again is the retry, and stays quiet. A different one is
     // more content skipped, and speaks up — see the two tests below.
-    expect(mergeShareSkippedOps(beyond, [op(9000)]).generation).toBe(
-      beyond.generation,
-    );
+    expect(mergeShareSkippedOps(beyond, [op(9000)]).generation).toBe(beyond.generation);
   });
 
   // Exactness and visibility are different questions. `inexact` flips once,
@@ -520,16 +523,10 @@ describe("share skip records", () => {
   // past a committed cursor — and after the user acknowledges the first one,
   // silence would hide all of it forever.
   it("re-raises an acknowledged warning when more unplaceable ops arrive", () => {
-    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) =>
-      op(index),
-    );
+    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) => op(index));
     const atCap = mergeShareSkippedOps(undefined, upToCap);
     const firstBeyond = mergeShareSkippedOps(atCap, [op(9000)]);
-    // The user sees it and dismisses it.
-    const acknowledged = acknowledgeShareSkips(
-      firstBeyond,
-      firstBeyond.generation,
-    );
+    const acknowledged = acknowledgeShareSkips(firstBeyond, firstBeyond.generation);
     expect(hasUnacknowledgedShareSkips(acknowledged)).toBe(false);
 
     // A later pull skips more, and its cursor commits past them.
@@ -541,17 +538,10 @@ describe("share skip records", () => {
     ).toBe(true);
   });
 
-  // The retry of the same page is the one batch that is not news: the record
-  // cannot dedupe its ops, but it can tell that it just saw this exact set.
   it("stays quiet when the same unplaceable batch arrives again", () => {
-    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) =>
-      op(index),
-    );
+    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) => op(index));
     const page = [op(9000), op(9001)];
-    const first = mergeShareSkippedOps(
-      mergeShareSkippedOps(undefined, upToCap),
-      page,
-    );
+    const first = mergeShareSkippedOps(mergeShareSkippedOps(undefined, upToCap), page);
     const acknowledged = acknowledgeShareSkips(first, first.generation);
 
     const retried = mergeShareSkippedOps(acknowledged, page);
@@ -568,13 +558,9 @@ describe("share skip records", () => {
   // FNV-1a, so acknowledging the first would have silenced the second — more
   // content skipped past a committed cursor, hidden by a name collision.
   it("does not confuse two different batches that a short digest collides", () => {
-    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) =>
-      op(index),
-    );
+    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) => op(index));
     const atCap = mergeShareSkippedOps(undefined, upToCap);
-    const first = mergeShareSkippedOps(atCap, [
-      { ...op(9000), originId: "Q2LtvxVflmCTdWhH" },
-    ]);
+    const first = mergeShareSkippedOps(atCap, [{ ...op(9000), originId: "Q2LtvxVflmCTdWhH" }]);
     const acknowledged = acknowledgeShareSkips(first, first.generation);
     expect(hasUnacknowledgedShareSkips(acknowledged)).toBe(false);
 
@@ -588,19 +574,12 @@ describe("share skip records", () => {
     ).toBe(true);
   });
 
-  // A batch too large to keep the identity of records none, so the next one
-  // reads as news. Visible rather than silent is the safe side of a bound.
   it("treats the next batch as news when it could not keep the last one", () => {
-    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) =>
-      op(index),
-    );
+    const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) => op(index));
     const huge = Array.from({ length: MAX_TRACKED_BATCH_COORDINATES + 1 }, (_, index) =>
       op(9000 + index),
     );
-    const first = mergeShareSkippedOps(
-      mergeShareSkippedOps(undefined, upToCap),
-      huge,
-    );
+    const first = mergeShareSkippedOps(mergeShareSkippedOps(undefined, upToCap), huge);
     const acknowledged = acknowledgeShareSkips(first, first.generation);
 
     expect(
@@ -618,9 +597,7 @@ describe("share skip records", () => {
       { ...op(2), originId: "constructor" },
       { ...op(3), originId: "toString" },
     ];
-    const filler = Array.from({ length: MAX_RETAINED_SKIPPED_OPS }, (_, index) =>
-      op(1000 + index),
-    );
+    const filler = Array.from({ length: MAX_RETAINED_SKIPPED_OPS }, (_, index) => op(1000 + index));
     const first = mergeShareSkippedOps(undefined, [...filler, ...hostile]);
     expect(first.more).toBe(hostile.length);
 
@@ -630,18 +607,11 @@ describe("share skip records", () => {
       retried.more,
       "a prototype-inherited lookup recounts these coordinates on every retry",
     ).toBe(first.more);
-    expect(
-      retried.inexact,
-      "...and reports the inflated total as exact",
-    ).toBeUndefined();
+    expect(retried.inexact, "...and reports the inflated total as exact").toBeUndefined();
   });
 
-  // Two shares can serve ops from different origins at the same sequence.
   it("keys a skipped op by origin and sequence", () => {
-    const merged = mergeShareSkippedOps(undefined, [
-      op(4),
-      { ...op(4), originId: "origin-other" },
-    ]);
+    const merged = mergeShareSkippedOps(undefined, [op(4), { ...op(4), originId: "origin-other" }]);
     expect(merged.ops).toHaveLength(2);
   });
 });
@@ -660,46 +630,57 @@ describe("registry store", () => {
 
   it("rejects duplicate folder attachment", () => {
     store.register(personal);
-    expect(() =>
-      store.register({ ...personal, workspaceId: "ws-other" }),
-    ).toThrow(/already attached/i);
+    expect(() => store.register({ ...personal, workspaceId: "ws-other" })).toThrow(
+      /already attached/i,
+    );
   });
 
   it("rejects a second root carrying an already-registered workspace identity", () => {
     store.register(personal);
-    expect(() =>
-      store.register({ ...personal, rootPath: "/home/sam/dohc/personal-copy" }),
-    ).toThrow(/identity .* already attached|already attached .* identity/i);
+    expect(() => store.register({ ...personal, rootPath: "/home/sam/dohc/personal-copy" })).toThrow(
+      /identity .* already attached|already attached .* identity/i,
+    );
   });
 
   describe("on a Linux folder that ignores capitals", () => {
     // /home/sam/fold ignores capitals; /srv tells them apart.
-    const disk = caseFoldDisk({
-      "/home/sam/fold/Notes/a.md": "file",
-      "/home/sam/fold/Copy/a.md": "file",
-      "/srv/Notes/a.md": "file",
-      "/srv/notes/a.md": "file",
-    }, { foldsCase: (folder) => folder.startsWith("/home/sam/fold") });
-    const linuxStore = () => createRegistryStore(registryPath, {
-      folderIdentity: (rootPath) => folderIdentitySync(rootPath, disk.stat),
+    const disk = caseFoldDisk(
+      {
+        "/home/sam/fold/Notes/a.md": "file",
+        "/home/sam/fold/Copy/a.md": "file",
+        "/srv/Notes/a.md": "file",
+        "/srv/notes/a.md": "file",
+      },
+      { foldsCase: (folder) => folder.startsWith("/home/sam/fold") },
+    );
+    const linuxStore = () =>
+      createRegistryStore(registryPath, {
+        folderIdentity: (rootPath) => folderIdentitySync(rootPath, disk.stat),
+      });
+    const entry = (workspaceId: string, rootPath: string) => ({
+      ...personal,
+      workspaceId,
+      rootPath,
     });
-    const entry = (workspaceId: string, rootPath: string) => ({ ...personal, workspaceId, rootPath });
 
     it("refuses the same folder under other capitals, even under another workspace id", () => {
       const linux = linuxStore();
       linux.register(entry("ws-1", "/home/sam/fold/Notes"));
-      expect(() => linux.register(entry("ws-2", "/home/sam/fold/notes")))
-        .toThrow("Folder is already attached: /home/sam/fold/Notes");
-      expect(() => linux.register(entry("ws-1", "/home/sam/fold/NOTES")))
-        .toThrow("Folder is already attached: /home/sam/fold/Notes");
+      expect(() => linux.register(entry("ws-2", "/home/sam/fold/notes"))).toThrow(
+        "Folder is already attached: /home/sam/fold/Notes",
+      );
+      expect(() => linux.register(entry("ws-1", "/home/sam/fold/NOTES"))).toThrow(
+        "Folder is already attached: /home/sam/fold/Notes",
+      );
       expect(linux.list().map((w) => w.workspaceId)).toEqual(["ws-1"]);
     });
 
     it("still refuses a copied folder that carries the same workspace id", () => {
       const linux = linuxStore();
       linux.register(entry("ws-1", "/home/sam/fold/Notes"));
-      expect(() => linux.register(entry("ws-1", "/home/sam/fold/Copy")))
-        .toThrow(/carries the identity of an already attached workspace/);
+      expect(() => linux.register(entry("ws-1", "/home/sam/fold/Copy"))).toThrow(
+        /carries the identity of an already attached workspace/,
+      );
     });
 
     it("keeps Notes and notes apart on a disk that tells capitals apart", () => {
@@ -710,18 +691,26 @@ describe("registry store", () => {
     });
 
     it("loads two saved spellings of one folder as they are, and a missing folder as it is", async () => {
-      await writeFile(registryPath, JSON.stringify({ version: 1, workspaces: [
-        entry("ws-1", "/home/sam/fold/Notes"),
-        entry("ws-2", "/home/sam/fold/notes"),
-        entry("ws-gone", "/home/sam/fold/gone"),
-      ] }));
+      await writeFile(
+        registryPath,
+        JSON.stringify({
+          version: 1,
+          workspaces: [
+            entry("ws-1", "/home/sam/fold/Notes"),
+            entry("ws-2", "/home/sam/fold/notes"),
+            entry("ws-gone", "/home/sam/fold/gone"),
+          ],
+        }),
+      );
       const linux = linuxStore();
       expect(linux.list().map((w) => [w.workspaceId, w.rootPath])).toEqual([
         ["ws-1", "/home/sam/fold/Notes"],
         ["ws-2", "/home/sam/fold/notes"],
         ["ws-gone", "/home/sam/fold/gone"],
       ]);
-      expect(() => linux.register(entry("ws-3", "/home/sam/fold/NOTES"))).toThrow("Folder is already attached");
+      expect(() => linux.register(entry("ws-3", "/home/sam/fold/NOTES"))).toThrow(
+        "Folder is already attached",
+      );
     });
   });
 
@@ -730,28 +719,57 @@ describe("registry store", () => {
     const link = join(dirname(registryPath), "linked");
     await symlink(real, link, process.platform === "win32" ? "junction" : "dir");
     const missing = normalizeAbsolutePath(join(dirname(registryPath), "gone"));
-    await writeFile(registryPath, JSON.stringify({ version: 1, workspaces: [
-      { ...personal, rootPath: normalizeAbsolutePath(link) },
-      { ...personal, workspaceId: "ws-gone", rootPath: missing },
-    ] }));
+    await writeFile(
+      registryPath,
+      JSON.stringify({
+        version: 1,
+        workspaces: [
+          { ...personal, rootPath: normalizeAbsolutePath(link) },
+          { ...personal, workspaceId: "ws-gone", rootPath: missing },
+        ],
+      }),
+    );
 
     const reopened = createRegistryStore(registryPath);
-    expect(reopened.list().map((entry) => entry.rootPath)).toEqual([canonicalWorkspaceRoot(real), missing]);
-    expect(() => reopened.register({ ...personal, workspaceId: "ws-real", rootPath: canonicalWorkspaceRoot(real) }))
-      .toThrow(/already attached/i);
-    // The next write saves the real path.
+    expect(reopened.list().map((entry) => entry.rootPath)).toEqual([
+      canonicalWorkspaceRoot(real),
+      missing,
+    ]);
+    expect(() =>
+      reopened.register({
+        ...personal,
+        workspaceId: "ws-real",
+        rootPath: canonicalWorkspaceRoot(real),
+      }),
+    ).toThrow(/already attached/i);
     reopened.markOpened("ws-1", 5);
-    const saved = JSON.parse(await readFile(registryPath, "utf8")) as { workspaces: Array<{ rootPath: string }> };
-    expect(saved.workspaces.map((entry) => entry.rootPath)).toEqual([canonicalWorkspaceRoot(real), missing]);
+    const saved = JSON.parse(await readFile(registryPath, "utf8")) as {
+      workspaces: Array<{ rootPath: string }>;
+    };
+    expect(saved.workspaces.map((entry) => entry.rootPath)).toEqual([
+      canonicalWorkspaceRoot(real),
+      missing,
+    ]);
   });
 
-  it.skipIf(process.platform === "win32")("reads a backslash in a folder's name as part of the name", async () => {
-    const folder = join(dirname(registryPath), "trip\\2026");
-    await mkdir(folder);
-    await writeFile(registryPath, JSON.stringify({ version: 1, workspaces: [{ ...personal, rootPath: canonicalWorkspaceRoot(folder) }] }));
-    expect(createRegistryStore(registryPath).find("ws-1")?.rootPath).toBe(canonicalWorkspaceRoot(folder));
-    expect(canonicalWorkspaceRoot(folder).endsWith("/trip\\2026")).toBe(true);
-  });
+  it.skipIf(process.platform === "win32")(
+    "reads a backslash in a folder's name as part of the name",
+    async () => {
+      const folder = join(dirname(registryPath), "trip\\2026");
+      await mkdir(folder);
+      await writeFile(
+        registryPath,
+        JSON.stringify({
+          version: 1,
+          workspaces: [{ ...personal, rootPath: canonicalWorkspaceRoot(folder) }],
+        }),
+      );
+      expect(createRegistryStore(registryPath).find("ws-1")?.rootPath).toBe(
+        canonicalWorkspaceRoot(folder),
+      );
+      expect(canonicalWorkspaceRoot(folder).endsWith("/trip\\2026")).toBe(true);
+    },
+  );
 
   it("persists across store instances", () => {
     store.register(personal);
@@ -788,7 +806,9 @@ describe("registry store", () => {
     expect(createRegistryStore(registryPath).find("ws-1")?.lastOpenedAt).toBe(1_000);
     const writes = vi.mocked(renameSync).mock.calls.length;
     store.markOpened("ws-1", 1_000);
-    expect(vi.mocked(renameSync).mock.calls.length, "an unchanged stamp does not rewrite").toBe(writes);
+    expect(vi.mocked(renameSync).mock.calls.length, "an unchanged stamp does not rewrite").toBe(
+      writes,
+    );
     expect(() => store.markOpened("missing", 2_000)).not.toThrow();
     store.markOpened("ws-1", 3_000);
     expect(store.find("ws-1")?.lastOpenedAt).toBe(3_000);
@@ -810,9 +830,7 @@ describe("registry store", () => {
       throw renameFailure;
     });
 
-    expect(() => store.setRemote(personal.workspaceId, replacement)).toThrow(
-      renameFailure,
-    );
+    expect(() => store.setRemote(personal.workspaceId, replacement)).toThrow(renameFailure);
 
     expect(
       store.find(personal.workspaceId)?.remote,
@@ -831,7 +849,9 @@ describe("registry store", () => {
 
     reopened.completeJoinBootstrap("ws-1");
     expect(createRegistryStore(registryPath).find("ws-1")?.joinBootstrapPending).toBeUndefined();
-    expect(() => reopened.completeJoinBootstrap("missing")).toThrow("This workspace is not open. Open it again.");
+    expect(() => reopened.completeJoinBootstrap("missing")).toThrow(
+      "This workspace is not open. Open it again.",
+    );
   });
 
   // The cache may only show a warning hidden once the same change reached
@@ -865,11 +885,7 @@ describe("registry store", () => {
     await mkdir(registryPath);
 
     expect(() =>
-      store.acknowledgeShareSkips(
-        personal.workspaceId,
-        undefined,
-        before?.generation ?? 0,
-      ),
+      store.acknowledgeShareSkips(personal.workspaceId, undefined, before?.generation ?? 0),
     ).toThrow();
 
     expect(
@@ -879,10 +895,7 @@ describe("registry store", () => {
   });
 
   it("refuses to wipe a future-version registry", async () => {
-    await writeFile(
-      registryPath,
-      JSON.stringify({ version: 2, workspaces: [personal] }),
-    );
+    await writeFile(registryPath, JSON.stringify({ version: 2, workspaces: [personal] }));
     const future = createRegistryStore(registryPath);
     expect(() => future.list()).toThrow(/newer than supported|refusing to overwrite/i);
   });
@@ -900,18 +913,13 @@ describe("registry store", () => {
     store.setSharedChannels("ws-1", [joined]);
     expect(store.find("ws-1")?.sharedChannels).toEqual([joined]);
 
-    // Revocation stamps ended (replace-the-set write) and persists across
-    // store instances.
     store.setSharedChannels("ws-1", [{ ...joined, ended: true }]);
     const reopened = createRegistryStore(registryPath);
     expect(reopened.find("ws-1")?.sharedChannels).toEqual([{ ...joined, ended: true }]);
 
-    // Leaving the last shared channel removes the key entirely.
     store.setSharedChannels("ws-1", []);
     expect(store.find("ws-1")?.sharedChannels).toBeUndefined();
-    expect(
-      createRegistryStore(registryPath).find("ws-1")?.sharedChannels,
-    ).toBeUndefined();
+    expect(createRegistryStore(registryPath).find("ws-1")?.sharedChannels).toBeUndefined();
   });
 
   it("leaves joined shared channels unchanged when the registry write fails", () => {
@@ -950,27 +958,33 @@ describe("registry store", () => {
     expect(() =>
       store.setSharedChannels(personal.workspaceId, [{ ...joined, ended: true }]),
     ).toThrow();
-    expect(() =>
-      store.setSharedChannels(secondWorkspace.workspaceId, []),
-    ).toThrow();
+    expect(() => store.setSharedChannels(secondWorkspace.workspaceId, [])).toThrow();
 
-    expect.soft(
-      store.find(personal.workspaceId)?.sharedChannels,
-      "a failed replacement changes the cached channel set before it reaches disk",
-    ).toEqual([joined]);
-    expect.soft(
-      store.find(secondWorkspace.workspaceId)?.sharedChannels,
-      "a failed removal deletes the cached channel set before it reaches disk",
-    ).toEqual([secondJoined]);
+    expect
+      .soft(
+        store.find(personal.workspaceId)?.sharedChannels,
+        "a failed replacement changes the cached channel set before it reaches disk",
+      )
+      .toEqual([joined]);
+    expect
+      .soft(
+        store.find(secondWorkspace.workspaceId)?.sharedChannels,
+        "a failed removal deletes the cached channel set before it reaches disk",
+      )
+      .toEqual([secondJoined]);
     const reopened = createRegistryStore(registryPath);
-    expect.soft(
-      reopened.find(personal.workspaceId)?.sharedChannels,
-      "the failed replacement must leave the durable channel set unchanged",
-    ).toEqual([joined]);
-    expect.soft(
-      reopened.find(secondWorkspace.workspaceId)?.sharedChannels,
-      "the failed removal must leave the durable channel set unchanged",
-    ).toEqual([secondJoined]);
+    expect
+      .soft(
+        reopened.find(personal.workspaceId)?.sharedChannels,
+        "the failed replacement must leave the durable channel set unchanged",
+      )
+      .toEqual([joined]);
+    expect
+      .soft(
+        reopened.find(secondWorkspace.workspaceId)?.sharedChannels,
+        "the failed removal must leave the durable channel set unchanged",
+      )
+      .toEqual([secondJoined]);
   });
 
   it("records, marks ended, and keeps an empty ownership tombstone", () => {
@@ -995,9 +1009,7 @@ describe("registry store", () => {
 
     store.setShareMounts("ws-1", []);
     expect(store.find("ws-1")?.shareMounts).toEqual([]);
-    expect(createRegistryStore(registryPath).find("ws-1")?.shareMounts).toEqual(
-      [],
-    );
+    expect(createRegistryStore(registryPath).find("ws-1")?.shareMounts).toEqual([]);
   });
 
   it("keeps the cached mount set unchanged when persistence fails", async () => {
@@ -1015,7 +1027,6 @@ describe("registry store", () => {
     };
     store.setShareMounts("ws-1", [mount]);
 
-    // Model a rename failure while leaving the already-read cache available.
     await rm(registryPath);
     await mkdir(registryPath);
 
@@ -1031,10 +1042,8 @@ describe("registry store", () => {
     store.remove("ws-1");
     expect(store.find("ws-1")).toBeNull();
     expect(store.list()).toHaveLength(0);
-    // Unknown/already-removed ids are a no-op, never a throw.
     store.remove("ws-1");
     store.remove("ws-never-registered");
-    // The same root can be re-attached after removal (join retry).
     store.register(personal);
     expect(store.find("ws-1")?.rootPath).toBe(personal.rootPath);
   });
@@ -1053,7 +1062,6 @@ describe("registry store", () => {
       genericChatWritable: false,
       grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
     });
-    // Marking ended survives a fresh read of the same file.
     store.setShareView("ws-1", {
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
@@ -1097,9 +1105,7 @@ describe("registry store", () => {
       throw renameFailure;
     });
 
-    expect(() => store.setShareView(personal.workspaceId, replacement)).toThrow(
-      renameFailure,
-    );
+    expect(() => store.setShareView(personal.workspaceId, replacement)).toThrow(renameFailure);
 
     expect(
       store.find(personal.workspaceId)?.shareView,
@@ -1169,9 +1175,9 @@ describe("registry store", () => {
     expect(() => store.register(personal)).toThrow(writeFailure);
     expect(fsyncSync).not.toHaveBeenCalled();
     expect(renameSync).not.toHaveBeenCalled();
-    const leftovers = (await import("node:fs")).readdirSync(
-      join(registryPath, ".."),
-    ).filter((file) => file.includes(".tmp-"));
+    const leftovers = (await import("node:fs"))
+      .readdirSync(join(registryPath, ".."))
+      .filter((file) => file.includes(".tmp-"));
     expect(leftovers).toEqual([]);
   });
 
@@ -1186,15 +1192,8 @@ describe("registry store", () => {
 
     withPlatform("linux", () => store.register(personal));
 
-    expect(writeFileSync).toHaveBeenCalledWith(
-      expect.any(Number),
-      expect.any(Buffer),
-    );
-    expect(openSync).toHaveBeenNthCalledWith(
-      1,
-      expect.stringContaining(".tmp-"),
-      "w",
-    );
+    expect(writeFileSync).toHaveBeenCalledWith(expect.any(Number), expect.any(Buffer));
+    expect(openSync).toHaveBeenNthCalledWith(1, expect.stringContaining(".tmp-"), "w");
     expect(openSync).toHaveBeenNthCalledWith(2, join(registryPath, ".."), "r");
     expect(fsyncSync).toHaveBeenCalledTimes(2);
     expect(closeSync).toHaveBeenCalledTimes(2);
@@ -1234,18 +1233,14 @@ describe("registry store", () => {
       throw syncFailure;
     });
 
-    expect(() => store.setRemote(personal.workspaceId, replacement)).toThrow(
-      syncFailure,
-    );
+    expect(() => store.setRemote(personal.workspaceId, replacement)).toThrow(syncFailure);
 
     expect(renameSync).not.toHaveBeenCalled();
     expect(store.find(personal.workspaceId)?.remote).toEqual(original);
-    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
-      original,
-    );
-    const leftovers = (await import("node:fs")).readdirSync(
-      join(registryPath, ".."),
-    ).filter((file) => file.includes(".tmp-"));
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(original);
+    const leftovers = (await import("node:fs"))
+      .readdirSync(join(registryPath, ".."))
+      .filter((file) => file.includes(".tmp-"));
     expect(leftovers).toEqual([]);
 
     store.setRemote(personal.workspaceId, replacement);
@@ -1287,28 +1282,26 @@ describe("registry store", () => {
       });
 
     expect(() =>
-      withPlatform("linux", () =>
-        store.setRemote(personal.workspaceId, replacement),
-      ),
+      withPlatform("linux", () => store.setRemote(personal.workspaceId, replacement)),
     ).toThrow(syncFailure);
 
     expect(renameSync).toHaveBeenCalledOnce();
     expect(closeSync).toHaveBeenCalledTimes(2);
     vi.mocked(readFileSync).mockClear();
     expect(store.find(personal.workspaceId)?.remote).toEqual(replacement);
-    expect(vi.mocked(readFileSync).mock.calls.filter(([file]) => file === registryPath)).toHaveLength(1);
+    expect(
+      vi.mocked(readFileSync).mock.calls.filter(([file]) => file === registryPath),
+    ).toHaveLength(1);
     expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
       replacement,
     );
-    const leftovers = (await import("node:fs")).readdirSync(
-      join(registryPath, ".."),
-    ).filter((file) => file.includes(".tmp-"));
+    const leftovers = (await import("node:fs"))
+      .readdirSync(join(registryPath, ".."))
+      .filter((file) => file.includes(".tmp-"));
     expect(leftovers).toEqual([]);
 
     store.setRemote(personal.workspaceId, retried);
-    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
-      retried,
-    );
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(retried);
   });
 
   it("skips unsupported directory fsync on Windows", () => {
@@ -1316,13 +1309,8 @@ describe("registry store", () => {
 
     expect(fsyncSync).toHaveBeenCalledOnce();
     expect(openSync).toHaveBeenCalledOnce();
-    expect(openSync).toHaveBeenCalledWith(
-      expect.stringContaining(".tmp-"),
-      "w",
-    );
-    expect(createRegistryStore(registryPath).find(personal.workspaceId)).toEqual(
-      personal,
-    );
+    expect(openSync).toHaveBeenCalledWith(expect.stringContaining(".tmp-"), "w");
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)).toEqual(personal);
   });
 
   it("persists the share's origin relay so refresh can reject a foreign relay", () => {
@@ -1348,11 +1336,8 @@ describe("registry store", () => {
     store.register(personal);
     const onDisk = JSON.parse(await readFile(registryPath, "utf8"));
     expect(onDisk.workspaces).toHaveLength(1);
-    // The temp file used during the atomic rename must not survive.
     const { readdirSync } = await import("node:fs");
-    const leftovers = readdirSync(join(registryPath, "..")).filter((f) =>
-      f.includes(".tmp-"),
-    );
+    const leftovers = readdirSync(join(registryPath, "..")).filter((f) => f.includes(".tmp-"));
     expect(leftovers).toEqual([]);
   });
 });

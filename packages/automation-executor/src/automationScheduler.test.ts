@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { AutomationScheduleTrigger } from "@dohc/workspace-contracts/automations";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 
-type AutomationScheduleMark = Awaited<ReturnType<VersionedLiveAdapter["listAutomationScheduleMarks"]>>["marks"][number];
+type AutomationScheduleMark = Awaited<
+  ReturnType<VersionedLiveAdapter["listAutomationScheduleMarks"]>
+>["marks"][number];
 import {
   AutomationScheduler,
   CLOCK_JUMP_MS,
@@ -21,12 +23,28 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const NINE = Date.UTC(2026, 8, 25, 9);
 
-function scheduled(trigger: AutomationScheduleTrigger, automationId = "collection:Tasks#report"): ScheduledAutomation {
-  return { automationId, collectionPath: "Tasks", name: "Report", trigger, scheduleHash: scheduleHash(trigger), enabledSince: null };
+function scheduled(
+  trigger: AutomationScheduleTrigger,
+  automationId = "collection:Tasks#report",
+): ScheduledAutomation {
+  return {
+    automationId,
+    collectionPath: "Tasks",
+    name: "Report",
+    trigger,
+    scheduleHash: scheduleHash(trigger),
+    enabledSince: null,
+  };
 }
 
-const hourly = scheduled({ kind: "schedule", every: "hour", at: ":00", timezone: "UTC" }, "collection:Tasks#hourly");
-const daily = scheduled({ kind: "schedule", every: "day", at: "09:00", timezone: "UTC" }, "collection:Tasks#daily");
+const hourly = scheduled(
+  { kind: "schedule", every: "hour", at: ":00", timezone: "UTC" },
+  "collection:Tasks#hourly",
+);
+const daily = scheduled(
+  { kind: "schedule", every: "day", at: "09:00", timezone: "UTC" },
+  "collection:Tasks#daily",
+);
 
 function markOf(schedule: ScheduledAutomation, throughMs: number): AutomationScheduleMark {
   return { automationId: schedule.automationId, scheduleHash: schedule.scheduleHash, throughMs };
@@ -43,17 +61,31 @@ function fakeClock(start: number) {
       now: () => wall,
       monotonic: () => monotonic,
       setTimer: (wake: () => void, delayMs: number) => (timer = { wake, at: wall + delayMs }),
-      clearTimer: (handle: unknown) => { if (timer === handle) timer = null; },
+      clearTimer: (handle: unknown) => {
+        if (timer === handle) timer = null;
+      },
     },
-    advance: (ms: number) => { wall += ms; monotonic += ms; },
-    jumpWall: (ms: number) => { wall += ms; },
+    advance: (ms: number) => {
+      wall += ms;
+      monotonic += ms;
+    },
+    jumpWall: (ms: number) => {
+      wall += ms;
+    },
     timerAt: () => timer?.at ?? null,
-    fire: () => { const due = timer; timer = null; due?.wake(); },
+    fire: () => {
+      const due = timer;
+      timer = null;
+      due?.wake();
+    },
   };
 }
 
 // The engine's rules for marks, and a record of every step.
-function fakeSource(initialSchedules: ScheduledAutomation[], initial: AutomationScheduleMark[] = []) {
+function fakeSource(
+  initialSchedules: ScheduledAutomation[],
+  initial: AutomationScheduleMark[] = [],
+) {
   let schedules = initialSchedules;
   const marks = new Map(initial.map((mark) => [mark.automationId, mark]));
   const steps: Array<{ automationId: string; run: number[]; throughMs: number }> = [];
@@ -75,24 +107,41 @@ function fakeSource(initialSchedules: ScheduledAutomation[], initial: Automation
     source,
     steps,
     marks,
-    setAnswering: (value: boolean) => { answering = value; },
-    setSchedules: (next: ScheduledAutomation[]) => { schedules = next; },
-    stepped: (count: number) => new Promise<void>((resolve) => {
-      const check = () => { if (steps.length >= count) resolve(); else settled = check; };
-      check();
-    }),
+    setAnswering: (value: boolean) => {
+      answering = value;
+    },
+    setSchedules: (next: ScheduledAutomation[]) => {
+      schedules = next;
+    },
+    stepped: (count: number) =>
+      new Promise<void>((resolve) => {
+        const check = () => {
+          if (steps.length >= count) resolve();
+          else settled = check;
+        };
+        check();
+      }),
   };
 }
 
 const idle = (scheduler: AutomationScheduler) => scheduler.idle();
-const here: ScheduleHost = { runsHere: async () => true, stillRuns: () => true, asksAgain: () => false };
-const elsewhere: ScheduleHost = { runsHere: async () => false, stillRuns: () => false, asksAgain: () => false };
+const here: ScheduleHost = {
+  runsHere: async () => true,
+  stillRuns: () => true,
+  asksAgain: () => false,
+};
+const elsewhere: ScheduleHost = {
+  runsHere: async () => false,
+  stillRuns: () => false,
+  asksAgain: () => false,
+};
 
 describe("planScheduleStep", () => {
   it("starts a new or changed schedule's mark at now, running nothing", () => {
     expect(planScheduleStep(daily, undefined, NINE, 0)).toEqual({ run: [], throughMs: NINE });
-    expect(planScheduleStep(daily, { ...markOf(daily, 0), scheduleHash: "other" }, NINE, 0))
-      .toEqual({ run: [], throughMs: NINE });
+    expect(
+      planScheduleStep(daily, { ...markOf(daily, 0), scheduleHash: "other" }, NINE, 0),
+    ).toEqual({ run: [], throughMs: NINE });
   });
 
   it("runs the due times it reached and skips those before coveredFrom", () => {
@@ -102,17 +151,45 @@ describe("planScheduleStep", () => {
       throughMs: NINE,
       skipped: { first: [NINE - 4 * HOUR, NINE - 3 * HOUR, NINE - 2 * HOUR], count: 3 },
     });
-    expect(planScheduleStep(hourly, mark, NINE, NINE - 90 * MINUTE, [], NINE - 150 * MINUTE), "ran elsewhere up to 6:30")
-      .toEqual({ run: [NINE - HOUR, NINE], throughMs: NINE, skipped: { first: [NINE - 2 * HOUR], count: 1 } });
-    expect(planScheduleStep({ ...hourly, enabledSince: NINE - 150 * MINUTE }, mark, NINE, NINE - 90 * MINUTE), "switched on at 6:30")
-      .toEqual({ run: [NINE - HOUR, NINE], throughMs: NINE, skipped: { first: [NINE - 2 * HOUR], count: 1 } });
-    const long = planScheduleStep(hourly, markOf(hourly, NINE - 30 * HOUR), NINE, NINE - 90 * MINUTE)!;
+    expect(
+      planScheduleStep(hourly, mark, NINE, NINE - 90 * MINUTE, [], NINE - 150 * MINUTE),
+      "ran elsewhere up to 6:30",
+    ).toEqual({
+      run: [NINE - HOUR, NINE],
+      throughMs: NINE,
+      skipped: { first: [NINE - 2 * HOUR], count: 1 },
+    });
+    expect(
+      planScheduleStep(
+        { ...hourly, enabledSince: NINE - 150 * MINUTE },
+        mark,
+        NINE,
+        NINE - 90 * MINUTE,
+      ),
+      "switched on at 6:30",
+    ).toEqual({
+      run: [NINE - HOUR, NINE],
+      throughMs: NINE,
+      skipped: { first: [NINE - 2 * HOUR], count: 1 },
+    });
+    const long = planScheduleStep(
+      hourly,
+      markOf(hourly, NINE - 30 * HOUR),
+      NINE,
+      NINE - 90 * MINUTE,
+    )!;
     expect(long.skipped, "lists five, counts all").toEqual({
       first: [0, 1, 2, 3, 4].map((hours) => NINE - (29 - hours) * HOUR),
       count: 28,
     });
-    expect(planScheduleStep(hourly, markOf(hourly, NINE), NINE + 30 * MINUTE, 0), "nothing due").toBeNull();
-    expect(planScheduleStep(hourly, markOf(hourly, NINE + HOUR), NINE, 0), "a mark ahead of the clock").toBeNull();
+    expect(
+      planScheduleStep(hourly, markOf(hourly, NINE), NINE + 30 * MINUTE, 0),
+      "nothing due",
+    ).toBeNull();
+    expect(
+      planScheduleStep(hourly, markOf(hourly, NINE + HOUR), NINE, 0),
+      "a mark ahead of the clock",
+    ).toBeNull();
   });
 
   it("leaves due times past the engine's bound for the next step", () => {
@@ -126,7 +203,12 @@ describe("planScheduleStep", () => {
 describe("AutomationScheduler", () => {
   it("starts new schedules at now and sets one timer for the earliest due time", async () => {
     const time = fakeClock(NINE - 10 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([daily, hourly]);
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
@@ -144,24 +226,38 @@ describe("AutomationScheduler", () => {
       { automationId: daily.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE },
       { automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE },
     ]);
-    expect(time.timerAt(), "never more than 15 minutes ahead").toBe(NINE + 3 * MINUTE + MAX_TIMER_MS);
+    expect(time.timerAt(), "never more than 15 minutes ahead").toBe(
+      NINE + 3 * MINUTE + MAX_TIMER_MS,
+    );
     scheduler.dispose();
   });
 
   it("skips what was due before the start grace, and runs what is within it", async () => {
     const time = fakeClock(NINE + 3 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 3 * HOUR)]);
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
     expect(NINE > NINE + 3 * MINUTE - START_GRACE_MS).toBe(true);
-    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE }]);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE },
+    ]);
     scheduler.dispose();
   });
 
   it("skips what was due while the computer slept, and runs what was due before it slept", async () => {
     const time = fakeClock(NINE - 30 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 30 * MINUTE)]);
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
@@ -187,7 +283,9 @@ describe("AutomationScheduler", () => {
     let work: ReturnType<typeof fakeSource>;
     const scheduler = new AutomationScheduler({
       clock: time.clock,
-      onError: (context) => { errors.push(context); },
+      onError: (context) => {
+        errors.push(context);
+      },
       onSkipped: async (_workspaceId, schedule, skipped) => {
         reports.push({ steps: work.steps.length, ...skipped });
         expect(schedule.automationId).toBe(hourly.automationId);
@@ -204,8 +302,14 @@ describe("AutomationScheduler", () => {
     failing = false;
     scheduler.wake();
     await idle(scheduler);
-    expect(reports.at(-1), "the same report, so the same notice").toEqual({ steps: 0, first: [NINE - 2 * HOUR, NINE - HOUR], count: 2 });
-    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE }]);
+    expect(reports.at(-1), "the same report, so the same notice").toEqual({
+      steps: 0,
+      first: [NINE - 2 * HOUR, NINE - HOUR],
+      count: 2,
+    });
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE },
+    ]);
     scheduler.dispose();
   });
 
@@ -216,20 +320,29 @@ describe("AutomationScheduler", () => {
     let work: ReturnType<typeof fakeSource>;
     const scheduler = new AutomationScheduler({
       clock: time.clock,
-      onError: (_, error) => { throw error; },
+      onError: (_, error) => {
+        throw error;
+      },
       onSkipped: async (_workspaceId, _schedule, skipped) => {
         reported.push(skipped.first);
         // Switched off and on at 7:30 while the notice was posted.
-        if (reported.length === 1) work.setSchedules([{ ...hourly, enabledSince: NINE - 90 * MINUTE }]);
+        if (reported.length === 1)
+          work.setSchedules([{ ...hourly, enabledSince: NINE - 90 * MINUTE }]);
       },
-      onSkipWithdrawn: async (_workspaceId, _schedule, skipped) => { withdrawn.push(skipped.first); },
+      onSkipWithdrawn: async (_workspaceId, _schedule, skipped) => {
+        withdrawn.push(skipped.first);
+      },
     });
     work = fakeSource([hourly], [markOf(hourly, NINE - 3 * HOUR)]);
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
     expect(reported).toEqual([[NINE - 2 * HOUR, NINE - HOUR], [NINE - HOUR]]);
-    expect(withdrawn, "the first report named a skip that did not happen").toEqual([[NINE - 2 * HOUR, NINE - HOUR]]);
-    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE }]);
+    expect(withdrawn, "the first report named a skip that did not happen").toEqual([
+      [NINE - 2 * HOUR, NINE - HOUR],
+    ]);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE },
+    ]);
     scheduler.dispose();
   });
 
@@ -240,13 +353,18 @@ describe("AutomationScheduler", () => {
     let work: ReturnType<typeof fakeSource>;
     const scheduler = new AutomationScheduler({
       clock: time.clock,
-      onError: (_, error) => { throw error; },
+      onError: (_, error) => {
+        throw error;
+      },
       onSkipped: async (_workspaceId, _schedule, skipped) => {
         reported.push(skipped.first);
         // Switched off and on at 11:30 while the first report was posted.
-        if (reported.length === 1) work.setSchedules([{ ...hourly, enabledSince: NINE + 150 * MINUTE }]);
+        if (reported.length === 1)
+          work.setSchedules([{ ...hourly, enabledSince: NINE + 150 * MINUTE }]);
       },
-      onSkipWithdrawn: async (_workspaceId, _schedule, skipped) => { withdrawn.push(skipped.first); },
+      onSkipWithdrawn: async (_workspaceId, _schedule, skipped) => {
+        withdrawn.push(skipped.first);
+      },
     });
     work = fakeSource([hourly], [markOf(hourly, NINE + 90 * MINUTE)]);
     scheduler.add("ws", work.source, here);
@@ -259,14 +377,22 @@ describe("AutomationScheduler", () => {
     await idle(scheduler);
     expect(withdrawn).toEqual([[NINE + 2 * HOUR, NINE + 3 * HOUR]]);
     expect(reported.at(-1)).toEqual([NINE + 3 * HOUR]);
-    expect(work.steps.flatMap((step) => step.run), "nothing slept through runs").toEqual([]);
+    expect(
+      work.steps.flatMap((step) => step.run),
+      "nothing slept through runs",
+    ).toEqual([]);
     scheduler.dispose();
   });
 
   it("keeps skipping the sleep when the step after it fails", async () => {
     const time = fakeClock(NINE - 30 * MINUTE);
     const errors: string[] = [];
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (context) => { errors.push(context); } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (context) => {
+        errors.push(context);
+      },
+    });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 30 * MINUTE)]);
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
@@ -275,7 +401,9 @@ describe("AutomationScheduler", () => {
     scheduler.suspended();
     time.advance(3 * HOUR);
     const claim = work.source.claimSchedule;
-    work.source.claimSchedule = async () => { throw new Error("The engine refused the step."); };
+    work.source.claimSchedule = async () => {
+      throw new Error("The engine refused the step.");
+    };
     scheduler.resumed();
     await idle(scheduler);
     expect(errors).toEqual(['step the schedules in workspace "ws"']);
@@ -292,7 +420,12 @@ describe("AutomationScheduler", () => {
 
   it("skips what the wall clock jumped over, and not across a small drift", async () => {
     const time = fakeClock(NINE - 30 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 30 * MINUTE)]);
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
@@ -321,7 +454,12 @@ describe("AutomationScheduler", () => {
 
   it("skips everything after the last check when the clock jumps inside the timer's wait", async () => {
     const time = fakeClock(NINE - 15 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 15 * MINUTE)]);
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
@@ -334,14 +472,24 @@ describe("AutomationScheduler", () => {
     time.advance(10 * MINUTE);
     time.fire();
     await idle(scheduler);
-    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [], throughMs: NINE + 2 * HOUR }]);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [], throughMs: NINE + 2 * HOUR },
+    ]);
     scheduler.dispose();
   });
 
   it("skips what a clock jump crossed while a step waited on the engine", async () => {
     const time = fakeClock(NINE - 20 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
-    const work = fakeSource([hourly, daily], [markOf(hourly, NINE - 20 * MINUTE), markOf(daily, NINE - 20 * MINUTE)]);
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
+    const work = fakeSource(
+      [hourly, daily],
+      [markOf(hourly, NINE - 20 * MINUTE), markOf(daily, NINE - 20 * MINUTE)],
+    );
     const marks = work.source.scheduleMarks;
     // The clock is set two hours ahead while the step reads the marks.
     work.source.scheduleMarks = async () => {
@@ -364,8 +512,16 @@ describe("AutomationScheduler", () => {
 
   it("starts a schedule switched back on at the switch-on, without the time it was off", async () => {
     const time = fakeClock(NINE - 10 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
-    const work = fakeSource([hourly, daily], [markOf(hourly, NINE - 10 * MINUTE), markOf(daily, NINE - 10 * MINUTE)]);
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
+    const work = fakeSource(
+      [hourly, daily],
+      [markOf(hourly, NINE - 10 * MINUTE), markOf(daily, NINE - 10 * MINUTE)],
+    );
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
 
@@ -384,7 +540,12 @@ describe("AutomationScheduler", () => {
 
   it("plans each claim from the schedule as it is right then", async () => {
     const time = fakeClock(NINE + 3 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 10 * MINUTE)]);
     // Switched off and on again at 9:03 while the step asks who runs it.
     const host: ScheduleHost = {
@@ -397,24 +558,35 @@ describe("AutomationScheduler", () => {
     };
     scheduler.add("ws", work.source, host);
     await idle(scheduler);
-    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [], throughMs: NINE + 3 * MINUTE }]);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [], throughMs: NINE + 3 * MINUTE },
+    ]);
     scheduler.dispose();
   });
 
   it("keeps a sleep while its first answer on who runs the workspace is out", async () => {
     const time = fakeClock(NINE - MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 10 * MINUTE)]);
     let answer: (runs: boolean) => void = () => undefined;
     let asked: () => void = () => undefined;
-    const firstAsked = new Promise<void>((resolve) => { asked = resolve; });
+    const firstAsked = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
     let first = true;
     const host: ScheduleHost = {
       runsHere: () => {
         if (!first) return Promise.resolve(true);
         first = false;
         asked();
-        return new Promise<boolean>((resolve) => { answer = resolve; });
+        return new Promise<boolean>((resolve) => {
+          answer = resolve;
+        });
       },
       stillRuns: () => true,
       asksAgain: () => false,
@@ -427,13 +599,20 @@ describe("AutomationScheduler", () => {
     scheduler.resumed();
     answer(true);
     await idle(scheduler);
-    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [], throughMs: NINE + 3 * MINUTE }]);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [], throughMs: NINE + 3 * MINUTE },
+    ]);
     scheduler.dispose();
   });
 
   it("claims nothing once the workspace starts to sync during a step", async () => {
     const time = fakeClock(NINE + 3 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 30 * MINUTE)]);
     let local = true;
     const marks = work.source.scheduleMarks;
@@ -442,7 +621,11 @@ describe("AutomationScheduler", () => {
       local = false;
       return await marks();
     };
-    scheduler.add("ws", work.source, { runsHere: async () => local, stillRuns: () => local, asksAgain: () => false });
+    scheduler.add("ws", work.source, {
+      runsHere: async () => local,
+      stillRuns: () => local,
+      asksAgain: () => false,
+    });
     await idle(scheduler);
     expect(work.steps).toEqual([]);
     expect(time.timerAt(), "no timer for a workspace it does not run").toBeNull();
@@ -452,9 +635,17 @@ describe("AutomationScheduler", () => {
   it("keeps a timer and reports a schedule it cannot follow", async () => {
     const time = fakeClock(NINE);
     const errors: string[] = [];
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (context) => { errors.push(context); } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (context) => {
+        errors.push(context);
+      },
+    });
     // A mark past the year 9999, which the next-run module refuses.
-    const work = fakeSource([daily, hourly], [markOf(daily, Date.UTC(10_000, 0, 2)), markOf(hourly, NINE)]);
+    const work = fakeSource(
+      [daily, hourly],
+      [markOf(daily, Date.UTC(10_000, 0, 2)), markOf(hourly, NINE)],
+    );
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
     expect(errors).toEqual([`set the timer for "${daily.automationId}"`]);
@@ -465,7 +656,12 @@ describe("AutomationScheduler", () => {
   it("reads the marks again after the engine refuses a step", async () => {
     const time = fakeClock(NINE - 10 * MINUTE);
     const errors: string[] = [];
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (context) => { errors.push(context); } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (context) => {
+        errors.push(context);
+      },
+    });
     const work = fakeSource([daily], [markOf(daily, NINE - HOUR)]);
     scheduler.add("ws", work.source, here);
     await idle(scheduler);
@@ -474,7 +670,8 @@ describe("AutomationScheduler", () => {
     work.marks.clear();
     const claim = work.source.claimSchedule;
     work.source.claimSchedule = async (input) => {
-      if (input.run.length > 0 && !work.marks.has(input.automationId)) throw new Error("A new or changed schedule sets its mark first.");
+      if (input.run.length > 0 && !work.marks.has(input.automationId))
+        throw new Error("A new or changed schedule sets its mark first.");
       return await claim(input);
     };
     time.advance(12 * MINUTE);
@@ -483,13 +680,22 @@ describe("AutomationScheduler", () => {
     expect(errors).toEqual(['step the schedules in workspace "ws"']);
     scheduler.wake();
     await idle(scheduler);
-    expect(work.steps.at(-1)).toEqual({ automationId: daily.automationId, run: [], throughMs: NINE + 2 * MINUTE });
+    expect(work.steps.at(-1)).toEqual({
+      automationId: daily.automationId,
+      run: [],
+      throughMs: NINE + 2 * MINUTE,
+    });
     scheduler.dispose();
   });
 
   it("runs nothing for a workspace this computer does not run, and no timer", async () => {
     const time = fakeClock(NINE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([hourly]);
     scheduler.add("ws", work.source, elsewhere);
     await idle(scheduler);
@@ -500,7 +706,12 @@ describe("AutomationScheduler", () => {
 
   it("waits for the engine and reads the marks again when it answers", async () => {
     const time = fakeClock(NINE - 10 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const work = fakeSource([daily], [markOf(daily, NINE - HOUR)]);
     work.setAnswering(false);
     scheduler.add("ws", work.source, here);
@@ -512,7 +723,9 @@ describe("AutomationScheduler", () => {
     work.setAnswering(true);
     scheduler.wake();
     await idle(scheduler);
-    expect(work.steps).toEqual([{ automationId: daily.automationId, run: [NINE], throughMs: NINE + 2 * MINUTE }]);
+    expect(work.steps).toEqual([
+      { automationId: daily.automationId, run: [NINE], throughMs: NINE + 2 * MINUTE },
+    ]);
     scheduler.remove("ws");
     await idle(scheduler);
     expect(time.timerAt(), "no schedules, no timer").toBeNull();
@@ -522,19 +735,31 @@ describe("AutomationScheduler", () => {
 
 describe("AutomationScheduler with an automation host", () => {
   function movableHost() {
-    const host = { runs: false, runsHere: async () => host.runs, stillRuns: () => host.runs, asksAgain: () => true };
+    const host = {
+      runs: false,
+      runsHere: async () => host.runs,
+      stillRuns: () => host.runs,
+      asksAgain: () => true,
+    };
     return host;
   }
 
   it("asks again within the cap, and after a release runs what came after it", async () => {
     const time = fakeClock(NINE + 30 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const host = movableHost();
     const work = fakeSource([hourly, daily], [markOf(hourly, NINE - 5 * HOUR)]);
     scheduler.add("ws", work.source, host);
     await idle(scheduler);
     expect(work.steps).toEqual([]);
-    expect(time.timerAt(), "another computer may hand the schedules over").toBe(NINE + 30 * MINUTE + MAX_TIMER_MS);
+    expect(time.timerAt(), "another computer may hand the schedules over").toBe(
+      NINE + 30 * MINUTE + MAX_TIMER_MS,
+    );
 
     // The last host released through 9:10. This computer opened at 9:30,
     // so it runs ten o'clock, and a schedule it has no mark for starts
@@ -552,7 +777,12 @@ describe("AutomationScheduler with an automation host", () => {
 
   it("starts at now when it became the host without a release", async () => {
     const time = fakeClock(NINE + 30 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const host = movableHost();
     const work = fakeSource([hourly], [markOf(hourly, NINE - 5 * HOUR)]);
     scheduler.add("ws", work.source, host);
@@ -561,14 +791,21 @@ describe("AutomationScheduler with an automation host", () => {
     host.runs = true;
     scheduler.startedHere("ws", null, NINE - 5 * HOUR);
     await idle(scheduler);
-    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [], throughMs: NINE + 80 * MINUTE }]);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [], throughMs: NINE + 80 * MINUTE },
+    ]);
     scheduler.dispose();
   });
 
   it("starts without a release no earlier than the host's recorded progress", async () => {
     // This computer's clock reads 9:59; an earlier host recorded 10:00:30.
     const time = fakeClock(NINE + 59 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const host = movableHost();
     const work = fakeSource([hourly], [markOf(hourly, NINE)]);
     scheduler.add("ws", work.source, host);
@@ -579,7 +816,10 @@ describe("AutomationScheduler with an automation host", () => {
     time.advance(2 * MINUTE);
     scheduler.wake();
     await idle(scheduler);
-    expect(work.steps.flatMap((step) => step.run), "ten o'clock may have run there").toEqual([]);
+    expect(
+      work.steps.flatMap((step) => step.run),
+      "ten o'clock may have run there",
+    ).toEqual([]);
     time.advance(HOUR);
     scheduler.wake();
     await idle(scheduler);
@@ -592,8 +832,12 @@ describe("AutomationScheduler with an automation host", () => {
     const skips: Array<{ first: number[]; count: number }> = [];
     const scheduler = new AutomationScheduler({
       clock: time.clock,
-      onError: (_, error) => { throw error; },
-      onSkipped: async (_workspaceId, _schedule, skipped) => { skips.push(skipped); },
+      onError: (_, error) => {
+        throw error;
+      },
+      onSkipped: async (_workspaceId, _schedule, skipped) => {
+        skips.push(skipped);
+      },
     });
     const host = movableHost();
     host.runs = true;
@@ -611,7 +855,12 @@ describe("AutomationScheduler with an automation host", () => {
 
   it("runs nothing a lost copy recorded, while its clock is behind that progress", async () => {
     const time = fakeClock(NINE + 30 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const host = movableHost();
     host.runs = true;
     const work = fakeSource([hourly]);
@@ -621,7 +870,10 @@ describe("AutomationScheduler with an automation host", () => {
     time.advance(40 * MINUTE);
     scheduler.wake();
     await idle(scheduler);
-    expect(work.steps.flatMap((step) => step.run), "ten o'clock ran on the lost copy").toEqual([]);
+    expect(
+      work.steps.flatMap((step) => step.run),
+      "ten o'clock ran on the lost copy",
+    ).toEqual([]);
     time.advance(HOUR);
     scheduler.wake();
     await idle(scheduler);
@@ -631,7 +883,12 @@ describe("AutomationScheduler with an automation host", () => {
 
   it("hands over with every schedule stepped through one cutoff, past the engine's bound", async () => {
     const time = fakeClock(NINE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const host = movableHost();
     host.runs = true;
     const work = fakeSource([hourly, daily], [markOf(hourly, NINE), markOf(daily, NINE)]);
@@ -652,7 +909,12 @@ describe("AutomationScheduler with an automation host", () => {
 
   it("waits for its own clock to pass a release from a computer whose clock is ahead", async () => {
     const time = fakeClock(NINE + 59 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const host = movableHost();
     const work = fakeSource([hourly], [markOf(hourly, NINE)]);
     scheduler.add("ws", work.source, host);
@@ -664,7 +926,10 @@ describe("AutomationScheduler with an automation host", () => {
     time.advance(2 * MINUTE);
     scheduler.wake();
     await idle(scheduler);
-    expect(work.steps.flatMap((step) => step.run), "ten o'clock ran there").toEqual([]);
+    expect(
+      work.steps.flatMap((step) => step.run),
+      "ten o'clock ran there",
+    ).toEqual([]);
     time.advance(HOUR);
     scheduler.wake();
     await idle(scheduler);
@@ -674,18 +939,29 @@ describe("AutomationScheduler with an automation host", () => {
 
   it("steps the schedules one last time when it hands over, and says how far", async () => {
     const time = fakeClock(NINE + 3 * MINUTE);
-    const scheduler = new AutomationScheduler({ clock: time.clock, onError: (_, error) => { throw error; } });
+    const scheduler = new AutomationScheduler({
+      clock: time.clock,
+      onError: (_, error) => {
+        throw error;
+      },
+    });
     const host = movableHost();
     host.runs = true;
     const work = fakeSource([hourly], [markOf(hourly, NINE - 30 * MINUTE)]);
     scheduler.add("ws", work.source, host);
     await idle(scheduler);
-    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE }]);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [NINE], throughMs: NINE + 3 * MINUTE },
+    ]);
 
     host.runs = false;
     time.advance(67 * MINUTE);
     expect(await scheduler.finishHere("ws")).toBe(NINE + 70 * MINUTE);
-    expect(work.steps.at(-1)).toEqual({ automationId: hourly.automationId, run: [NINE + HOUR], throughMs: NINE + 70 * MINUTE });
+    expect(work.steps.at(-1)).toEqual({
+      automationId: hourly.automationId,
+      run: [NINE + HOUR],
+      throughMs: NINE + 70 * MINUTE,
+    });
 
     time.advance(HOUR);
     work.setAnswering(false);
@@ -701,8 +977,12 @@ describe("AutomationScheduler with closed workspaces", () => {
     const records: Array<[string, ScheduleRecord | null]> = [];
     const scheduler = new AutomationScheduler({
       clock: time.clock,
-      onError: (_, error) => { throw error; },
-      onRecord: (workspaceId, record) => { records.push([workspaceId, record]); },
+      onError: (_, error) => {
+        throw error;
+      },
+      onRecord: (workspaceId, record) => {
+        records.push([workspaceId, record]);
+      },
     });
     const work = fakeSource([hourly], [markOf(hourly, NINE - 30 * MINUTE)]);
     scheduler.add("ws", work.source, here);
@@ -723,12 +1003,17 @@ describe("AutomationScheduler with closed workspaces", () => {
     const time = fakeClock(NINE - 10 * MINUTE);
     const work = fakeSource([hourly], [markOf(hourly, NINE - 10 * MINUTE)]);
     let open = true;
-    const source: ScheduleSource = { ...work.source, schedules: () => (open ? work.source.schedules() : null) };
+    const source: ScheduleSource = {
+      ...work.source,
+      schedules: () => (open ? work.source.schedules() : null),
+    };
     const opened: string[] = [];
     let background: Promise<void> = Promise.resolve();
     const scheduler: AutomationScheduler = new AutomationScheduler({
       clock: time.clock,
-      onError: (_, error) => { throw error; },
+      onError: (_, error) => {
+        throw error;
+      },
       openInBackground: (workspaceId) => {
         opened.push(workspaceId);
         background = (async () => {
@@ -746,7 +1031,6 @@ describe("AutomationScheduler with closed workspaces", () => {
     expect(time.timerAt(), "wakes at the recorded due time").toBe(NINE);
     expect(scheduler.runningSchedules()).toBe(1);
 
-    // The workspace's executor exists but is closed until the background open.
     open = false;
     scheduler.add("ws", source, here);
     await idle(scheduler);
@@ -757,7 +1041,9 @@ describe("AutomationScheduler with closed workspaces", () => {
     scheduler.wake();
     await idle(scheduler);
     expect(opened).toEqual(["ws"]);
-    expect(work.steps).toEqual([{ automationId: hourly.automationId, run: [NINE], throughMs: NINE }]);
+    expect(work.steps).toEqual([
+      { automationId: hourly.automationId, run: [NINE], throughMs: NINE },
+    ]);
     expect(time.timerAt(), "closed again, it waits for ten").toBe(NINE + MAX_TIMER_MS);
     scheduler.dispose();
   });
@@ -767,8 +1053,12 @@ describe("AutomationScheduler with closed workspaces", () => {
     const opened: string[] = [];
     const scheduler = new AutomationScheduler({
       clock: time.clock,
-      onError: (_, error) => { throw error; },
-      openInBackground: async (workspaceId) => { opened.push(workspaceId); },
+      onError: (_, error) => {
+        throw error;
+      },
+      openInBackground: async (workspaceId) => {
+        opened.push(workspaceId);
+      },
     });
     scheduler.watch("ws", { schedules: [{ ...daily, throughMs: NINE - 20 * MINUTE }] });
     await idle(scheduler);
@@ -778,7 +1068,9 @@ describe("AutomationScheduler with closed workspaces", () => {
     scheduler.resumed();
     await idle(scheduler);
     expect(opened).toEqual([]);
-    expect(time.timerAt(), "it waits for the next day within the cap").toBe(time.clock.now() + MAX_TIMER_MS);
+    expect(time.timerAt(), "it waits for the next day within the cap").toBe(
+      time.clock.now() + MAX_TIMER_MS,
+    );
     scheduler.dispose();
   });
 
@@ -788,7 +1080,9 @@ describe("AutomationScheduler with closed workspaces", () => {
     let background: Promise<void> = Promise.resolve();
     const scheduler = new AutomationScheduler({
       clock: time.clock,
-      onError: (_, error) => { throw error; },
+      onError: (_, error) => {
+        throw error;
+      },
       openInBackground: () => {
         opened.push(time.clock.now());
         background = Promise.resolve();

@@ -14,7 +14,12 @@ import { useWindowFullScreen } from "./windowFullScreen";
 export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath" | "shareView">): string {
   if (workspace.shareView?.subjectName) return workspace.shareView.subjectName;
   // Separator-agnostic: rootPath is backslash-separated on native Windows.
-  return workspace.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "workspace";
+  return (
+    workspace.rootPath
+      .replace(/[\\/]+$/, "")
+      .split(/[\\/]/)
+      .pop() || "workspace"
+  );
 }
 
 type TitlebarPanelToggle = {
@@ -67,7 +72,9 @@ function LayoutToggle(props: {
           role="status"
           aria-label="Agent running"
           className="pointer-events-none absolute right-0.5 top-0.5 size-1.5 rounded-full bg-agent"
-        ><span className="sr-only">Agent running</span></span>
+        >
+          <span className="sr-only">Agent running</span>
+        </span>
       ) : null}
     </span>
   );
@@ -115,12 +122,17 @@ export function Titlebar(props: {
   const fullScreen = useWindowFullScreen();
   const quickOpenShortcut = shortcutText("quick-open", window.dohcDesktop?.platform);
   const leftInset = isMac
-    ? fullScreen ? "12px" : "88px"
+    ? fullScreen
+      ? "12px"
+      : "88px"
     : "calc(env(titlebar-area-x, 0px) + 12px)";
   const rightInset = isMac
     ? "12px"
     : "calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 140px)))";
-  const hasRightGroup = props.update !== undefined || props.primarySidebar !== undefined || props.aboutSidebar !== undefined;
+  const hasRightGroup =
+    props.update !== undefined ||
+    props.primarySidebar !== undefined ||
+    props.aboutSidebar !== undefined;
 
   return (
     <header
@@ -138,21 +150,29 @@ export function Titlebar(props: {
             workspace's own name says where the person is. */}
         <span aria-hidden className="flex shrink-0 items-center gap-1.5 text-ink">
           <DohcMark size={15} className="shrink-0" />
-          {props.workspace ? null : <span className="text-[13px] font-semibold tracking-tight">dohc</span>}
+          {props.workspace ? null : (
+            <span className="text-[13px] font-semibold tracking-tight">dohc</span>
+          )}
         </span>
         {/* Every nightly is an alpha, so the build says so beside the mark. */}
         {window.dohcDesktop?.releaseChannel === "nightly" ? (
-          <span data-testid="titlebar-alpha" className="shrink-0"><Pill>Alpha</Pill></span>
+          <span data-testid="titlebar-alpha" className="shrink-0">
+            <Pill>Alpha</Pill>
+          </span>
         ) : null}
 
         {props.workspace && props.workspaces && props.onSwitchWorkspace ? (
           <div
             ref={switcherRef}
             className="titlebar-no-drag relative flex min-w-0 items-center gap-0.5"
-            onContextMenu={props.onWorkspaceContextMenu ? (event) => {
-              event.preventDefault();
-              props.onWorkspaceContextMenu?.();
-            } : undefined}
+            onContextMenu={
+              props.onWorkspaceContextMenu
+                ? (event) => {
+                    event.preventDefault();
+                    props.onWorkspaceContextMenu?.();
+                  }
+                : undefined
+            }
           >
             <button
               ref={switcherTriggerRef}
@@ -182,7 +202,10 @@ export function Titlebar(props: {
             {props.workspaceStatus}
             {/* Where the names and their status end, past the group's edge
                 when their floors overflow it. Go to… stays clear of it. */}
-            <span aria-hidden className="-ml-0.5 w-0 self-stretch [anchor-name:--titlebar-names-end]" />
+            <span
+              aria-hidden
+              className="-ml-0.5 w-0 self-stretch [anchor-name:--titlebar-names-end]"
+            />
             {switcherOpen ? (
               <ul
                 role="listbox"
@@ -195,9 +218,7 @@ export function Titlebar(props: {
                     role="option"
                     data-testid="workspace-switcher-option"
                     data-workspace-id={candidate.workspaceId}
-                    aria-selected={
-                      candidate.workspaceId === props.workspace?.workspaceId
-                    }
+                    aria-selected={candidate.workspaceId === props.workspace?.workspaceId}
                   >
                     <button
                       type="button"
@@ -263,7 +284,11 @@ export function Titlebar(props: {
           data-testid="titlebar-quick-open"
           title="Go to…"
           onClick={props.onQuickOpen}
-          style={{ left: QUICK_OPEN_LEFT, right: `calc(50% - ${QUICK_OPEN_WIDTH} / 2)`, minWidth: QUICK_OPEN_MIN_WIDTH }}
+          style={{
+            left: QUICK_OPEN_LEFT,
+            right: `calc(50% - ${QUICK_OPEN_WIDTH} / 2)`,
+            minWidth: QUICK_OPEN_MIN_WIDTH,
+          }}
           className="@container titlebar-no-drag absolute top-1/2 flex h-7 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
         >
           <Search size={12} aria-hidden className="shrink-0" />
@@ -279,12 +304,16 @@ export function Titlebar(props: {
         <div
           data-testid="titlebar-right-group"
           className={`flex items-center justify-end-safe gap-2 ${props.onQuickOpen ? "absolute inset-y-0" : "ml-auto flex-1"}`}
-          style={props.onQuickOpen
-            ? { left: `calc(${QUICK_OPEN_END} + 12px)`, right: `calc(${rightInset} + 16px)` }
-            : undefined}
+          style={
+            props.onQuickOpen
+              ? { left: `calc(${QUICK_OPEN_END} + 12px)`, right: `calc(${rightInset} + 16px)` }
+              : undefined
+          }
         >
           {/* The button's own box: its width decides whether the label fits. */}
-          {props.update ? <div className="@container flex min-w-7 flex-1 justify-end">{props.update}</div> : null}
+          {props.update ? (
+            <div className="@container flex min-w-7 flex-1 justify-end">{props.update}</div>
+          ) : null}
           {props.primarySidebar || props.aboutSidebar ? (
             <div
               data-testid="titlebar-layout-controls"

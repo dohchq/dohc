@@ -1,16 +1,6 @@
 import { errorMessage } from "./workspaceError";
-import { createHash } from "node:crypto";
 import { atomicReplaceFile } from "../atomicReplaceFile";
-import {
-  lstat,
-  mkdir,
-  open,
-  realpath,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
@@ -99,10 +89,10 @@ export type StandaloneShareViewRefreshOutcome =
 // refresh then completed or failed.
 type SetAsideCollisionRecord = Pick<RefreshSharedViewOutcome, "collisionRecordQuarantined">;
 
-export function setAsideCollisionRecord(captured: CaptureSharedViewRefreshOutcome): SetAsideCollisionRecord {
-  return captured.collisionRecordQuarantined
-    ? { collisionRecordQuarantined: true }
-    : {};
+export function setAsideCollisionRecord(
+  captured: CaptureSharedViewRefreshOutcome,
+): SetAsideCollisionRecord {
+  return captured.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {};
 }
 
 export interface CaptureSharedViewLocalDivergenceOutcome {
@@ -119,7 +109,7 @@ export interface CaptureSharedViewRefreshOutcome extends CaptureSharedViewLocalD
 
 // Capture failing mid-pass still leaves whatever it fixed before the throw —
 // the pending marker for the one unreadable path survives (capture's
-// pending branch fails closed rather than guessing, per #867), but the
+// pending branch fails closed rather than guessing), but the
 // repairs or edits capture already applied to every entry visited before it
 // are real and already durable. This carries those counts on the error so a
 // caller can account for the work completed before capture failed instead of
@@ -132,12 +122,7 @@ class CapturePartialFailureError extends Error {
     readonly reason: "unreadable" | "other",
     options: { cause: unknown },
   ) {
-    super(
-      options.cause instanceof Error
-        ? options.cause.message
-        : String(options.cause),
-      options,
-    );
+    super(options.cause instanceof Error ? options.cause.message : String(options.cause), options);
     this.name = "CapturePartialFailureError";
     if (options.cause instanceof CollisionRecordRefusal) {
       Object.assign(this, { code: options.cause.code });
@@ -149,12 +134,7 @@ class CapturePartialFailureError extends Error {
 // This keeps path access failures distinct from failures inside the store.
 class SharedViewTargetAccessError extends Error {
   constructor(options: { cause: unknown }) {
-    super(
-      options.cause instanceof Error
-        ? options.cause.message
-        : String(options.cause),
-      options,
-    );
+    super(options.cause instanceof Error ? options.cause.message : String(options.cause), options);
     this.name = "SharedViewTargetAccessError";
   }
 }
@@ -176,9 +156,8 @@ export function standaloneShareViewFailureOutcome(
       changedPaths: error.capturedPaths + error.repairedPaths,
       errorMessage:
         error.reason === "unreadable"
-          ? (unjournalablePathMessages([
-              { path: error.path, reason: "unreadable" },
-            ])[0] ?? error.message)
+          ? (unjournalablePathMessages([{ path: error.path, reason: "unreadable" }])[0] ??
+            error.message)
           : error.message,
     };
   }
@@ -199,8 +178,11 @@ function collisionRecordFailure(
     changedPaths,
     errorMessage: refusal.message,
     errorKind: "collision-record",
-    ...(refusal.cause instanceof Error && "code" in refusal.cause && typeof refusal.cause.code === "string"
-      ? { errorCause: errorMessage(refusal.cause) } : {}),
+    ...(refusal.cause instanceof Error &&
+    "code" in refusal.cause &&
+    typeof refusal.cause.code === "string"
+      ? { errorCause: errorMessage(refusal.cause) }
+      : {}),
   };
 }
 
@@ -209,8 +191,7 @@ function collisionRecordFailure(
 export function isCollisionRecordRefusal(error: unknown): boolean {
   return (
     error instanceof CollisionRecordRefusal ||
-    (error instanceof CapturePartialFailureError &&
-      error.cause instanceof CollisionRecordRefusal)
+    (error instanceof CapturePartialFailureError && error.cause instanceof CollisionRecordRefusal)
   );
 }
 
@@ -275,8 +256,8 @@ export async function resolvedShareViewTarget(
 // this helper. There is no other correct way to mutate the store from here —
 // a branch added later that calls store.deleteTextFile / writeDiskContentToStore
 // / materializeSharedViewPaths directly, outside this helper, reintroduces the
-// exact race this function exists to close (see the round-14 fix for the
-// scanned-deletion branch, which used to skip locking entirely).
+// exact race this function exists to close. The scanned-deletion branch locks
+// too.
 async function withCaptureMutationLock<T>(
   rootDir: string,
   path: string,
@@ -292,12 +273,7 @@ async function withCaptureMutationLock<T>(
   const run = () => operation(resolvedTarget);
   return workspaceLease === undefined
     ? withOrderedWorkspaceTargetPath(rootDir, resolvedTarget, run)
-    : withOrderedWorkspaceTargetPathInLease(
-        rootDir,
-        workspaceLease,
-        resolvedTarget,
-        run,
-      );
+    : withOrderedWorkspaceTargetPathInLease(rootDir, workspaceLease, resolvedTarget, run);
 }
 
 // Whether the disk might reach `path`'s file through another spelling, as the
@@ -311,12 +287,20 @@ async function reachesOtherSpelling(rootDir: string, path: string): Promise<bool
   if (!/^[\x00-\x7f]*$/u.test(path)) return true;
   const segments = path.split("/");
   for (const [index, segment] of segments.entries()) {
-    const swapped = [...segment].map((c) => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join("");
+    const swapped = [...segment]
+      .map((c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()))
+      .join("");
     const composed = lookAlikeSpelling(segment);
     for (const spelling of [swapped, composed]) {
       if (spelling === segment) continue;
       const probe = [...segments.slice(0, index), spelling, ...segments.slice(index + 1)];
-      if (await lstat(join(rootDir, ...probe)).then(() => true, () => false)) return true;
+      if (
+        await lstat(join(rootDir, ...probe)).then(
+          () => true,
+          () => false,
+        )
+      )
+        return true;
     }
   }
   return false;
@@ -347,7 +331,9 @@ async function spellingSharingFile(
   spellings: ReadonlyMap<string, readonly string[]>,
   owns: (other: string) => boolean = () => true,
 ): Promise<string | null> {
-  const others = (spellings.get(pathCollisionKey(path)) ?? []).filter((other) => other !== path && owns(other)).sort();
+  const others = (spellings.get(pathCollisionKey(path)) ?? [])
+    .filter((other) => other !== path && owns(other))
+    .sort();
   if (others.length === 0) return null;
   const file = await lstat(target, { bigint: true }).catch(absentAsNull);
   if (!file?.isFile()) return null;
@@ -362,13 +348,25 @@ async function spellingSharingFile(
     if (realOther === null) continue;
     if (realFile === realOther) return other;
     // Only Linux realpath keeps lookup case; elsewhere the realpath check above decides.
-    if (process.platform === "linux" && basename(target) === basename(otherTarget)
-      && file.dev === otherFile.dev && file.ino === otherFile.ino && file.ctimeNs === otherFile.ctimeNs) {
+    if (
+      process.platform === "linux" &&
+      basename(target) === basename(otherTarget) &&
+      file.dev === otherFile.dev &&
+      file.ino === otherFile.ino &&
+      file.ctimeNs === otherFile.ctimeNs
+    ) {
       const [parent, otherParent] = await Promise.all([
         stat(dirname(target), { bigint: true }).catch(absentAsNull),
         stat(dirname(otherTarget), { bigint: true }).catch(absentAsNull),
       ]);
-      if (parent !== null && otherParent !== null && parent.ino !== 0n && parent.dev === otherParent.dev && parent.ino === otherParent.ino) return other;
+      if (
+        parent !== null &&
+        otherParent !== null &&
+        parent.ino !== 0n &&
+        parent.dev === otherParent.dev &&
+        parent.ino === otherParent.ino
+      )
+        return other;
     }
     storedFile ??= diskSpelling(rootDir, target);
     const [stored, storedOther] = await Promise.all([
@@ -406,9 +404,7 @@ async function materializeSharedViewPaths(
     // on the write path would otherwise have recursive mkdir create real
     // directories outside the projection before the post-check throws. The
     // deepest existing ancestor must already be inside the root.
-    const realAncestor = await realpath(
-      await existingAncestor(dirname(target)),
-    );
+    const realAncestor = await realpath(await existingAncestor(dirname(target)));
     if (!isInside(realRoot, realAncestor)) {
       throw new Error(`Shared view parent escapes the workspace: ${target}`);
     }
@@ -426,13 +422,15 @@ async function materializeSharedViewPaths(
   let aliases: Map<string, string[]> | undefined;
   // The first other live path, by path, that reaches the regular file at
   // `target`: that path's head owns the file, as the engine decides for
-  // workspace peers (#2157). A link or folder at the target has no owner; the
+  // workspace peers. A link or folder at the target has no owner; the
   // delete repairs it.
   async function aliasOwner(path: string, target: string): Promise<string | null> {
     if (!(await lstat(target).catch(absentAsNull))?.isFile()) return null;
     if (!(await reachesOtherSpelling(rootDir, path))) return null;
     aliases ??= spellingGroups(
-      (await store.listTextFileMetadata({ workspaceId, versionId: main.id })).map((file) => file.path),
+      (await store.listTextFileMetadata({ workspaceId, versionId: main.id })).map(
+        (file) => file.path,
+      ),
     );
     return spellingSharingFile(rootDir, path, target, aliases);
   }
@@ -447,7 +445,11 @@ async function materializeSharedViewPaths(
       const spelling = await diskSpelling(rootDir, target).catch(() => null);
       if (spelling !== null && basename(spelling) === basename(owner)) return null;
     }
-    return { path: owner, operation: "write", contentKind: head.contentKind === "binary" ? "binary" : "text" };
+    return {
+      path: owner,
+      operation: "write",
+      contentKind: head.contentKind === "binary" ? "binary" : "text",
+    };
   }
   // Every delete before every write. On a disk that ignores case or Unicode
   // normalization, writing `notes.md` opens the `Notes.md` that a delete then
@@ -478,8 +480,7 @@ async function materializeSharedViewPaths(
     // The prepare, the removal, and the write all run on the resolution this
     // judged. Reusing the spelling would let a directory alias planted after
     // the check take the relay's bytes somewhere the rule never saw.
-    const { resolvedAbsolute: resolvedTarget } =
-      await assertResolvedWorkspacePath({
+    const { resolvedAbsolute: resolvedTarget } = await assertResolvedWorkspacePath({
       rootPath: rootDir,
       absolutePath: target,
       spelled: change.path,
@@ -491,16 +492,14 @@ async function materializeSharedViewPaths(
       // directory symlink must not route the unlink outside the root. The
       // final component is safe either way — rm without `recursive`
       // removes a link as a link, never through it.
-      const realParent = await realpath(dirname(resolvedTarget)).catch(
-        () => null,
-      );
+      const realParent = await realpath(dirname(resolvedTarget)).catch(() => null);
       if (realParent === null) continue; // parent gone — nothing to delete
       if (!isInside(realRoot, realParent)) {
         throw new Error(`Shared view parent escapes the workspace: ${target}`);
       }
       // Another live spelling owns this file. The delete leaves it when it holds
       // that head, and otherwise writes that head there, under that spelling,
-      // so capture never reads the deleted path's bytes as that file's (#2294).
+      // so capture never reads the deleted path's bytes as that file's.
       const owner = await aliasOwner(change.path, resolvedTarget);
       if (owner !== null) {
         // A protected owner, such as one whose local edits capture could not
@@ -511,7 +510,8 @@ async function materializeSharedViewPaths(
           continue;
         }
         const write = await ownerWrite(owner, resolvedTarget);
-        if (write && !ordered.some((other) => other.path === owner && other.operation !== "delete")) ordered.push(write);
+        if (write && !ordered.some((other) => other.path === owner && other.operation !== "delete"))
+          ordered.push(write);
         owners.push(owner);
         continue;
       }
@@ -544,9 +544,7 @@ async function materializeSharedViewPaths(
     await writeFile(
       resolvedTarget,
       content,
-      typeof content === "string"
-        ? { encoding: "utf8", flag: "wx" }
-        : { flag: "wx" },
+      typeof content === "string" ? { encoding: "utf8", flag: "wx" } : { flag: "wx" },
     );
   }
   return { kept, owners };
@@ -617,18 +615,13 @@ interface ShareViewRecords extends LocalStateWorkspace {
   readonly shown: string;
 }
 
-function shareViewRecords(
-  owner: ShareViewFilesOwnerCapability,
-  rootDir: string,
-): ShareViewRecords {
+function shareViewRecords(owner: ShareViewFilesOwnerCapability, rootDir: string): ShareViewRecords {
   const resource = assertActiveShareViewFilesOwner(owner, { rootPath: rootDir });
   const view = relative(resource.schedulingRootPath, rootDir).split(sep).join("/");
   return {
     workspaceId: resource.storeWorkspaceId,
     rootPath: rootDir,
-    ...(resource.attachmentId === undefined
-      ? {}
-      : { attachmentId: resource.attachmentId }),
+    ...(resource.attachmentId === undefined ? {} : { attachmentId: resource.attachmentId }),
     shown: posix.join(view, ".dohc", "local", RECORDS_FOLDER),
   };
 }
@@ -651,10 +644,7 @@ export function withShareViewRefreshLifecycleLock<T>(
   rootDir: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  return withExclusiveWorkspaceOperation(
-    shareViewRefreshLifecycleLockKey(rootDir),
-    operation,
-  );
+  return withExclusiveWorkspaceOperation(shareViewRefreshLifecycleLockKey(rootDir), operation);
 }
 
 async function syncFolder(folder: string): Promise<void> {
@@ -670,7 +660,8 @@ async function syncFolder(folder: string): Promise<void> {
 }
 
 // What a refresh says when the view's open has not prepared `.dohc/local`.
-const NOT_OPENED_REFUSAL = "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens.";
+const NOT_OPENED_REFUSAL =
+  "dohc did not update these shared files because the workspace has not finished opening. Try again when it opens.";
 
 // The records folder for a writer, made 0700 when missing.
 async function recordsFolderForWrite(records: ShareViewRecords): Promise<string> {
@@ -710,20 +701,14 @@ async function writeRecord(
   await syncFolder(folder);
 }
 
-async function removeRecord(
-  records: ShareViewRecords,
-  name: string,
-): Promise<void> {
+async function removeRecord(records: ShareViewRecords, name: string): Promise<void> {
   const folder = await recordsFolderForWrite(records);
   await rm(join(folder, name), { force: true });
   await syncFolder(folder);
 }
 
 // Moves a record dohc can't use out of the way, keeping its bytes beside it.
-async function moveRecordAside(
-  records: ShareViewRecords,
-  name: string,
-): Promise<void> {
+async function moveRecordAside(records: ShareViewRecords, name: string): Promise<void> {
   const target = join(await recordsFolderForWrite(records), name);
   await rename(target, `${target}.invalid-${Date.now()}`);
 }
@@ -761,11 +746,14 @@ type RecordRead =
 // Creates nothing. Waits for the engine only on Windows, for an open under way.
 async function readRecord(rootDir: string, name: string): Promise<RecordRead> {
   try {
-    return await readOwnedLocalStateFolder(rootDir, RECORDS_FOLDER, (folder) => recordIn(folder, name));
+    return await readOwnedLocalStateFolder(rootDir, RECORDS_FOLDER, (folder) =>
+      recordIn(folder, name),
+    );
   } catch (error) {
     // On Windows nothing in `.dohc/local` is read unless the view's open
     // holds it throughout, which is no reason to distrust the records.
-    if (error instanceof LocalStateUnavailableError) throw new LocalStateUnavailableError(error.refusal, NOT_OPENED_REFUSAL);
+    if (error instanceof LocalStateUnavailableError)
+      throw new LocalStateUnavailableError(error.refusal, NOT_OPENED_REFUSAL);
     return {
       status: "untrusted",
       place: "folder",
@@ -781,9 +769,7 @@ async function recordIn(folder: string | null | "unusable", name: string): Promi
     return { status: "untrusted", place: "folder", reason: "unusable folder" };
   }
   const path = join(folder, name);
-  const read = await readOwnedFile(path, MAX_RECORD_BYTES).catch(
-    (error: unknown) => String(error),
-  );
+  const read = await readOwnedFile(path, MAX_RECORD_BYTES).catch((error: unknown) => String(error));
   if (typeof read === "string") {
     return { status: "untrusted", place: "file", reason: read };
   }
@@ -813,9 +799,7 @@ async function pullMayBeInFlight(rootDir: string): Promise<boolean> {
   return read.status !== "missing";
 }
 
-export async function readPendingMaterializationPaths(
-  rootDir: string,
-): Promise<Set<string>> {
+export async function readPendingMaterializationPaths(rootDir: string): Promise<Set<string>> {
   return withExclusiveWorkspaceOperation(
     recordPath(rootDir, PENDING_MATERIALIZATION_FILE),
     async () => new Set(Object.keys(await readPendingFileUnlocked(rootDir))),
@@ -837,9 +821,7 @@ async function readPendingMaterializationPathsForCapture(
     recordPath(records.rootPath, PENDING_MATERIALIZATION_FILE),
     async () => {
       try {
-        const recordedPaths = new Set(
-          Object.keys(await readPendingFileUnlocked(records.rootPath)),
-        );
+        const recordedPaths = new Set(Object.keys(await readPendingFileUnlocked(records.rootPath)));
         const paths = new Set(recordedPaths);
         if (pullInFlight) {
           for (const path of trackedPaths) paths.add(path);
@@ -854,9 +836,13 @@ async function readPendingMaterializationPathsForCapture(
         // A read the view's open didn't hold throughout found nothing wrong
         // with the record. The refresh refuses, and the record stays.
         if (error instanceof LocalStateUnavailableError) throw error;
-        if (!repairRecord) return {
-          paths: new Set(trackedPaths), recordedPaths: new Set(), canClearRecord: false, pullInFlight,
-        };
+        if (!repairRecord)
+          return {
+            paths: new Set(trackedPaths),
+            recordedPaths: new Set(),
+            canClearRecord: false,
+            pullInFlight,
+          };
         console.error(
           `[desktop] pending materialization record at ${recordPath(records.rootPath, PENDING_MATERIALIZATION_FILE)} ` +
             "is unreadable; quarantining it and verifying every tracked path. Pending paths " +
@@ -879,23 +865,18 @@ async function readPendingMaterializationPathsForCapture(
 }
 
 type PendingMaterializationCounts = Record<string, number>;
-const INVALID_PENDING_MATERIALIZATION_RECORD =
-  "Invalid pending-materialization record.";
+const INVALID_PENDING_MATERIALIZATION_RECORD = "Invalid pending-materialization record.";
 
 function emptyPendingMaterializationCounts(): PendingMaterializationCounts {
   return Object.create(null) as PendingMaterializationCounts;
 }
 
-async function readPendingFileUnlocked(
-  rootDir: string,
-): Promise<PendingMaterializationCounts> {
+async function readPendingFileUnlocked(rootDir: string): Promise<PendingMaterializationCounts> {
   const read = await readRecord(rootDir, PENDING_MATERIALIZATION_FILE);
   if (read.status === "missing") return emptyPendingMaterializationCounts();
   // Read like a damaged record, so capture checks every tracked path.
   if (read.status === "untrusted") {
-    throw new Error(
-      `Untrusted pending-materialization record (${read.reason}).`,
-    );
+    throw new Error(`Untrusted pending-materialization record (${read.reason}).`);
   }
   let parsed: unknown;
   try {
@@ -936,11 +917,7 @@ async function writePendingFileUnlocked(
   } else {
     // Durable before the projection changes, so a crash can't make an
     // interrupted materialization look like a user edit.
-    await writeRecord(
-      records,
-      PENDING_MATERIALIZATION_FILE,
-      JSON.stringify({ counts }),
-    );
+    await writeRecord(records, PENDING_MATERIALIZATION_FILE, JSON.stringify({ counts }));
   }
 }
 
@@ -1006,14 +983,11 @@ export function shareViewFilesProjection(owner: ShareViewFilesOwnerCapability) {
   const active = <T>(
     expected: Parameters<typeof assertActiveShareViewFilesOwner>[1],
     operation: () => Promise<T>,
-  ): Promise<T> =>
-    withActiveShareViewFilesOwnerOperation(owner, expected ?? {}, operation);
+  ): Promise<T> => withActiveShareViewFilesOwnerOperation(owner, expected ?? {}, operation);
   const records = (rootDir: string) => shareViewRecords(owner, rootDir);
   return {
     resolvedTarget: (rootDir: string, relativePath: string) =>
-      active({ rootPath: rootDir }, () =>
-        resolvedShareViewTarget(rootDir, relativePath),
-      ),
+      active({ rootPath: rootDir }, () => resolvedShareViewTarget(rootDir, relativePath)),
     materialize: (
       rootDir: string,
       workspaceId: string,
@@ -1029,10 +1003,7 @@ export function shareViewFilesProjection(owner: ShareViewFilesOwnerCapability) {
       versionId: string;
       path: string;
       content: DiskTextState & { kind: "text" | "binary" };
-    }) =>
-      active({ storeWorkspaceId: input.workspaceId }, () =>
-        writeDiskContentToStore(input),
-      ),
+    }) => active({ storeWorkspaceId: input.workspaceId }, () => writeDiskContentToStore(input)),
     markPending: (rootDir: string, paths: readonly string[]) =>
       active({ rootPath: rootDir }, () =>
         writePendingMaterializationPaths(records(rootDir), paths),
@@ -1042,14 +1013,8 @@ export function shareViewFilesProjection(owner: ShareViewFilesOwnerCapability) {
         clearPendingMaterializationPaths(records(rootDir), paths),
       ),
     clearPullInFlight: (rootDir: string) =>
-      active({ rootPath: rootDir }, () =>
-        clearPullInFlightMarker(records(rootDir)),
-      ),
-    recordCollisions: (
-      rootDir: string,
-      shareId: string,
-      paths: readonly string[],
-    ) =>
+      active({ rootPath: rootDir }, () => clearPullInFlightMarker(records(rootDir))),
+    recordCollisions: (rootDir: string, shareId: string, paths: readonly string[]) =>
       active({ rootPath: rootDir, shareId }, () =>
         recordCollisionPaths(records(rootDir), shareId, paths),
       ),
@@ -1110,7 +1075,7 @@ class CollisionRecordRefusal extends Error {
   }
 }
 
-// Before #2372 the collision record lived at the top of `.dohc`. A view
+// An older build kept the collision record at the top of `.dohc`. A view
 // updated from then may have one there still keeping a person's files apart,
 // and reading no new record as "no collisions" would let the next capture
 // replace them. So a view with no new record refuses while the old one is
@@ -1135,10 +1100,7 @@ function olderCollisionRecordRefusal(
   records: ShareViewRecords,
   error: OlderCollisionRecordError,
 ): Error {
-  const older = posix.join(
-    posix.dirname(posix.dirname(records.shown)),
-    COLLISION_RECORD_FILE,
-  );
+  const older = posix.join(posix.dirname(posix.dirname(records.shown)), COLLISION_RECORD_FILE);
   return new Error(
     `dohc did not update these shared files because an older record at ${older} may be keeping your own files apart from the share. ` +
       "Move the files it lists out of the shared folder, then remove the record and try again. " +
@@ -1174,8 +1136,7 @@ async function readCollisionRecordUnlocked(
     !Array.isArray(parsed.paths) ||
     !parsed.paths.every(
       (path): path is string =>
-        typeof path === "string" &&
-        classifyEngineFilePath(path).kind === "tracked",
+        typeof path === "string" && classifyEngineFilePath(path).kind === "tracked",
     )
   ) {
     throw new Error(INVALID_COLLISION_RECORD);
@@ -1217,7 +1178,11 @@ async function readCollisionRecordLocked(
       paths = await recovery.rebuild();
       const original = await readRecord(records.rootPath, COLLISION_RECORD_FILE);
       if (original.status !== "read") throw new Error(INVALID_COLLISION_RECORD);
-      await writeRecord(records, `${COLLISION_RECORD_FILE}.invalid-${Date.now()}`, original.content);
+      await writeRecord(
+        records,
+        `${COLLISION_RECORD_FILE}.invalid-${Date.now()}`,
+        original.content,
+      );
       await writeCollisionRecordUnlocked(records, shareId, paths);
     } catch (quarantineError) {
       if (quarantineError instanceof LocalStateUnavailableError) throw quarantineError;
@@ -1259,28 +1224,19 @@ async function readCollisionRecordPaths(
   shareId: string,
   recovery?: { rebuild: () => Promise<Set<string>>; onQuarantine: () => void },
 ): Promise<Set<string>> {
-  return withExclusiveWorkspaceOperation(
-    recordPath(records.rootPath, COLLISION_RECORD_FILE),
-    () => readCollisionRecordLocked(records, shareId, recovery),
+  return withExclusiveWorkspaceOperation(recordPath(records.rootPath, COLLISION_RECORD_FILE), () =>
+    readCollisionRecordLocked(records, shareId, recovery),
   );
 }
 
-async function peekCollisionRecordPaths(
-  rootDir: string,
-  shareId: string,
-): Promise<Set<string>> {
-  return withExclusiveWorkspaceOperation(
-    recordPath(rootDir, COLLISION_RECORD_FILE),
-    async () => {
-      const record = await readCollisionRecordUnlocked(rootDir, shareId);
-      if (record.shareId !== shareId) {
-        throw new Error(
-          `Share collision record belongs to ${record.shareId}, not ${shareId}.`,
-        );
-      }
-      return record.paths;
-    },
-  );
+async function peekCollisionRecordPaths(rootDir: string, shareId: string): Promise<Set<string>> {
+  return withExclusiveWorkspaceOperation(recordPath(rootDir, COLLISION_RECORD_FILE), async () => {
+    const record = await readCollisionRecordUnlocked(rootDir, shareId);
+    if (record.shareId !== shareId) {
+      throw new Error(`Share collision record belongs to ${record.shareId}, not ${shareId}.`);
+    }
+    return record.paths;
+  });
 }
 
 // Adds or removes paths. Writes only when that changes the record, so a clear
@@ -1339,9 +1295,7 @@ export async function readSharedViewProjectionDebt(
 
 type IncomingPathState = "absent" | "file" | "non-file";
 
-async function inspectIncomingPath(
-  resolvedTarget: string,
-): Promise<IncomingPathState> {
+async function inspectIncomingPath(resolvedTarget: string): Promise<IncomingPathState> {
   try {
     const stat = await lstat(resolvedTarget);
     return !stat.isSymbolicLink() && stat.isFile() ? "file" : "non-file";
@@ -1352,9 +1306,7 @@ async function inspectIncomingPath(
   }
 }
 
-async function inspectIncomingPullPath(
-  resolvedTarget: string,
-): Promise<IncomingPathState> {
+async function inspectIncomingPullPath(resolvedTarget: string): Promise<IncomingPathState> {
   const incoming = await inspectIncomingPath(resolvedTarget);
   if (incoming !== "absent") return incoming;
   return (await stat(await existingAncestor(dirname(resolvedTarget)))).isDirectory()
@@ -1362,9 +1314,7 @@ async function inspectIncomingPullPath(
     : "file";
 }
 
-async function pathConfirmedAbsentOnDisk(
-  resolvedTarget: string,
-): Promise<boolean> {
+async function pathConfirmedAbsentOnDisk(resolvedTarget: string): Promise<boolean> {
   return (await inspectIncomingPath(resolvedTarget)) === "absent";
 }
 
@@ -1523,10 +1473,7 @@ function captureWorkRow(work: CaptureWorkItem): CaptureWorkRow {
 
 // Equal bytes are an unchanged file. A snapshot stored as binary before its
 // path was read as text still matches the same bytes on disk.
-function diskMatchesSnapshot(
-  disk: DiskTextState,
-  snapshot: CaptureSnapshotIdentity,
-): boolean {
+function diskMatchesSnapshot(disk: DiskTextState, snapshot: CaptureSnapshotIdentity): boolean {
   if (disk.kind !== "text" && disk.kind !== "binary") return false;
   return typeof snapshot.sha256 === "string" && disk.sha256 === snapshot.sha256;
 }
@@ -1546,7 +1493,13 @@ async function keptPath(rootDir: string, path: string, target: string): Promise<
   const entry: UnjournalablePath = { path, reason: "local-collision" };
   const root = await realpath(rootDir).catch(() => undefined);
   const ancestor = await existingAncestor(dirname(target)).catch(() => undefined);
-  if (root === undefined || ancestor === undefined || ancestor === root || !isInside(root, ancestor)) return entry;
+  if (
+    root === undefined ||
+    ancestor === undefined ||
+    ancestor === root ||
+    !isInside(root, ancestor)
+  )
+    return entry;
   const info = await stat(ancestor).catch(() => undefined);
   if (info?.isFile()) entry.owner = relative(root, ancestor).split(sep).join("/");
   return entry;
@@ -1581,10 +1534,7 @@ function classifyCaptureObservation(
           reportMissingTracked: true,
         };
       }
-      const alreadyMatchesGranter = diskMatchesSnapshot(
-        observation.disk,
-        observation.current,
-      );
+      const alreadyMatchesGranter = diskMatchesSnapshot(observation.disk, observation.current);
       if (observation.disk.kind !== "absent" && !alreadyMatchesGranter) {
         return unjournalableVerdict(observation.path, "local-collision");
       }
@@ -1640,10 +1590,7 @@ function classifyCaptureObservation(
       ) {
         return unjournalableVerdict(observation.path, "local-collision");
       }
-      if (
-        observation.disk.kind === "untracked-content" ||
-        observation.disk.kind === "unreadable"
-      ) {
+      if (observation.disk.kind === "untracked-content" || observation.disk.kind === "unreadable") {
         return {
           kind: "unjournalable",
           action: { kind: "none" },
@@ -1689,10 +1636,7 @@ function classifyCaptureObservation(
           resolveCollision: false,
         };
       }
-      if (
-        observation.disk.kind === "untracked-content" ||
-        observation.disk.kind === "unreadable"
-      ) {
+      if (observation.disk.kind === "untracked-content" || observation.disk.kind === "unreadable") {
         return {
           kind: "unjournalable",
           action: { kind: "none" },
@@ -1729,10 +1673,7 @@ function classifyCaptureObservation(
               resolveCollision: false,
             };
       }
-      if (
-        observation.disk.kind === "untracked-content" ||
-        observation.disk.kind === "unreadable"
-      ) {
+      if (observation.disk.kind === "untracked-content" || observation.disk.kind === "unreadable") {
         return {
           kind: "unjournalable",
           action: { kind: "none" },
@@ -1783,18 +1724,22 @@ function classifyCaptureObservation(
 // view already tracks. A hand-placed file belongs to the recipient and stays
 // outside the journal. Comparing disk with the engine head avoids echoing
 // in-app writes and prior materialization.
-async function captureSharedViewLocalDivergence(input: {
-  rootDir: string;
-  workspaceId: string;
-  store: CaptureVersionedTextStore;
-  allowLocalJournaling: boolean;
-  shareId: string;
-  beforeCaptureWrite?: (path: string) => Promise<void>;
-  paths?: readonly string[];
-  preservedPaths?: readonly string[] | null;
-  bestEffort?: boolean;
-  workspaceLease?: WorkspaceOperationLease;
-}, records: ShareViewRecords, recoverCollisionRecord = false): Promise<CaptureSharedViewRefreshOutcome> {
+async function captureSharedViewLocalDivergence(
+  input: {
+    rootDir: string;
+    workspaceId: string;
+    store: CaptureVersionedTextStore;
+    allowLocalJournaling: boolean;
+    shareId: string;
+    beforeCaptureWrite?: (path: string) => Promise<void>;
+    paths?: readonly string[];
+    preservedPaths?: readonly string[] | null;
+    bestEffort?: boolean;
+    workspaceLease?: WorkspaceOperationLease;
+  },
+  records: ShareViewRecords,
+  recoverCollisionRecord = false,
+): Promise<CaptureSharedViewRefreshOutcome> {
   const {
     rootDir,
     workspaceId,
@@ -1810,7 +1755,8 @@ async function captureSharedViewLocalDivergence(input: {
   const preserved = new Set(preservedPaths ?? []);
   const realRoot = await realpath(rootDir).catch(() => null);
   if (realRoot === null) {
-    if (bestEffort || preservedPaths === null || preserved.size > 0) throw new Error("The share folder could not be read before access changed.");
+    if (bestEffort || preservedPaths === null || preserved.size > 0)
+      throw new Error("The share folder could not be read before access changed.");
     return {
       capturedPaths: 0,
       repairedPaths: 0,
@@ -1820,8 +1766,7 @@ async function captureSharedViewLocalDivergence(input: {
 
   const main = await store.ensureMainVersion({ workspaceId });
   const pathIsInScope = (path: string) =>
-    paths === undefined ||
-    paths.some((scope) => path === scope || path.startsWith(`${scope}/`));
+    paths === undefined || paths.some((scope) => path === scope || path.startsWith(`${scope}/`));
   const everyTracked = await store.listTextFileMetadata({
     workspaceId,
     versionId: main.id,
@@ -1832,42 +1777,62 @@ async function captureSharedViewLocalDivergence(input: {
     for (const entry of tracked) preserved.add(entry.path);
   }
   let collisionRecordQuarantined = false;
-  const everyCollisionRecordedPath = await readCollisionRecordPaths(records, shareId,
-    recoverCollisionRecord ? {
-      rebuild: async () => {
-        const pending = await readPendingMaterializationPathsForCapture(records, everyTracked.map(entry => entry.path), false);
-        const kept = new Set<string>();
-        for (const entry of everyTracked) {
-          if (classifyEngineFilePath(entry.path).kind !== "tracked") continue;
-          try {
-            await withCaptureMutationLock(rootDir, entry.path, workspaceLease, async (target) => {
-              const disk = await readDiskContent(target);
-              if (diskMatchesSnapshot(disk, entry)) return;
-              if (pending.paths.has(entry.path)) {
-                const latest = await store.getMoment({ workspaceId, momentId: entry.latestMomentId });
-                if (latest?.payload.before === null && disk.kind === "absent") return;
-                if (latest?.payload.before && diskMatchesSnapshot(disk, latest.payload.before)) return;
+  const everyCollisionRecordedPath = await readCollisionRecordPaths(
+    records,
+    shareId,
+    recoverCollisionRecord
+      ? {
+          rebuild: async () => {
+            const pending = await readPendingMaterializationPathsForCapture(
+              records,
+              everyTracked.map((entry) => entry.path),
+              false,
+            );
+            const kept = new Set<string>();
+            for (const entry of everyTracked) {
+              if (classifyEngineFilePath(entry.path).kind !== "tracked") continue;
+              try {
+                await withCaptureMutationLock(
+                  rootDir,
+                  entry.path,
+                  workspaceLease,
+                  async (target) => {
+                    const disk = await readDiskContent(target);
+                    if (diskMatchesSnapshot(disk, entry)) return;
+                    if (pending.paths.has(entry.path)) {
+                      const latest = await store.getMoment({
+                        workspaceId,
+                        momentId: entry.latestMomentId,
+                      });
+                      if (latest?.payload.before === null && disk.kind === "absent") return;
+                      if (
+                        latest?.payload.before &&
+                        diskMatchesSnapshot(disk, latest.payload.before)
+                      )
+                        return;
+                    }
+                    kept.add(entry.path);
+                  },
+                );
+              } catch (error) {
+                if (!(error instanceof SharedViewTargetAccessError)) throw error;
+                kept.add(entry.path);
               }
-              kept.add(entry.path);
-            });
-          } catch (error) {
-            if (!(error instanceof SharedViewTargetAccessError)) throw error;
-            kept.add(entry.path);
-          }
+            }
+            return kept;
+          },
+          onQuarantine: () => {
+            collisionRecordQuarantined = true;
+          },
         }
-        return kept;
-      },
-      onQuarantine: () => { collisionRecordQuarantined = true; },
-    } : undefined,
+      : undefined,
   );
   const pendingState = await readPendingMaterializationPathsForCapture(
     records,
     tracked.map((entry) => entry.path),
   );
   const pendingPaths = new Set([...pendingState.paths].filter(pathIsInScope));
-  const collisionRecordedPaths = new Set(
-    [...everyCollisionRecordedPath].filter(pathIsInScope),
-  );
+  const collisionRecordedPaths = new Set([...everyCollisionRecordedPath].filter(pathIsInScope));
   if (preservedPaths === null) {
     for (const path of [...pendingPaths, ...collisionRecordedPaths]) preserved.add(path);
   }
@@ -1876,10 +1841,13 @@ async function captureSharedViewLocalDivergence(input: {
     return {
       capturedPaths: 0,
       repairedPaths: 0,
-      unjournalablePaths: await Promise.all([...collisionRecordedPaths].map(path =>
-        withCaptureMutationLock(rootDir, path, workspaceLease, target => keptPath(rootDir, path, target))
-          .catch((): UnjournalablePath => ({ path, reason: "local-collision" })),
-      )),
+      unjournalablePaths: await Promise.all(
+        [...collisionRecordedPaths].map((path) =>
+          withCaptureMutationLock(rootDir, path, workspaceLease, (target) =>
+            keptPath(rootDir, path, target),
+          ).catch((): UnjournalablePath => ({ path, reason: "local-collision" })),
+        ),
+      ),
       collisionRecordQuarantined: true,
     };
   }
@@ -1946,11 +1914,14 @@ async function captureSharedViewLocalDivergence(input: {
   // The paths capture keeps its hands off so far: preserved ones, and ones it
   // could not capture or journal, except a spelling collision, whose file is
   // another spelling's.
-  const captureProtected = () => new Set([
-    ...preserved,
-    ...settlement.failedPaths,
-    ...settlement.unjournalablePaths.filter((path) => path.reason !== "spelling-collision").map((path) => path.path),
-  ]);
+  const captureProtected = () =>
+    new Set([
+      ...preserved,
+      ...settlement.failedPaths,
+      ...settlement.unjournalablePaths
+        .filter((path) => path.reason !== "spelling-collision")
+        .map((path) => path.path),
+    ]);
 
   const currentEntry = (
     current: Awaited<ReturnType<CaptureVersionedTextStore["readTextFile"]>>,
@@ -2044,9 +2015,7 @@ async function captureSharedViewLocalDivergence(input: {
           };
         }
         const latestMoment =
-          disk.kind === "absent"
-            ? null
-            : await latestMomentForPath(store, workspaceId, work.path);
+          disk.kind === "absent" ? null : await latestMomentForPath(store, workspaceId, work.path);
         return {
           row,
           path: work.path,
@@ -2055,10 +2024,7 @@ async function captureSharedViewLocalDivergence(input: {
         };
       }
       case "tracked-ordinary": {
-        let disk: Extract<
-          CaptureObservation,
-          { row: "tracked-ordinary" }
-        >["disk"];
+        let disk: Extract<CaptureObservation, { row: "tracked-ordinary" }>["disk"];
         if (ordinaryPreLock === "absent") {
           try {
             disk = (await pathConfirmedAbsentOnDisk(resolvedTarget))
@@ -2101,10 +2067,7 @@ async function captureSharedViewLocalDivergence(input: {
     }
   };
 
-  const applyAction = async (
-    path: string,
-    action: CaptureAction,
-  ): Promise<void> => {
+  const applyAction = async (path: string, action: CaptureAction): Promise<void> => {
     switch (action.kind) {
       case "none":
         return;
@@ -2160,20 +2123,37 @@ async function captureSharedViewLocalDivergence(input: {
 
   // Held spellings: their files are other spellings', not unsaved work.
   const held = new Set<string>();
-  const knownSpellings = spellingGroups(new Set([...spellings.values()].flat().concat([...pendingState.paths, ...everyCollisionRecordedPath])));
-  const executeWork = async (
-    work: CaptureWorkItem,
-  ): Promise<CaptureVerdict> => {
+  const knownSpellings = spellingGroups(
+    new Set(
+      [...spellings.values()].flat().concat([...pendingState.paths, ...everyCollisionRecordedPath]),
+    ),
+  );
+  const executeWork = async (work: CaptureWorkItem): Promise<CaptureVerdict> => {
     // A spelling a refresh held back, whose file another live spelling owns,
-    // sends and repairs nothing, even when preserved (#2416). Its record
+    // sends and repairs nothing, even when preserved. Its record
     // keeps it from reading as deleted if that file goes, and ends once it is
     // no longer live.
     if (work.collision) {
-      const owner = await withCaptureMutationLock<string | null | UnjournalablePath>(rootDir, work.path, workspaceLease, async (resolvedTarget) => {
-        if (work.tracked !== null && collisionRecordedPaths.has(work.path)
-          && !(await stat(await existingAncestor(dirname(resolvedTarget)))).isDirectory()) return keptPath(rootDir, work.path, resolvedTarget);
-        return spellingSharingFile(rootDir, work.path, resolvedTarget, spellings, (other) => !everyCollisionRecordedPath.has(other));
-      }).catch(() => undefined);
+      const owner = await withCaptureMutationLock<string | null | UnjournalablePath>(
+        rootDir,
+        work.path,
+        workspaceLease,
+        async (resolvedTarget) => {
+          if (
+            work.tracked !== null &&
+            collisionRecordedPaths.has(work.path) &&
+            !(await stat(await existingAncestor(dirname(resolvedTarget)))).isDirectory()
+          )
+            return keptPath(rootDir, work.path, resolvedTarget);
+          return spellingSharingFile(
+            rootDir,
+            work.path,
+            resolvedTarget,
+            spellings,
+            (other) => !everyCollisionRecordedPath.has(other),
+          );
+        },
+      ).catch(() => undefined);
       if (owner === undefined) return unjournalableVerdict(work.path, "unreadable");
       if (owner !== null && typeof owner === "object") {
         return { ...unjournalableVerdict(work.path, owner.reason), path: owner };
@@ -2183,7 +2163,12 @@ async function captureSharedViewLocalDivergence(input: {
       }
       if (owner !== null) {
         held.add(work.path);
-        return { kind: "unjournalable", action: { kind: "none" }, resolveCollision: false, path: { path: work.path, reason: "spelling-collision", owner } };
+        return {
+          kind: "unjournalable",
+          action: { kind: "none" },
+          resolveCollision: false,
+          path: { path: work.path, reason: "spelling-collision", owner },
+        };
       }
     }
     // A recorded spelling whose file is gone, or is the file of another
@@ -2191,35 +2176,48 @@ async function captureSharedViewLocalDivergence(input: {
     // settles it instead. Other spellings count when tracked, pending or
     // recorded, as a crashed pull's deleted owner still is. A kept path
     // never takes the preserved branch.
-    const hasOtherSpelling = (knownSpellings.get(pathCollisionKey(work.path)) ?? []).some((other) => other !== work.path);
-    const sharedSpelling = collisionRecordedPaths.has(work.path)
-      && hasOtherSpelling
-      && await withCaptureMutationLock(rootDir, work.path, workspaceLease, async (resolvedTarget) =>
-        !(await lstat(resolvedTarget).then(() => true, () => false))
-          || (await spellingSharingFile(rootDir, work.path, resolvedTarget, knownSpellings)) !== null,
-      ).catch(() => undefined);
+    const hasOtherSpelling = (knownSpellings.get(pathCollisionKey(work.path)) ?? []).some(
+      (other) => other !== work.path,
+    );
+    const sharedSpelling =
+      collisionRecordedPaths.has(work.path) &&
+      hasOtherSpelling &&
+      (await withCaptureMutationLock(
+        rootDir,
+        work.path,
+        workspaceLease,
+        async (resolvedTarget) =>
+          !(await lstat(resolvedTarget).then(
+            () => true,
+            () => false,
+          )) ||
+          (await spellingSharingFile(rootDir, work.path, resolvedTarget, knownSpellings)) !== null,
+      ).catch(() => undefined));
     if (sharedSpelling === undefined) return unjournalableVerdict(work.path, "unreadable");
     if (preserved.has(work.path) && !sharedSpelling && !work.collision) {
       // These bytes predate the restriction. Journal them locally before
       // releasing protection, even when this copy is now read-only.
-      return withCaptureMutationLock(
-        rootDir, work.path, workspaceLease, async resolvedTarget => {
-          const disk = await readDiskContent(resolvedTarget);
-          if (disk.kind === "unreadable" || disk.kind === "untracked-content") {
-            return unjournalableVerdict(work.path, unjournalableFromDisk(work.path, disk).reason);
-          }
-          if (disk.kind === "absent" && !(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
-            return unjournalableVerdict(work.path, "unreadable");
-          }
-          if (work.tracked !== null && diskMatchesSnapshot(disk, work.tracked)) {
-            return { kind: "unchanged", action: { kind: "none" }, resolveCollision: false };
-          }
-          await applyAction(work.path, disk.kind === "absent"
-            ? work.tracked ? { kind: "delete-store" } : { kind: "none" }
-            : { kind: "write-store", content: disk, beforeWrite: false });
-          return { kind: "captured", action: { kind: "none" }, resolveCollision: false };
-        },
-      );
+      return withCaptureMutationLock(rootDir, work.path, workspaceLease, async (resolvedTarget) => {
+        const disk = await readDiskContent(resolvedTarget);
+        if (disk.kind === "unreadable" || disk.kind === "untracked-content") {
+          return unjournalableVerdict(work.path, unjournalableFromDisk(work.path, disk).reason);
+        }
+        if (disk.kind === "absent" && !(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
+          return unjournalableVerdict(work.path, "unreadable");
+        }
+        if (work.tracked !== null && diskMatchesSnapshot(disk, work.tracked)) {
+          return { kind: "unchanged", action: { kind: "none" }, resolveCollision: false };
+        }
+        await applyAction(
+          work.path,
+          disk.kind === "absent"
+            ? work.tracked
+              ? { kind: "delete-store" }
+              : { kind: "none" }
+            : { kind: "write-store", content: disk, beforeWrite: false },
+        );
+        return { kind: "captured", action: { kind: "none" }, resolveCollision: false };
+      });
     }
     const row = captureWorkRow(work);
     let ordinaryPreLock: IncomingPathState | undefined;
@@ -2227,9 +2225,7 @@ async function captureSharedViewLocalDivergence(input: {
       // On Windows, keep this pre-lock check: target resolution must not turn
       // an unreadable ancestor into a journaled delete.
       try {
-        ordinaryPreLock = await inspectIncomingPath(
-          resolve(realRoot, work.path),
-        );
+        ordinaryPreLock = await inspectIncomingPath(resolve(realRoot, work.path));
       } catch {
         return unjournalableVerdict(work.path, "unreadable");
       }
@@ -2243,20 +2239,9 @@ async function captureSharedViewLocalDivergence(input: {
         work.path,
         workspaceLease,
         async (resolvedTarget) => {
-          const observation = await observeLocked(
-            work,
-            row,
-            resolvedTarget,
-            ordinaryPreLock,
-          );
-          const verdict = classifyCaptureObservation(
-            observation,
-            allowLocalJournaling,
-          );
-          if (
-            "reportMissingTracked" in verdict &&
-            verdict.reportMissingTracked
-          ) {
+          const observation = await observeLocked(work, row, resolvedTarget, ordinaryPreLock);
+          const verdict = classifyCaptureObservation(observation, allowLocalJournaling);
+          if ("reportMissingTracked" in verdict && verdict.reportMissingTracked) {
             console.error(
               `[desktop] shared view store lost tracked path ${work.path} ` +
                 `in workspace ${workspaceId} version ${main.id}`,
@@ -2277,10 +2262,7 @@ async function captureSharedViewLocalDivergence(input: {
     }
   };
 
-  const settleWork = async (
-    work: CaptureWorkItem,
-    verdict: CaptureVerdict,
-  ): Promise<void> => {
+  const settleWork = async (work: CaptureWorkItem, verdict: CaptureVerdict): Promise<void> => {
     switch (verdict.kind) {
       case "captured":
         settlement.capturedPaths += 1;
@@ -2296,7 +2278,10 @@ async function captureSharedViewLocalDivergence(input: {
       default:
         unreachableCaptureState(verdict);
     }
-    if (verdict.resolveCollision || (preserved.has(work.path) && verdict.kind !== "unjournalable")) {
+    if (
+      verdict.resolveCollision ||
+      (preserved.has(work.path) && verdict.kind !== "unjournalable")
+    ) {
       settlement.resolvedCollisionPaths.push(work.path);
       // The rows after this one see a resolved spelling as an owner.
       collisionRecordedPaths.delete(work.path);
@@ -2304,12 +2289,7 @@ async function captureSharedViewLocalDivergence(input: {
       return;
     }
     if (work.pending && !work.collision) {
-      await clearCapturePendingMarker(
-        records,
-        work.path,
-        verdict.kind,
-        pendingState,
-      );
+      await clearCapturePendingMarker(records, work.path, verdict.kind, pendingState);
     }
   };
 
@@ -2317,7 +2297,9 @@ async function captureSharedViewLocalDivergence(input: {
   try {
     // Collision rows run last: a file the person deleted then reads as the
     // delete of the spelling they saw before a held spelling takes it back.
-    const works = [...workByPath.values()].sort((left, right) => Number(left.collision) - Number(right.collision));
+    const works = [...workByPath.values()].sort(
+      (left, right) => Number(left.collision) - Number(right.collision),
+    );
     for (const work of works) {
       failurePath = work.path;
       try {
@@ -2332,15 +2314,8 @@ async function captureSharedViewLocalDivergence(input: {
       failurePath = settlement.resolvedCollisionPaths[0]!;
       // Collision resolution discharges every retry count, then publishes the
       // collision record once for the whole pass.
-      await clearAllPendingMaterializationPaths(
-        records,
-        settlement.resolvedCollisionPaths,
-      );
-      await clearCollisionRecordPaths(
-        records,
-        shareId,
-        settlement.resolvedCollisionPaths,
-      );
+      await clearAllPendingMaterializationPaths(records, settlement.resolvedCollisionPaths);
+      await clearCollisionRecordPaths(records, shareId, settlement.resolvedCollisionPaths);
     }
 
     if (
@@ -2359,9 +2334,7 @@ async function captureSharedViewLocalDivergence(input: {
       settlement.capturedPaths,
       settlement.repairedPaths,
       failurePath,
-      error instanceof SharedViewTargetAccessError
-        ? "unreadable"
-        : "other",
+      error instanceof SharedViewTargetAccessError ? "unreadable" : "other",
       { cause: error },
     );
   }
@@ -2372,86 +2345,101 @@ async function captureSharedViewLocalDivergence(input: {
     repairedPaths: settlement.repairedPaths,
     unjournalablePaths: settlement.unjournalablePaths,
     ...(settlement.failedPaths.length > 0 ? { failedPaths: settlement.failedPaths } : {}),
-    ...(input.preservedPaths !== undefined && (preservedPaths !== null || paths === undefined) ? {
-      remainingPreservedPaths: [...preserved].filter(path => !resolvedPaths.has(path) && !held.has(path)),
-    } : {}),
+    ...(input.preservedPaths !== undefined && (preservedPaths !== null || paths === undefined)
+      ? {
+          remainingPreservedPaths: [...preserved].filter(
+            (path) => !resolvedPaths.has(path) && !held.has(path),
+          ),
+        }
+      : {}),
   };
 }
 
-async function captureStandaloneShareViewDivergence(input: {
-  rootDir: string;
-  workspaceId: string;
-  store: CaptureVersionedTextStore;
-  pinnedSelector: unknown;
-  shareId: string;
-  ended: boolean;
-  paths?: readonly string[];
-  preservedPaths?: readonly string[] | null;
-  bestEffort?: boolean;
-  workspaceLease?: WorkspaceOperationLease;
-}, records: ShareViewRecords, recoverCollisionRecord = false): Promise<CaptureSharedViewRefreshOutcome> {
+async function captureStandaloneShareViewDivergence(
+  input: {
+    rootDir: string;
+    workspaceId: string;
+    store: CaptureVersionedTextStore;
+    pinnedSelector: unknown;
+    shareId: string;
+    ended: boolean;
+    paths?: readonly string[];
+    preservedPaths?: readonly string[] | null;
+    bestEffort?: boolean;
+    workspaceLease?: WorkspaceOperationLease;
+  },
+  records: ShareViewRecords,
+  recoverCollisionRecord = false,
+): Promise<CaptureSharedViewRefreshOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
   const allowLocalJournaling = shareViewTakesLocalWrites({
     access: grantedSelector.access,
     ended: input.ended,
   });
-  return captureSharedViewLocalDivergence({
-    rootDir: input.rootDir,
-    workspaceId: input.workspaceId,
-    store: input.store,
-    allowLocalJournaling,
-    shareId: input.shareId,
-    paths: input.paths,
-    preservedPaths: input.preservedPaths,
-    bestEffort: input.bestEffort,
-    workspaceLease: input.workspaceLease,
-  }, records, recoverCollisionRecord);
+  return captureSharedViewLocalDivergence(
+    {
+      rootDir: input.rootDir,
+      workspaceId: input.workspaceId,
+      store: input.store,
+      allowLocalJournaling,
+      shareId: input.shareId,
+      paths: input.paths,
+      preservedPaths: input.preservedPaths,
+      bestEffort: input.bestEffort,
+      workspaceLease: input.workspaceLease,
+    },
+    records,
+    recoverCollisionRecord,
+  );
 }
 
 // One refresh pass: pull the share's filtered ops into the local store,
 // materialize what changed, then commit the cursor. Revocation (or a share
 // that stopped existing for this account) comes back as status "ended" —
 // the local files are left exactly as they were.
-async function refreshSharedViewOnce(input: {
-  rootDir: string;
-  workspaceId: string;
-  relay: SyncRelayConnection;
-  shareId: string;
-  // Required at the factory boundary: every rooted caller must explicitly
-  // select its relay implementation, so no call can drift back to the legacy
-  // TypeScript SQLite path.
-  pull: (input: {
+async function refreshSharedViewOnce(
+  input: {
     rootDir: string;
     workspaceId: string;
     relay: SyncRelayConnection;
     shareId: string;
-    grantedSelector: ShareViewSelector;
+    // Required at the factory boundary: every rooted caller must explicitly
+    // select its relay implementation, so no call can drift back to the legacy
+    // TypeScript SQLite path.
+    pull: (input: {
+      rootDir: string;
+      workspaceId: string;
+      relay: SyncRelayConnection;
+      shareId: string;
+      grantedSelector: ShareViewSelector;
+      recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
+      recordCollisions?: (paths: readonly string[]) => Promise<void>;
+      recordChangedPaths?: (paths: readonly string[]) => Promise<void>;
+    }) => Promise<PullShareViewResult>;
+    // Required at the factory boundary for the same reason: every rooted caller
+    // must explicitly select its store implementation.
+    store: CaptureVersionedTextStore;
+    // The scope this refresh enforces, exactly as the share record holds it.
+    // Read before the pull and never repaired from the relay, so no pull ever
+    // runs unscoped and no refresh can re-pin a wider selector.
+    pinnedSelector: unknown;
+    // Where a refused op is written down. Called before the cursor that skips
+    // past it is committed, and idempotent by origin coordinate, because a
+    // re-fetched page repeats refusals the record already holds.
     recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
-    recordCollisions?: (paths: readonly string[]) => Promise<void>;
-    recordChangedPaths?: (paths: readonly string[]) => Promise<void>;
-  }) => Promise<PullShareViewResult>;
-  // Required at the factory boundary for the same reason: every rooted caller
-  // must explicitly select its store implementation.
-  store: CaptureVersionedTextStore;
-  // The scope this refresh enforces, exactly as the share record holds it.
-  // Read before the pull and never repaired from the relay, so no pull ever
-  // runs unscoped and no refresh can re-pin a wider selector.
-  pinnedSelector: unknown;
-  // Where a refused op is written down. Called before the cursor that skips
-  // past it is committed, and idempotent by origin coordinate, because a
-  // re-fetched page repeats refusals the record already holds.
-  recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
-  onCursorCommitted?: (cursor: number) => void;
-  excludeFromMaterialization?: ReadonlySet<string>;
-  // Excluded paths whose files hold local work capture keeps aside, such as
-  // preserved paths and ones it could not capture. Nothing removes or rewrites
-  // their files, even to settle another spelling.
-  protectedPaths?: ReadonlySet<string>;
-  unjournalablePaths?: readonly UnjournalablePath[];
-  trackPendingMaterialization?: boolean;
-  preTrackedPaths?: ReadonlySet<string>;
-}, records: ShareViewRecords): Promise<RefreshSharedViewOutcome> {
+    onCursorCommitted?: (cursor: number) => void;
+    excludeFromMaterialization?: ReadonlySet<string>;
+    // Excluded paths whose files hold local work capture keeps aside, such as
+    // preserved paths and ones it could not capture. Nothing removes or rewrites
+    // their files, even to settle another spelling.
+    protectedPaths?: ReadonlySet<string>;
+    unjournalablePaths?: readonly UnjournalablePath[];
+    trackPendingMaterialization?: boolean;
+    preTrackedPaths?: ReadonlySet<string>;
+  },
+  records: ShareViewRecords,
+): Promise<RefreshSharedViewOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
   if (input.trackPendingMaterialization) {
@@ -2461,9 +2449,7 @@ async function refreshSharedViewOnce(input: {
   const recordedChangedPaths = new Set<string>();
   const recordChangedPaths = input.trackPendingMaterialization
     ? async (paths: readonly string[]) => {
-        const newPaths = [...new Set(paths)].filter(
-          (path) => !recordedChangedPaths.has(path),
-        );
+        const newPaths = [...new Set(paths)].filter((path) => !recordedChangedPaths.has(path));
         if (newPaths.length === 0) return;
         await writePendingMaterializationPaths(records, newPaths);
         for (const path of newPaths) recordedChangedPaths.add(path);
@@ -2487,20 +2473,13 @@ async function refreshSharedViewOnce(input: {
               const newlyColliding: string[] = [];
               for (const path of paths) {
                 if (preTrackedPaths.has(path)) continue;
-                const target = await resolvedShareViewTarget(
-                  input.rootDir,
-                  path,
-                );
+                const target = await resolvedShareViewTarget(input.rootDir, path);
                 if ((await inspectIncomingPullPath(target)) === "file") {
                   newlyColliding.push(path);
                 }
               }
               if (newlyColliding.length > 0) {
-                await recordCollisionPaths(
-                  records,
-                  input.shareId,
-                  newlyColliding,
-                );
+                await recordCollisionPaths(records, input.shareId, newlyColliding);
               }
             },
     });
@@ -2526,9 +2505,7 @@ async function refreshSharedViewOnce(input: {
     }
     throw error;
   }
-  const materializationExclusions = new Set(
-    input.excludeFromMaterialization ?? [],
-  );
+  const materializationExclusions = new Set(input.excludeFromMaterialization ?? []);
   if (recordChangedPaths) {
     // Non-daemon test adapters and alternate transports may not implement the
     // page callback yet. Persist anything the completed pull returned before
@@ -2540,10 +2517,7 @@ async function refreshSharedViewOnce(input: {
   // Spellings this pull holds back for an earlier spelling in it, by path.
   const heldSpellings = new Map<string, string>();
   if (input.preTrackedPaths !== undefined) {
-    collisionRecordedPaths = await readCollisionRecordPaths(
-      records,
-      input.shareId,
-    );
+    collisionRecordedPaths = await readCollisionRecordPaths(records, input.shareId);
     const newlyCollidingPaths: string[] = [];
     // A file in the way is either this machine's or, on a disk that ignores
     // case, the file of another shared spelling that is not itself held.
@@ -2551,7 +2525,13 @@ async function refreshSharedViewOnce(input: {
     let spellings: Map<string, string[]> | undefined;
     const collisionEntry = async (path: string, target: string): Promise<UnjournalablePath> => {
       spellings ??= spellingGroups(preTrackedPaths);
-      const owner = await spellingSharingFile(input.rootDir, path, target, spellings, (other) => !collisionRecordedPaths.has(other)).catch(() => null);
+      const owner = await spellingSharingFile(
+        input.rootDir,
+        path,
+        target,
+        spellings,
+        (other) => !collisionRecordedPaths.has(other),
+      ).catch(() => null);
       return owner === null
         ? keptPath(input.rootDir, path, target)
         : { path, reason: "spelling-collision", owner };
@@ -2561,8 +2541,8 @@ async function refreshSharedViewOnce(input: {
 
       if (collisionRecordedPaths.has(change.path)) {
         // Already-recorded: keep excluding every later write OR delete for
-        // this path, regardless of whether the store now tracks it — this is
-        // the persistence #854 adds. Only capture's resolution arm clears it.
+        // this path, regardless of whether the store now tracks it. Only
+        // capture's resolution arm clears it.
         materializationExclusions.add(change.path);
         unjournalablePaths.push(
           await resolvedShareViewTarget(input.rootDir, change.path).then(
@@ -2589,7 +2569,7 @@ async function refreshSharedViewOnce(input: {
     // Two spellings of one path in this pull, such as `notes.md` and
     // `Notes.md`, share one file on a disk that ignores case. The first is
     // written. Each later one is held back, recorded before that write, and
-    // released below if the disk gives it its own file (#2416).
+    // released below if the disk gives it its own file.
     const firstSpellings = new Map<string, string>();
     for (const change of pull.changedPaths) {
       if (change.operation === "delete" || materializationExclusions.has(change.path)) continue;
@@ -2603,11 +2583,7 @@ async function refreshSharedViewOnce(input: {
       newlyCollidingPaths.push(change.path);
     }
     if (newlyCollidingPaths.length > 0) {
-      await recordCollisionPaths(
-        records,
-        input.shareId,
-        newlyCollidingPaths,
-      );
+      await recordCollisionPaths(records, input.shareId, newlyCollidingPaths);
     }
   }
   const excludedPaths = pull.changedPaths
@@ -2616,9 +2592,7 @@ async function refreshSharedViewOnce(input: {
   const pathsToMaterialize = pull.changedPaths.filter(
     (change) => !materializationExclusions.has(change.path),
   );
-  const pendingMaterializationPaths = pathsToMaterialize.map(
-    (change) => change.path,
-  );
+  const pendingMaterializationPaths = pathsToMaterialize.map((change) => change.path);
   if (input.trackPendingMaterialization) {
     // A collision record is durable debt of its own. Clear duplicate pending
     // counts only for those paths. Other exclusions, including the one-pass
@@ -2651,13 +2625,26 @@ async function refreshSharedViewOnce(input: {
     const group = written.get(key) ?? [first];
     written.set(key, group);
     const target = await resolvedShareViewTarget(input.rootDir, change.path);
-    const owner = await spellingSharingFile(input.rootDir, change.path, target, new Map([[key, group]]));
+    const owner = await spellingSharingFile(
+      input.rootDir,
+      change.path,
+      target,
+      new Map([[key, group]]),
+    );
     if (owner !== null) {
-      const entry = unjournalablePaths.find((held) => held.path === change.path && held.reason === "spelling-collision");
+      const entry = unjournalablePaths.find(
+        (held) => held.path === change.path && held.reason === "spelling-collision",
+      );
       if (entry) entry.owner = owner;
       continue;
     }
-    await materializeSharedViewPaths(input.rootDir, input.workspaceId, [change], input.store, input.protectedPaths);
+    await materializeSharedViewPaths(
+      input.rootDir,
+      input.workspaceId,
+      [change],
+      input.store,
+      input.protectedPaths,
+    );
     await clearCollisionRecordPaths(records, input.shareId, [change.path]);
     group.push(change.path);
     releasedPaths.add(change.path);
@@ -2722,33 +2709,35 @@ async function refreshCapturedShareView(
       })
     ).map((entry) => entry.path),
   );
-  const outcome = await refreshSharedViewOnce({
-    ...refreshInput,
-    excludeFromMaterialization: new Set([
-      ...(preservedPaths ?? preTrackedPaths),
-      ...(captured.failedPaths ?? []),
-      ...captured.unjournalablePaths.map((path) => path.path),
-      ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
-    ]),
-    // A spelling collision is left out: its file is another spelling's, which
-    // a delete of that spelling settles.
-    protectedPaths: new Set([
-      ...(preservedPaths ?? preTrackedPaths),
-      ...(captured.failedPaths ?? []),
-      ...captured.unjournalablePaths.filter((path) => path.reason !== "spelling-collision").map((path) => path.path),
-      ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
-    ]),
-    unjournalablePaths: captured.unjournalablePaths,
-    trackPendingMaterialization: true,
-    preTrackedPaths,
-  }, records);
+  const outcome = await refreshSharedViewOnce(
+    {
+      ...refreshInput,
+      excludeFromMaterialization: new Set([
+        ...(preservedPaths ?? preTrackedPaths),
+        ...(captured.failedPaths ?? []),
+        ...captured.unjournalablePaths.map((path) => path.path),
+        ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
+      ]),
+      // A spelling collision is left out: its file is another spelling's, which
+      // a delete of that spelling settles.
+      protectedPaths: new Set([
+        ...(preservedPaths ?? preTrackedPaths),
+        ...(captured.failedPaths ?? []),
+        ...captured.unjournalablePaths
+          .filter((path) => path.reason !== "spelling-collision")
+          .map((path) => path.path),
+        ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
+      ]),
+      unjournalablePaths: captured.unjournalablePaths,
+      trackPendingMaterialization: true,
+      preTrackedPaths,
+    },
+    records,
+  );
   return {
     ...outcome,
     ...setAsideCollisionRecord(captured),
-    status:
-      outcome.status === "unchanged" && localChanges > 0
-        ? "updated"
-        : outcome.status,
+    status: outcome.status === "unchanged" && localChanges > 0 ? "updated" : outcome.status,
     changedPaths: outcome.changedPaths + localChanges,
   };
 }
@@ -2781,11 +2770,14 @@ async function reconcileStandaloneShareView(
 }
 
 export function createShareViewLifecycle(owner: ShareViewFilesOwnerCapability) {
-  const active = <T>(input: {
-    rootDir: string;
-    workspaceId: string;
-    shareId: string;
-  }, operation: (records: ShareViewRecords) => Promise<T>): Promise<T> =>
+  const active = <T>(
+    input: {
+      rootDir: string;
+      workspaceId: string;
+      shareId: string;
+    },
+    operation: (records: ShareViewRecords) => Promise<T>,
+  ): Promise<T> =>
     withActiveShareViewFilesOwnerOperation(
       owner,
       {
@@ -2799,28 +2791,25 @@ export function createShareViewLifecycle(owner: ShareViewFilesOwnerCapability) {
     captureShared: (
       input: Parameters<typeof captureSharedViewLocalDivergence>[0],
     ): Promise<CaptureSharedViewLocalDivergenceOutcome> => {
-      return active(input, (records) =>
-        captureSharedViewLocalDivergence(input, records),
-      );
+      return active(input, (records) => captureSharedViewLocalDivergence(input, records));
     },
     captureSharedRefresh: (input: Parameters<typeof captureSharedViewLocalDivergence>[0]) =>
-      active(input, records => captureSharedViewLocalDivergence(input, records, true)),
+      active(input, (records) => captureSharedViewLocalDivergence(input, records, true)),
     captureStandalone: (
       input: Parameters<typeof captureStandaloneShareViewDivergence>[0],
     ): Promise<CaptureSharedViewLocalDivergenceOutcome> => {
-      return active(input, (records) =>
-        captureStandaloneShareViewDivergence(input, records),
-      );
+      return active(input, (records) => captureStandaloneShareViewDivergence(input, records));
     },
-    captureStandaloneRefresh: (
-      input: Parameters<typeof captureStandaloneShareViewDivergence>[0],
-    ) =>
+    captureStandaloneRefresh: (input: Parameters<typeof captureStandaloneShareViewDivergence>[0]) =>
       active(input, async (records) => {
         try {
           const captured = await captureStandaloneShareViewDivergence(input, records, true);
           return {
             ok: true as const,
-            captured: { ...captured, collisionRecordQuarantined: captured.collisionRecordQuarantined ?? false },
+            captured: {
+              ...captured,
+              collisionRecordQuarantined: captured.collisionRecordQuarantined ?? false,
+            },
           };
         } catch (error) {
           return standaloneShareViewFailureOutcome(error, 0);
@@ -2829,19 +2818,11 @@ export function createShareViewLifecycle(owner: ShareViewFilesOwnerCapability) {
     refreshOnce: (input: Parameters<typeof refreshSharedViewOnce>[0]) => {
       return active(input, (records) => refreshSharedViewOnce(input, records));
     },
-    refreshCaptured: (
-      input: Parameters<typeof refreshCapturedShareView>[0],
-    ) => {
-      return active(input, (records) =>
-        refreshCapturedShareView(input, records),
-      );
+    refreshCaptured: (input: Parameters<typeof refreshCapturedShareView>[0]) => {
+      return active(input, (records) => refreshCapturedShareView(input, records));
     },
-    reconcileStandalone: (
-      input: Parameters<typeof reconcileStandaloneShareView>[0],
-    ) => {
-      return active(input, (records) =>
-        reconcileStandaloneShareView(input, records),
-      );
+    reconcileStandalone: (input: Parameters<typeof reconcileStandaloneShareView>[0]) => {
+      return active(input, (records) => reconcileStandaloneShareView(input, records));
     },
   };
 }

@@ -1,7 +1,5 @@
 use super::*;
 
-/// (metadata_summary, metadata_correlation_id) of the latest secret
-/// moment for `path`.
 fn secret_moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
     let store = EngineStore::open(db, 100).expect("reopen store");
     store
@@ -17,8 +15,6 @@ fn secret_moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<Stri
         .expect("secret moment metadata")
 }
 
-/// (metadata_summary, metadata_correlation_id) of the latest moment for
-/// `path`.
 fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
     let store = EngineStore::open(db, 100).expect("reopen store");
     store
@@ -38,7 +34,6 @@ fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
 fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
     let scratch = ScratchDir::new().expect("scratch");
     let supervisor = WorkspaceSupervisor::new();
-    // A pre-pass live capture that the reconcile pass will DELETE.
     write_file(scratch.path(), "gone.md", b"deleted while closed");
     let (db, mut live_sink) = sink_for(&scratch, &supervisor);
     assert!(
@@ -111,7 +106,6 @@ fn a_first_import_labels_its_secrets_and_an_edit_keeps_the_per_file_label() {
     let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine db path");
     write_file(scratch.path(), ".env", b"TOKEN=existing");
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
-    // The pass that opens a new workspace carries only the import's id.
     let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
         cancel: dohc_engine_files::CancellationToken::new(),
         provenance: CaptureProvenance {
@@ -219,8 +213,6 @@ fn content_kind_transitions_get_honest_moment_summaries() {
         ingest(&mut sink, "notes/flip.md").expect("text ingest"),
         IngestOutcome::Captured { .. }
     ));
-    // Binary in disguise under a text suffix: invalid UTF-8 routes to the
-    // binary store and the moment records the flip.
     write_file(scratch.path(), "notes/flip.md", &[0xff, 0x00, 0xfe]);
     assert!(matches!(
         ingest(&mut sink, "notes/flip.md").expect("flip to binary"),
@@ -247,7 +239,6 @@ fn suppression_keeps_multiple_pending_identities_per_path() {
     // registry — the in-order case consumes sha2 for the first event
     // (mismatch → ingest) and this test fails.
     let writes = SelfWriteSuppression::default();
-    // In-order delivery: each event consumes its own identity.
     writes.record("ws", "a.md", "sha1");
     writes.record("ws", "a.md", "sha2");
     assert!(writes.consume("ws", "a.md", "sha1"));
@@ -267,7 +258,6 @@ fn suppression_keeps_multiple_pending_identities_per_path() {
     writes.record("ws", "a.md", "sha1");
     assert!(!writes.consume("ws", "a.md", "external"));
     assert!(!writes.consume("ws", "a.md", "sha1"), "cleared by mismatch");
-    // A stale retract removes only its own identity.
     writes.record("ws", "a.md", "sha1");
     writes.record("ws", "a.md", "sha2");
     dohc_engine_runtime::SelfWriteRecorder::retract(&writes, "ws", "a.md", "sha1");

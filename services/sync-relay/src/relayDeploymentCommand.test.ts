@@ -15,7 +15,9 @@ const TEST_TIMEOUT_MS = 90_000;
 const RUN_TIMEOUT_MS = 30_000;
 vi.setConfig({ testTimeout: TEST_TIMEOUT_MS });
 let testDeadline = 0;
-beforeEach(() => { testDeadline = Date.now() + TEST_TIMEOUT_MS - 5_000; });
+beforeEach(() => {
+  testDeadline = Date.now() + TEST_TIMEOUT_MS - 5_000;
+});
 const runTimeout = () => Math.max(1, Math.min(RUN_TIMEOUT_MS, testDeadline - Date.now()));
 
 const exec = promisify(execFile);
@@ -28,18 +30,27 @@ beforeAll(async () => {
   command = join(root, "relay-deployment.mjs");
   await build({
     entryPoints: [fileURLToPath(new URL("./relayDeploymentCommand.ts", import.meta.url))],
-    outfile: command, bundle: true, platform: "node", format: "esm", target: "node24",
-    external: ["better-auth", "better-auth/*", "pg"], logLevel: "silent",
+    outfile: command,
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    target: "node24",
+    external: ["better-auth", "better-auth/*", "pg"],
+    logLevel: "silent",
   });
   // Beside 32 CPU burners this bundle overran the 10 s hook default.
 }, 30_000);
 
-afterAll(async () => { if (root) await rm(root, { recursive: true, force: true }); });
+afterAll(async () => {
+  if (root) await rm(root, { recursive: true, force: true });
+});
 
 async function run(args: string[]) {
   try {
     const result = await exec(process.execPath, [command, ...args], {
-      windowsHide: true, timeout: runTimeout(), env: { ...process.env, NODE_OPTIONS: "" },
+      windowsHide: true,
+      timeout: runTimeout(),
+      env: { ...process.env, NODE_OPTIONS: "" },
     });
     return { code: 0, ...result };
   } catch (error) {
@@ -53,27 +64,47 @@ function paths(name: string) {
   const config = join(directory, "deployment.json");
   const database = join(directory, "relay", "relay.sqlite");
   const continuity = join(directory, "continuity");
-  return { directory, config, database, continuity,
-    args: ["initialize", "--config", config, "--database", database, "--continuity-directory", continuity] };
+  return {
+    directory,
+    config,
+    database,
+    continuity,
+    args: [
+      "initialize",
+      "--config",
+      config,
+      "--database",
+      database,
+      "--continuity-directory",
+      continuity,
+    ],
+  };
 }
 
 it("initializes a fresh deployment once and preserves it on a repeated command", async () => {
   const target = paths("fresh");
   const result = await run(target.args);
-  expect(result, result.stderr).toMatchObject({ code: 0,
-    stdout: `Relay deployment initialized.\nDeployment config: ${JSON.stringify(target.config)}\n` });
+  expect(result, result.stderr).toMatchObject({
+    code: 0,
+    stdout: `Relay deployment initialized.\nDeployment config: ${JSON.stringify(target.config)}\n`,
+  });
   const before = await readFile(target.config);
   const { storage } = openRelayDeployment(target.config);
   try {
-    expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 })).toBe("created");
+    expect(
+      storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 }),
+    ).toBe("created");
   } finally {
     storage.close();
   }
   expect(await run(target.args)).toMatchObject({ code: 1, stdout: "" });
   expect(await readFile(target.config)).toEqual(before);
   const reopened = openRelayDeployment(target.config).storage;
-  try { expect(reopened.workspaceIsOwnedBy("workspace", "owner")).toBe(true); }
-  finally { reopened.close(); }
+  try {
+    expect(reopened.workspaceIsOwnedBy("workspace", "owner")).toBe(true);
+  } finally {
+    reopened.close();
+  }
 });
 
 it("refuses to adopt an existing database", async () => {
@@ -95,28 +126,55 @@ it("provisions a service host once without opening admission or replacing its id
   expect(await run([...provision.slice(0, -1), "different"])).toMatchObject({ code: 1 });
   const { storage } = openRelayDeployment(target.config);
   try {
-    expect(storage.getLiveHostControl()).toMatchObject({ configuredMode: "service", configuredHostId: "service",
-      hostEpoch: 1, admissionState: "closed", registeredInstanceId: null });
-  } finally { storage.close(); }
+    expect(storage.getLiveHostControl()).toMatchObject({
+      configuredMode: "service",
+      configuredHostId: "service",
+      hostEpoch: 1,
+      admissionState: "closed",
+      registeredInstanceId: null,
+    });
+  } finally {
+    storage.close();
+  }
 });
 
 it("refuses service provisioning over a device host", async () => {
   const target = paths("device");
   expect(await run(target.args)).toMatchObject({ code: 0 });
   const { storage } = openRelayDeployment(target.config);
-  try { storage.provisionLiveHostControl({ mode: "device", hostId: "device", updatedAtMs: 1, guard: storage.captureStanding() }); }
-  finally { storage.close(); }
-  expect(await run(["provision-service", "--config", target.config, "--host-id", "device"])).toMatchObject({ code: 1 });
+  try {
+    storage.provisionLiveHostControl({
+      mode: "device",
+      hostId: "device",
+      updatedAtMs: 1,
+      guard: storage.captureStanding(),
+    });
+  } finally {
+    storage.close();
+  }
+  expect(
+    await run(["provision-service", "--config", target.config, "--host-id", "device"]),
+  ).toMatchObject({ code: 1 });
   const reopened = openRelayDeployment(target.config).storage;
-  try { expect(reopened.getLiveHostControl()).toMatchObject({ configuredMode: "device", configuredHostId: "device", hostEpoch: 1 }); }
-  finally { reopened.close(); }
+  try {
+    expect(reopened.getLiveHostControl()).toMatchObject({
+      configuredMode: "device",
+      configuredHostId: "device",
+      hostEpoch: 1,
+    });
+  } finally {
+    reopened.close();
+  }
 });
 
-it.each(["restore", "reset"])("refuses the unsupported %s action before creating files", async action => {
-  const target = paths(action);
-  expect(await run([action, ...target.args.slice(1)])).toMatchObject({ code: 1, stdout: "" });
-  await expect(stat(target.directory)).rejects.toMatchObject({ code: "ENOENT" });
-});
+it.each(["restore", "reset"])(
+  "refuses the unsupported %s action before creating files",
+  async (action) => {
+    const target = paths(action);
+    expect(await run([action, ...target.args.slice(1)])).toMatchObject({ code: 1, stdout: "" });
+    await expect(stat(target.directory)).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
 
 it("refuses duplicate arguments, relative paths, and bypass flags", async () => {
   const target = paths("invalid");

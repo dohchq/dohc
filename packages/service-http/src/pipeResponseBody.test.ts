@@ -108,7 +108,12 @@ describe("pipeResponseBody", () => {
           { highWaterMark: 0 },
         );
         const outgoing = new ControlledResponse();
-        return { source, body, outgoing, piping: pipeResponseBody(new Response(body, { headers }), response(outgoing)) };
+        return {
+          source,
+          body,
+          outgoing,
+          piping: pipeResponseBody(new Response(body, { headers }), response(outgoing)),
+        };
       };
       const held = piped({ [DRAIN_TIMEOUT_HEADER]: "1" });
       const download = piped({});
@@ -117,7 +122,6 @@ describe("pipeResponseBody", () => {
         expect(download.outgoing.writes).toHaveLength(1);
       });
 
-      // A slow client that drains within the timeout keeps its response.
       await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS - 1_000);
       held.outgoing.emit("drain");
       await vi.waitFor(() => expect(held.outgoing.writes).toHaveLength(2));
@@ -131,7 +135,6 @@ describe("pipeResponseBody", () => {
       expect(held.body.locked).toBe(false);
       expect(held.outgoing.writes).toHaveLength(2);
 
-      // The ordinary download, paused for the same two minutes and more, resumes where it stopped.
       await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS);
       expect(download.outgoing.destroyed).toBe(false);
       for (const written of [2, 3]) {
@@ -150,7 +153,10 @@ describe("pipeResponseBody", () => {
 
   it("ends a response without a body", async () => {
     const outgoing = new ControlledResponse();
-    await pipeResponseBody(new Response(null, { headers: { [DRAIN_TIMEOUT_HEADER]: "1" } }), response(outgoing));
+    await pipeResponseBody(
+      new Response(null, { headers: { [DRAIN_TIMEOUT_HEADER]: "1" } }),
+      response(outgoing),
+    );
     expect(outgoing.writableFinished).toBe(true);
   });
 });

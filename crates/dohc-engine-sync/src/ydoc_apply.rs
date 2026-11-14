@@ -176,8 +176,6 @@ fn not_own_host(o: &str) -> String {
     )
 }
 
-/// Whether `key`'s queued row at (`origin_id`, `origin_seq`) is one the
-/// owner holds ([`owner_held`]).
 fn owner_held_row(
     conn: &Connection,
     key: &DocKey,
@@ -3218,7 +3216,6 @@ pub fn prepare_local_ydoc_lineage_in_tx(
 /// What capture does with its prepared lineage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureLineage {
-    /// Fold the captured file into the lineage as ever.
     Fold,
     /// The file holds the bytes capture last recorded, over a released
     /// chain's tail: keep the lineage as it is and write nothing.
@@ -3398,7 +3395,6 @@ fn hold_archived_lineage(
     )?))
 }
 
-/// What released protection decides for a synced row.
 enum ReleasedDecision {
     /// No released tail protects the head's lineage.
     Unprotected,
@@ -4766,7 +4762,6 @@ fn projection_held_in_tx(
 
 /// What folding a file's text into its Y.Doc lineage did.
 pub(crate) enum LineageFold {
-    /// The lineage holds no content: the file alone carries the text.
     NoContent,
     /// The lineage holds the text now, with the record fields its append
     /// changed, if any. Boxed, since the facts dwarf the empty variant.
@@ -4899,7 +4894,6 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
     }
 }
 
-/// What an imported text head does to the object's closed Y.Doc lineage.
 pub(crate) enum ImportedTextHead {
     /// The lineage holds no content the text would replace. Settle its
     /// marker to the text, if there is a marker.
@@ -5113,12 +5107,6 @@ pub fn fold_resolution_into_ydoc_in_tx(
         DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "conflict resolution coordinates are invalid",
         })?;
-    // Acked-but-parked remote updates for this object were never part of
-    // either reviewed side, and the drain that lands them runs after the
-    // review gate would have closed. Refuse the resolution while they are
-    // queued: a resync or session close drains them, the open conflict
-    // coalesces to the freshest incoming state, and the user resolves what
-    // they can actually see.
     let complete = match ydoc_lineage_completeness_in_tx(tx, &key)? {
         YdocLineageCompleteness::Complete(complete) => complete,
         YdocLineageCompleteness::DeferredUpdates => {
@@ -7848,7 +7836,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     }
     let search_policy = search_policy_for_store(store);
     // Gate on the same floor the projection sink applies
-    // (`validate_plaintext_storable_path`) rather than R10's narrow
+    // (`validate_plaintext_storable_path`) rather than the narrow
     // share-boundary classifier, which misses reserved 8.3 aliases (`dohc~1`
     // aliases `.dohc`) and dots-and-spaces segments. The path is persisted as a
     // durable alias key, so it must already be canonical.
@@ -9559,7 +9547,6 @@ fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncErr
         DomainError::InvalidText { .. }
         | DomainError::InvalidPath { .. }
         | DomainError::InvalidInput { .. } => SyncError::InvalidInput { reason },
-        // Everything else is a hard failure.
         hard => map_domain_hard_error(hard),
     }
 }

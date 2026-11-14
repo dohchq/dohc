@@ -10,8 +10,26 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { CalendarDays, ChevronDown, Database, Pencil, Plus, Search, SlidersHorizontal, SquareKanban, Table2, Trash2, Zap } from "lucide-react";
-import { FieldError, GhostButton, IconButton, PrimaryButton, SecondaryButton } from "../ui/controls";
+import {
+  CalendarDays,
+  ChevronDown,
+  Database,
+  Pencil,
+  Plus,
+  Search,
+  SlidersHorizontal,
+  SquareKanban,
+  Table2,
+  Trash2,
+  Zap,
+} from "lucide-react";
+import {
+  FieldError,
+  GhostButton,
+  IconButton,
+  PrimaryButton,
+  SecondaryButton,
+} from "../ui/controls";
 import { MENU_EDGE_PX, MENU_GAP_PX, Menu, type MenuEntry, type MenuItem } from "../ui/Menu";
 import { useDismiss } from "../ui/useDismiss";
 import { inputClass, selectClass } from "./FieldForm";
@@ -31,7 +49,8 @@ const VIEW_KINDS: ReadonlyArray<{ kind: CollectionViewKind; name: string; icon: 
   { kind: "board", name: "Board", icon: SquareKanban },
   { kind: "calendar", name: "Calendar", icon: CalendarDays },
 ];
-const kindOf = (kind: CollectionViewKind) => VIEW_KINDS.find((entry) => entry.kind === kind) ?? VIEW_KINDS[0]!;
+const kindOf = (kind: CollectionViewKind) =>
+  VIEW_KINDS.find((entry) => entry.kind === kind) ?? VIEW_KINDS[0]!;
 
 export interface CollectionFrameTab {
   id: string;
@@ -49,24 +68,18 @@ export interface CollectionFrameField {
 export interface NewCollectionView {
   name: string;
   kind: CollectionViewKind;
-  /** The field a board groups by. */
   groupBy?: string;
-  /** The date field a calendar places records by. */
   dateField?: string;
 }
 
 /** What someone who can save views does with them. Without it, the tabs only switch. */
 export interface CollectionFrameViews {
-  /** The fields a board can group by. */
   groupFields: readonly CollectionFrameField[];
-  /** The fields a calendar can place records by. */
   dateFields: readonly CollectionFrameField[];
-  /** Opens the way to add a date field, where this person can add one. */
   onAddDateField?: () => void;
   nameMaxLength?: number;
   /** Saves a new view and opens it. Answers what went wrong as a sentence, or null. */
   create: (view: NewCollectionView) => Promise<string | null>;
-  /** Answers what went wrong as a sentence, or null. */
   rename: (id: string, name: string) => Promise<string | null>;
   /** Deletes a view. The page reports a failure, and offers Undo where it has one. */
   remove: (id: string) => void;
@@ -80,7 +93,6 @@ export interface CollectionFrameViews {
 export interface CollectionFrameViewField {
   /** What the choice is, such as "Group board by": the menu's name and the control's tooltip. */
   label: string;
-  /** The words before the chosen field's name, such as "Group by". */
   prefix: string;
   value: string | undefined;
   options: readonly CollectionFrameField[];
@@ -92,7 +104,6 @@ export interface CollectionFrameCommand {
   id: string;
   label: string;
   icon?: ReactNode;
-  /** A count after the label, such as the Collection's automations. */
   count?: number;
   onSelect: () => void;
   disabled?: boolean;
@@ -128,8 +139,12 @@ export interface CollectionFrameProps extends Omit<HTMLAttributes<HTMLElement>, 
   tabsDisabled?: boolean;
   views?: CollectionFrameViews;
   viewField?: CollectionFrameViewField;
-  search?: { value: string; onChange: (value: string) => void; onSubmit: () => void; disabled?: boolean };
-  /** The page's own buttons, between the search and the Automations button. */
+  search?: {
+    value: string;
+    onChange: (value: string) => void;
+    onSubmit: () => void;
+    disabled?: boolean;
+  };
   actions?: readonly CollectionFrameAction[];
   /** `disabled`: what holds the side panel must end before the ⚡ panel can take it. */
   automations?: { open: boolean; count: number; onToggle: () => void; disabled?: boolean };
@@ -143,7 +158,25 @@ export interface CollectionFrameProps extends Omit<HTMLAttributes<HTMLElement>, 
 }
 
 export function CollectionFrame({
-  name, count, status, tabs, activeTabId, onSelectTab, tabsDisabled = false, views, viewField, search, actions, automations, newRecord, menuLabel, menu, panel, children, className, ...rest
+  name,
+  count,
+  status,
+  tabs,
+  activeTabId,
+  onSelectTab,
+  tabsDisabled = false,
+  views,
+  viewField,
+  search,
+  actions,
+  automations,
+  newRecord,
+  menuLabel,
+  menu,
+  panel,
+  children,
+  className,
+  ...rest
 }: CollectionFrameProps) {
   return (
     <section
@@ -154,13 +187,21 @@ export function CollectionFrame({
     >
       <header className="flex shrink-0 items-center gap-2 px-5 pt-4">
         <h1 className="m-0 flex min-w-0 items-center gap-2 text-base font-semibold text-ink">
-          <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-md bg-panel-2 text-muted">
+          <span
+            aria-hidden
+            className="grid size-6 shrink-0 place-items-center rounded-md bg-panel-2 text-muted"
+          >
             <Database size={14} strokeWidth={1.9} />
           </span>
           <span className="truncate">{name}</span>
         </h1>
         {count !== undefined ? (
-          <span data-testid="collection-record-count" className="shrink-0 text-[12px] tabular-nums text-muted">{count}</span>
+          <span
+            data-testid="collection-record-count"
+            className="shrink-0 text-[12px] tabular-nums text-muted"
+          >
+            {count}
+          </span>
         ) : null}
         <span className="flex-1" />
         {status}
@@ -172,23 +213,44 @@ export function CollectionFrame({
       */}
       <div className="flex shrink-0 flex-wrap items-stretch pt-2">
         <div className="flex min-w-48 flex-[999_1_0%] items-center gap-1 border-b border-line pl-3">
-          <ViewTabs tabs={tabs} activeId={activeTabId} onSelect={onSelectTab} disabled={tabsDisabled} views={views} />
+          <ViewTabs
+            tabs={tabs}
+            activeId={activeTabId}
+            onSelect={onSelectTab}
+            disabled={tabsDisabled}
+            views={views}
+          />
           <span className="flex-1" />
-          {viewField && viewField.options.length > 0 ? <ViewFieldControl field={viewField} disabled={tabsDisabled} /> : null}
+          {viewField && viewField.options.length > 0 ? (
+            <ViewFieldControl field={viewField} disabled={tabsDisabled} />
+          ) : null}
         </div>
         <div className="flex grow flex-wrap items-center justify-end gap-1 border-b border-line py-1 pl-2 pr-3">
           {search ? <SearchBox search={search} /> : null}
           {actions?.map((action) => (
-            <SecondaryButton key={action.id} disabled={action.disabled} onClick={action.onClick} className="inline-flex shrink-0 items-center gap-2">
+            <SecondaryButton
+              key={action.id}
+              disabled={action.disabled}
+              onClick={action.onClick}
+              className="inline-flex shrink-0 items-center gap-2"
+            >
               {action.icon}
               {action.label}
             </SecondaryButton>
           ))}
           {automations && (automations.count > 0 || automations.open) ? (
-            <GhostButton size="toolbar" data-testid="collection-automations-button" aria-pressed={automations.open} disabled={automations.disabled} onClick={automations.onToggle}>
+            <GhostButton
+              size="toolbar"
+              data-testid="collection-automations-button"
+              aria-pressed={automations.open}
+              disabled={automations.disabled}
+              onClick={automations.onToggle}
+            >
               <Zap size={14} strokeWidth={1.9} aria-hidden />
               Automations
-              {automations.count > 0 ? <span className="text-[12px] tabular-nums text-subtle">{automations.count}</span> : null}
+              {automations.count > 0 ? (
+                <span className="text-[12px] tabular-nums text-subtle">{automations.count}</span>
+              ) : null}
             </GhostButton>
           ) : null}
           <ActionsMenu label={menuLabel} sections={menu} />
@@ -236,7 +298,13 @@ function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["searc
         onChange={(event) => search.onChange(event.target.value)}
         className={`${inputClass.replace("w-full", "h-8 w-44").replace("px-2.5", "pl-8 pr-2")}`}
       />
-      <IconButton type="submit" aria-label="Search" title="Search" disabled={search.disabled} className="absolute left-1">
+      <IconButton
+        type="submit"
+        aria-label="Search"
+        title="Search"
+        disabled={search.disabled}
+        className="absolute left-1"
+      >
         <Search size={14} strokeWidth={1.9} aria-hidden />
       </IconButton>
     </form>
@@ -244,48 +312,80 @@ function SearchBox({ search }: { search: NonNullable<CollectionFrameProps["searc
 }
 
 /** The one menu for everything else: its own open state, so opening it draws nothing else again. */
-function ActionsMenu({ label, sections }: { label: string; sections: readonly CollectionFrameMenuSection[] }) {
+function ActionsMenu({
+  label,
+  sections,
+}: {
+  label: string;
+  sections: readonly CollectionFrameMenuSection[];
+}) {
   const [open, setOpen] = useState(false);
   const items: MenuEntry[] = sections.flatMap((section) => {
-    const commands = section.commands.filter((command): command is CollectionFrameCommand => !!command);
+    const commands = section.commands.filter(
+      (command): command is CollectionFrameCommand => !!command,
+    );
     if (commands.length === 0) return [];
-    return [{ section: section.label }, ...commands.map((command): MenuItem => ({
-      id: command.id,
-      label: command.count !== undefined && command.count > 0 ? (
-        <span className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate">{command.label}</span>
-          <span className="text-[12px] tabular-nums text-subtle">{command.count}</span>
-        </span>
-      ) : command.label,
-      icon: command.icon,
-      onSelect: command.onSelect,
-      disabled: command.disabled,
-      description: command.disabled ? command.reason : undefined,
-      testId: command.testId,
-    }))];
+    return [
+      { section: section.label },
+      ...commands.map((command): MenuItem => ({
+        id: command.id,
+        label:
+          command.count !== undefined && command.count > 0 ? (
+            <span className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate">{command.label}</span>
+              <span className="text-[12px] tabular-nums text-subtle">{command.count}</span>
+            </span>
+          ) : (
+            command.label
+          ),
+        icon: command.icon,
+        onSelect: command.onSelect,
+        disabled: command.disabled,
+        description: command.disabled ? command.reason : undefined,
+        testId: command.testId,
+      })),
+    ];
   });
   if (items.length === 0) return null;
   return <Menu label={label} open={open} onOpenChange={setOpen} width={224} items={items} />;
 }
 
-function ViewFieldControl({ field, disabled }: { field: CollectionFrameViewField; disabled: boolean }) {
+function ViewFieldControl({
+  field,
+  disabled,
+}: {
+  field: CollectionFrameViewField;
+  disabled: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const held = disabled || field.disabled === true;
   // A control that is held closes its menu.
   useEffect(() => {
     if (held) setOpen(false);
   }, [held]);
-  const chosen = field.options.find((option) => option.id === field.value)?.name ?? "Choose a field";
+  const chosen =
+    field.options.find((option) => option.id === field.value)?.name ?? "Choose a field";
   return (
     <Menu
       label={field.label}
       open={open && !held}
       onOpenChange={setOpen}
       width={192}
-      items={field.options.map((option) => ({ id: option.id, label: option.name, checked: option.id === field.value, onSelect: () => field.onChange(option.id) }))}
+      items={field.options.map((option) => ({
+        id: option.id,
+        label: option.name,
+        checked: option.id === field.value,
+        onSelect: () => field.onChange(option.id),
+      }))}
       trigger={(trigger) => (
         // The two parts read as one name. The tooltip says what the choice is for.
-        <GhostButton {...trigger} aria-label={`${field.prefix} ${chosen}`} title={field.label} disabled={held} className="shrink-0">
+        <GhostButton
+          {...trigger}
+          aria-label={`${field.prefix} ${chosen}`}
+          title={field.label}
+          disabled={held}
+          className="shrink-0"
+        >
           <span className="text-subtle">{field.prefix}</span>
           <span className="max-w-32 truncate">{chosen}</span>
           <ChevronDown size={12} strokeWidth={1.9} aria-hidden />
@@ -345,7 +445,11 @@ function ViewTabs(props: {
     deleted.current = null;
     // Focus the person has since moved out of the tabs stays where they put it.
     const focused = document.activeElement;
-    if (focused === document.body || [...tabButtons.current.values()].some((button) => button === focused)) tabButtons.current.get(stop ?? "")?.focus();
+    if (
+      focused === document.body ||
+      [...tabButtons.current.values()].some((button) => button === focused)
+    )
+      tabButtons.current.get(stop ?? "")?.focus();
   });
 
   // A pick closes the menu and puts focus on the tab, so what the pick opens returns focus there.
@@ -355,22 +459,41 @@ function ViewTabs(props: {
   };
   const menuItems = (tab: CollectionFrameTab): MenuItem[] => {
     if (!views || !tab.saved) return [];
-    const items: MenuItem[] = [{
-      id: "rename", label: "Rename", icon: <Pencil size={14} strokeWidth={1.9} aria-hidden />,
-      onSelect: () => {
-        picked(tab);
-        if (held) return;
-        renameAnchor.current = tabButtons.current.get(tab.id) ?? null;
-        setAdding(false);
-        setRenaming(tab.id);
+    const items: MenuItem[] = [
+      {
+        id: "rename",
+        label: "Rename",
+        icon: <Pencil size={14} strokeWidth={1.9} aria-hidden />,
+        onSelect: () => {
+          picked(tab);
+          if (held) return;
+          renameAnchor.current = tabButtons.current.get(tab.id) ?? null;
+          setAdding(false);
+          setRenaming(tab.id);
+        },
       },
-    }];
+    ];
     const onEdit = views.onEdit;
-    if (onEdit) items.push({ id: "edit", label: "Edit view…", icon: <SlidersHorizontal size={14} strokeWidth={1.9} aria-hidden />, onSelect: () => { picked(tab); onEdit(tab.id); } });
+    if (onEdit)
+      items.push({
+        id: "edit",
+        label: "Edit view…",
+        icon: <SlidersHorizontal size={14} strokeWidth={1.9} aria-hidden />,
+        onSelect: () => {
+          picked(tab);
+          onEdit(tab.id);
+        },
+      });
     items.push({
-      id: "delete", label: armed ? "Confirm delete" : "Delete", danger: true, icon: <Trash2 size={14} strokeWidth={1.9} aria-hidden />,
+      id: "delete",
+      label: armed ? "Confirm delete" : "Delete",
+      danger: true,
+      icon: <Trash2 size={14} strokeWidth={1.9} aria-hidden />,
       onSelect: () => {
-        if (views.confirmDelete && !armed) { setArmed(true); return; }
+        if (views.confirmDelete && !armed) {
+          setArmed(true);
+          return;
+        }
         picked(tab);
         deleted.current = tab.id;
         views.remove(tab.id);
@@ -383,8 +506,16 @@ function ViewTabs(props: {
   function onStripKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const at = tabs.findIndex((tab) => tabButtons.current.get(tab.id) === event.target);
     if (at < 0) return;
-    const next = event.key === "ArrowRight" ? (at + 1) % tabs.length : event.key === "ArrowLeft" ? (at - 1 + tabs.length) % tabs.length
-      : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : -1;
+    const next =
+      event.key === "ArrowRight"
+        ? (at + 1) % tabs.length
+        : event.key === "ArrowLeft"
+          ? (at - 1 + tabs.length) % tabs.length
+          : event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? tabs.length - 1
+              : -1;
     if (next >= 0) {
       event.preventDefault();
       tabButtons.current.get(tabs[next]!.id)?.focus();
@@ -392,7 +523,11 @@ function ViewTabs(props: {
     }
     // The keyboard's context menu key opens a tab's menu under it.
     const tab = tabs[at]!;
-    if ((event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) && !disabled && menuItems(tab).length > 0) {
+    if (
+      (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) &&
+      !disabled &&
+      menuItems(tab).length > 0
+    ) {
       event.preventDefault();
       const box = tabButtons.current.get(tab.id)?.getBoundingClientRect();
       setMenu({ id: tab.id, at: { x: box?.left ?? 0, y: box?.bottom ?? 0 }, keyboard: true });
@@ -414,7 +549,10 @@ function ViewTabs(props: {
           const items = menuItems(tab);
           return (
             // Keyed by place, so a tab whose view is renamed keeps its button, and the focus on it.
-            <span key={index} className={`flex h-10 shrink-0 items-center border-b-2 ${active ? "border-ink" : "border-transparent"}`}>
+            <span
+              key={index}
+              className={`flex h-10 shrink-0 items-center border-b-2 ${active ? "border-ink" : "border-transparent"}`}
+            >
               <button
                 ref={(element) => {
                   if (element) tabButtons.current.set(tab.id, element);
@@ -431,7 +569,11 @@ function ViewTabs(props: {
                 onContextMenu={(event) => {
                   if (disabled || items.length === 0) return;
                   event.preventDefault();
-                  setMenu({ id: tab.id, at: { x: event.clientX, y: event.clientY }, keyboard: false });
+                  setMenu({
+                    id: tab.id,
+                    at: { x: event.clientX, y: event.clientY },
+                    keyboard: false,
+                  });
                 }}
                 className={`flex h-8 items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors duration-75 disabled:text-subtle ${
                   active ? "text-ink" : "text-muted enabled:hover:text-ink"
@@ -444,12 +586,20 @@ function ViewTabs(props: {
                 <Menu
                   label="View actions"
                   open={menu?.id === tab.id && menu.at === undefined}
-                  onOpenChange={(open) => (open ? setMenu({ id: tab.id, keyboard: false }) : closeMenu())}
+                  onOpenChange={(open) =>
+                    open ? setMenu({ id: tab.id, keyboard: false }) : closeMenu()
+                  }
                   closeOnPick={false}
                   align="start"
                   items={items}
                   trigger={(trigger) => (
-                    <IconButton {...trigger} aria-label="View actions" title="View actions" disabled={disabled} className="shrink-0">
+                    <IconButton
+                      {...trigger}
+                      aria-label="View actions"
+                      title="View actions"
+                      disabled={disabled}
+                      className="shrink-0"
+                    >
                       <ChevronDown size={12} strokeWidth={1.9} aria-hidden />
                     </IconButton>
                   )}
@@ -494,12 +644,31 @@ function ViewTabs(props: {
       ) : null}
       {views && adding ? (
         <Popover anchor={addButton} label="Add a view" held={held} onClose={() => setAdding(false)}>
-          <AddViewForm views={views} taken={names} paused={disabled} onHeld={setHeld} onDone={() => setAdding(false)} />
+          <AddViewForm
+            views={views}
+            taken={names}
+            paused={disabled}
+            onHeld={setHeld}
+            onDone={() => setAdding(false)}
+          />
         </Popover>
       ) : null}
       {views && renamed ? (
-        <Popover anchor={renameAnchor} label={`Rename ${renamed.name}`} held={held} onClose={() => setRenaming(null)}>
-          <RenameViewForm key={renamed.id} views={views} tab={renamed} taken={names} paused={disabled} onHeld={setHeld} onDone={() => setRenaming(null)} />
+        <Popover
+          anchor={renameAnchor}
+          label={`Rename ${renamed.name}`}
+          held={held}
+          onClose={() => setRenaming(null)}
+        >
+          <RenameViewForm
+            key={renamed.id}
+            views={views}
+            tab={renamed}
+            taken={names}
+            paused={disabled}
+            onHeld={setHeld}
+            onDone={() => setRenaming(null)}
+          />
         </Popover>
       ) : null}
     </>
@@ -513,19 +682,35 @@ const POPOVER_WIDTH_PX = 272;
  * closes as a menu does: Escape, a press outside, focus leaving, or the
  * anchor again, and focus then returns to the anchor. While `held`, it stays.
  */
-function Popover(props: { anchor: RefObject<HTMLElement | null>; label: string; held: boolean; onClose: () => void; children: ReactNode }) {
+function Popover(props: {
+  anchor: RefObject<HTMLElement | null>;
+  label: string;
+  held: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) {
   const panel = useRef<HTMLDivElement | null>(null);
   const [place, setPlace] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
   const held = useRef(props.held);
   held.current = props.held;
-  useDismiss({ open: true, container: panel, trigger: props.anchor, onClose: () => { if (!held.current) props.onClose(); } });
+  useDismiss({
+    open: true,
+    container: panel,
+    trigger: props.anchor,
+    onClose: () => {
+      if (!held.current) props.onClose();
+    },
+  });
   // Placed before the first paint, as a menu is.
   useLayoutEffect(() => {
     const box = props.anchor.current?.getBoundingClientRect();
     if (!box) return;
     const top = box.bottom + MENU_GAP_PX;
     setPlace({
-      left: Math.max(MENU_EDGE_PX, Math.min(box.left, window.innerWidth - MENU_EDGE_PX - POPOVER_WIDTH_PX)),
+      left: Math.max(
+        MENU_EDGE_PX,
+        Math.min(box.left, window.innerWidth - MENU_EDGE_PX - POPOVER_WIDTH_PX),
+      ),
       top,
       maxHeight: Math.max(0, window.innerHeight - top - MENU_EDGE_PX),
     });
@@ -535,9 +720,16 @@ function Popover(props: { anchor: RefObject<HTMLElement | null>; label: string; 
       ref={panel}
       role="dialog"
       aria-label={props.label}
-      style={{ width: POPOVER_WIDTH_PX, left: place?.left ?? 0, top: place?.top ?? 0, maxHeight: place?.maxHeight }}
+      style={{
+        width: POPOVER_WIDTH_PX,
+        left: place?.left ?? 0,
+        top: place?.top ?? 0,
+        maxHeight: place?.maxHeight,
+      }}
       // One Escape closes one surface: useDismiss closed this one.
-      onKeyDown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") event.stopPropagation();
+      }}
       className={`dohc-popover fixed z-40 overflow-y-auto rounded-xl border border-line bg-panel p-3 ${place ? "dohc-pop-in" : ""}`}
     >
       {props.children}
@@ -560,7 +752,9 @@ function useAlive(): RefObject<boolean> {
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
-    return () => { alive.current = false; };
+    return () => {
+      alive.current = false;
+    };
   }, []);
   return alive;
 }
@@ -568,7 +762,13 @@ function useAlive(): RefObject<boolean> {
 type Problem = { at: "name" | "group" | "date" | "form"; text: string };
 
 /** `paused`: the page holds its tabs, so a form kept open for its answer saves nothing more until they are free. */
-function AddViewForm(props: { views: CollectionFrameViews; taken: readonly string[]; paused: boolean; onHeld: (held: boolean) => void; onDone: () => void }) {
+function AddViewForm(props: {
+  views: CollectionFrameViews;
+  taken: readonly string[];
+  paused: boolean;
+  onHeld: (held: boolean) => void;
+  onDone: () => void;
+}) {
   const { views, taken } = props;
   const ids = useId();
   const alive = useAlive();
@@ -584,8 +784,12 @@ function AddViewForm(props: { views: CollectionFrameViews; taken: readonly strin
   const form = useRef<HTMLFormElement | null>(null);
   const name = typed ?? freeViewName(kind, taken);
   // A date field added while the popover is open is chosen.
-  const chosenDate = views.dateFields.some((field) => field.id === dateField) ? dateField : views.dateFields[0]?.id ?? "";
-  const chosenGroup = views.groupFields.some((field) => field.id === groupBy) ? groupBy : views.groupFields[0]?.id ?? "";
+  const chosenDate = views.dateFields.some((field) => field.id === dateField)
+    ? dateField
+    : (views.dateFields[0]?.id ?? "");
+  const chosenGroup = views.groupFields.some((field) => field.id === groupBy)
+    ? groupBy
+    : (views.groupFields[0]?.id ?? "");
   useLayoutEffect(() => {
     nameInput.current?.focus();
     nameInput.current?.select();
@@ -607,12 +811,19 @@ function AddViewForm(props: { views: CollectionFrameViews; taken: readonly strin
     const trimmed = name.trim();
     if (trimmed === "") return fail({ at: "name", text: NAME_MISSING });
     if (taken.includes(trimmed)) return fail({ at: "name", text: nameTaken(trimmed) });
-    if (kind === "board" && chosenGroup === "") return fail({ at: "group", text: "Choose a field to group by." });
-    if (kind === "calendar" && chosenDate === "") return fail({ at: "date", text: "A calendar needs a date field. Add one first." });
+    if (kind === "board" && chosenGroup === "")
+      return fail({ at: "group", text: "Choose a field to group by." });
+    if (kind === "calendar" && chosenDate === "")
+      return fail({ at: "date", text: "A calendar needs a date field. Add one first." });
     setProblem(null);
     setPending(true);
     props.onHeld(true);
-    const failure = await views.create({ name: trimmed, kind, ...(kind === "board" ? { groupBy: chosenGroup } : {}), ...(kind === "calendar" ? { dateField: chosenDate } : {}) });
+    const failure = await views.create({
+      name: trimmed,
+      kind,
+      ...(kind === "board" ? { groupBy: chosenGroup } : {}),
+      ...(kind === "calendar" ? { dateField: chosenDate } : {}),
+    });
     props.onHeld(false);
     if (!alive.current) return;
     setPending(false);
@@ -620,7 +831,8 @@ function AddViewForm(props: { views: CollectionFrameViews; taken: readonly strin
     else setProblem({ at: "form", text: failure });
   }
   const errorId = `${ids}-problem`;
-  const invalid = (at: Problem["at"]) => (problem?.at === at ? { "aria-invalid": true, "aria-describedby": errorId } as const : {});
+  const invalid = (at: Problem["at"]) =>
+    problem?.at === at ? ({ "aria-invalid": true, "aria-describedby": errorId } as const) : {};
   const labelClass = "flex flex-col gap-1 text-[12px] text-muted";
   return (
     <form ref={form} className="flex flex-col gap-3" onSubmit={(event) => void submit(event)}>
@@ -647,7 +859,12 @@ function AddViewForm(props: { views: CollectionFrameViews; taken: readonly strin
           aria-labelledby={`${ids}-layout`}
           className="grid grid-cols-3 gap-2"
           onKeyDown={(event) => {
-            const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+            const step =
+              event.key === "ArrowRight" || event.key === "ArrowDown"
+                ? 1
+                : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                  ? -1
+                  : 0;
             if (step === 0) return;
             event.preventDefault();
             const at = VIEW_KINDS.findIndex((entry) => entry.kind === kind);
@@ -684,17 +901,43 @@ function AddViewForm(props: { views: CollectionFrameViews; taken: readonly strin
       {kind === "board" ? (
         <label className={labelClass}>
           Group by
-          <select disabled={pending} value={chosenGroup} onChange={(event) => { setGroupBy(event.target.value); setProblem(null); }} {...invalid("group")} className={selectClass}>
+          <select
+            disabled={pending}
+            value={chosenGroup}
+            onChange={(event) => {
+              setGroupBy(event.target.value);
+              setProblem(null);
+            }}
+            {...invalid("group")}
+            className={selectClass}
+          >
             {views.groupFields.length === 0 ? <option value="">No field to group by</option> : null}
-            {views.groupFields.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}
+            {views.groupFields.map((field) => (
+              <option key={field.id} value={field.id}>
+                {field.name}
+              </option>
+            ))}
           </select>
         </label>
       ) : null}
       {kind === "calendar" && views.dateFields.length > 0 ? (
         <label className={labelClass}>
           Date field
-          <select disabled={pending} value={chosenDate} onChange={(event) => { setDateField(event.target.value); setProblem(null); }} {...invalid("date")} className={selectClass}>
-            {views.dateFields.map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}
+          <select
+            disabled={pending}
+            value={chosenDate}
+            onChange={(event) => {
+              setDateField(event.target.value);
+              setProblem(null);
+            }}
+            {...invalid("date")}
+            className={selectClass}
+          >
+            {views.dateFields.map((field) => (
+              <option key={field.id} value={field.id}>
+                {field.name}
+              </option>
+            ))}
           </select>
         </label>
       ) : null}
@@ -702,19 +945,37 @@ function AddViewForm(props: { views: CollectionFrameViews; taken: readonly strin
         <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
           <span>This Collection has no date field.</span>
           {views.onAddDateField ? (
-            <SecondaryButton size="row" disabled={pending} {...(problem?.at === "date" ? { "data-problem": "", "aria-describedby": errorId } : {})} onClick={views.onAddDateField}>Add a date field</SecondaryButton>
+            <SecondaryButton
+              size="row"
+              disabled={pending}
+              {...(problem?.at === "date"
+                ? { "data-problem": "", "aria-describedby": errorId }
+                : {})}
+              onClick={views.onAddDateField}
+            >
+              Add a date field
+            </SecondaryButton>
           ) : null}
         </div>
       ) : null}
       {problem ? <FieldError id={errorId}>{problem.text}</FieldError> : null}
       <div className="flex justify-end">
-        <PrimaryButton type="submit" disabled={pending || props.paused}>{pending ? "Creating…" : "Create view"}</PrimaryButton>
+        <PrimaryButton type="submit" disabled={pending || props.paused}>
+          {pending ? "Creating…" : "Create view"}
+        </PrimaryButton>
       </div>
     </form>
   );
 }
 
-function RenameViewForm(props: { views: CollectionFrameViews; tab: CollectionFrameTab; taken: readonly string[]; paused: boolean; onHeld: (held: boolean) => void; onDone: () => void }) {
+function RenameViewForm(props: {
+  views: CollectionFrameViews;
+  tab: CollectionFrameTab;
+  taken: readonly string[];
+  paused: boolean;
+  onHeld: (held: boolean) => void;
+  onDone: () => void;
+}) {
   const { views, tab } = props;
   const ids = useId();
   const alive = useAlive();
@@ -731,7 +992,8 @@ function RenameViewForm(props: { views: CollectionFrameViews; tab: CollectionFra
     if (pending || props.paused) return;
     const trimmed = name.trim();
     if (trimmed === tab.name) return props.onDone();
-    const wrong = trimmed === "" ? NAME_MISSING : props.taken.includes(trimmed) ? nameTaken(trimmed) : null;
+    const wrong =
+      trimmed === "" ? NAME_MISSING : props.taken.includes(trimmed) ? nameTaken(trimmed) : null;
     if (wrong !== null) {
       setProblem(wrong);
       input.current?.focus();
@@ -768,7 +1030,9 @@ function RenameViewForm(props: { views: CollectionFrameViews; tab: CollectionFra
       </label>
       {problem !== null ? <FieldError id={errorId}>{problem}</FieldError> : null}
       <div className="flex justify-end">
-        <PrimaryButton type="submit" disabled={pending || props.paused}>{pending ? "Renaming…" : "Rename"}</PrimaryButton>
+        <PrimaryButton type="submit" disabled={pending || props.paused}>
+          {pending ? "Renaming…" : "Rename"}
+        </PrimaryButton>
       </div>
     </form>
   );

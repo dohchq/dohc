@@ -9,9 +9,7 @@ import {
 
 describe("chat file reference tokens", () => {
   it("round-trips whole-file and heading references", () => {
-    expect(formatChatFileReferenceToken({ path: "docs/plan.md" })).toBe(
-      "@[docs/plan.md]",
-    );
+    expect(formatChatFileReferenceToken({ path: "docs/plan.md" })).toBe("@[docs/plan.md]");
     expect(
       formatChatFileReferenceToken({
         path: "docs/plan.md",
@@ -40,9 +38,7 @@ describe("chat file reference tokens", () => {
     };
     const token = formatChatFileReferenceToken(reference);
 
-    expect(token).toBe(
-      "@[notes/C%23 plan%5D 100%25 — 進捗.md#risks%5D%2350%25]",
-    );
+    expect(token).toBe("@[notes/C%23 plan%5D 100%25 — 進捗.md#risks%5D%2350%25]");
     expect(extractChatFileReferences(token)).toEqual([reference]);
     expect(
       extractChatFileReferences(formatChatFileReferenceToken({ path: "notes/literal%23.md" })),
@@ -113,7 +109,11 @@ describe("chat file reference tokens", () => {
 function regexTokens(body: string) {
   const pattern = /@\[([^\]\r\n#]+?)(?:#([^\]\r\n]+))?\]/gu;
   const decode = (value: string) =>
-    value.replace(/%(23|5d|25)/giu, (escape) => ({ "%23": "#", "%5d": "]" } as Record<string, string>)[escape.toLowerCase()] ?? "%");
+    value.replace(
+      /%(23|5d|25)/giu,
+      (escape) =>
+        ({ "%23": "#", "%5d": "]" } as Record<string, string>)[escape.toLowerCase()] ?? "%",
+    );
   const ranges = codeRanges(body);
   const tokens = [];
   for (let match = pattern.exec(body); match; match = pattern.exec(body)) {
@@ -136,7 +136,23 @@ function regexTokens(body: string) {
 
 describe("the linear reference scanner", () => {
   it("finds what the regular expression found", () => {
-    const pieces = ["@[", "]", "#", "\n", "\r", "a", " ", "`", "```\n", "~~~\n", "%23", "%5D", "@", "[", "b.md"];
+    const pieces = [
+      "@[",
+      "]",
+      "#",
+      "\n",
+      "\r",
+      "a",
+      " ",
+      "`",
+      "```\n",
+      "~~~\n",
+      "%23",
+      "%5D",
+      "@",
+      "[",
+      "b.md",
+    ];
     let seed = 1;
     const random = () => {
       seed = (seed * 1103515245 + 12345) % 2147483648;
@@ -146,7 +162,10 @@ describe("the linear reference scanner", () => {
       let body = "";
       const size = Math.floor(random() * 40);
       for (let at = 0; at < size; at++) body += pieces[Math.floor(random() * pieces.length)];
-      expect({ body, tokens: extractChatFileReferenceTokens(body) }).toEqual({ body, tokens: regexTokens(body) });
+      expect({ body, tokens: extractChatFileReferenceTokens(body) }).toEqual({
+        body,
+        tokens: regexTokens(body),
+      });
     }
   });
 
@@ -162,9 +181,7 @@ describe("the linear reference scanner", () => {
     const handles = (body: string) => chatMentionTokens(body).map((token) => token.handle);
     expect(handles("@Nova, see @[trip @Nova notes.md]")).toEqual(["Nova"]);
     expect(handles("@[notes @agent draft.md#plan @agent]")).toEqual([]);
-    // A name that ends where a link starts still counts.
     expect(handles("@Nova@[trip.md]")).toEqual(["Nova"]);
-    // Inside code, the link is text and code hides its name.
     expect(handles("`@[trip @Nova notes.md]` and @Nova")).toEqual(["Nova"]);
   });
 });

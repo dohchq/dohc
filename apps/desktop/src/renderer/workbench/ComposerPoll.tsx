@@ -1,6 +1,12 @@
 import { Plus, Trash2, X } from "lucide-react";
 import { Fragment, useLayoutEffect, useRef, type Ref } from "react";
-import { MAX_POLL_CHOICE_LENGTH, MAX_POLL_CHOICES, repeatedPollChoices, trimChoice, type PollDraft } from "./chatPoll";
+import {
+  MAX_POLL_CHOICE_LENGTH,
+  MAX_POLL_CHOICES,
+  repeatedPollChoices,
+  trimChoice,
+  type PollDraft,
+} from "./chatPoll";
 import { isComposingKey } from "../ui/keys";
 
 const GHOST_ICON =
@@ -55,9 +61,7 @@ export function ComposerPoll(props: {
       data-testid={`${props.testIdPrefix}-poll`}
       aria-label="Poll"
       disabled={props.disabled}
-      className={`flex min-w-0 flex-col gap-1 ${
-        props.surface === "post" ? "mt-2" : "mt-1 px-3"
-      }`}
+      className={`flex min-w-0 flex-col gap-1 ${props.surface === "post" ? "mt-2" : "mt-1 px-3"}`}
     >
       {props.choices.map((choice, index) => {
         const isRepeat = repeated.has(index);
@@ -65,9 +69,16 @@ export function ComposerPoll(props: {
         return (
           <Fragment key={index}>
             <div className="flex items-center gap-2">
-              <span aria-hidden className="w-3.5 shrink-0 text-right text-[12px] tabular-nums text-subtle">{index + 1}</span>
+              <span
+                aria-hidden
+                className="w-3.5 shrink-0 text-right text-[12px] tabular-nums text-subtle"
+              >
+                {index + 1}
+              </span>
               <input
-                ref={(node) => { inputs.current[index] = node; }}
+                ref={(node) => {
+                  inputs.current[index] = node;
+                }}
                 data-testid={`${props.testIdPrefix}-poll-choice`}
                 aria-label={`Choice ${index + 1}`}
                 aria-invalid={isRepeat || undefined}
@@ -76,7 +87,9 @@ export function ComposerPoll(props: {
                 maxLength={MAX_POLL_CHOICE_LENGTH}
                 value={choice}
                 onChange={(event) =>
-                  props.onChange(props.choices.map((entry, at) => (at === index ? event.target.value : entry)))
+                  props.onChange(
+                    props.choices.map((entry, at) => (at === index ? event.target.value : entry)),
+                  )
                 }
                 onKeyDown={(event) => {
                   // IME guard first: Enter confirms the composed characters.
@@ -88,7 +101,11 @@ export function ComposerPoll(props: {
                     else if (canAdd) add();
                     return;
                   }
-                  if (event.key === "Backspace" && choice.length === 0 && props.choices.length > 1) {
+                  if (
+                    event.key === "Backspace" &&
+                    choice.length === 0 &&
+                    props.choices.length > 1
+                  ) {
                     event.preventDefault();
                     remove(index, index - 1);
                   }
@@ -97,7 +114,9 @@ export function ComposerPoll(props: {
                 // dohc-focus-input sets the focused border and its inner edge
                 // too and comes later in the stylesheet, so both are important.
                 className={`h-7 min-w-0 flex-1 rounded-md border bg-bg px-2.5 text-[13px] text-ink placeholder:text-subtle dohc-focus-input ${
-                  isRepeat ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-line"
+                  isRepeat
+                    ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!"
+                    : "border-line"
                 }`}
               />
               <button
@@ -113,7 +132,12 @@ export function ComposerPoll(props: {
               </button>
             </div>
             {messageAt === index ? (
-              <p id={errorId(index)} data-testid={`${props.testIdPrefix}-poll-error`} role="alert" className="m-0 pl-5.5 text-[11px] text-danger">
+              <p
+                id={errorId(index)}
+                data-testid={`${props.testIdPrefix}-poll-error`}
+                role="alert"
+                className="m-0 pl-5.5 text-[11px] text-danger"
+              >
                 {trimChoice(choice)} is already a choice.
               </p>
             ) : null}

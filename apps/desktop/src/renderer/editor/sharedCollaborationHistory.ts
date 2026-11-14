@@ -16,7 +16,8 @@ export const CollaborationHistoryInput = Extension.create({
         props: {
           handleDOMEvents: {
             beforeinput: (_view, event) => {
-              if (event.inputType !== "historyUndo" && event.inputType !== "historyRedo") return false;
+              if (event.inputType !== "historyUndo" && event.inputType !== "historyRedo")
+                return false;
               event.preventDefault();
               if (event.inputType === "historyUndo") editor.commands.undo();
               else editor.commands.redo();
@@ -31,9 +32,7 @@ export const CollaborationHistoryInput = Extension.create({
 
 type UndoEventName = Parameters<Y.UndoManager["on"]>[0];
 type UndoEventHandler = Parameters<Y.UndoManager["on"]>[1];
-type UndoManagerOptions = NonNullable<
-  ConstructorParameters<typeof Y.UndoManager>[1]
->;
+type UndoManagerOptions = NonNullable<ConstructorParameters<typeof Y.UndoManager>[1]>;
 
 const managers = new WeakMap<Y.Doc, Y.UndoManager>();
 
@@ -48,8 +47,7 @@ function getManager(
   const manager = new Y.UndoManager(doc.getXmlFragment("body"), {
     trackedOrigins: new Set([trackedOrigin]),
     deleteFilter,
-    captureTransaction: (transaction) =>
-      transaction.meta.get("addToHistory") !== false,
+    captureTransaction: (transaction) => transaction.meta.get("addToHistory") !== false,
   });
   managers.set(doc, manager);
   return manager;
@@ -83,8 +81,7 @@ export function createCollaborationHistoryHandle(
         return (event: UndoEventName, handler: UndoEventHandler) => {
           Reflect.apply(target.off, target, [event, handler]);
           const index = subscriptions.findIndex(
-            (subscription) =>
-              subscription.event === event && subscription.handler === handler,
+            (subscription) => subscription.event === event && subscription.handler === handler,
           );
           if (index >= 0) subscriptions.splice(index, 1);
         };

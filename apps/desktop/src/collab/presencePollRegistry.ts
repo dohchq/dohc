@@ -1,21 +1,3 @@
-// MU-C5 — main-process ownership registry for in-flight presence long-polls.
-//
-// Each renderer poll opens a relay long-poll in MAIN; this registry tracks the
-// AbortController so presenceCancel can stop the exact fetch on unmount /
-// workspace switch, and bounds how many a renderer can open. The relay bearer
-// token never leaves main, so this is the only place a poll can be governed.
-//
-// Two robustness properties a buggy or hostile trusted renderer must not break:
-//   1. OWNERSHIP — a poll is owned by (senderId, pollId). A presenceCancel from
-//      a different window can't abort it, and a pollId collision across windows
-//      keeps both cancellable: each handle only ever removes its own entry (by
-//      identity), so one window's cleanup never deletes another's controller.
-//   2. BOUNDEDNESS — at most one active poll per (senderId, scope, topic): a new
-//      poll for the same key supersedes (aborts) the prior, which is natural for
-//      presence (one long-poll per scope per window). A per-sender ceiling is a
-//      backstop against a renderer looping unique keys to exhaust main's
-//      controllers/timers/relay sockets.
-
 interface PollEntry {
   controller: AbortController;
   pollId: string;

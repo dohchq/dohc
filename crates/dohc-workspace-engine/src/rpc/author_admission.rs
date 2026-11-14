@@ -7,7 +7,6 @@ fn refused() -> WireError {
     WireError::new(ErrorCode::Forbidden, "person-author-refused")
 }
 
-// A human author, or anyone acting on a person's behalf.
 fn names_person(declared: &Value) -> bool {
     let kind = declared.get("kind").or_else(|| declared.get("actorKind"));
     kind.and_then(Value::as_str) == Some("human") || declared.get("onBehalfOf").is_some()

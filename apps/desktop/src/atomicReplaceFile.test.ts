@@ -21,15 +21,22 @@ const variants: { name: string; replace: Replace }[] = [
   { name: "synchronous", replace: atomicReplaceFileSync },
   {
     name: "asynchronous",
-    replace: (destination, write, dependencies) => atomicReplaceFile(
-      destination,
-      async (temporary) => { write(temporary); },
-      {
-        platform: dependencies.platform,
-        rename: async (source, target) => { dependencies.rename(source, target); },
-        wait: async (milliseconds) => { dependencies.wait(milliseconds); },
-      },
-    ),
+    replace: (destination, write, dependencies) =>
+      atomicReplaceFile(
+        destination,
+        async (temporary) => {
+          write(temporary);
+        },
+        {
+          platform: dependencies.platform,
+          rename: async (source, target) => {
+            dependencies.rename(source, target);
+          },
+          wait: async (milliseconds) => {
+            dependencies.wait(milliseconds);
+          },
+        },
+      ),
   },
 ];
 
@@ -43,11 +50,15 @@ describe.each(variants)("$name atomic replacement", ({ replace }) => {
     directory = await createTestScratch("dohc-atomic-replace-");
     destination = join(directory, "state.json");
     writeFileSync(destination, "previous");
-    write = vi.fn((temporary: string) => { writeFileSync(temporary, "next"); });
+    write = vi.fn((temporary: string) => {
+      writeFileSync(temporary, "next");
+    });
     dependencies = { rename: vi.fn(renameSync), wait: vi.fn(), platform: "win32" };
   });
 
-  const run = async () => { await replace(destination, write, dependencies); };
+  const run = async () => {
+    await replace(destination, write, dependencies);
+  };
 
   it("replaces an existing file without waiting on success", async () => {
     await run();
@@ -58,30 +69,35 @@ describe.each(variants)("$name atomic replacement", ({ replace }) => {
     expect(readdirSync(directory)).toEqual(["state.json"]);
   });
 
-  it.each(["EPERM", "EBUSY", "EACCES"])("retries transient %s errors without rewriting the temp file", async (code) => {
-    const error = Object.assign(new Error("destination locked"), { code });
-    const rename = vi.fn((source: string, target: string) => {
-      expect(readFileSync(target, "utf8")).toBe("previous");
-      expect(readFileSync(source, "utf8")).toBe("next");
-      if (rename.mock.calls.length <= 3) throw error;
-      renameSync(source, target);
-    });
-    dependencies.rename = rename;
+  it.each(["EPERM", "EBUSY", "EACCES"])(
+    "retries transient %s errors without rewriting the temp file",
+    async (code) => {
+      const error = Object.assign(new Error("destination locked"), { code });
+      const rename = vi.fn((source: string, target: string) => {
+        expect(readFileSync(target, "utf8")).toBe("previous");
+        expect(readFileSync(source, "utf8")).toBe("next");
+        if (rename.mock.calls.length <= 3) throw error;
+        renameSync(source, target);
+      });
+      dependencies.rename = rename;
 
-    await run();
+      await run();
 
-    expect(rename).toHaveBeenCalledTimes(4);
-    expect(vi.mocked(dependencies.wait).mock.calls).toEqual([[8], [16], [32]]);
-    expect(write).toHaveBeenCalledTimes(1);
-    expect(readFileSync(destination, "utf8")).toBe("next");
-    expect(readdirSync(directory)).toEqual(["state.json"]);
-  });
+      expect(rename).toHaveBeenCalledTimes(4);
+      expect(vi.mocked(dependencies.wait).mock.calls).toEqual([[8], [16], [32]]);
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(readFileSync(destination, "utf8")).toBe("next");
+      expect(readdirSync(directory)).toEqual(["state.json"]);
+    },
+  );
 
   it("stops after six attempts, removes the temp file, and rethrows the final error", async () => {
     const errors = Array.from({ length: 6 }, (_, attempt) =>
       Object.assign(new Error(`locked on attempt ${attempt}`), { code: "EPERM" }),
     );
-    const rename = vi.fn(() => { throw errors[rename.mock.calls.length - 1]; });
+    const rename = vi.fn(() => {
+      throw errors[rename.mock.calls.length - 1];
+    });
     dependencies.rename = rename;
 
     await expect(run()).rejects.toBe(errors[5]);
@@ -95,7 +111,9 @@ describe.each(variants)("$name atomic replacement", ({ replace }) => {
 
   it("does not retry a non-retryable error and removes the temp file", async () => {
     const error = Object.assign(new Error("missing destination directory"), { code: "ENOENT" });
-    dependencies.rename = vi.fn(() => { throw error; });
+    dependencies.rename = vi.fn(() => {
+      throw error;
+    });
 
     await expect(run()).rejects.toBe(error);
 
@@ -108,7 +126,9 @@ describe.each(variants)("$name atomic replacement", ({ replace }) => {
   it("does not retry Windows error codes on other platforms", async () => {
     const error = Object.assign(new Error("permission denied"), { code: "EPERM" });
     dependencies.platform = "linux";
-    dependencies.rename = vi.fn(() => { throw error; });
+    dependencies.rename = vi.fn(() => {
+      throw error;
+    });
 
     await expect(run()).rejects.toBe(error);
 
@@ -134,23 +154,44 @@ describe.each(variants)("$name atomic replacement", ({ replace }) => {
 });
 
 describe("durable asynchronous replacement", () => {
-  it.each(["linux", "darwin", "win32"] as const)("syncs the directory after rename on %s only", async (platform) => {
-    const destination = join(await createTestScratch("durable-replace-"), "state.json");
-    const events: string[] = [];
-    await atomicReplaceFile(destination, async () => { events.push("write"); }, {
-      platform,
-      syncDirectory: true,
-      rename: async () => { events.push("rename"); },
-      open: async (path, flags) => {
-        expect(path).toBe(dirname(destination));
-        expect(flags).toBe("r");
-        events.push("open directory");
-        return { sync: async () => { events.push("sync directory"); }, close: async () => { events.push("close directory"); } };
-      },
-    });
-    expect(events).toEqual(platform === "win32" ? ["write", "rename"]
-      : ["write", "rename", "open directory", "sync directory", "close directory"]);
-  });
+  it.each(["linux", "darwin", "win32"] as const)(
+    "syncs the directory after rename on %s only",
+    async (platform) => {
+      const destination = join(await createTestScratch("durable-replace-"), "state.json");
+      const events: string[] = [];
+      await atomicReplaceFile(
+        destination,
+        async () => {
+          events.push("write");
+        },
+        {
+          platform,
+          syncDirectory: true,
+          rename: async () => {
+            events.push("rename");
+          },
+          open: async (path, flags) => {
+            expect(path).toBe(dirname(destination));
+            expect(flags).toBe("r");
+            events.push("open directory");
+            return {
+              sync: async () => {
+                events.push("sync directory");
+              },
+              close: async () => {
+                events.push("close directory");
+              },
+            };
+          },
+        },
+      );
+      expect(events).toEqual(
+        platform === "win32"
+          ? ["write", "rename"]
+          : ["write", "rename", "open directory", "sync directory", "close directory"],
+      );
+    },
+  );
 
   it("renames the named temporary only after the writer has flushed it", async () => {
     const directory = await createTestScratch("named-replace-");
@@ -158,55 +199,85 @@ describe("durable asynchronous replacement", () => {
     const temporary = join(directory, ".dohc-write-named.tmp");
     writeFileSync(destination, "old");
     const events: string[] = [];
-    await atomicReplaceFile(destination, async (path) => {
-      expect(path).toBe(temporary);
-      const handle = await open(path, "wx");
-      await handle.writeFile("new");
-      await handle.sync();
-      events.push("sync");
-      await handle.close();
-    }, {
-      temporary,
-      rename: async (source, target) => {
-        events.push(`rename ${basename(source)}`);
-        await rename(source, target);
+    await atomicReplaceFile(
+      destination,
+      async (path) => {
+        expect(path).toBe(temporary);
+        const handle = await open(path, "wx");
+        await handle.writeFile("new");
+        await handle.sync();
+        events.push("sync");
+        await handle.close();
       },
-    });
+      {
+        temporary,
+        rename: async (source, target) => {
+          events.push(`rename ${basename(source)}`);
+          await rename(source, target);
+        },
+      },
+    );
     expect(events).toEqual(["sync", "rename .dohc-write-named.tmp"]);
     expect(readFileSync(destination, "utf8")).toBe("new");
     expect(readdirSync(directory)).toEqual(["notes.md"]);
   });
 
-  it.each(["write", "rename"] as const)("removes the named temporary when the %s fails", async (failing) => {
-    const directory = await createTestScratch("named-replace-");
-    const destination = join(directory, "notes.md");
-    writeFileSync(destination, "old");
-    const error = Object.assign(new Error("disk full"), { code: "ENOSPC" });
-    await expect(atomicReplaceFile(destination, async (path) => {
-      writeFileSync(path, "ne");
-      if (failing === "write") throw error;
-    }, {
-      temporary: join(directory, ".dohc-write-named.tmp"),
-      rename: async () => { throw error; },
-    })).rejects.toBe(error);
-    expect(readFileSync(destination, "utf8")).toBe("old");
-    expect(readdirSync(directory)).toEqual(["notes.md"]);
-  });
+  it.each(["write", "rename"] as const)(
+    "removes the named temporary when the %s fails",
+    async (failing) => {
+      const directory = await createTestScratch("named-replace-");
+      const destination = join(directory, "notes.md");
+      writeFileSync(destination, "old");
+      const error = Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      await expect(
+        atomicReplaceFile(
+          destination,
+          async (path) => {
+            writeFileSync(path, "ne");
+            if (failing === "write") throw error;
+          },
+          {
+            temporary: join(directory, ".dohc-write-named.tmp"),
+            rename: async () => {
+              throw error;
+            },
+          },
+        ),
+      ).rejects.toBe(error);
+      expect(readFileSync(destination, "utf8")).toBe("old");
+      expect(readdirSync(directory)).toEqual(["notes.md"]);
+    },
+  );
 
   it("keeps the default path free of directory sync", async () => {
     const open = vi.fn();
-    await atomicReplaceFile("unused", async () => {}, { platform: "linux", rename: async () => {}, open });
+    await atomicReplaceFile("unused", async () => {}, {
+      platform: "linux",
+      rename: async () => {},
+      open,
+    });
     expect(open).not.toHaveBeenCalled();
   });
 
   it("closes a directory whose sync fails and surfaces the error without retrying the rename", async () => {
     const error = new Error("directory sync failed");
-    const close = vi.fn(async () => { throw new Error("close also failed"); });
+    const close = vi.fn(async () => {
+      throw new Error("close also failed");
+    });
     const rename = vi.fn(async () => {});
-    await expect(atomicReplaceFile("unused", async () => {}, {
-      platform: "linux", syncDirectory: true, rename,
-      open: async () => ({ sync: async () => { throw error; }, close }),
-    })).rejects.toBe(error);
+    await expect(
+      atomicReplaceFile("unused", async () => {}, {
+        platform: "linux",
+        syncDirectory: true,
+        rename,
+        open: async () => ({
+          sync: async () => {
+            throw error;
+          },
+          close,
+        }),
+      }),
+    ).rejects.toBe(error);
     expect(rename).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
   });

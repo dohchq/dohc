@@ -1,4 +1,4 @@
-// Passphrase floor for the secret-key envelope enrollment (0P-D). The relay
+// Passphrase floor for the secret-key envelope enrollment. The relay
 // only ever sees the scrypt-wrapped envelope, so the passphrase is the sole
 // factor protecting synced secrets — refuse a trivially weak one at the
 // enrollment boundary (main process), which a renderer check cannot enforce.

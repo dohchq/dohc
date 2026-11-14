@@ -8,15 +8,25 @@ import type { createLocalUnconnectedApps } from "./localUnconnectedApps";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 
 /** The only local publication API exposed to owner handlers and browser launch. */
-export function createLocalApps(store: LocalAppStore, dataset: ReturnType<typeof createLocalDatasetApps>, collection: ReturnType<typeof createLocalCollectionApps>,
-  unconnected: ReturnType<typeof createLocalUnconnectedApps>) {
+export function createLocalApps(
+  store: LocalAppStore,
+  dataset: ReturnType<typeof createLocalDatasetApps>,
+  collection: ReturnType<typeof createLocalCollectionApps>,
+  unconnected: ReturnType<typeof createLocalUnconnectedApps>,
+) {
   const kind = (publicationId: string, expected?: number) => {
     const row = store.row(publicationId, expected);
-    (row.kind === "dataset" ? dataset : row.kind === "collection" ? collection : unconnected).current(publicationId, expected);
+    (row.kind === "dataset"
+      ? dataset
+      : row.kind === "collection"
+        ? collection
+        : unconnected
+    ).current(publicationId, expected);
     return row.kind;
   };
   // Ending or replacing a Dataset app's authority ends its binding in the same commit.
-  const displace = (displaced: LocalAppRow | undefined, commit: () => void) => displaced?.kind === "dataset" ? dataset.withdrawBinding(displaced, commit) : commit();
+  const displace = (displaced: LocalAppRow | undefined, commit: () => void) =>
+    displaced?.kind === "dataset" ? dataset.withdrawBinding(displaced, commit) : commit();
   const backend: LocalAppLaunchBackend = {
     browserPublication(publicationId) {
       kind(publicationId);
@@ -26,15 +36,20 @@ export function createLocalApps(store: LocalAppStore, dataset: ReturnType<typeof
       kind(publicationId, authorityRevision);
     },
     async checkBrowserPublication(publicationId, authorityRevision, signal) {
-      if (kind(publicationId, authorityRevision) === "collection") await collection.checkBrowserPublication(publicationId, authorityRevision, signal);
+      if (kind(publicationId, authorityRevision) === "collection")
+        await collection.checkBrowserPublication(publicationId, authorityRevision, signal);
     },
     request: async (publicationId, action, input, signal, activated) => {
       const reached = kind(publicationId);
-      if (reached === "unconnected") throw new Error("This app is not approved for workspace data.");
-      return reached === "dataset" ? dataset.request(publicationId, action, input, signal, activated) : collection.request(publicationId, action, input, signal, activated);
+      if (reached === "unconnected")
+        throw new Error("This app is not approved for workspace data.");
+      return reached === "dataset"
+        ? dataset.request(publicationId, action, input, signal, activated)
+        : collection.request(publicationId, action, input, signal, activated);
     },
     readBrowserFile: async (publicationId, input, signal) => {
-      if (kind(publicationId) !== "dataset") throw new Error("This app cannot read Collection files.");
+      if (kind(publicationId) !== "dataset")
+        throw new Error("This app cannot read Collection files.");
       return dataset.readBrowserFile(publicationId, input, signal);
     },
   };
@@ -50,13 +65,28 @@ export function createLocalApps(store: LocalAppStore, dataset: ReturnType<typeof
       return collection.activate(prepared, signal, agent, displace);
     },
     has: (publicationId: string) => store.has(publicationId),
-    list: (appRoot: string) => store.list(appRoot).map(value => value.kind === "dataset" ? dataset.describe(value) : value.kind === "collection" ? collection.describe(value) : unconnected.describe(value)),
+    list: (appRoot: string) =>
+      store
+        .list(appRoot)
+        .map((value) =>
+          value.kind === "dataset"
+            ? dataset.describe(value)
+            : value.kind === "collection"
+              ? collection.describe(value)
+              : unconnected.describe(value),
+        ),
     /** Confirmed only when no admitted response can still be saved. Repeat at the returned revision to confirm. */
     async withdraw(publicationId: string, expected: number) {
       const ended = store.withdraw(publicationId, expected, displace);
-      const unresolvedCreates = ended.kind === "collection" ? await collection.confirm(publicationId) : 0;
+      const unresolvedCreates =
+        ended.kind === "collection" ? await collection.confirm(publicationId) : 0;
       return unresolvedCreates
-        ? { kind: "withdrawalUnconfirmed" as const, publicationId, authorityRevision: ended.authorityRevision, unresolvedCreates }
+        ? {
+            kind: "withdrawalUnconfirmed" as const,
+            publicationId,
+            authorityRevision: ended.authorityRevision,
+            unresolvedCreates,
+          }
         : { kind: "withdrawn" as const, publicationId, authorityRevision: ended.authorityRevision };
     },
     reconcile: () => collection.reconcile(),

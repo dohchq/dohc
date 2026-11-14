@@ -1,13 +1,6 @@
-// The native-target guard decides whether a gate run may be recorded as native
-// evidence. Its first version collapsed cfg values into a Set, so two targets
-// that shared an arch and an os counted as one and passed; the defect shipped
-// because nothing could import the function to test it.
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  cfgValues,
-  verifyNativeTarget,
-} from "../tools/rust-engine-program/native-target.mjs";
+import { cfgValues, verifyNativeTarget } from "../tools/rust-engine-program/native-target.mjs";
 
 /** One `--print cfg` block, as rustc emits it per target. */
 function cfgBlock({ arch = "x86_64", os = "windows", env = "msvc" } = {}) {
@@ -21,7 +14,9 @@ function cfgBlock({ arch = "x86_64", os = "windows", env = "msvc" } = {}) {
   ].join("\n");
 }
 
-const probeOf = (stdout, over = {}) => () => ({ status: 0, stdout, ...over });
+const probeOf =
+  (stdout, over = {}) =>
+  () => ({ status: 0, stdout, ...over });
 const windowsHost = { nodeArch: "x64", nodePlatform: "win32" };
 
 test("one host target passes and reports the cfg rustc gave", () => {

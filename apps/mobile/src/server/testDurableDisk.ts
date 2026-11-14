@@ -54,9 +54,16 @@ export function durableDisk(): DurableDisk {
     locked: false,
     holdWrites() {
       let release!: () => void;
-      const hold = { promise: new Promise<void>(done => { release = done; }), release: () => release() };
+      const hold = {
+        promise: new Promise<void>((done) => {
+          release = done;
+        }),
+        release: () => release(),
+      };
       held = hold;
-      return () => { if (held === hold) releaseHold(); };
+      return () => {
+        if (held === hold) releaseHold();
+      };
     },
     crash() {
       run += 1;
@@ -69,12 +76,15 @@ export function durableDisk(): DurableDisk {
   let temporaries = 0;
 
   const unreadable = (name: string) =>
-    disk.unreadable.has(name) || new TextEncoder().encode(disk.files.get(name) ?? "").length > RECORD_MAX_BYTES;
+    disk.unreadable.has(name) ||
+    new TextEncoder().encode(disk.files.get(name) ?? "").length > RECORD_MAX_BYTES;
   const checkName = (name: string, pattern = RECORD_NAME) => {
-    if (!pattern.test(name)) throw nativeError("ERR_DURABLE_INVALID", "The record name isn't valid.");
+    if (!pattern.test(name))
+      throw nativeError("ERR_DURABLE_INVALID", "The record name isn't valid.");
   };
   const checkUnlocked = () => {
-    if (disk.locked) throw nativeError("ERR_DURABLE_LOCKED", "The phone hasn't been unlocked since it started.");
+    if (disk.locked)
+      throw nativeError("ERR_DURABLE_LOCKED", "The phone hasn't been unlocked since it started.");
   };
 
   function launch(): NativeDurableFile {
@@ -84,61 +94,76 @@ export function durableDisk(): DurableDisk {
     function serial<T>(call: string, body: () => Promise<T> | T): Promise<T> {
       if (ended()) return never();
       disk.log.push(call);
-      const result = queue.then(() => ended() ? never<T>() : body());
+      const result = queue.then(() => (ended() ? never<T>() : body()));
       queue = result.catch(() => undefined);
       return result;
     }
     const unlink = (fileName: string) => {
-      if (disk.failRemoves === "unlink") throw nativeError("ERR_DURABLE_FAILED", "Couldn't delete the file.");
+      if (disk.failRemoves === "unlink")
+        throw nativeError("ERR_DURABLE_FAILED", "Couldn't delete the file.");
       disk.files.delete(fileName);
-      if (disk.failRemoves === "sync-folder") throw nativeError("ERR_DURABLE_UNSYNCED", "Couldn't sync the folder.");
+      if (disk.failRemoves === "sync-folder")
+        throw nativeError("ERR_DURABLE_UNSYNCED", "Couldn't sync the folder.");
     };
 
     return {
-      write: (name, text) => serial(`write ${name}`, async () => {
-        checkName(name);
-        if (new TextEncoder().encode(text).length > RECORD_MAX_BYTES) throw nativeError("ERR_DURABLE_TOO_LARGE", "The record is too large.");
-        if (disk.failWrites === "prepare") throw nativeError("ERR_DURABLE_FAILED", "Couldn't sync the folder's parent.");
-        if (disk.locked) throw nativeError("ERR_DURABLE_FAILED", "Couldn't create the temporary file: Operation not permitted.");
-        temporaries += 1;
-        const temp = `${name}.${temporaries.toString(16).padStart(32, "0")}.tmp`;
-        disk.files.set(temp, text.slice(0, Math.floor(text.length / 2)));
-        if (held) await held.promise;
-        if (ended()) return never<void>();
-        if (disk.failWrites === "write") {
+      write: (name, text) =>
+        serial(`write ${name}`, async () => {
+          checkName(name);
+          if (new TextEncoder().encode(text).length > RECORD_MAX_BYTES)
+            throw nativeError("ERR_DURABLE_TOO_LARGE", "The record is too large.");
+          if (disk.failWrites === "prepare")
+            throw nativeError("ERR_DURABLE_FAILED", "Couldn't sync the folder's parent.");
+          if (disk.locked)
+            throw nativeError(
+              "ERR_DURABLE_FAILED",
+              "Couldn't create the temporary file: Operation not permitted.",
+            );
+          temporaries += 1;
+          const temp = `${name}.${temporaries.toString(16).padStart(32, "0")}.tmp`;
+          disk.files.set(temp, text.slice(0, Math.floor(text.length / 2)));
+          if (held) await held.promise;
+          if (ended()) return never<void>();
+          if (disk.failWrites === "write") {
+            disk.files.delete(temp);
+            throw nativeError("ERR_DURABLE_FAILED", "No space left on device");
+          }
           disk.files.delete(temp);
-          throw nativeError("ERR_DURABLE_FAILED", "No space left on device");
-        }
-        disk.files.delete(temp);
-        disk.files.set(name, text);
-        disk.unreadable.delete(name);
-        if (disk.failWrites === "sync-folder") throw nativeError("ERR_DURABLE_UNSYNCED", "Couldn't sync the folder.");
-      }),
-      read: name => serial(`read ${name}`, () => {
-        checkName(name);
-        const text = disk.files.get(name);
-        if (text === undefined) return null;
-        checkUnlocked();
-        if (unreadable(name)) throw nativeError("ERR_DURABLE_UNREADABLE", "Couldn't read the record.");
-        return text;
-      }),
-      list: () => serial("list", () => disk.names().filter(name => RECORD_NAME.test(name))),
-      remove: name => serial(`remove ${name}`, () => {
-        checkName(name);
-        unlink(name);
-      }),
-      recover: () => serial("recover", () => {
-        const records = disk.names().filter(name => RECORD_NAME.test(name));
-        if (records.length > 0) checkUnlocked();
-        return {
-          leftovers: disk.names().filter(name => !RECORD_NAME.test(name)),
-          unreadable: records.filter(unreadable),
-        };
-      }),
-      removeLeftover: fileName => serial(`removeLeftover ${fileName}`, () => {
-        checkName(fileName, TEMPORARY_NAME);
-        unlink(fileName);
-      }),
+          disk.files.set(name, text);
+          disk.unreadable.delete(name);
+          if (disk.failWrites === "sync-folder")
+            throw nativeError("ERR_DURABLE_UNSYNCED", "Couldn't sync the folder.");
+        }),
+      read: (name) =>
+        serial(`read ${name}`, () => {
+          checkName(name);
+          const text = disk.files.get(name);
+          if (text === undefined) return null;
+          checkUnlocked();
+          if (unreadable(name))
+            throw nativeError("ERR_DURABLE_UNREADABLE", "Couldn't read the record.");
+          return text;
+        }),
+      list: () => serial("list", () => disk.names().filter((name) => RECORD_NAME.test(name))),
+      remove: (name) =>
+        serial(`remove ${name}`, () => {
+          checkName(name);
+          unlink(name);
+        }),
+      recover: () =>
+        serial("recover", () => {
+          const records = disk.names().filter((name) => RECORD_NAME.test(name));
+          if (records.length > 0) checkUnlocked();
+          return {
+            leftovers: disk.names().filter((name) => !RECORD_NAME.test(name)),
+            unreadable: records.filter(unreadable),
+          };
+        }),
+      removeLeftover: (fileName) =>
+        serial(`removeLeftover ${fileName}`, () => {
+          checkName(fileName, TEMPORARY_NAME);
+          unlink(fileName);
+        }),
     };
   }
 

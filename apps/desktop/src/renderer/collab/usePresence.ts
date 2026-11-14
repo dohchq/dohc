@@ -8,17 +8,6 @@ import {
   type PresenceTransport,
 } from "./presenceChannel";
 
-// MU-C1 — the React binding for channel/doc presence + typing.
-//
-// It is dormant for solo/offline: with `enabled === false` (or no transport)
-// it constructs no channel, opens no poll, and returns an empty presence — the
-// same "build nothing for solo" posture as the engine co-editing hook.
-//
-// No-stale-repaint guard (product invariant): every channel carries a
-// monotonic token. A slow poll for workspace/topic A can never repaint after
-// the user switches to B — the stale snapshot is dropped because its token no
-// longer matches the live one.
-
 interface PresenceLocalState {
   typing: boolean;
 }
@@ -33,7 +22,6 @@ interface UsePresenceInput {
   topic: string;
   // Stable per-tab/device id so this client's own entry is identifiable.
   clientId: string;
-  // How this user is shown to peers.
   displayName: string;
   // Auto-clear typing after this idle window even if the caller forgets to
   // clear it. Default 5s.
@@ -43,15 +31,14 @@ interface UsePresenceInput {
 export interface PresenceResult {
   // Peers other than this client (self is filtered out by clientId).
   others: PresencePeer[];
-  // Display names of others currently typing.
   typingNames: string[];
   // Report local typing state; publishes immediately and self-clears on idle.
   setTyping: (typing: boolean) => void;
   // Imperative early stop, for an action that will make this scope reject
-  // presence calls once it completes (#742 P2-E: leaving a DM ends its share,
-  // and an ended-scope transport rejects the leave the effect cleanup would
-  // otherwise send later — the peer would then read as present until the
-  // relay's TTL). Await this before that action. A no-op if presence was
+  // presence calls once it completes. Leaving a DM ends its share, and an
+  // ended-scope transport rejects the leave the effect cleanup would
+  // otherwise send later. The peer would then read as present until the
+  // relay's TTL. Await this before that action. A no-op if presence was
   // never active (channelRef is null) or already stopped.
   leave: () => Promise<void>;
   // Re-arms presence with a fresh channel: call this if
@@ -73,8 +60,8 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
   const typingIdleMs = input.typingIdleMs ?? 5_000;
   const [peers, setPeers] = useState<PresencePeer[]>(EMPTY_PEERS);
   // Bumped by restart() to force the channel effect below to tear down (a
-  // no-op — it is already stopped) and stand up a fresh channel (#742 P2,
-  // round 3), without needing any of the scope inputs to actually change.
+  // no-op, because it is already stopped) and stand up a fresh channel,
+  // without needing any of the scope inputs to change.
   const [restartGeneration, setRestartGeneration] = useState(0);
   // Monotonic per-channel token; only the newest channel may repaint.
   const requests = useRequestSequence();
@@ -86,7 +73,6 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
 
   useEffect(() => {
     if (!active || !transport) {
-      // Solo/offline: build nothing, show nothing.
       setPeers(EMPTY_PEERS);
       return;
     }
@@ -116,10 +102,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     };
   }, [active, transport, topic, clientId, displayName, restartGeneration]);
 
-  const others = useMemo(
-    () => peers.filter((peer) => !peer.isSelf),
-    [peers, clientId],
-  );
+  const others = useMemo(() => peers.filter((peer) => !peer.isSelf), [peers, clientId]);
   const typingNames = useMemo(
     () =>
       others
@@ -154,15 +137,9 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     };
   }, [displayName, typingIdleMs]);
 
-  const leave = useMemo(
-    () => () => channelRef.current?.stop() ?? Promise.resolve(),
-    [],
-  );
+  const leave = useMemo(() => () => channelRef.current?.stop() ?? Promise.resolve(), []);
 
-  const restart = useMemo(
-    () => () => setRestartGeneration((generation) => generation + 1),
-    [],
-  );
+  const restart = useMemo(() => () => setRestartGeneration((generation) => generation + 1), []);
 
   return { others, typingNames, setTyping, leave, restart };
 }

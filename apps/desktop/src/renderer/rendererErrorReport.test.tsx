@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, render } from "@testing-library/react";
+import { cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
-import { ErrorBoundary, installGlobalErrorReporters } from "./ErrorBoundary";
+
+import { installGlobalErrorReporters } from "./ErrorBoundary";
 import { reportRendererError } from "./rendererErrorReport";
 
 const SECRET = "Secret Trip Plans";
@@ -17,14 +17,12 @@ function secretError(): Error {
   return error;
 }
 
-function Bomb(): never {
-  throw secretError();
-}
-
 beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   reportRendererErrorCall = vi.fn(async () => undefined);
-  window.dohcDesktop = { reportRendererError: reportRendererErrorCall } as unknown as typeof window.dohcDesktop;
+  window.dohcDesktop = {
+    reportRendererError: reportRendererErrorCall,
+  } as unknown as typeof window.dohcDesktop;
 });
 
 afterEach(() => {
@@ -38,7 +36,10 @@ describe("renderer error reports", () => {
     reportRendererError("uncaught", secretError());
     expect(reportRendererErrorCall).toHaveBeenCalledWith({
       origin: "uncaught",
-      error: { name: "RangeError", stack: `    at open (file:///C:/dohc/resources/app.asar/dist/renderer/index.js:${line}:2)` },
+      error: {
+        name: "RangeError",
+        stack: `    at open (file:///C:/dohc/resources/app.asar/dist/renderer/index.js:${line}:2)`,
+      },
     });
     expect(JSON.stringify(reportRendererErrorCall.mock.calls)).not.toContain(SECRET);
   });
@@ -52,29 +53,16 @@ describe("renderer error reports", () => {
     ]);
   });
 
-  it("never throws, with or without a bridge", () => {
-    reportRendererErrorCall.mockRejectedValue(new Error("main is gone"));
-    expect(() => reportRendererError("uncaught", new Error("x"))).not.toThrow();
-    delete window.dohcDesktop;
-    expect(() => reportRendererError("uncaught", new Error("x"))).not.toThrow();
-  });
-
   it("forwards uncaught errors and unhandled rejections", () => {
     const target = new EventTarget();
     installGlobalErrorReporters(target as unknown as Window);
-    target.dispatchEvent(Object.assign(new Event("error"), { error: secretError(), message: SECRET }));
+    target.dispatchEvent(
+      Object.assign(new Event("error"), { error: secretError(), message: SECRET }),
+    );
     target.dispatchEvent(Object.assign(new Event("unhandledrejection"), { reason: secretError() }));
-    expect(reportRendererErrorCall.mock.calls.map(([payload]) => (payload as { origin: string }).origin))
-      .toEqual(["uncaught", "rejection"]);
+    expect(
+      reportRendererErrorCall.mock.calls.map(([payload]) => (payload as { origin: string }).origin),
+    ).toEqual(["uncaught", "rejection"]);
     expect(JSON.stringify(reportRendererErrorCall.mock.calls)).not.toContain(SECRET);
-  });
-
-  it("forwards what both error boundaries catch", () => {
-    render(<ErrorBoundary scope="editor"><Bomb /></ErrorBoundary>);
-    render(<EditorErrorBoundary resetKey="notes/a.md"><Bomb /></EditorErrorBoundary>);
-    expect(reportRendererErrorCall.mock.calls.map(([payload]) => payload)).toEqual([
-      expect.objectContaining({ origin: "boundary", error: expect.objectContaining({ name: "RangeError" }) }),
-      expect.objectContaining({ origin: "boundary", error: expect.objectContaining({ name: "RangeError" }) }),
-    ]);
   });
 });

@@ -5,8 +5,27 @@ import type { CacheFiles, SavedView } from "./cacheFiles";
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "./client";
 import { sleep } from "./deviceFlow";
 import {
-  earlierCursor, FEED_HOLD_MS, isCursor, laterCursor, markThreadRead, readChanges, readChats, readFiles, readPage, readStream, readThread,
-  type ChatGroup, type ChatMessage, type ChatThread, type FeedAnswer, type FeedChanges, type GroupStream, type MissingChat, type PageRead, type Read, type WorkspaceFile,
+  earlierCursor,
+  FEED_HOLD_MS,
+  isCursor,
+  laterCursor,
+  markThreadRead,
+  readChanges,
+  readChats,
+  readFiles,
+  readPage,
+  readStream,
+  readThread,
+  type ChatGroup,
+  type ChatMessage,
+  type ChatThread,
+  type FeedAnswer,
+  type FeedChanges,
+  type GroupStream,
+  type MissingChat,
+  type PageRead,
+  type Read,
+  type WorkspaceFile,
 } from "./workspaceReads";
 import type { SavedList } from "./workspaceList";
 
@@ -69,20 +88,34 @@ export interface View<T> {
 }
 
 export const views = {
-  files: { id: "files", read: readFiles, affectedBy: changes => changes.files !== undefined } satisfies View<readonly WorkspaceFile[]>,
-  chats: { id: "chats", read: readChats, affectedBy: changes => changes.chats !== undefined } satisfies View<readonly ChatGroup[]>,
+  files: {
+    id: "files",
+    read: readFiles,
+    affectedBy: (changes) => changes.files !== undefined,
+  } satisfies View<readonly WorkspaceFile[]>,
+  chats: {
+    id: "chats",
+    read: readChats,
+    affectedBy: (changes) => changes.chats !== undefined,
+  } satisfies View<readonly ChatGroup[]>,
 
   /** A chat's stream: a change to one of its threads, or to a thread the store can't place in a chat yet. */
   stream(groupId: string): View<GroupStream | MissingChat> {
     return {
       id: `stream:${groupId}`,
       read: (client, workspaceId, signal) => readStream(client, workspaceId, groupId, signal),
-      messages: value => value.kind === "stream" ? value.items.map(item => item.message) : [],
+      messages: (value) => (value.kind === "stream" ? value.items.map((item) => item.message) : []),
       affectedBy(changes, known, value) {
         if (changes.chats === undefined) return false;
         if (changes.chats.length === 0 || known.chats === null) return true;
-        return changes.chats.some(threadId => (value?.kind === "stream" && value.items.some(item => item.message.threadId === threadId)) ||
-          !known.chats?.some(group => group.id !== groupId && group.threadIds.includes(threadId)));
+        return changes.chats.some(
+          (threadId) =>
+            (value?.kind === "stream" &&
+              value.items.some((item) => item.message.threadId === threadId)) ||
+            !known.chats?.some(
+              (group) => group.id !== groupId && group.threadIds.includes(threadId),
+            ),
+        );
       },
     };
   },
@@ -91,8 +124,10 @@ export const views = {
     return {
       id: `thread:${threadId}`,
       read: (client, workspaceId, signal) => readThread(client, workspaceId, threadId, signal),
-      messages: value => value.kind === "thread" ? value.messages : [],
-      affectedBy: changes => changes.chats !== undefined && (changes.chats.length === 0 || changes.chats.includes(threadId)),
+      messages: (value) => (value.kind === "thread" ? value.messages : []),
+      affectedBy: (changes) =>
+        changes.chats !== undefined &&
+        (changes.chats.length === 0 || changes.chats.includes(threadId)),
     };
   },
 
@@ -106,7 +141,12 @@ export const views = {
       read: (client, workspaceId, signal) => readPage(client, workspaceId, path, signal),
       carry(previous, next) {
         if (next.kind !== "missing") return next;
-        const last = previous?.kind === "page" ? previous.markdown : previous?.kind === "missing" ? previous.last : undefined;
+        const last =
+          previous?.kind === "page"
+            ? previous.markdown
+            : previous?.kind === "missing"
+              ? previous.last
+              : undefined;
         return last === undefined ? next : { kind: "missing", last };
       },
       // Any file change can put another object at the page's path: one deleted and another made there. The listing that
@@ -115,7 +155,7 @@ export const views = {
       affectedBy(changes, known) {
         if (changes.files !== undefined) return true;
         if (changes.pages === undefined) return false;
-        const objectId = known.files?.find(file => file.path === path)?.objectId;
+        const objectId = known.files?.find((file) => file.path === path)?.objectId;
         return objectId === undefined || changes.pages.includes(objectId);
       },
     };
@@ -134,8 +174,6 @@ export function viewOf(id: string): View<unknown> | null {
   if (kind === "page") return views.page(key);
   return null;
 }
-
-// --- the cache ----------------------------------------------------------------------------------------------------
 
 export interface Cached {
   readonly view: View<unknown>;
@@ -169,14 +207,17 @@ export interface ReadCache {
    * Empties the cache each time the account's sign-in changes: sign-out, a 401, or a new sign-in. The saved sign-in
    * read at launch keeps it, and a launch with none empties it.
    */
-  follow(account: { state(): AccountState; subscribe(listener: () => void): () => void }): () => void;
+  follow(account: {
+    state(): AccountState;
+    subscribe(listener: () => void): () => void;
+  }): () => void;
 }
 
 export const cacheScope = (signIn: Pick<SignIn, "origin" | "userId">, workspaceId: string) =>
   JSON.stringify([signIn.origin, signIn.userId, workspaceId]);
 
-/** The scope of an account's workspace list. */
-const listScope = (signIn: Pick<SignIn, "origin" | "userId">) => JSON.stringify([signIn.origin, signIn.userId]);
+const listScope = (signIn: Pick<SignIn, "origin" | "userId">) =>
+  JSON.stringify([signIn.origin, signIn.userId]);
 
 export function createReadCache(files?: CacheFiles): ReadCache {
   const scopes = new Map<string, Map<string, Cached>>();
@@ -193,12 +234,18 @@ export function createReadCache(files?: CacheFiles): ReadCache {
   }
 
   // Listings first, so a scope over its cap keeps Home and Chats, then the views set most recently.
-  const saved = (scope: string): readonly SavedView[] => [...scopes.get(scope)?.values() ?? []]
-    .reverse()
-    .sort((a, b) => Number(isListing(b.view)) - Number(isListing(a.view)))
-    .map(cached => ({ id: cached.view.id, value: cached.value, cursor: cached.cursor, stale: cached.stale }));
+  const saved = (scope: string): readonly SavedView[] =>
+    [...(scopes.get(scope)?.values() ?? [])]
+      .reverse()
+      .sort((a, b) => Number(isListing(b.view)) - Number(isListing(a.view)))
+      .map((cached) => ({
+        id: cached.view.id,
+        value: cached.value,
+        cursor: cached.cursor,
+        stale: cached.stale,
+      }));
   const cache: ReadCache = {
-    entries: scope => [...scopes.get(scope)?.values() ?? []],
+    entries: (scope) => [...(scopes.get(scope)?.values() ?? [])],
     get: (scope, viewId) => scopes.get(scope)?.get(viewId),
     set(scope, cached) {
       const views = scopes.get(scope) ?? new Map<string, Cached>();
@@ -221,17 +268,26 @@ export function createReadCache(files?: CacheFiles): ReadCache {
       const pending = restoring.get(scope);
       if (pending) return pending;
       const expected = generation(scope);
-      const done = files.read(scope).catch(() => []).then(found => {
-        restoring.delete(scope);
-        // A delete since the read began wins, and views read into memory meanwhile are newer.
-        if (generation(scope) !== expected || scopes.has(scope)) return;
-        const views = new Map<string, Cached>();
-        for (const item of found) {
-          const view = viewOf(item.id);
-          if (view && isCursor(item.cursor)) views.set(view.id, { view, value: item.value, cursor: item.cursor, stale: item.stale });
-        }
-        if (views.size > 0) scopes.set(scope, views);
-      });
+      const done = files
+        .read(scope)
+        .catch(() => [])
+        .then((found) => {
+          restoring.delete(scope);
+          // A delete since the read began wins, and views read into memory meanwhile are newer.
+          if (generation(scope) !== expected || scopes.has(scope)) return;
+          const views = new Map<string, Cached>();
+          for (const item of found) {
+            const view = viewOf(item.id);
+            if (view && isCursor(item.cursor))
+              views.set(view.id, {
+                view,
+                value: item.value,
+                cursor: item.cursor,
+                stale: item.stale,
+              });
+          }
+          if (views.size > 0) scopes.set(scope, views);
+        });
       restoring.set(scope, done);
       return done;
     },
@@ -241,21 +297,29 @@ export function createReadCache(files?: CacheFiles): ReadCache {
       return {
         load() {
           const expected = epoch;
-          return files.readList(scope).then(found => epoch === expected ? each(found, accountWorkspace) : null);
+          return files
+            .readList(scope)
+            .then((found) => (epoch === expected ? each(found, accountWorkspace) : null));
         },
         // The list from the server, or one this phone changed, decides which workspaces the cache keeps: only those the
         // phone can open.
         listed(workspaces) {
           void files.writeList(scope, workspaces);
-          const kept = new Set(workspaces.filter(entry => entry.showOnPhone && entry.canOpen).map(entry => cacheScope(signIn, entry.workspaceId)));
-          for (const known of new Set([...scopes.keys(), ...restoring.keys()])) if (!kept.has(known)) forget(known);
+          const kept = new Set(
+            workspaces
+              .filter((entry) => entry.showOnPhone && entry.canOpen)
+              .map((entry) => cacheScope(signIn, entry.workspaceId)),
+          );
+          for (const known of new Set([...scopes.keys(), ...restoring.keys()]))
+            if (!kept.has(known)) forget(known);
           void files.keep([...kept]);
         },
       };
     },
     flush: () => void files?.flush(),
     follow(account) {
-      const signInOf = (state: AccountState) => state.status === "signed-in" ? state.signIn : null;
+      const signInOf = (state: AccountState) =>
+        state.status === "signed-in" ? state.signIn : null;
       let serving = account.state();
       return account.subscribe(() => {
         const last = serving;
@@ -273,8 +337,6 @@ export function createReadCache(files?: CacheFiles): ReadCache {
 }
 
 const isListing = (view: View<unknown>) => view.id === views.files.id || view.id === views.chats.id;
-
-// --- one workspace ------------------------------------------------------------------------------------------------
 
 export interface WorkspaceData {
   readonly workspaceId: string;
@@ -318,7 +380,9 @@ interface Entry {
 }
 
 function readProblem(error: unknown): ReadProblem | null {
-  return error instanceof ServerError && error.code === "restore-in-progress" ? "restoring" : shownProblem(error);
+  return error instanceof ServerError && error.code === "restore-in-progress"
+    ? "restoring"
+    : shownProblem(error);
 }
 
 export function createWorkspaceData(options: {
@@ -359,8 +423,11 @@ export function createWorkspaceData(options: {
         target.stale = cached.stale;
       } else {
         entries.set(cached.view.id, {
-          view: cached.view, state: { value: cached.value, loading: false, problem: null, failures: 0 },
-          listeners: new Set(), stale: cached.stale, reads: requestGenerations(),
+          view: cached.view,
+          state: { value: cached.value, loading: false, problem: null, failures: 0 },
+          listeners: new Set(),
+          stale: cached.stale,
+          reads: requestGenerations(),
         });
       }
       cursor = cursor === null ? cached.cursor : earlierCursor(cursor, cached.cursor);
@@ -381,7 +448,8 @@ export function createWorkspaceData(options: {
       // What the cache holds now, so a drop or clear since the file was read wins here too.
       seed(cache.entries(scope));
       for (const target of entries.values()) {
-        if (target.listeners.size > 0 && live() && (target.state.value === null || target.stale)) read(target);
+        if (target.listeners.size > 0 && live() && (target.state.value === null || target.stale))
+          read(target);
         else if (target.state.loading) set(target, { ...target.state, loading: false });
       }
       startFeed();
@@ -403,14 +471,19 @@ export function createWorkspaceData(options: {
     hasGone = true;
     cache.drop(scope);
     store.stop();
-    for (const target of entries.values()) set(target, { value: null, loading: false, problem: "refused", failures: target.state.failures + 1 });
+    for (const target of entries.values())
+      set(target, {
+        value: null,
+        loading: false,
+        problem: "refused",
+        failures: target.state.failures + 1,
+      });
     options.onGone?.();
   }
 
   function entry(view: View<unknown>): Entry {
     let found = entries.get(view.id);
     if (!found) {
-      // A view first opened after the workspace has gone can't read, so it shows the same failed read and Try again.
       const state: ViewState<unknown> = hasGone
         ? { value: null, loading: false, problem: "refused", failures: 1 }
         : { value: null, loading: restoring, problem: null, failures: 0 };
@@ -430,10 +503,12 @@ export function createWorkspaceData(options: {
     const from = cursor;
     set(target, { ...target.state, loading: true });
     target.view.read(signIn.client, workspaceId, everything.signal).then(
-      answer => {
+      (answer) => {
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
-        const value = target.view.carry ? target.view.carry(target.state.value, answer.value) : answer.value;
+        const value = target.view.carry
+          ? target.view.carry(target.state.value, answer.value)
+          : answer.value;
         cache.set(scope, { view: target.view, value, cursor: answer.cursor, stale: false });
         set(target, { value, loading: false, problem: null, failures: target.state.failures });
         if (target.view.messages) options.onMessages?.(target.view.messages(value));
@@ -445,7 +520,12 @@ export function createWorkspaceData(options: {
         if (isGone(error)) return gone();
         const problem = readProblem(error);
         if (problem === null) return;
-        set(target, { ...target.state, loading: false, problem, failures: target.state.failures + 1 });
+        set(target, {
+          ...target.state,
+          loading: false,
+          problem,
+          failures: target.state.failures + 1,
+        });
       },
     );
   }
@@ -489,12 +569,22 @@ export function createWorkspaceData(options: {
       } catch (error) {
         // A request of a feed that has stopped, or been started again, says nothing, not even that the workspace has
         // gone. A 401 has ended the sign-in.
-        if (signal.aborted || !live() || (error instanceof ServerError && (error.problem === "signed-out" || error.problem === "cancelled"))) return;
+        if (
+          signal.aborted ||
+          !live() ||
+          (error instanceof ServerError &&
+            (error.problem === "signed-out" || error.problem === "cancelled"))
+        )
+          return;
         if (isGone(error)) return gone();
         failures += 1;
         const delay = Math.min(FEED_RETRY_MS * 2 ** (failures - 1), FEED_RETRY_MAX_MS);
         const problem = readProblem(error);
-        if (problem !== null && !shown && (failures >= FEED_FAILURES_SHOWN || delay >= FEED_RETRY_MAX_MS)) {
+        if (
+          problem !== null &&
+          !shown &&
+          (failures >= FEED_FAILURES_SHOWN || delay >= FEED_RETRY_MAX_MS)
+        ) {
           shown = true;
           setFeed({ problem, failures: feedState.failures + 1 });
         }
@@ -534,8 +624,8 @@ export function createWorkspaceData(options: {
       return;
     }
     const known: Known = {
-      files: entries.get(views.files.id)?.state.value as readonly WorkspaceFile[] | null ?? null,
-      chats: entries.get(views.chats.id)?.state.value as readonly ChatGroup[] | null ?? null,
+      files: (entries.get(views.files.id)?.state.value as readonly WorkspaceFile[] | null) ?? null,
+      chats: (entries.get(views.chats.id)?.state.value as readonly ChatGroup[] | null) ?? null,
     };
     for (const target of entries.values()) {
       if (!target.view.affectedBy(answer.changed, known, target.state.value)) continue;
@@ -557,7 +647,13 @@ export function createWorkspaceData(options: {
     subscribe(view, listener) {
       const target = entry(view);
       target.listeners.add(listener);
-      if (target.listeners.size === 1 && live() && !target.state.loading && (target.state.value === null || target.stale)) read(target);
+      if (
+        target.listeners.size === 1 &&
+        live() &&
+        !target.state.loading &&
+        (target.state.value === null || target.stale)
+      )
+        read(target);
       return () => void target.listeners.delete(listener);
     },
     retry(view) {
@@ -590,17 +686,22 @@ export function createWorkspaceData(options: {
       everything.abort();
     },
     markRead(threadId, messageId) {
-      if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId) return Promise.resolve();
+      if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId)
+        return Promise.resolve();
       sending.set(threadId, messageId);
-      return markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal).then(
-        () => { marked.set(threadId, messageId); },
-        (error: unknown) => {
-          // As a read's 404 does, one that still counts says the workspace may be gone from this phone.
-          if (live() && isGone(error)) gone();
-        },
-      ).finally(() => {
-        if (sending.get(threadId) === messageId) sending.delete(threadId);
-      });
+      return markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal)
+        .then(
+          () => {
+            marked.set(threadId, messageId);
+          },
+          (error: unknown) => {
+            // As a read's 404 does, one that still counts says the workspace may be gone from this phone.
+            if (live() && isGone(error)) gone();
+          },
+        )
+        .finally(() => {
+          if (sending.get(threadId) === messageId) sending.delete(threadId);
+        });
     },
   };
   return store;

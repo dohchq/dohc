@@ -36,18 +36,24 @@ vi.mock("../process/windowsSpawn", async (importOriginal) => ({
 }));
 vi.mock("../process/posixSpawn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../process/posixSpawn")>()),
-  killProcessTreePosix: vi.fn(async (pid: number, signal: NodeJS.Signals, options?: { alsoSignal?: number[] }) => {
-    await beforeTreeKill?.(undefined);
-    posixRoots.push(pid);
-    signalled.push(...(options?.alsoSignal ?? []));
-    await duringHelperKill?.([pid, ...(options?.alsoSignal ?? [])]);
-    if (!helpers.has(pid)) endWrapper(pid, signal);
-    return [pid, ...(options?.alsoSignal ?? [])];
-  }),
+  killProcessTreePosix: vi.fn(
+    async (pid: number, signal: NodeJS.Signals, options?: { alsoSignal?: number[] }) => {
+      await beforeTreeKill?.(undefined);
+      posixRoots.push(pid);
+      signalled.push(...(options?.alsoSignal ?? []));
+      await duringHelperKill?.([pid, ...(options?.alsoSignal ?? [])]);
+      if (!helpers.has(pid)) endWrapper(pid, signal);
+      return [pid, ...(options?.alsoSignal ?? [])];
+    },
+  ),
 }));
 
 function endWrapper(pid: number, signal: NodeJS.Signals): void {
-  try { process.kill(pid, signal); } catch { /* already gone */ }
+  try {
+    process.kill(pid, signal);
+  } catch {
+    /* already gone */
+  }
 }
 
 const started: ChildProcess[] = [];
@@ -62,7 +68,11 @@ afterEach(() => {
   windowsHelperKills.length = 0;
   helpers.clear();
   for (const each of started.splice(0)) {
-    try { each.kill("SIGKILL"); } catch { /* gone */ }
+    try {
+      each.kill("SIGKILL");
+    } catch {
+      /* gone */
+    }
   }
 });
 
@@ -87,14 +97,16 @@ const exited = (child: ChildProcess) =>
 async function app(files: Record<string, string>) {
   const workspaceRoot = await realpath(await createTestScratch("site-runner-endings-"));
   await mkdir(join(workspaceRoot, "portal"));
-  for (const [name, text] of Object.entries(files)) await writeFile(join(workspaceRoot, "portal", name), text);
+  for (const [name, text] of Object.entries(files))
+    await writeFile(join(workspaceRoot, "portal", name), text);
   return workspaceRoot;
 }
 
-const SERVER = "require('node:http').createServer((q, r) => r.end('ok')).listen(0, '127.0.0.1', function () { console.log('http://127.0.0.1:' + this.address().port + '/'); });";
+const SERVER =
+  "require('node:http').createServer((q, r) => r.end('ok')).listen(0, '127.0.0.1', function () { console.log('http://127.0.0.1:' + this.address().port + '/'); });";
 const IDLE = "setInterval(() => {}, 1000);";
-// A build that writes its output and exits 0.
-const BUILT = "const fs = require('node:fs'); fs.mkdirSync('dist', { recursive: true }); fs.writeFileSync('dist/index.html', '<h1>ok</h1>');";
+const BUILT =
+  "const fs = require('node:fs'); fs.mkdirSync('dist', { recursive: true }); fs.writeFileSync('dist/index.html', '<h1>ok</h1>');";
 
 describe("each way an app command ends counts what it left running", () => {
   it("counts a helper that a capture still in flight finds after the stop", async () => {
@@ -104,7 +116,10 @@ describe("each way an app command ends counts what it left running", () => {
     const inFlight = deferred<void>();
     let reads = 0;
     const handle = await startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["server.js"],
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["server.js"],
       descendantCaptureIntervalMs: 20,
       descendantsReader: async () => {
         reads += 1;
@@ -124,10 +139,17 @@ describe("each way an app command ends counts what it left running", () => {
     const left = orphan();
     const workspaceRoot = await app({ "idle.js": IDLE });
     const starting = startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["idle.js"], readyTimeoutMs: 300,
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["idle.js"],
+      readyTimeoutMs: 300,
       descendantsReader: async () => [left.pid!],
     });
-    const error = await starting.then(() => null, (cause: unknown) => cause);
+    const error = await starting.then(
+      () => null,
+      (cause: unknown) => cause,
+    );
     expect(error).toBeInstanceOf(AppCommandStillRunningError);
     expect((error as AppCommandStillRunningError).pids).toContain(left.pid);
   });
@@ -136,10 +158,16 @@ describe("each way an app command ends counts what it left running", () => {
     const left = orphan();
     const workspaceRoot = await app({ "quit.js": "setTimeout(() => process.exit(3), 200);" });
     const starting = startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["quit.js"],
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["quit.js"],
       descendantsReader: async () => [left.pid!],
     });
-    const error = await starting.then(() => null, (cause: unknown) => cause);
+    const error = await starting.then(
+      () => null,
+      (cause: unknown) => cause,
+    );
     expect(error).toBeInstanceOf(AppCommandStillRunningError);
   });
 
@@ -148,7 +176,11 @@ describe("each way an app command ends counts what it left running", () => {
     const workspaceRoot = await app({ "build.js": IDLE });
     const controller = new AbortController();
     const building = buildSite({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["build.js"], signal: controller.signal,
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["build.js"],
+      signal: controller.signal,
       timeoutMs: 100,
       descendantsReader: async () => {
         queueMicrotask(() => controller.abort());
@@ -162,7 +194,10 @@ describe("each way an app command ends counts what it left running", () => {
     const left = orphan();
     const workspaceRoot = await app({ "build.js": "setTimeout(() => process.exit(0), 200);" });
     const building = buildSite({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["build.js"],
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["build.js"],
       descendantsReader: async () => [left.pid!],
     });
     await expect(building).rejects.toBeInstanceOf(AppCommandStillRunningError);
@@ -179,16 +214,23 @@ describe("each way an app command ends counts what it left running", () => {
       }
       while (!existsSync(marker)) await delay(10);
     };
-    await writeFile(join(workspaceRoot, "portal", "server.js"), [
-      "const server = require('node:http').createServer((q, r) => r.end('ok'));",
-      "server.listen(0, '127.0.0.1', () => {",
-      "  console.log('http://127.0.0.1:' + server.address().port + '/');",
-      `  require('node:fs').writeFileSync(${JSON.stringify(marker)}, '');`,
-      "});",
-    ].join(String.fromCharCode(10)));
+    await writeFile(
+      join(workspaceRoot, "portal", "server.js"),
+      [
+        "const server = require('node:http').createServer((q, r) => r.end('ok'));",
+        "server.listen(0, '127.0.0.1', () => {",
+        "  console.log('http://127.0.0.1:' + server.address().port + '/');",
+        `  require('node:fs').writeFileSync(${JSON.stringify(marker)}, '');`,
+        "});",
+      ].join(String.fromCharCode(10)),
+    );
     const controller = new AbortController();
     const starting = startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["server.js"], signal: controller.signal,
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["server.js"],
+      signal: controller.signal,
       descendantsReader: async () => {
         queueMicrotask(() => controller.abort());
         return [];
@@ -202,7 +244,10 @@ describe("each way an app command ends counts what it left running", () => {
     const workspaceRoot = await app({ "server.js": SERVER });
     let reads = 0;
     const handle = await startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["server.js"],
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["server.js"],
       descendantsReader: async () => (reads++ === 0 ? [left.pid!] : []),
     });
     await handle.stop();
@@ -217,7 +262,6 @@ describe("each way an app command ends counts what it left running", () => {
     const left = orphan();
     const workspaceRoot = await app({ "build.js": BUILT });
     const controller = new AbortController();
-    // The exit's cleanup reaches the helper; the person cancels right then.
     duringHelperKill = async (pids) => {
       if (!pids.includes(left.pid!)) return;
       duringHelperKill = null;
@@ -226,7 +270,12 @@ describe("each way an app command ends counts what it left running", () => {
       controller.abort();
     };
     const result = await buildSite({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["build.js"], output: "dist", signal: controller.signal,
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["build.js"],
+      output: "dist",
+      signal: controller.signal,
       descendantsReader: async () => [left.pid!],
     });
     expect(result).toMatchObject({ ok: false, exitCode: null });
@@ -245,7 +294,12 @@ describe("each way an app command ends counts what it left running", () => {
       vi.advanceTimersByTime(60_000);
     };
     const result = await buildSite({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["build.js"], output: "dist", timeoutMs: 60_000,
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["build.js"],
+      output: "dist",
+      timeoutMs: 60_000,
       descendantsReader: async () => [left.pid!],
     });
     expect(result).toMatchObject({ ok: false, exitCode: null });
@@ -258,7 +312,10 @@ describe("each way an app command ends counts what it left running", () => {
     const inFlight = deferred<void>();
     let reads = 0;
     const handle = await startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["server.js"],
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["server.js"],
       descendantCaptureIntervalMs: 20,
       descendantsReader: async () => {
         reads += 1;
@@ -278,13 +335,15 @@ describe("each way an app command ends counts what it left running", () => {
     const left = orphan();
     const workspaceRoot = await app({ "server.js": SERVER });
     const handle = await startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["server.js"],
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["server.js"],
       descendantsReader: async () => [left.pid!],
     });
     onPlatform("linux");
     await handle.stop();
     const wrapperPid = posixRoots[0]!;
-    // The SIGTERM round ends the wrapper; the SIGKILL round roots at the helper.
     expect(posixRoots).toEqual([wrapperPid, left.pid]);
     posixRoots.length = 0;
     await handle.stop();
@@ -297,10 +356,12 @@ describe("each way an app command ends counts what it left running", () => {
     const second = orphan();
     const workspaceRoot = await app({ "server.js": SERVER });
     const handle = await startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["server.js"],
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["server.js"],
       descendantsReader: async () => [first.pid!, second.pid!],
     });
-    // The first helper's tree kill also ends the second.
     duringHelperKill = async (pids) => {
       if (!pids.includes(first.pid!)) return;
       second.kill("SIGKILL");
@@ -313,9 +374,19 @@ describe("each way an app command ends counts what it left running", () => {
   });
 
   it("keeps process numbers out of the words a person reads", () => {
-    const error = new AppCommandStillRunningError({
-      url: "", command: "node", args: [], cwd: "/trip", logs: () => [], onExit: () => undefined, stop: async () => undefined, stillRunning: async () => [],
-    }, [43210]);
+    const error = new AppCommandStillRunningError(
+      {
+        url: "",
+        command: "node",
+        args: [],
+        cwd: "/trip",
+        logs: () => [],
+        onExit: () => undefined,
+        stop: async () => undefined,
+        stillRunning: async () => [],
+      },
+      [43210],
+    );
     expect(error.pids).toEqual([43210]);
     expect(error.message).not.toContain("43210");
     expect(error.message).toContain("app");

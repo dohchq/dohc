@@ -1,28 +1,24 @@
 import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
-import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
+import type {
+  ChannelThreadRecord,
+  ChatBookmarkRecord,
+  ChatReactionRecord,
+} from "../../ipc/bridgeContract";
 import { formatChatTime, formatShortTime } from "../time";
 import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
-import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
+import {
+  chatAuthorLabel,
+  MessageReactions,
+  RowToolbar,
+  TOOLBAR_BUTTON,
+  type ChatReactionControls,
+} from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
 import { WorkLinkText } from "./workReferences";
 import { WorkStatus } from "./WorkCard";
-
-// A post in a group's feed, drawn as a row: who and when on one line, the
-// title or the text, then a meta line with the thread's Work card,
-// reactions, an open poll, and the comment count when there are any. Add reaction, Comment, and Save as file
-// sit in a toolbar shown on hover and focus. The whole row opens the post.
-// Controls inside stop the click so a reaction never also opens it.
-//
-// Pinned names from the previous card are kept: chats-post-card,
-// chats-thread, chats-post-author, chats-post-agent-badge, chats-post-time,
-// chats-post-title, chats-post-excerpt, chats-post-footer,
-// chats-post-reaction-pill, chats-post-decision-open,
-// chats-post-comment-count, chats-post-bookmark, chats-thread-unread.
-// The Work card adds chats-post-work, chats-post-work-reporter and
-// chats-post-work-open.
 
 export type PostOpeningMessage = Omit<
   NonNullable<ChannelThreadRecord["openingMessage"]>,
@@ -42,7 +38,8 @@ export interface PostData {
 // Rust's char::is_whitespace.
 const DERIVED_TITLE_MAX_CHARS = 80;
 const WORK_LINK = /@\[work:[A-Za-z0-9_-]{43}\]/gu;
-const RUST_WHITESPACE = /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/u;
+const RUST_WHITESPACE =
+  /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/u;
 
 function derivedTitle(firstLine: string): string {
   const line = firstLine.split(RUST_WHITESPACE).filter(Boolean).join(" ");
@@ -84,10 +81,9 @@ export const FEED_ROW =
 export const FEED_TOOLBAR = "top-1 right-9";
 // Home's rows have no unread count, so their toolbar sits at the row's edge.
 export const HOME_TOOLBAR = "top-1 right-2";
-// A feed row's meta line: reactions and counts.
-export const FEED_META = "mt-1.5 flex flex-wrap items-center gap-3 text-[11px] tabular-nums text-subtle";
+export const FEED_META =
+  "mt-1.5 flex flex-wrap items-center gap-3 text-[11px] tabular-nums text-subtle";
 
-// One icon button in a row's toolbar.
 export function ActionButton(props: {
   testId?: string;
   label: string;
@@ -151,7 +147,6 @@ export function FeedReactionPill(props: {
   );
 }
 
-// Shared by the post card and Home.
 export function SaveAsFileActions(props: {
   testIdPrefix: string;
   bookmark?: ChatBookmarkRecord;
@@ -166,7 +161,14 @@ export function SaveAsFileActions(props: {
         <ActionButton
           testId={props.testIdPrefix}
           label={props.bookmark ? "Saved" : "Save as file"}
-          icon={<Bookmark size={14} strokeWidth={1.9} fill={props.bookmark ? "currentColor" : "none"} aria-hidden />}
+          icon={
+            <Bookmark
+              size={14}
+              strokeWidth={1.9}
+              fill={props.bookmark ? "currentColor" : "none"}
+              aria-hidden
+            />
+          }
           active={Boolean(props.bookmark)}
           disabled={props.busy}
           onClick={() => props.onToggle?.("live")}
@@ -254,12 +256,16 @@ export function PostCard(props: {
       }}
       className={`${FEED_ROW} cursor-pointer text-left dohc-focus-row focus-visible:rounded-lg`}
     >
-      {/* Compatibility target retained for existing navigation and e2e
-          drivers. The row itself is the semantic button. */}
-      <div data-testid="chats-thread" data-thread-id={props.thread.id} className="flex items-start gap-3">
-        <ChatAvatar presentation={message?.presentation ?? neutralPresentation}
+      <div
+        data-testid="chats-thread"
+        data-thread-id={props.thread.id}
+        className="flex items-start gap-3"
+      >
+        <ChatAvatar
+          presentation={message?.presentation ?? neutralPresentation}
           name={message?.authorDisplayName ?? "?"}
-          kind={message?.authorKind ?? "human"} linkAgent={message?.linkAgent === true}
+          kind={message?.authorKind ?? "human"}
+          linkAgent={message?.linkAgent === true}
           size="row"
         />
         <div className="min-w-0 flex-1">
@@ -269,13 +275,27 @@ export function PostCard(props: {
               className="truncate text-[13px] font-semibold text-ink"
             >
               {message ? (
-                <AgentName kind={message.authorKind} presentation={message.presentation} linkAgent={message.linkAgent === true}>{chatAuthorLabel(message)}</AgentName>
-              ) : "Unknown author"}
+                <AgentName
+                  kind={message.authorKind}
+                  presentation={message.presentation}
+                  linkAgent={message.linkAgent === true}
+                >
+                  {chatAuthorLabel(message)}
+                </AgentName>
+              ) : (
+                "Unknown author"
+              )}
             </span>
             {isAgent ? (
-              <AgentBadge testIdPrefix="chats-post" author={message!} presentation={message!.presentation} />
+              <AgentBadge
+                testIdPrefix="chats-post"
+                author={message!}
+                presentation={message!.presentation}
+              />
             ) : null}
-            {message?.authorKind === "link" ? <LinkHolderMark testId="chats-post-link-holder" /> : null}
+            {message?.authorKind === "link" ? (
+              <LinkHolderMark testId="chats-post-link-holder" />
+            ) : null}
             {message?.authorKind === "automation" ? (
               <AutomationBadge
                 testIdPrefix="chats-post"
@@ -285,7 +305,9 @@ export function PostCard(props: {
               />
             ) : null}
             {props.groupLabel ? (
-              <span className="truncate text-[11px] tabular-nums text-subtle">{props.groupLabel}</span>
+              <span className="truncate text-[11px] tabular-nums text-subtle">
+                {props.groupLabel}
+              </span>
             ) : null}
             <time
               data-testid="chats-post-time"
@@ -318,7 +340,11 @@ export function PostCard(props: {
                 <WorkStatus
                   testIdPrefix="chats-post"
                   work={work}
-                  reportedBy={{ name: work.authorDisplayName, owner: work.authorOwnerDisplayName, atMs: work.reportedAtMs }}
+                  reportedBy={{
+                    name: work.authorDisplayName,
+                    owner: work.authorOwnerDisplayName,
+                    atMs: work.reportedAtMs,
+                  }}
                   // The row names the post's author. A report on a later
                   // message names its own.
                   showReporter={work.messageId !== message?.id}

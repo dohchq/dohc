@@ -1,7 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { access, mkdtemp, readFile, rm } from "node:fs/promises";
-import { createServer, request as httpRequest, type IncomingHttpHeaders, type Server } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingHttpHeaders,
+  type Server,
+} from "node:http";
 import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -159,14 +164,15 @@ function waitForListening(
       if (error) reject(error);
       else if (match) resolve(match);
     };
-    const diagnostics = (): string =>
-      `stdout:\n${service.stdout()}\nstderr:\n${service.stderr()}`;
+    const diagnostics = (): string => `stdout:\n${service.stdout()}\nstderr:\n${service.stderr()}`;
     const inspectStdout = (): void => {
       const match = pattern.exec(service.stdout());
       if (match) finish(undefined, match);
     };
     const onError = (error: Error): void => {
-      finish(new Error(`${service.label} child failed to start\n${diagnostics()}`, { cause: error }));
+      finish(
+        new Error(`${service.label} child failed to start\n${diagnostics()}`, { cause: error }),
+      );
     };
     const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
       finish(
@@ -263,7 +269,9 @@ async function allocatePort(): Promise<number> {
 // A TLS proxy in front of share-web, as a deployment has. share-web names its
 // agent sign-in addresses https://<Host>, so the MCP sign-in needs one. The
 // proxy keeps the Host header.
-async function startHttpsFront(shareWebPort: number): Promise<{ server: HttpsServer; url: string }> {
+async function startHttpsFront(
+  shareWebPort: number,
+): Promise<{ server: HttpsServer; url: string }> {
   const tls = await ensureLocalhostTls();
   const server = createHttpsServer(
     { key: await readFile(tls.key), cert: await readFile(tls.certificate) },
@@ -374,8 +382,7 @@ async function startStack(options: { httpsFront: boolean }): Promise<RunningStac
     if (options.httpsFront) {
       httpsFront = await startHttpsFront(shareWebPort);
       relayEnv.DOHC_RELAY_SHARE_WEB_ORIGIN = httpsFront.url;
-      shareWebEnv.DOHC_SHARE_WEB_PUBLIC_HOSTS =
-        `${LOOPBACK_HOST}:${String(shareWebPort)},${new URL(httpsFront.url).host}`;
+      shareWebEnv.DOHC_SHARE_WEB_PUBLIC_HOSTS = `${LOOPBACK_HOST}:${String(shareWebPort)},${new URL(httpsFront.url).host}`;
     }
     const relay = spawnService(
       "sync relay",
@@ -450,7 +457,10 @@ async function expectHttpOk(response: Response, operation: string): Promise<Resp
   );
 }
 
-async function responseObject(response: Response, operation: string): Promise<Record<string, unknown>> {
+async function responseObject(
+  response: Response,
+  operation: string,
+): Promise<Record<string, unknown>> {
   await expectHttpOk(response, operation);
   return (await response.json()) as Record<string, unknown>;
 }
@@ -524,9 +534,7 @@ export async function seedShare(options: SeedShareOptions): Promise<SeededShare>
               payloadBeforePath: null,
               payloadAfterBlobSha256: seededFile.blobSha256,
               payloadAfterPath: seededFile.path,
-              ...(fixture.contentKind === "binary"
-                ? { payloadAfterContentKind: "binary" }
-                : {}),
+              ...(fixture.contentKind === "binary" ? { payloadAfterContentKind: "binary" } : {}),
               metadata: { origin: "user" },
               beforePresent: "null",
             },

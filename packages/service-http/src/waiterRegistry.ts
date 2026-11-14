@@ -86,7 +86,6 @@ export class WaiterRegistry<T = void> {
     });
   }
 
-  /** Settles every waiter parked on `group` with `value`. */
   wake(group: string, value: T): void {
     const waiters = this.byGroup.get(group);
     if (!waiters) return;

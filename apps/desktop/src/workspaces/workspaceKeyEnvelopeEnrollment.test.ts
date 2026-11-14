@@ -1,5 +1,4 @@
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
 import { wrapWorkspaceDataKey } from "@dohc/security-contract/secret-key-envelope";
 import type {
   DaemonErrorCode,
@@ -69,9 +68,7 @@ function snapshotError(error: unknown): Record<string, unknown> {
         ? {
             name: record.cause.name,
             message: record.cause.message,
-            wireError: (
-              record.cause as Error & { wireError?: unknown }
-            ).wireError,
+            wireError: (record.cause as Error & { wireError?: unknown }).wireError,
           }
         : record.cause,
   };
@@ -120,9 +117,7 @@ class BoundaryRecordingDaemon implements EngineDaemonClient {
     if (this.behavior.kind !== "scripted") return null;
     const step = this.behavior.steps.shift();
     if (!step || step.method !== method) {
-      throw new Error(
-        `Expected scripted ${step?.method ?? "end of script"}, received ${method}.`,
-      );
+      throw new Error(`Expected scripted ${step?.method ?? "end of script"}, received ${method}.`);
     }
     return step;
   }
@@ -135,10 +130,7 @@ class BoundaryRecordingDaemon implements EngineDaemonClient {
       case "workspace.close":
         return this.response(request, { closed: true });
       case "keys.upload": {
-        const params = request.params as Record<
-          string,
-          JsonValue | undefined
-        >;
+        const params = request.params as Record<string, JsonValue | undefined>;
         this.emit({
           seq: this.emittedEvents.length + 1,
           sessionGeneration: 1,
@@ -151,9 +143,7 @@ class BoundaryRecordingDaemon implements EngineDaemonClient {
             ifMatch: params.ifMatch ?? null,
           },
         });
-        this.stderr.push(
-          `[daemon] keys.upload ${JSON.stringify(request.params)}`,
-        );
+        this.stderr.push(`[daemon] keys.upload ${JSON.stringify(request.params)}`);
         if (this.behavior.kind === "refuseUpload") {
           this.refuse(request, this.behavior.refusal);
         }
@@ -201,9 +191,7 @@ class BoundaryRecordingDaemon implements EngineDaemonClient {
           payload: {
             method: "keys.download",
             custody: "opaque",
-            workspaceId: (
-              request.params as Record<string, JsonValue | undefined>
-            ).workspaceId,
+            workspaceId: (request.params as Record<string, JsonValue | undefined>).workspaceId,
             envelopeJson: result.envelopeJson,
             etag: result.etag,
           },
@@ -224,9 +212,7 @@ class BoundaryRecordingDaemon implements EngineDaemonClient {
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 async function harness(behavior: KeyBehavior): Promise<{
@@ -240,10 +226,7 @@ async function harness(behavior: KeyBehavior): Promise<{
   daemon.onEvent((event) => daemon.observedEvents.push(structuredClone(event)));
   const routes = new RelayTransportRouteGuard();
   const sessions = new EngineWorkspaceSessions(
-    new RelayConfiguredDaemonClientSource(
-      { currentClient: () => daemon },
-      routes,
-    ),
+    new RelayConfiguredDaemonClientSource({ currentClient: () => daemon }, routes),
     { transportRebindAttempts: 1 },
   );
   const relay = new EngineRelayClient({
@@ -294,18 +277,12 @@ function sentinelEncodings(sentinel: Buffer): string[] {
     sentinel.toString("base64"),
     sentinel.toString("hex"),
     JSON.stringify(ascii).slice(1, -1),
-    [...sentinel]
-      .map((byte) => `\\u${byte.toString(16).padStart(4, "0")}`)
-      .join(""),
+    [...sentinel].map((byte) => `\\u${byte.toString(16).padStart(4, "0")}`).join(""),
     JSON.stringify([...sentinel]),
   ];
 }
 
-function expectNoSentinel(
-  label: string,
-  surfaces: unknown,
-  sentinel = SENTINEL,
-): void {
+function expectNoSentinel(label: string, surfaces: unknown, sentinel = SENTINEL): void {
   const serialized = JSON.stringify(surfaces);
   const bytes = Buffer.from(serialized, "utf8");
   for (const encoding of sentinelEncodings(sentinel)) {
@@ -374,10 +351,7 @@ describe("workspace key-envelope daemon custody boundary", () => {
       workspaceId: WORKSPACE_ID,
       dataKey: Buffer.from(SENTINEL),
       passphrase: PASSPHRASE,
-      transport: recordingErrors(
-        uploadRefusal.client,
-        uploadRefusalErrors,
-      ),
+      transport: recordingErrors(uploadRefusal.client, uploadRefusalErrors),
       installDataKey: async () => undefined,
     }).catch((error: unknown) => error);
     expect(uploadRefusalError).toMatchObject({
@@ -443,9 +417,7 @@ describe("workspace key-envelope daemon custody boundary", () => {
       keyRequests
         .filter((frame) => frame.method === "keys.upload")
         .every(
-          (frame) =>
-            typeof (frame.params as Record<string, unknown>).envelopeJson ===
-            "string",
+          (frame) => typeof (frame.params as Record<string, unknown>).envelopeJson === "string",
         ),
     ).toBe(true);
   }, 30_000);
@@ -471,9 +443,7 @@ describe("workspace key-envelope conflict retries", () => {
       installDataKey: async () => undefined,
     });
 
-    const uploads = context.daemon.outboundFrames.filter(
-      (frame) => frame.method === "keys.upload",
-    );
+    const uploads = context.daemon.outboundFrames.filter((frame) => frame.method === "keys.upload");
     expect(uploads).toHaveLength(2);
     expect(uploads[0]?.params).not.toHaveProperty("ifMatch");
     expect(uploads[1]?.params).toMatchObject({ ifMatch: fetchedEtag });
@@ -498,9 +468,7 @@ describe("workspace key-envelope conflict retries", () => {
       installDataKey: async () => undefined,
     });
 
-    const uploads = context.daemon.outboundFrames.filter(
-      (frame) => frame.method === "keys.upload",
-    );
+    const uploads = context.daemon.outboundFrames.filter((frame) => frame.method === "keys.upload");
     expect(uploads).toHaveLength(2);
     expect(uploads[0]?.params).not.toHaveProperty("ifMatch");
     expect(uploads[1]?.params).not.toHaveProperty("ifMatch");
@@ -530,13 +498,10 @@ describe("workspace key-envelope conflict retries", () => {
       }),
     ).rejects.toMatchObject({
       name: "RelayConflictError",
-      message:
-        "Relay key envelope kept changing concurrently; upload did not complete.",
+      message: "Relay key envelope kept changing concurrently; upload did not complete.",
     });
     expect(
-      context.daemon.outboundFrames.filter(
-        (frame) => frame.method === "keys.upload",
-      ),
+      context.daemon.outboundFrames.filter((frame) => frame.method === "keys.upload"),
     ).toHaveLength(3);
     await context.sessions.closeAll();
   });

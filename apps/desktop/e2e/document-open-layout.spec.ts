@@ -103,8 +103,6 @@ async function releaseDocumentOpens(desktop: LaunchedDesktopApp): Promise<void> 
   });
 }
 
-// Each block's box, from the body that holds the first heading: the read body
-// while opening, the editor once ready.
 async function measureBlocks(page: Page): Promise<Record<string, Box | null>> {
   return page.evaluate(() => {
     const view = document.querySelector('[data-testid="view-markdown"]');
@@ -116,7 +114,12 @@ async function measureBlocks(page: Page): Promise<Record<string, Box | null>> {
       if (!element) return null;
       const rect = element.getBoundingClientRect();
       const round = (value: number) => Math.round(value * 10) / 10;
-      return { x: round(rect.x), y: round(rect.y), width: round(rect.width), height: round(rect.height) };
+      return {
+        x: round(rect.x),
+        y: round(rect.y),
+        width: round(rect.width),
+        height: round(rect.height),
+      };
     };
     const paragraphs = root.querySelectorAll(":scope > p");
     const tables = root.querySelectorAll("table");
@@ -159,13 +162,16 @@ async function settledBlocks(page: Page): Promise<Record<string, Box | null>> {
   let previous = "";
   let blocks: Record<string, Box | null> = {};
   await expect
-    .poll(async () => {
-      blocks = await measureBlocks(page);
-      const current = JSON.stringify(blocks);
-      const settled = current === previous;
-      previous = current;
-      return settled;
-    }, { timeout: 15_000 })
+    .poll(
+      async () => {
+        blocks = await measureBlocks(page);
+        const current = JSON.stringify(blocks);
+        const settled = current === previous;
+        previous = current;
+        return settled;
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
   return blocks;
 }
@@ -219,22 +225,33 @@ test("an opening document draws each block where the ready editor draws it", asy
         const before = opening[key];
         const after = ready[key];
         if (!before || !after) return [key, null];
-        return [key, {
-          x: Math.round((after.x - before.x) * 10) / 10,
-          y: Math.round((after.y - before.y) * 10) / 10,
-          width: Math.round((after.width - before.width) * 10) / 10,
-          height: Math.round((after.height - before.height) * 10) / 10,
-        }];
+        return [
+          key,
+          {
+            x: Math.round((after.x - before.x) * 10) / 10,
+            y: Math.round((after.y - before.y) * 10) / 10,
+            width: Math.round((after.width - before.width) * 10) / 10,
+            height: Math.round((after.height - before.height) * 10) / 10,
+          },
+        ];
       }),
     );
     console.log(`[document-open-layout] offsets ${JSON.stringify(offsets)}`);
-    await writeFile(join(shotDir, "blocks.json"), JSON.stringify({ opening, ready, offsets }, null, 2));
+    await writeFile(
+      join(shotDir, "blocks.json"),
+      JSON.stringify({ opening, ready, offsets }, null, 2),
+    );
 
     for (const [key, offset] of Object.entries(offsets)) {
       expect.soft(offset, `${key} draws in both states`).not.toBeNull();
       if (!offset) continue;
       for (const side of ["x", "y", "width", "height"] as const) {
-        expect.soft(Math.abs(offset[side]), `${key} ${side} moves when the editor replaces the read body`).toBeLessThanOrEqual(0.5);
+        expect
+          .soft(
+            Math.abs(offset[side]),
+            `${key} ${side} moves when the editor replaces the read body`,
+          )
+          .toBeLessThanOrEqual(0.5);
       }
     }
   } finally {

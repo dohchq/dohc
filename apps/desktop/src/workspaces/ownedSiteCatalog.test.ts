@@ -19,9 +19,17 @@ afterEach(async () => {
 
 function catalogWith(listing: WorkspacePathListing) {
   const reads = createOwnedWorkspaceReadPort({
-    hasShareState: false, searchSources: [], repairProjection: async () => new Set<string>(),
-    listFiles: vi.fn(async scope => ({ ...listing, files: listing.files.filter(file => matchesFileListingScope(file.path, scope)) })),
-    lookupFiles: vi.fn(async paths => ({ ...listing, files: listing.files.filter(file => paths.includes(file.path)) })),
+    hasShareState: false,
+    searchSources: [],
+    repairProjection: async () => new Set<string>(),
+    listFiles: vi.fn(async (scope) => ({
+      ...listing,
+      files: listing.files.filter((file) => matchesFileListingScope(file.path, scope)),
+    })),
+    lookupFiles: vi.fn(async (paths) => ({
+      ...listing,
+      files: listing.files.filter((file) => paths.includes(file.path)),
+    })),
   });
   const prepare = vi.spyOn(reads, "prepareSearch");
   return { ...createOwnedSiteCatalog({ reads: () => reads }), prepare, reads };
@@ -47,18 +55,13 @@ describe("owned site catalog", () => {
     await writeUnownedSite();
     const catalog = catalogWith({ files: [], folders: [] });
 
-    await expect(
-      catalog.get({ rootPath: root }, "unowned-site", undefined),
-    ).resolves.toBeNull();
+    await expect(catalog.get({ rootPath: root }, "unowned-site", undefined)).resolves.toBeNull();
   });
 
   it("forwards the effective preview mode to the selected owned site", async () => {
     await mkdir(join(root, "stale-dist", "dist"), { recursive: true });
     await writeFile(join(root, "stale-dist", "index.html"), "<h1>Source</h1>");
-    await writeFile(
-      join(root, "stale-dist", "dist", "index.html"),
-      "<h1>Stale build</h1>",
-    );
+    await writeFile(join(root, "stale-dist", "dist", "index.html"), "<h1>Stale build</h1>");
     const catalog = catalogWith({
       files: [
         { path: "stale-dist/index.html", kind: "file" },
@@ -67,16 +70,8 @@ describe("owned site catalog", () => {
       folders: ["stale-dist", "stale-dist/dist"],
     });
 
-    const defaultSite = await catalog.get(
-      { rootPath: root },
-      "stale-dist",
-      undefined,
-    );
-    const staticSite = await catalog.get(
-      { rootPath: root },
-      "stale-dist",
-      "static",
-    );
+    const defaultSite = await catalog.get({ rootPath: root }, "stale-dist", undefined);
+    const staticSite = await catalog.get({ rootPath: root }, "stale-dist", "static");
 
     expect(defaultSite?.shareManifest).toMatchObject({
       ok: true,
@@ -93,7 +88,9 @@ describe("owned site catalog", () => {
     const listFiles = vi.fn(async () => ({ files: [], folders: [] }));
     const catalog = createOwnedSiteCatalog({
       reads: vi.fn(() => ({
-        prepareLookup: async () => { throw Error("Canonical owner unavailable."); },
+        prepareLookup: async () => {
+          throw Error("Canonical owner unavailable.");
+        },
         prepareSearch: vi.fn(async () => {
           throw new Error("Canonical owner unavailable.");
         }),
@@ -101,12 +98,10 @@ describe("owned site catalog", () => {
       })),
     });
 
-    await expect(catalog.list({ rootPath: root })).rejects.toThrow(
+    await expect(catalog.list({ rootPath: root })).rejects.toThrow("Canonical owner unavailable.");
+    await expect(catalog.get({ rootPath: root }, "unowned-site", undefined)).rejects.toThrow(
       "Canonical owner unavailable.",
     );
-    await expect(
-      catalog.get({ rootPath: root }, "unowned-site", undefined),
-    ).rejects.toThrow("Canonical owner unavailable.");
     expect(listFiles).not.toHaveBeenCalled();
   });
 
@@ -116,7 +111,9 @@ describe("owned site catalog", () => {
     const listFiles = vi.fn(async () => listing);
     const catalog = createOwnedSiteCatalog({
       reads: vi.fn(() => ({
-        prepareLookup: async () => { throw Error("Canonical owner unavailable."); },
+        prepareLookup: async () => {
+          throw Error("Canonical owner unavailable.");
+        },
         prepareSearch: vi.fn(async () => ({
           listing: null,
           allowPath: () => true,
@@ -137,7 +134,9 @@ describe("owned site catalog", () => {
     }));
     const catalog = createOwnedSiteCatalog({
       reads: vi.fn(() => ({
-        prepareLookup: async () => { throw Error("Canonical owner unavailable."); },
+        prepareLookup: async () => {
+          throw Error("Canonical owner unavailable.");
+        },
         prepareSearch: vi.fn(async () => ({
           listing: { files: [], folders: [] },
           allowPath: () => false,
@@ -164,47 +163,76 @@ it("matches the old catalog for files, folders, missing paths, nested apps, and 
     await mkdir(join(root, path, ".."), { recursive: true });
     await writeFile(join(root, path), body);
   }
-  const listing = { files: Object.keys(bodies).map(path => ({ path, kind: "file" as const })), folders: [] };
+  const listing = {
+    files: Object.keys(bodies).map((path) => ({ path, kind: "file" as const })),
+    folders: [],
+  };
   const catalog = catalogWith(listing);
   const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
   const old = await catalog.list({ rootPath: root });
-  for (const path of ["portal", "portal/src/readme.txt", "portal/src", "portal/missing.txt", "portal/child/missing", "portal/public", "missing"]) {
+  for (const path of [
+    "portal",
+    "portal/src/readme.txt",
+    "portal/src",
+    "portal/missing.txt",
+    "portal/child/missing",
+    "portal/public",
+    "missing",
+  ]) {
     catalog.prepare.mockClear();
     vi.mocked(catalog.reads.listFiles).mockClear();
-    expect(await catalog.get({ rootPath: root }, path, undefined)).toEqual(await selectListedSitePackage(path, old));
+    expect(await catalog.get({ rootPath: root }, path, undefined)).toEqual(
+      await selectListedSitePackage(path, old),
+    );
     expect(catalog.prepare).not.toHaveBeenCalled();
-    expect(vi.mocked(catalog.reads.listFiles).mock.calls.every(([scope]) => scope?.path !== ".")).toBe(true);
+    expect(
+      vi.mocked(catalog.reads.listFiles).mock.calls.every(([scope]) => scope?.path !== "."),
+    ).toBe(true);
   }
 });
 it("keeps a root app's complete inventory after bounded discovery and rejects excluded metadata", async () => {
   await writeFile(join(root, "index.html"), "<h1>root</h1>");
   await writeFile(join(root, "note.txt"), "note");
   await writeUnownedSite();
-  const listing = { files: ["index.html", "note.txt"].map(path => ({ path, kind: "file" as const })), folders: [] };
+  const listing = {
+    files: ["index.html", "note.txt"].map((path) => ({ path, kind: "file" as const })),
+    folders: [],
+  };
   const catalog = catalogWith(listing);
   const old = await catalog.list({ rootPath: root });
   const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
   for (const path of [".", "note.txt", "missing", "unowned-site", ".dohc/private", "./note.txt"]) {
-    expect(await catalog.get({ rootPath: root }, path, undefined)).toEqual(await selectListedSitePackage(path, old));
+    expect(await catalog.get({ rootPath: root }, path, undefined)).toEqual(
+      await selectListedSitePackage(path, old),
+    );
   }
 });
 
-it.each(["app/", "app//x", "app/./x", "app/../x"])("matches listing selection for non-normalized input %s", async path => {
-  await writeFile(join(root, "index.html"), "<h1>root</h1>");
-  await mkdir(join(root, "app"));
-  await writeFile(join(root, "app/index.html"), "<h1>app</h1>");
-  const catalog = catalogWith({ files: ["index.html", "app/index.html"].map(path => ({ path, kind: "file" as const })), folders: [] });
-  const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
-  const listed = await catalog.list({ rootPath: root });
-  const selected = await catalog.get({ rootPath: root }, path, undefined);
-  expect(selected?.root).toBe("app");
-  expect(selected).toEqual(selectListedSitePackage(path, listed));
-});
+it.each(["app/", "app//x", "app/./x", "app/../x"])(
+  "matches listing selection for non-normalized input %s",
+  async (path) => {
+    await writeFile(join(root, "index.html"), "<h1>root</h1>");
+    await mkdir(join(root, "app"));
+    await writeFile(join(root, "app/index.html"), "<h1>app</h1>");
+    const catalog = catalogWith({
+      files: ["index.html", "app/index.html"].map((path) => ({ path, kind: "file" as const })),
+      folders: [],
+    });
+    const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
+    const listed = await catalog.list({ rootPath: root });
+    const selected = await catalog.get({ rootPath: root }, path, undefined);
+    expect(selected?.root).toBe("app");
+    expect(selected).toEqual(selectListedSitePackage(path, listed));
+  },
+);
 
 it("selects a one-character nested app ahead of the workspace-root app", async () => {
   await writeFile(join(root, "index.html"), "<h1>root</h1>");
   await mkdir(join(root, "a"));
   await writeFile(join(root, "a/index.html"), "<h1>nested</h1>");
-  const catalog = catalogWith({ files: ["index.html", "a/index.html"].map(path => ({ path, kind: "file" as const })), folders: [] });
+  const catalog = catalogWith({
+    files: ["index.html", "a/index.html"].map((path) => ({ path, kind: "file" as const })),
+    folders: [],
+  });
   expect((await catalog.get({ rootPath: root }, "a/x", undefined))?.root).toBe("a");
 });

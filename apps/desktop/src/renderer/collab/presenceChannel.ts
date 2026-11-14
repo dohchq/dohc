@@ -1,4 +1,4 @@
-// MU-C1 — the CLIENT half of the ephemeral awareness transport.
+// The client half of the ephemeral awareness transport.
 //
 // A PresenceChannel drives one (scope, topic): it heartbeats the local state
 // so the relay keeps this client "present", long-polls for peer changes, and
@@ -39,20 +39,17 @@ export interface PresenceTransport {
     incarnationId: string;
     state: unknown;
   }): Promise<PresenceSnapshot>;
-  leave(input: {
+  leave(input: { topic: string; clientId: string; incarnationId: string }): Promise<void>;
+  poll(input: {
     topic: string;
     clientId: string;
-    incarnationId: string;
-  }): Promise<void>;
-  poll(input: { topic: string; clientId: string; since: number; signal: AbortSignal }): Promise<PresenceSnapshot>;
+    since: number;
+    signal: AbortSignal;
+  }): Promise<PresenceSnapshot>;
 }
 
 interface RelayPresenceTransport {
-  publish(input: {
-    topic: string;
-    clientId: string;
-    state: unknown;
-  }): Promise<PresenceSnapshot>;
+  publish(input: { topic: string; clientId: string; state: unknown }): Promise<PresenceSnapshot>;
   leave(input: { topic: string; clientId: string }): Promise<void>;
   poll(input: {
     topic: string;
@@ -80,7 +77,11 @@ interface RelayPresenceConfig {
   fetch?: typeof fetch;
 }
 
-function presenceUrl(config: RelayPresenceConfig, topic: string, query: Record<string, string>): string {
+function presenceUrl(
+  config: RelayPresenceConfig,
+  topic: string,
+  query: Record<string, string>,
+): string {
   const base =
     config.scope.kind === "workspace"
       ? `${config.baseUrl}/sync/${encodeURIComponent(config.scope.workspaceId)}/presence`
@@ -99,9 +100,7 @@ function parseSnapshot(value: unknown): PresenceSnapshot {
 // Build a relay-backed transport. The bearer token authenticates the actor;
 // the relay derives identity from it (never from the body), so this client
 // cannot claim another user's presence.
-export function createRelayPresenceTransport(
-  config: RelayPresenceConfig,
-): RelayPresenceTransport {
+export function createRelayPresenceTransport(config: RelayPresenceConfig): RelayPresenceTransport {
   const doFetch = config.fetch ?? fetch;
   const authHeaders = { authorization: `Bearer ${config.token}` };
   return {
@@ -123,11 +122,14 @@ export function createRelayPresenceTransport(
       if (!response.ok) throw new Error(`presence leave failed: ${response.status}`);
     },
     async poll({ topic, clientId, since, signal }) {
-      const response = await doFetch(presenceUrl(config, topic, { since: String(since), clientId }), {
-        method: "GET",
-        headers: authHeaders,
-        signal,
-      });
+      const response = await doFetch(
+        presenceUrl(config, topic, { since: String(since), clientId }),
+        {
+          method: "GET",
+          headers: authHeaders,
+          signal,
+        },
+      );
       if (!response.ok) throw new Error(`presence poll failed: ${response.status}`);
       return parseSnapshot(await response.json());
     },
@@ -153,18 +155,17 @@ interface PresenceChannelOptions {
 export interface PresenceChannel {
   // Update the local state and publish it immediately (e.g. typing on/off).
   setState(state: unknown): void;
-  // Stop heartbeating + polling, abort any in-flight poll, wait out any
-  // publish already in flight, and best-effort leave — in that order (#742
-  // P2, round 5: sending leave before an earlier publish settles lets that
-  // publish reach the transport after leave does, reviving presence the
-  // instant after it left). Idempotent. After this, onPeers never fires
-  // again. Resolves once the internal poll loop has fully exited (including
-  // a pending retry sleep) and the leave call has settled (#742 P2, round 3:
-  // a caller about to do something that will make this scope reject further
-  // presence calls — e.g. ending the DM's share — must be able to await the
-  // leave actually reaching the transport, not just being launched) — so
-  // teardown is deterministic and nothing dangles. The leave itself stays
-  // best-effort: a rejecting transport.leave never throws out of stop().
+  // Stop heartbeating and polling, abort any in-flight poll, wait out any
+  // publish already in flight, then send a best-effort leave, in that order.
+  // A leave sent before an earlier publish settles lets that publish reach
+  // the transport after the leave and revive presence the instant after it
+  // left. Idempotent. After this, onPeers never fires again. Resolves once
+  // the internal poll loop has fully exited (including a pending retry
+  // sleep) and the leave call has settled. A caller about to make this scope
+  // reject further presence calls, such as ending the DM's share, must be
+  // able to await the leave reaching the transport, not only its launch.
+  // The leave itself stays best-effort: a rejecting transport.leave never
+  // throws out of stop().
   stop(): Promise<void>;
 }
 
@@ -192,9 +193,9 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
   // transport.leave alone does not order it after a publish already in
   // flight when stop() is called — a late-arriving publish can reach the
   // transport after leave does, reviving presence the instant after it left
-  // (ghost until TTL). Publishes never overlap: rapid pointer updates used
-  // to start concurrent requests, and an older one finishing last could
-  // outlive the newest — the same ghost — or repaint an older cursor. An
+  // (ghost until TTL). Publishes never overlap: rapid pointer updates would
+  // otherwise start concurrent requests, and an older one finishing last
+  // could outlive the newest, the same ghost, or repaint an older cursor. An
   // idle channel publishes synchronously; otherwise at most one publish
   // waits behind the active one, and it reads `state` when it runs, so the
   // coalesced publish always sends the newest.
@@ -299,15 +300,9 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
         // returns; clearing the timer alone would strand it forever.
         retryResolve?.();
         pollController?.abort();
-        // Wait out any publish already in flight before sending leave (#742
-        // P2, round 5) — see inFlightPublish's own comment.
+        // Wait out any publish already in flight before sending leave. See
+        // inFlightPublish's own comment.
         await inFlightPublish;
-        // Best-effort explicit leave so peers see the departure before the
-        // TTL — awaited, not fire-and-forget: a caller can
-        // rely on this having actually reached the transport once stop()'s
-        // own promise settles. Guarded: this channel accepts any transport,
-        // and a rejecting leave must never surface as an unhandled rejection
-        // or throw out of stop().
         try {
           await options.transport.leave({
             topic: options.topic,

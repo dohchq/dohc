@@ -10,10 +10,7 @@ import {
   type EngineWorkspace,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
-import {
-  isWorkspaceUpdatingRefusal,
-  VersionedLiveAdapter,
-} from "@dohc/workspace-engine-client";
+import { isWorkspaceUpdatingRefusal, VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
@@ -40,17 +37,14 @@ function positiveInteger(name: string, fallback: number): number {
 async function seedFiles(root: string, count: number): Promise<void> {
   for (let first = 0; first < count; first += WRITE_CONCURRENCY) {
     await Promise.all(
-      Array.from(
-        { length: Math.min(WRITE_CONCURRENCY, count - first) },
-        async (_, offset) => {
-          const index = first + offset;
-          await writeFile(
-            join(root, `note-${String(index).padStart(5, "0")}.md`),
-            `# Note ${index}\n\nbody ${index}\n`,
-            "utf8",
-          );
-        },
-      ),
+      Array.from({ length: Math.min(WRITE_CONCURRENCY, count - first) }, async (_, offset) => {
+        const index = first + offset;
+        await writeFile(
+          join(root, `note-${String(index).padStart(5, "0")}.md`),
+          `# Note ${index}\n\nbody ${index}\n`,
+          "utf8",
+        );
+      }),
     );
   }
 }
@@ -109,10 +103,7 @@ async function waitForDurableMoments(
     try {
       return await countDurableMoments(sessions, workspace, onFirstPage);
     } catch (error) {
-      if (
-        !isWorkspaceUpdatingRefusal(error) ||
-        performance.now() >= deadline
-      ) {
+      if (!isWorkspaceUpdatingRefusal(error) || performance.now() >= deadline) {
         throw error;
       }
       await delay(250);
@@ -137,9 +128,7 @@ it.skipIf(fileCount === 0 || engine.missing)(
         "utf8",
       );
     } else if (searchMode !== "default") {
-      throw new Error(
-        `${SEARCH_MODE_ENV} must be default or excluded, received ${searchMode}.`,
-      );
+      throw new Error(`${SEARCH_MODE_ENV} must be default or excluded, received ${searchMode}.`);
     }
     await seedFiles(root, fileCount);
 

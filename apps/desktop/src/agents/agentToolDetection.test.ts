@@ -11,8 +11,12 @@ import type { ProbeOutput } from "./agentToolProbe";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), resolveSpawnCommand: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
-vi.mock("node:fs", async (importOriginal) => ({ ...await importOriginal<typeof import("node:fs")>() }));
-vi.mock("./agentToolProbe", async (importOriginal) => ({ ...await importOriginal<typeof import("./agentToolProbe")>() }));
+vi.mock("node:fs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs")>()),
+}));
+vi.mock("./agentToolProbe", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./agentToolProbe")>()),
+}));
 // Detection has no tree-kill dependency: a Windows probe never kills by PID.
 vi.mock("../process/windowsSpawn", () => ({ resolveSpawnCommand: mocks.resolveSpawnCommand }));
 
@@ -38,7 +42,10 @@ class FakeChild extends EventEmitter {
   private pipesOpen: boolean;
   private closesNeeded: number;
 
-  constructor(readonly pid: number | undefined, { pipes = true } = {}) {
+  constructor(
+    readonly pid: number | undefined,
+    { pipes = true } = {},
+  ) {
     super();
     this.stdin = pipes ? new FakeStdin() : null;
     this.stdout = pipes ? new FakeStream() : null;
@@ -92,13 +99,20 @@ function setPlatform(platform: NodeJS.Platform, arch: NodeJS.Architecture = "x64
   Object.defineProperty(process, "arch", { value: arch });
 }
 
-const turn = () => new Promise<void>((resolve) => { setImmediate(resolve); });
+const turn = () =>
+  new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
 
 function start(signal: AbortSignal, resourcesRoot = resources) {
   const seen: { outcome?: { value: ProbeOutput } | { error: unknown } } = {};
   const done = runProbe(EXECUTABLE, ["--version"], signal, resourcesRoot).then(
-    (value) => { seen.outcome = { value }; },
-    (error: unknown) => { seen.outcome = { error }; },
+    (value) => {
+      seen.outcome = { value };
+    },
+    (error: unknown) => {
+      seen.outcome = { error };
+    },
   );
   return { seen, done };
 }
@@ -110,14 +124,18 @@ function admitted(): unknown {
 function expectReleased(signal: AbortSignal): void {
   expect(getEventListeners(signal, "abort")).toHaveLength(0);
   expect(vi.getTimerCount()).toBe(0);
-  for (const emitter of [child, child.stdin, child.stdout, child.stderr]) expect(emitter?.eventNames() ?? []).toEqual([]);
+  for (const emitter of [child, child.stdin, child.stdout, child.stderr])
+    expect(emitter?.eventNames() ?? []).toEqual([]);
 }
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   setPlatform("win32");
   child = new FakeChild(4321);
-  mocks.resolveSpawnCommand.mockImplementation((command: string, args: string[]) => ({ command, args }));
+  mocks.resolveSpawnCommand.mockImplementation((command: string, args: string[]) => ({
+    command,
+    args,
+  }));
   mocks.spawn.mockImplementation(() => child);
   vi.spyOn(process, "kill").mockImplementation(() => true);
 });
@@ -130,12 +148,16 @@ afterEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset();
 });
 
-afterAll(() => { rmSync(resources, { recursive: true, force: true }); });
+afterAll(() => {
+  rmSync(resources, { recursive: true, force: true });
+});
 
 describe("agent detection filesystem", () => {
   it.each(["native", "fallback", "unavailable"])(
-    "resolves installed names using %s", async (resolution) => {
-      const lookup = "/usr/local/bin/claude", stored = "/opt/installed/claude";
+    "resolves installed names using %s",
+    async (resolution) => {
+      const lookup = "/usr/local/bin/claude",
+        stored = "/opt/installed/claude";
       const nativeSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(() => {
         if (resolution !== "native") throw new Error("native resolution unavailable");
         return stored;
@@ -157,11 +179,16 @@ describe("agent detection filesystem", () => {
   );
 
   it("continues detection after unavailable install entries", async () => {
-    const actualProbe = await vi.importActual<typeof import("./agentToolProbe")>("./agentToolProbe");
+    const actualProbe =
+      await vi.importActual<typeof import("./agentToolProbe")>("./agentToolProbe");
     vi.spyOn(toolProbe, "probeAgentTools").mockImplementation(actualProbe.probeAgentTools);
-    const home = "C:\\Users\\me", windowsApps = `${home}\\AppData\\Local\\Microsoft\\WindowsApps`;
-    const missing = `${home}\\missing`, unresolved = `${home}\\unresolved`, installed = `${home}\\AppData\\Roaming\\npm`;
-    const candidate = `${installed}\\codex.cmd`, unresolvedCandidate = `${unresolved}\\codex.cmd`;
+    const home = "C:\\Users\\me",
+      windowsApps = `${home}\\AppData\\Local\\Microsoft\\WindowsApps`;
+    const missing = `${home}\\missing`,
+      unresolved = `${home}\\unresolved`,
+      installed = `${home}\\AppData\\Roaming\\npm`;
+    const candidate = `${installed}\\codex.cmd`,
+      unresolvedCandidate = `${unresolved}\\codex.cmd`;
     vi.stubEnv("Path", [missing, windowsApps, unresolved, installed].join(";"));
     vi.stubEnv("PATHEXT", ".exe;.cmd");
     vi.stubEnv("APPDATA", `${home}\\AppData\\Roaming`);
@@ -169,11 +196,19 @@ describe("agent detection filesystem", () => {
     vi.spyOn(fs, "accessSync").mockImplementation(() => {});
     const statSpy = vi.spyOn(fs, "statSync").mockImplementation((path) => {
       const value = String(path);
-      if (value.startsWith(windowsApps)) throw Object.assign(new Error("unreadable"), { code: "EACCES" });
-      if (value === candidate || value === unresolvedCandidate || [NODE, OWNER, RELAY].includes(value)) return identity;
+      if (value.startsWith(windowsApps))
+        throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+      if (
+        value === candidate ||
+        value === unresolvedCandidate ||
+        [NODE, OWNER, RELAY].includes(value)
+      )
+        return identity;
       throw Object.assign(new Error("missing"), { code: "ENOENT" });
     });
-    const nativeSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(() => { throw new Error("native resolution unavailable"); });
+    const nativeSpy = vi.spyOn(fs.realpathSync, "native").mockImplementation(() => {
+      throw new Error("native resolution unavailable");
+    });
     const fallbackSpy = vi.spyOn(fs, "realpathSync").mockImplementation((path) => {
       if (String(path) === unresolvedCandidate) throw new Error("resolution unavailable");
       return String(path);
@@ -181,16 +216,28 @@ describe("agent detection filesystem", () => {
     Object.defineProperty(fallbackSpy, "native", { value: nativeSpy, configurable: true });
     mocks.spawn.mockImplementation(() => {
       const probeChild = new FakeChild(4321);
-      queueMicrotask(() => { probeChild.stdout!.emit("data", "1.2.3"); probeChild.drain(0); });
+      queueMicrotask(() => {
+        probeChild.stdout!.emit("data", "1.2.3");
+        probeChild.drain(0);
+      });
       return probeChild;
     });
-    const tools = await detectAgentTools("C:\\Projects\\Work", new AbortController().signal, resources);
-    expect(tools.find((tool) => tool.tool === "codex")).toMatchObject({ executable: candidate, probe: "detected" });
+    const tools = await detectAgentTools(
+      "C:\\Projects\\Work",
+      new AbortController().signal,
+      resources,
+    );
+    expect(tools.find((tool) => tool.tool === "codex")).toMatchObject({
+      executable: candidate,
+      probe: "detected",
+    });
     expect(statSpy).toHaveBeenCalledWith(`${windowsApps}\\codex.exe`);
     expect(statSpy).toHaveBeenCalledWith(`${missing}\\codex.exe`);
     expect(fallbackSpy).toHaveBeenCalledWith(unresolvedCandidate);
     expect(mocks.resolveSpawnCommand).toHaveBeenCalledTimes(2);
-    expect(mocks.resolveSpawnCommand).toHaveBeenCalledWith(candidate, ["--version"], { cwd: homedir() });
+    expect(mocks.resolveSpawnCommand).toHaveBeenCalledWith(candidate, ["--version"], {
+      cwd: homedir(),
+    });
   });
 });
 
@@ -209,7 +256,6 @@ describe("Claude Code version check", () => {
     });
 
     expect(await claudeCodeVersion(executable, resources)).toBeNull();
-    // An update through a launcher that doesn't change takes effect.
     reported = "2.1.294";
     expect(await claudeCodeVersion(executable, resources)).toBe("2.1.294");
     reported = "2.1.317";
@@ -235,7 +281,10 @@ describe("Claude Code version check", () => {
       const probeChild = new FakeChild(4321);
       const output = reported;
       if (output === "2.1.317") writeFileSync(executable, "a newer build");
-      queueMicrotask(() => { probeChild.stdout!.emit("data", `${output} (Claude Code)`); probeChild.drain(0); });
+      queueMicrotask(() => {
+        probeChild.stdout!.emit("data", `${output} (Claude Code)`);
+        probeChild.drain(0);
+      });
       return probeChild;
     });
 
@@ -262,16 +311,30 @@ describe("Windows agent probe owner", () => {
       child.drain();
       await probe.done;
     }
-    expect(probe.seen.outcome).toEqual({ value: { exitCode: 0, stdout: "claude 2.1.300", stderr: "note" } });
-    expect(mocks.resolveSpawnCommand).toHaveBeenCalledWith(EXECUTABLE, ["--version"], { cwd: homedir() });
+    expect(probe.seen.outcome).toEqual({
+      value: { exitCode: 0, stdout: "claude 2.1.300", stderr: "note" },
+    });
+    expect(mocks.resolveSpawnCommand).toHaveBeenCalledWith(EXECUTABLE, ["--version"], {
+      cwd: homedir(),
+    });
     const admission = child.stdin!.write.mock.calls[0]![0];
     expect(mocks.spawn).toHaveBeenCalledWith(OWNER, [NODE, RELAY, String(admission.byteLength)], {
-      cwd: OWNER_ROOT, env: expect.any(Object), windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+      cwd: OWNER_ROOT,
+      env: expect.any(Object),
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
     });
     const ownerEnvironment = mocks.spawn.mock.calls[0]![2].env as Record<string, string>;
-    expect(Object.keys(ownerEnvironment).filter((name) => !["SystemRoot", "WINDIR", "TEMP", "TMP"].includes(name))).toEqual([]);
+    expect(
+      Object.keys(ownerEnvironment).filter(
+        (name) => !["SystemRoot", "WINDIR", "TEMP", "TMP"].includes(name),
+      ),
+    ).toEqual([]);
     expect(admitted()).toEqual({
-      command: EXECUTABLE, args: ["--version"], windowsVerbatimArguments: false, cwd: homedir(),
+      command: EXECUTABLE,
+      args: ["--version"],
+      windowsVerbatimArguments: false,
+      cwd: homedir(),
       env: { ...process.env, DOHC_SYNTHETIC_SECRET: "credential" },
     });
     expect(child.stdin!.write).toHaveBeenCalledOnce();
@@ -281,11 +344,21 @@ describe("Windows agent probe owner", () => {
   });
 
   it("admits a cmd wrapper's resolved verbatim arguments unchanged", async () => {
-    const wrapper = { command: "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/s", "/c", "\"\"C:\\Tools\\codex.cmd\" \"--version\"\""], windowsVerbatimArguments: true };
+    const wrapper = {
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/s", "/c", '""C:\\Tools\\codex.cmd" "--version""'],
+      windowsVerbatimArguments: true,
+    };
     mocks.resolveSpawnCommand.mockReturnValue(wrapper);
     const controller = new AbortController();
     const probe = start(controller.signal);
-    try { child.drain(0); await probe.done; } finally { child.drain(); await probe.done; }
+    try {
+      child.drain(0);
+      await probe.done;
+    } finally {
+      child.drain();
+      await probe.done;
+    }
     expect(admitted()).toMatchObject({ ...wrapper, cwd: homedir() });
     expectReleased(controller.signal);
   });
@@ -293,28 +366,49 @@ describe("Windows agent probe owner", () => {
   it("rejects an already cancelled probe before resolving or spawning a command", async () => {
     const controller = new AbortController();
     controller.abort(reason);
-    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal, resources)).rejects.toBe(reason);
+    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal, resources)).rejects.toBe(
+      reason,
+    );
     expect(mocks.resolveSpawnCommand).not.toHaveBeenCalled();
     expect(mocks.spawn).not.toHaveBeenCalled();
     expectReleased(controller.signal);
   });
 
-  it.each(["resolveSpawnCommand", "spawn"] as const)("rejects a synchronous %s failure without a timer or listener", async (step) => {
-    const failure = new Error(`${step} failed`);
-    mocks[step].mockImplementation(() => { throw failure; });
-    const controller = new AbortController();
-    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal, resources)).rejects.toBe(failure);
-    expectReleased(controller.signal);
-  });
+  it.each(["resolveSpawnCommand", "spawn"] as const)(
+    "rejects a synchronous %s failure without a timer or listener",
+    async (step) => {
+      const failure = new Error(`${step} failed`);
+      mocks[step].mockImplementation(() => {
+        throw failure;
+      });
+      const controller = new AbortController();
+      await expect(runProbe(EXECUTABLE, ["--version"], controller.signal, resources)).rejects.toBe(
+        failure,
+      );
+      expectReleased(controller.signal);
+    },
+  );
 
   it.each([
-    { name: "a missing installed asset", root: () => join(resources, "missing"), arch: "x64" as const, message: /missing/ },
-    { name: "a relative resources path", root: () => "resources", arch: "x64" as const, message: /absolute/ },
+    {
+      name: "a missing installed asset",
+      root: () => join(resources, "missing"),
+      arch: "x64" as const,
+      message: /missing/,
+    },
+    {
+      name: "a relative resources path",
+      root: () => "resources",
+      arch: "x64" as const,
+      message: /absolute/,
+    },
     { name: "Windows on arm64", root: () => resources, arch: "arm64" as const, message: /x64/ },
   ])("fails closed without spawning for $name", async ({ root, arch, message }) => {
     setPlatform("win32", arch);
     const controller = new AbortController();
-    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal, root())).rejects.toThrow(message);
+    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal, root())).rejects.toThrow(
+      message,
+    );
     expect(mocks.spawn).not.toHaveBeenCalled();
     expectReleased(controller.signal);
   });
@@ -360,7 +454,9 @@ describe("Windows agent probe owner", () => {
       child.drain();
       await probe.done;
     }
-    expect(probe.seen.outcome).toEqual({ value: { exitCode: null, stdout: "partial", stderr: "" } });
+    expect(probe.seen.outcome).toEqual({
+      value: { exitCode: null, stdout: "partial", stderr: "" },
+    });
     expectReleased(controller.signal);
   });
 
@@ -424,23 +520,26 @@ describe("Windows agent probe owner", () => {
   it.each([
     { source: "child", emitter: (): EventEmitter => child },
     { source: "stdout", emitter: (): EventEmitter => child.stdout! },
-  ])("stops a started owner after a $source error and waits for it to close", async ({ emitter }) => {
-    const controller = new AbortController();
-    const probe = start(controller.signal);
-    try {
-      emitter().emit("error", new Error("pipe failed"));
-      expect(child.stdin!.destroy).toHaveBeenCalledOnce();
-      await turn();
-      expect(probe.seen.outcome).toBeUndefined();
-      child.drain(1);
-      await probe.done;
-    } finally {
-      child.drain();
-      await probe.done;
-    }
-    expect(probe.seen.outcome).toEqual({ value: { exitCode: null, stdout: "", stderr: "" } });
-    expectReleased(controller.signal);
-  });
+  ])(
+    "stops a started owner after a $source error and waits for it to close",
+    async ({ emitter }) => {
+      const controller = new AbortController();
+      const probe = start(controller.signal);
+      try {
+        emitter().emit("error", new Error("pipe failed"));
+        expect(child.stdin!.destroy).toHaveBeenCalledOnce();
+        await turn();
+        expect(probe.seen.outcome).toBeUndefined();
+        child.drain(1);
+        await probe.done;
+      } finally {
+        child.drain();
+        await probe.done;
+      }
+      expect(probe.seen.outcome).toEqual({ value: { exitCode: null, stdout: "", stderr: "" } });
+      expectReleased(controller.signal);
+    },
+  );
 
   it("waits for Node to close an owner that never started", async () => {
     child = new FakeChild(undefined);
@@ -467,7 +566,9 @@ describe("Windows agent probe owner", () => {
     const controller = new AbortController();
     const probe = start(controller.signal);
     try {
-      expect(() => child.emit("error", Object.assign(new Error("spawn EMFILE"), { code: "EMFILE" }))).not.toThrow();
+      expect(() =>
+        child.emit("error", Object.assign(new Error("spawn EMFILE"), { code: "EMFILE" })),
+      ).not.toThrow();
       await turn();
       expect(probe.seen.outcome).toBeUndefined();
       child.exit(-4066);
@@ -482,7 +583,9 @@ describe("Windows agent probe owner", () => {
 
   it("admits nothing when output setup fails and rejects once the owner closes", async () => {
     const failure = new Error("setEncoding failed");
-    child.stdout!.setEncoding.mockImplementation(() => { throw failure; });
+    child.stdout!.setEncoding.mockImplementation(() => {
+      throw failure;
+    });
     const controller = new AbortController();
     const probe = start(controller.signal);
     try {
@@ -502,7 +605,10 @@ describe("Windows agent probe owner", () => {
 
   it("admits nothing when cancellation arrives during spawn", async () => {
     const controller = new AbortController();
-    mocks.spawn.mockImplementation(() => { controller.abort(reason); return child; });
+    mocks.spawn.mockImplementation(() => {
+      controller.abort(reason);
+      return child;
+    });
     const probe = start(controller.signal);
     try {
       expect(child.stdin!.write).not.toHaveBeenCalled();
@@ -526,9 +632,16 @@ describe("POSIX agent probe", () => {
     const controller = new AbortController();
     const probe = start(controller.signal, join(resources, "missing"));
     try {
-      expect(mocks.spawn).toHaveBeenCalledWith(EXECUTABLE, ["--version"], expect.objectContaining({
-        cwd: homedir(), windowsHide: true, detached: true, stdio: ["ignore", "pipe", "pipe"],
-      }));
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        EXECUTABLE,
+        ["--version"],
+        expect.objectContaining({
+          cwd: homedir(),
+          windowsHide: true,
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        }),
+      );
       controller.abort(reason);
       vi.advanceTimersByTime(5_000);
       expect(process.kill).toHaveBeenCalledOnce();

@@ -71,10 +71,8 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   override componentDidUpdate(prev: ErrorBoundaryProps): void {
-    if (
-      this.state.hasError &&
-      arraysDiffer(prev.resetKeys ?? [], this.props.resetKeys ?? [])
-    ) {
+    if (this.state.hasError && arraysDiffer(prev.resetKeys ?? [], this.props.resetKeys ?? [])) {
+      // oxlint-disable-next-line react/no-did-update-set-state -- resets the boundary once when its reset keys change
       this.setState({ error: null, hasError: false });
     }
   }
@@ -94,18 +92,13 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           this.props.fallbackClassName ? ` ${this.props.fallbackClassName}` : ""
         }`}
       >
-        <span className="text-sm font-semibold text-ink">
-          This view ran into a problem
-        </span>
+        <span className="text-sm font-semibold text-ink">This view ran into a problem</span>
         <span className="max-w-md break-words text-xs leading-relaxed text-muted">
           {errorMessage(this.state.error)}
         </span>
         <span className="max-w-md text-[11px] text-subtle">
           {this.props.recoveryMessage ?? (
-            <>
-              The rest of dohc keeps working. Try again, or switch to another
-              file or view.
-            </>
+            <>The rest of dohc keeps working. Try again, or switch to another file or view.</>
           )}
         </span>
         <button
@@ -128,10 +121,7 @@ type AppErrorBoundaryState = { error: unknown; hasError: boolean };
 // scoped boundary lands on a branded full-window recovery screen instead of a
 // blank window. Reload restarts the renderer cleanly (workspace state is in
 // main / on disk, so nothing is lost).
-export class AppErrorBoundary extends Component<
-  { children: ReactNode },
-  AppErrorBoundaryState
-> {
+export class AppErrorBoundary extends Component<{ children: ReactNode }, AppErrorBoundaryState> {
   override state: AppErrorBoundaryState = { error: null, hasError: false };
 
   static getDerivedStateFromError(error: unknown): AppErrorBoundaryState {
@@ -151,11 +141,13 @@ export class AppErrorBoundary extends Component<
         className="relative flex h-screen flex-col items-center justify-center gap-3 bg-bg px-8 text-center"
       >
         {/* No title bar here, so this strip moves the window. */}
-        <div aria-hidden className="titlebar-drag absolute inset-x-0 top-0" style={{ height: TITLEBAR_HEIGHT_PX }} />
+        <div
+          aria-hidden
+          className="titlebar-drag absolute inset-x-0 top-0"
+          style={{ height: TITLEBAR_HEIGHT_PX }}
+        />
         <DohcMark size={30} className="text-line" />
-        <span className="text-sm font-semibold text-ink">
-          something went wrong
-        </span>
+        <span className="text-sm font-semibold text-ink">something went wrong</span>
         <span className="max-w-lg break-words text-xs leading-relaxed text-muted">
           {errorMessage(this.state.error)}
         </span>
@@ -165,9 +157,8 @@ export class AppErrorBoundary extends Component<
         <button
           type="button"
           data-testid="app-crash-reload"
-          // Through the guard, so a blocked reload resumes as a reload — the
-          // set-aside-draft warning must not turn it into an exit (#579
-          // review, r7).
+          // Through the guard, so a blocked reload resumes as a reload. The
+          // set-aside-draft warning must not turn it into an exit.
           onClick={requestGuardedReload}
           className="mt-1 cursor-pointer rounded border border-line px-3 py-1 text-xs font-semibold text-muted hover:bg-hover hover:text-ink"
         >

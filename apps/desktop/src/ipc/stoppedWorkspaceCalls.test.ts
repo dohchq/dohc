@@ -2,14 +2,24 @@ import { describe, expect, it, vi } from "vitest";
 import { chatOperations } from "./chatOperations";
 import { CHANNELS } from "./channels";
 import { datasetOperations } from "./datasetOperations";
-import { ipcWireError, isPrivacyDenied, isStoppedWorkspaceCall, isStoppedWorkspaceRead, readError, refusalCode } from "./errorWords";
+import {
+  ipcWireError,
+  isPrivacyDenied,
+  isStoppedWorkspaceCall,
+  isStoppedWorkspaceRead,
+  readError,
+  refusalCode,
+} from "./errorWords";
 import { stoppedWorkspaceCall } from "./stoppedWorkspaceCalls";
 
 const INACTIVE = "This workspace is no longer open in this window.";
 
 // What the renderer receives: Electron sends a rejected handler's error as its string.
 function received(channel: string, payload: unknown, error: Error, stopped: string | null): Error {
-  const sent = ipcWireError(error, stoppedWorkspaceCall(channel, payload, () => stopped));
+  const sent = ipcWireError(
+    error,
+    stoppedWorkspaceCall(channel, payload, () => stopped),
+  );
   return new Error(`Error invoking remote method '${channel}': ${String(sent)}`);
 }
 
@@ -40,7 +50,12 @@ describe("a call on the workspace its window has stopped", () => {
 
   it("keeps the failure's own code and what it means", () => {
     const denied = Object.assign(new Error("Operation not permitted"), { code: "privacy-denied" });
-    const error = received(chatOperations.sendChatMessage.channel, { workspaceId: "w1" }, denied, "w1");
+    const error = received(
+      chatOperations.sendChatMessage.channel,
+      { workspaceId: "w1" },
+      denied,
+      "w1",
+    );
     expect(refusalCode(error)).toBe("privacy-denied");
     expect(isPrivacyDenied(error)).toBe(true);
     expect(isStoppedWorkspaceCall(error)).toBe(true);

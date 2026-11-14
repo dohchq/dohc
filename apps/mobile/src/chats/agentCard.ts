@@ -13,7 +13,6 @@ export interface ReportedAgent {
 export type AgentKind = "connected" | "own" | "unknown";
 
 export interface AgentCardInput {
-  /** The name shown. Ignored when the agent gave none. */
   readonly name: string;
   /** Whether the agent gave that name itself. */
   readonly named: boolean;
@@ -24,7 +23,6 @@ export interface AgentCardInput {
 }
 
 export interface AgentCard {
-  /** Line 1. */
   readonly name: string;
   /** Line 1's muted "(as reported)": a plug card with no reported line, after a name the agent gave. */
   readonly nameAsReported: boolean;
@@ -46,8 +44,14 @@ export const agentCardWords = {
 /** Line 3 without its mark: `Claude Code 2.1 · Claude Opus 5.5`; the product alone with no version; the model alone with
  * no product. */
 export function reportedClaim(reported: ReportedAgent | undefined): string | undefined {
-  const product = reported?.product ? (reported.version ? `${reported.product} ${reported.version}` : reported.product) : undefined;
-  const parts = [product, reported?.model].filter((part): part is string => part !== undefined && part !== "");
+  const product = reported?.product
+    ? reported.version
+      ? `${reported.product} ${reported.version}`
+      : reported.product
+    : undefined;
+  const parts = [product, reported?.model].filter(
+    (part): part is string => part !== undefined && part !== "",
+  );
   return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
@@ -58,9 +62,14 @@ export function agentCard(input: AgentCardInput): AgentCard {
     name: input.named ? input.name : agentCardWords.unnamed,
     // "(as reported)" appears once per card: on the reported line when there is one, otherwise after a name the agent gave.
     nameAsReported: plug && reported === undefined && input.named,
-    kindLine: input.kind === "unknown" ? undefined
-      : input.kind === "connected" ? agentCardWords.connected
-      : input.owner ? agentCardWords.ownedBy(input.owner) : agentCardWords.ownerUnavailable,
+    kindLine:
+      input.kind === "unknown"
+        ? undefined
+        : input.kind === "connected"
+          ? agentCardWords.connected
+          : input.owner
+            ? agentCardWords.ownedBy(input.owner)
+            : agentCardWords.ownerUnavailable,
     reported,
     markLabel: input.kind === "connected" ? "connected agent" : "agent",
   };
@@ -72,5 +81,7 @@ export function agentCardLabel(card: AgentCard): string {
     card.nameAsReported ? `${card.name} ${AS_REPORTED}` : card.name,
     card.kindLine,
     card.reported === undefined ? undefined : `${card.reported} ${AS_REPORTED}`,
-  ].filter((line): line is string => line !== undefined).join(", ");
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join(", ");
 }

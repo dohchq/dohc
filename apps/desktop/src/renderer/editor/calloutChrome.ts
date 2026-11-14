@@ -108,9 +108,7 @@ function buildCalloutHeader(
     stopEditorMouseEvent(event);
     const callout = resolveCallout(view, getPos);
     if (!callout) return;
-    view.dispatch(
-      view.state.tr.setSelection(NodeSelection.create(view.state.doc, callout.pos)),
-    );
+    view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, callout.pos)));
     view.focus();
   });
 
@@ -156,9 +154,7 @@ function buildCalloutHeader(
   typeTrigger.setAttribute("aria-expanded", "false");
   typeTrigger.disabled = view.editable === false;
 
-  const hasKnownType = CALLOUT_TYPE_OPTIONS.some(
-    (option) => option.value === attrs.type,
-  );
+  const hasKnownType = CALLOUT_TYPE_OPTIONS.some((option) => option.value === attrs.type);
   const typeOptions = hasKnownType
     ? CALLOUT_TYPE_OPTIONS
     : [{ value: attrs.type, label: attrs.type }, ...CALLOUT_TYPE_OPTIONS];
@@ -193,10 +189,7 @@ function buildCalloutHeader(
     optionButton.type = "button";
     optionButton.className = "dohc-callout-type-option";
     optionButton.setAttribute("role", "option");
-    optionButton.setAttribute(
-      "aria-selected",
-      String(option.value === attrs.type),
-    );
+    optionButton.setAttribute("aria-selected", String(option.value === attrs.type));
     optionButton.dataset.calloutType = option.value;
     optionButton.textContent = option.label;
     optionButton.addEventListener("mousedown", (event) => event.stopPropagation());
@@ -206,9 +199,7 @@ function buildCalloutHeader(
       setTypeMenuOpen(false);
       commitFocusedTitle();
       const liveCallout = resolveCallout(view, getPos);
-      const liveType = liveCallout
-        ? String(liveCallout.attrs.calloutType ?? "note")
-        : null;
+      const liveType = liveCallout ? String(liveCallout.attrs.calloutType ?? "note") : null;
       if (liveType !== null && option.value !== liveType) {
         updateCalloutAttr(view, getPos, { calloutType: option.value });
       } else {
@@ -269,8 +260,7 @@ function buildCalloutHeader(
   typePicker.addEventListener("focusout", () => {
     queueMicrotask(() => {
       const root = typePicker.getRootNode();
-      const active =
-        root instanceof ShadowRoot ? root.activeElement : document.activeElement;
+      const active = root instanceof ShadowRoot ? root.activeElement : document.activeElement;
       if (!typePicker.contains(active)) setTypeMenuOpen(false);
     });
   });

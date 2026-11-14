@@ -16,20 +16,41 @@ it("the daemon source fixture comes from the real captured Markdown seeder", asy
   const markdown = "# Shared\n\nStarting together.";
   const canonical = "# Shared\n\nStarting together.\n";
   const engine = new YdocLoopbackEngine();
-  engine.seedFile({ workspace: "workspace", versionId: "main", path: "owner.md", content: markdown, contentKind: "richdoc" });
+  engine.seedFile({
+    workspace: "workspace",
+    versionId: "main",
+    path: "owner.md",
+    content: markdown,
+    contentKind: "richdoc",
+  });
   const adapter = new YdocLiveAdapter(engine);
-  const session = await adapter.openSession({ workspace: "workspace", versionId: "main", path: "owner.md", contentKind: "richdoc" });
+  const session = await adapter.openSession({
+    workspace: "workspace",
+    versionId: "main",
+    path: "owner.md",
+    contentKind: "richdoc",
+  });
   try {
-    const records = engine.requests.filter((request) => request.method === YDOC_METHOD.recordUpdate);
+    const records = engine.requests.filter(
+      (request) => request.method === YDOC_METHOD.recordUpdate,
+    );
     expect(records).toHaveLength(1);
-    const seed = records[0]!.params as { seed: boolean; updateBase64: string; expectedLineageClaimId: string | null };
+    const seed = records[0]!.params as {
+      seed: boolean;
+      updateBase64: string;
+      expectedLineageClaimId: string | null;
+    };
     expect(seed.seed).toBe(true);
     expect(seed.expectedLineageClaimId).toBeNull();
     const bytes = Array.from(Buffer.from(seed.updateBase64, "base64"));
     if (process.env.UPDATE_OWNER_SOURCE_FIXTURE === "1") {
       writeFileSync(fixture, `${JSON.stringify({ markdown, canonical, bytes })}\n`);
     }
-    const retained = JSON.parse(readFileSync(fixture, "utf8")) as { markdown: string; canonical: string; bytes: number[] };
+    const retained = JSON.parse(readFileSync(fixture, "utf8")) as {
+      markdown: string;
+      canonical: string;
+      bytes: number[];
+    };
     expect(retained.markdown).toBe(markdown);
     expect(retained.canonical).toBe(canonical);
     for (const update of [bytes, retained.bytes]) {
@@ -39,8 +60,12 @@ it("the daemon source fixture comes from the real captured Markdown seeder", asy
         expect(yDocToMarkdown(doc)).toBe(canonical);
         expect(yDocToArtifactMarkdown(doc)).toBe(markdown);
         expect(doc.getMap("meta").get("dohcMarkdownSource")).toBe(markdown);
-        expect(doc.getMap("meta").get("dohcMarkdownSourceSha256")).toBe(createHash("sha256").update(markdown).digest("hex"));
-        expect(doc.getMap("meta").get("dohcMarkdownSourceProjectionSha256")).toBe(createHash("sha256").update(canonical).digest("hex"));
+        expect(doc.getMap("meta").get("dohcMarkdownSourceSha256")).toBe(
+          createHash("sha256").update(markdown).digest("hex"),
+        );
+        expect(doc.getMap("meta").get("dohcMarkdownSourceProjectionSha256")).toBe(
+          createHash("sha256").update(canonical).digest("hex"),
+        );
       } finally {
         doc.destroy();
       }
@@ -56,10 +81,7 @@ const lexicalFixture = new URL(
   import.meta.url,
 );
 
-// Ordinary files that differ from their projection only in spelling. The seed
-// keeps each file's bytes, and the engine must start a live session from that
-// seed without rewriting the file.
-const canonicalArtifactFixtures = new Set(['plain-ampersands', 'angle-words', 'cell-break']);
+const canonicalArtifactFixtures = new Set(["plain-ampersands", "angle-words", "cell-break"]);
 const LEXICAL: Record<string, string> = {
   "star-bullets": "* one\n* two\n",
   "plus-bullets": "+ one\n+ two\n",
@@ -86,11 +108,24 @@ it("the lexical source fixtures come from the real captured Markdown seeder", as
   try {
     for (const [name, markdown] of Object.entries(LEXICAL)) {
       const path = `${name}.md`;
-      engine.seedFile({ workspace: "workspace", versionId: "main", path, content: markdown, contentKind: "richdoc" });
+      engine.seedFile({
+        workspace: "workspace",
+        versionId: "main",
+        path,
+        content: markdown,
+        contentKind: "richdoc",
+      });
       const before = engine.requests.length;
-      const session = await adapter.openSession({ workspace: "workspace", versionId: "main", path, contentKind: "richdoc" });
+      const session = await adapter.openSession({
+        workspace: "workspace",
+        versionId: "main",
+        path,
+        contentKind: "richdoc",
+      });
       try {
-        const records = engine.requests.slice(before).filter((request) => request.method === YDOC_METHOD.recordUpdate);
+        const records = engine.requests
+          .slice(before)
+          .filter((request) => request.method === YDOC_METHOD.recordUpdate);
         expect(records).toHaveLength(1);
         const seed = records[0]!.params as { seed: boolean; updateBase64: string };
         expect(seed.seed).toBe(true);
@@ -122,11 +157,17 @@ it("the lexical source fixtures come from the real captured Markdown seeder", as
       try {
         Y.applyUpdate(doc, Uint8Array.from(seed.bytes));
         expect(yDocToMarkdown(doc)).toBe(seed.canonical);
-        expect(yDocToArtifactMarkdown(doc)).toBe(canonicalArtifactFixtures.has(name) ? seed.canonical : markdown);
+        expect(yDocToArtifactMarkdown(doc)).toBe(
+          canonicalArtifactFixtures.has(name) ? seed.canonical : markdown,
+        );
         const meta = doc.getMap("meta");
         expect(meta.get("dohcMarkdownSource")).toBe(markdown);
-        expect(meta.get("dohcMarkdownSourceSha256")).toBe(createHash("sha256").update(markdown).digest("hex"));
-        expect(meta.get("dohcMarkdownSourceProjectionSha256")).toBe(createHash("sha256").update(seed.canonical).digest("hex"));
+        expect(meta.get("dohcMarkdownSourceSha256")).toBe(
+          createHash("sha256").update(markdown).digest("hex"),
+        );
+        expect(meta.get("dohcMarkdownSourceProjectionSha256")).toBe(
+          createHash("sha256").update(seed.canonical).digest("hex"),
+        );
       } finally {
         doc.destroy();
       }

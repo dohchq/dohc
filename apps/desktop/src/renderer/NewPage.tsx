@@ -4,7 +4,9 @@ import type { PageEditor } from "./MarkdownView";
 import { PageIdentity } from "./PageIdentity";
 import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
 
-export type NewPageFile = (onEditorReady: ((editor: PageEditor | null) => void) | undefined) => ReactNode;
+export type NewPageFile = (
+  onEditorReady: ((editor: PageEditor | null) => void) | undefined,
+) => ReactNode;
 
 // A page whose file does not exist yet. It opens at once with the cursor in
 // its title, drawn as the empty document it will be, and nothing is written
@@ -24,7 +26,6 @@ export function NewPage(props: {
   onBodyChange: (body: string) => void;
   // Enter or Tab from the title, or a click into the body.
   onLeaveTitle: () => void;
-  // The page's file, once it exists.
   file: NewPageFile | null;
   // An earlier mount of this page already handed its body over.
   handedOff: boolean;
@@ -58,7 +59,10 @@ export function NewPage(props: {
     if (fileRef.current) fileRef.current.inert = false;
     if (page) {
       const { meta } = parseFrontmatter(draftRef.current);
-      page.setIdentity({ title: displayFrontmatterValue(meta.title), icon: displayFrontmatterValue(meta.icon) });
+      page.setIdentity({
+        title: displayFrontmatterValue(meta.title),
+        icon: displayFrontmatterValue(meta.icon),
+      });
       const body = bodyRef.current;
       const text = body?.value ?? "";
       const focused = pageRef.current?.contains(document.activeElement) ?? false;
@@ -94,7 +98,12 @@ export function NewPage(props: {
           data-testid="new-page"
           className="absolute inset-0 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
           onPointerDown={(event) => {
-            if (event.button !== 0 || event.target === bodyRef.current || identityRef.current?.contains(event.target as Node)) return;
+            if (
+              event.button !== 0 ||
+              event.target === bodyRef.current ||
+              identityRef.current?.contains(event.target as Node)
+            )
+              return;
             event.preventDefault();
             focusBodyEnd();
           }}

@@ -2,10 +2,7 @@
 import { createElement, startTransition, Suspense } from "react";
 import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  WorkspaceSearchPayload,
-  WorkspaceSearchStartResult,
-} from "../../ipc/bridgeContract";
+import type { WorkspaceSearchPayload, WorkspaceSearchStartResult } from "../../ipc/bridgeContract";
 import type { SearchResultsEvent } from "../../ipc/bridgeContract";
 import {
   useWorkspaceSearch,
@@ -16,9 +13,8 @@ import { deferred } from "../../testing/deferred";
 
 let searchResultsListener: ((event: SearchResultsEvent) => void) | null = null;
 const bridgeMock = {
-  searchWorkspace: vi.fn<
-    (payload: WorkspaceSearchPayload) => Promise<WorkspaceSearchStartResult>
-  >(),
+  searchWorkspace:
+    vi.fn<(payload: WorkspaceSearchPayload) => Promise<WorkspaceSearchStartResult>>(),
   cancelWorkspaceSearch: vi.fn(async () => undefined),
   onSearchResults: vi.fn((listener: (event: SearchResultsEvent) => void) => {
     searchResultsListener = listener;
@@ -38,9 +34,7 @@ const options: SearchRunOptions = {
   wholeWord: false,
   regex: false,
 };
-const reportSearchError = vi.fn<
-  (error: unknown, retry: () => void) => void
->();
+const reportSearchError = vi.fn<(error: unknown, retry: () => void) => void>();
 const clearSearchError = vi.fn<() => void>();
 
 beforeEach(() => {
@@ -182,12 +176,8 @@ describe("useWorkspaceSearch", () => {
         status: "refused",
         code: "workspace-updating",
       });
-      const onError = vi.fn<
-        (error: unknown, retry: () => void) => void
-      >();
-      const view = renderHook(() =>
-        useWorkspaceSearch("workspace-1", onError, clearSearchError),
-      );
+      const onError = vi.fn<(error: unknown, retry: () => void) => void>();
+      const view = renderHook(() => useWorkspaceSearch("workspace-1", onError, clearSearchError));
 
       await act(async () => {
         view.result.current.run(options);
@@ -199,9 +189,7 @@ describe("useWorkspaceSearch", () => {
         status: "idle",
       });
       expect(onError).toHaveBeenCalledTimes(1);
-      expect(onError.mock.calls[0]?.[0]).toEqual(
-        new Error("Workspace is still updating."),
-      );
+      expect(onError.mock.calls[0]?.[0]).toEqual(new Error("Workspace is still updating."));
       const callsAtDeadline = bridgeMock.searchWorkspace.mock.calls.length;
 
       await act(async () => {
@@ -300,15 +288,11 @@ describe("useWorkspaceSearch", () => {
   });
 
   it("reports a current invocation failure with a retry that starts the search again", async () => {
-    const onError = vi.fn<
-      (error: unknown, retry: () => void) => void
-    >();
+    const onError = vi.fn<(error: unknown, retry: () => void) => void>();
     bridgeMock.searchWorkspace
       .mockRejectedValueOnce(new Error("Workspace search stopped"))
       .mockResolvedValueOnce({ status: "accepted" });
-    const view = renderHook(() =>
-      useWorkspaceSearch("workspace-1", onError, clearSearchError),
-    );
+    const view = renderHook(() => useWorkspaceSearch("workspace-1", onError, clearSearchError));
 
     await act(async () => {
       view.result.current.run(options);
@@ -321,9 +305,7 @@ describe("useWorkspaceSearch", () => {
       totalMatches: 0,
     });
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0]?.[0]).toEqual(
-      new Error("Workspace search stopped"),
-    );
+    expect(onError.mock.calls[0]?.[0]).toEqual(new Error("Workspace search stopped"));
 
     act(() => onError.mock.calls[0]?.[1]());
 
@@ -397,16 +379,10 @@ describe("useWorkspaceSearch", () => {
   });
 
   it("never renders the previous workspace's query or results during replacement", () => {
-    const snapshots: Array<
-      Pick<WorkspaceSearchApi, "model" | "criteria">
-    > = [];
+    const snapshots: Array<Pick<WorkspaceSearchApi, "model" | "criteria">> = [];
     let search!: WorkspaceSearchApi;
     function Probe({ workspaceId }: { workspaceId: string }) {
-      search = useWorkspaceSearch(
-        workspaceId,
-        reportSearchError,
-        clearSearchError,
-      );
+      search = useWorkspaceSearch(workspaceId, reportSearchError, clearSearchError);
       snapshots.push({ model: search.model, criteria: search.criteria });
       return null;
     }
@@ -451,11 +427,7 @@ describe("useWorkspaceSearch", () => {
     const interrupted = new Promise<never>(() => undefined);
     let search!: WorkspaceSearchApi;
     function Probe({ workspaceId }: { workspaceId: string }) {
-      search = useWorkspaceSearch(
-        workspaceId,
-        reportSearchError,
-        clearSearchError,
-      );
+      search = useWorkspaceSearch(workspaceId, reportSearchError, clearSearchError);
       if (workspaceId === "workspace-2") throw interrupted;
       return createElement(
         "output",

@@ -13,10 +13,6 @@ const PREFIX = "1785780488421-0ff532fe-1e3f-4c2b-9a77-5d1e6c8b3a10-";
 
 const byteLength = (value: string) => new TextEncoder().encode(value).length;
 
-// The name a caller would actually land on when nothing refuses it.
-const firstOf = (name: string, prefix: string, options = {}) =>
-  trashEntryPlan(name, prefix, options).candidates[0]!;
-// The name a caller falls back to once the platform has refused the rest.
 const lastOf = (name: string, prefix: string, options = {}) => {
   const { candidates } = trashEntryPlan(name, prefix, options);
   return candidates[candidates.length - 1]!;
@@ -50,17 +46,13 @@ describe("the component limit, and its unit", () => {
     expect(lastOf(name, PREFIX, { unit: "utf16" })).toBe(`${PREFIX}${name}`);
     // ...and a byte-counting filesystem legitimately cannot.
     expect(lastOf(name, PREFIX, { unit: "utf8" })).not.toBe(`${PREFIX}${name}`);
-    expect(byteLength(lastOf(name, PREFIX, { unit: "utf8" }))).toBeLessThanOrEqual(
-      NAME_MAX_UNITS,
-    );
+    expect(byteLength(lastOf(name, PREFIX, { unit: "utf8" }))).toBeLessThanOrEqual(NAME_MAX_UNITS);
   });
 
   it("leaves a name that already fits exactly as it is", () => {
     expect(lastOf("notes.md", PREFIX, { unit: "utf8" })).toBe(`${PREFIX}notes.md`);
   });
 
-  // The boundary either side, because an off-by-one here either truncates a
-  // name that fits or ships one the filesystem rejects.
   it("keeps the longest name that fits and trims the first that does not", () => {
     const budget = NAME_MAX_UNITS - byteLength(PREFIX);
     const exact = "b".repeat(budget);
@@ -79,9 +71,7 @@ describe("the component limit, and its unit", () => {
   it("trims a replacement character produced by the cut", () => {
     const budget = NAME_MAX_UNITS - byteLength(PREFIX);
     const name = `${"c".repeat(budget - 1)}é`;
-    expect(lastOf(name, PREFIX, { unit: "utf8" })).toBe(
-      `${PREFIX}${"c".repeat(budget - 1)}`,
-    );
+    expect(lastOf(name, PREFIX, { unit: "utf8" })).toBe(`${PREFIX}${"c".repeat(budget - 1)}`);
   });
 
   it("answers an empty name when the prefix alone exhausts the limit", () => {
@@ -89,7 +79,6 @@ describe("the component limit, and its unit", () => {
     expect(fitWithinNameMax("anything", prefix, { unit: "utf8" })).toBe("");
   });
 
-  // A UTF-16 cut can land between a surrogate pair, under either unit.
   it("never leaves half a surrogate pair", () => {
     const utf16 = lastOf("😀".repeat(200), PREFIX, { unit: "utf16" });
     expect(utf16).not.toMatch(/[\uD800-\uDBFF]$/);
@@ -101,17 +90,14 @@ describe("the component limit, and its unit", () => {
   });
 });
 
-// #613 twice over. The rule predicted which limit applied and was wrong both
-// ways: first that the component limit was the only one, then that MAX_PATH
-// always binds -- which took deletion away from deep workspaces on hosts
-// where long paths work. It offers candidates now, and the caller asks the
-// filesystem.
+// The rule offers candidates, and the caller asks the filesystem. It cannot
+// predict which limit applies: the component limit is not the only one, and
+// MAX_PATH does not always bind, because long paths work on some hosts and
+// deep workspaces there must still be able to delete.
 describe("the ladder, longest name first", () => {
   const TRASH_DIR =
     "C:\\Users\\ice\\AppData\\Local\\Temp\\dohc-mcp-test-bJMVxX\\ws\\.dohc\\local\\trash";
 
-  // The whole point: a name that fits is never shortened for a limit that did
-  // not apply, and costs exactly one rename.
   it("offers the real name first, and only that when it fits", () => {
     const plan = trashEntryPlan("notes.md", PREFIX, {
       unit: "utf16",
@@ -137,9 +123,6 @@ describe("the ladder, longest name first", () => {
     );
   });
 
-  // Where no composed-path limit applies there is nothing to fall back TO, so
-  // the ladder must not invent a rung and truncate for a limit that is not
-  // there.
   it("has no composed-path rung off Windows", () => {
     const name = `${"a".repeat(226)}.txt`;
     const plan = trashEntryPlan(name, PREFIX, {
@@ -151,16 +134,11 @@ describe("the ladder, longest name first", () => {
   });
 
   it("budgets the whole path on Windows and nothing anywhere else", () => {
-    expect(entryCharBudget(TRASH_DIR, "win32")).toBe(
-      WINDOWS_MAX_PATH_CHARS - TRASH_DIR.length - 1,
-    );
+    expect(entryCharBudget(TRASH_DIR, "win32")).toBe(WINDOWS_MAX_PATH_CHARS - TRASH_DIR.length - 1);
     expect(entryCharBudget(TRASH_DIR, "linux")).toBe(Number.POSITIVE_INFINITY);
     expect(entryCharBudget(TRASH_DIR, "darwin")).toBe(Number.POSITIVE_INFINITY);
   });
 
-  // When even the unique prefix cannot fit there is no shorter name to try,
-  // and the caller has to refuse rather than rename onto a path the platform
-  // will reject.
   it("reports exhausted when the prefix alone cannot fit", () => {
     const deep = `C:\\${"nested\\".repeat(30)}.dohc\\local\\trash`;
     const plan = trashEntryPlan("notes.md", PREFIX, {
@@ -187,11 +165,6 @@ describe("truncation decodes filename bytes, not a text stream", () => {
     expect(fitted).toBe(`\uFEFF${"a".repeat(budget - 3)}`);
   });
 
-  // A genuine U+FFFD in a filename is a character, and the old rule deleted it
-  // whenever the cut landed right after its complete encoding: it stripped
-  // every trailing U+FFFD, which cannot tell a sequence the cut broke from one
-  // the name already carried. The trash keeps no record of the original name,
-  // so that character was gone for good.
   it("keeps a real U+FFFD whose own bytes fit", () => {
     const budget = NAME_MAX_UNITS - byteLength(PREFIX);
     // U+FFFD is three bytes and ends exactly at the cut; the trailing "é"
@@ -204,24 +177,13 @@ describe("truncation decodes filename bytes, not a text stream", () => {
     );
   });
 
-  // The same distinction on the UTF-16 side: a pair the cut split is not the
-  // same fact as a lone surrogate the name already ended with.
   it("keeps a lone surrogate it did not create", () => {
     const budget = 8;
     const prefix = "p".repeat(NAME_MAX_UNITS - budget);
-    expect(fitWithinNameMax("abcdefg\uD800xyz", prefix, { unit: "utf16" })).toBe(
-      "abcdefg\uD800",
-    );
-    // And a pair the cut does split loses its half.
+    expect(fitWithinNameMax("abcdefg\uD800xyz", prefix, { unit: "utf16" })).toBe("abcdefg\uD800");
     expect(fitWithinNameMax("abcdefg😀z", prefix, { unit: "utf16" })).toBe("abcdefg");
   });
 
-  // Checked through the module, against a reference written a different way:
-  // build the name up code point by code point and keep the longest prefix
-  // that fits. Obviously correct, and it shares no code with the byte-level
-  // cut, so agreeing means something. An earlier version used
-  // Buffer#toString plus the same trailing-U+FFFD strip the module did, so it
-  // agreed with the bug.
   it("answers the longest prefix that fits, at every offset", () => {
     const longestFitting = (name: string, budget: number) => {
       let best = "";
@@ -274,27 +236,20 @@ describe("collision variants ride the same ladder", () => {
   const DEEP = `C:${"/nested-folder".repeat(13)}/inbox`;
 
   it("offers the plain variant first, and only that when it fits", () => {
-    expect(collisionVariantPlan("report.md", 2, { unit: "utf16" })).toEqual([
-      "report (2).md",
-    ]);
+    expect(collisionVariantPlan("report.md", 2, { unit: "utf16" })).toEqual(["report (2).md"]);
   });
 
   it("suffixes dotfiles and extensionless names at the end", () => {
     expect(collisionVariantPlan(".env", 2, { unit: "utf16" })).toEqual([".env (2)"]);
-    expect(collisionVariantPlan("Makefile", 3, { unit: "utf16" })).toEqual([
-      "Makefile (3)",
-    ]);
+    expect(collisionVariantPlan("Makefile", 3, { unit: "utf16" })).toEqual(["Makefile (3)"]);
   });
 
-  // The regression: 84 CJK characters is 84 UTF-16 units, so the component
-  // rule keeps them all -- and the composed path then passes 259.
   it("adds a shorter candidate when the composed path would not fit", () => {
     const name = `${"中".repeat(84)}.md`;
     const budget = entryCharBudget(DEEP, "win32");
     const plan = collisionVariantPlan(name, 2, { unit: "utf16", maxEntryChars: budget });
 
     expect(plan).toHaveLength(2);
-    // Rung 1 keeps every character, and is tried first.
     expect(plan[0]).toBe(`${"中".repeat(84)} (2).md`);
     expect(`${DEEP}/${plan[0]}`.length).toBeGreaterThan(WINDOWS_MAX_PATH_CHARS);
     // Rung 2 is the one that fits, used only once the platform refuses rung 1.

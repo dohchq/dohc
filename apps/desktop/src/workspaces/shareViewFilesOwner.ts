@@ -4,9 +4,7 @@ import {
   type WorkspaceOperationLease,
 } from "./workspaceAssets";
 
-const shareViewFilesOwnerCapabilityBrand = Symbol(
-  "ShareViewFilesOwnerCapability",
-);
+const shareViewFilesOwnerCapabilityBrand = Symbol("ShareViewFilesOwnerCapability");
 
 export interface ShareViewFilesOwnerCapability {
   readonly [shareViewFilesOwnerCapabilityBrand]: true;
@@ -24,9 +22,7 @@ export interface ShareViewFilesOwnerResource {
   attachmentId?: symbol;
 }
 
-export type ShareViewFilesOwnerResourceExpectation = Partial<
-  ShareViewFilesOwnerResource
->;
+export type ShareViewFilesOwnerResourceExpectation = Partial<ShareViewFilesOwnerResource>;
 
 const activeShareViewFilesOwners = new WeakMap<
   ShareViewFilesOwnerCapability,
@@ -53,21 +49,16 @@ export function assertActiveShareViewFilesOwner(
   const actual = active.resource;
   const matches =
     (expected.kind === undefined || expected.kind === actual.kind) &&
-    (expected.workspaceId === undefined ||
-      expected.workspaceId === actual.workspaceId) &&
+    (expected.workspaceId === undefined || expected.workspaceId === actual.workspaceId) &&
     (expected.storeWorkspaceId === undefined ||
       expected.storeWorkspaceId === actual.storeWorkspaceId) &&
     (expected.shareId === undefined || expected.shareId === actual.shareId) &&
-    (expected.mountLabel === undefined ||
-      expected.mountLabel === actual.mountLabel) &&
+    (expected.mountLabel === undefined || expected.mountLabel === actual.mountLabel) &&
     (expected.schedulingRootPath === undefined ||
       samePath(expected.schedulingRootPath, actual.schedulingRootPath)) &&
-    (expected.rootPath === undefined ||
-      samePath(expected.rootPath, actual.rootPath));
+    (expected.rootPath === undefined || samePath(expected.rootPath, actual.rootPath));
   if (!matches) {
-    throw new Error(
-      "Share-view file ownership admission belongs to another target.",
-    );
+    throw new Error("Share-view file ownership admission belongs to another target.");
   }
   return actual;
 }
@@ -106,10 +97,7 @@ export async function withShareViewFilesOwner<T>(
       if (!active) {
         throw new Error("Share-view file ownership admission has ended.");
       }
-      assertActiveWorkspaceOperationLease(
-        input.resource.schedulingRootPath,
-        input.workspaceLease,
-      );
+      assertActiveWorkspaceOperationLease(input.resource.schedulingRootPath, input.workspaceLease);
     },
   });
   try {

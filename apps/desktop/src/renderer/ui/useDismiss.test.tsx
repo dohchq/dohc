@@ -18,7 +18,9 @@ function Menu() {
         </button>
         {open ? (
           <div role="menu">
-            <button type="button" onClick={() => setOpen(false)}>Item</button>
+            <button type="button" onClick={() => setOpen(false)}>
+              Item
+            </button>
             <span>Label</span>
           </div>
         ) : null}
@@ -78,7 +80,9 @@ describe("useDismiss", () => {
     item.focus();
     fireEvent.keyDown(item, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Trigger" })));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Trigger" })),
+    );
   });
 });
 
@@ -142,8 +146,6 @@ it("keeps an intentional outside focus destination", async () => {
   expect(document.activeElement).toBe(screen.getByText("Elsewhere"));
 });
 
-// The same rule for a menu another owner builds from the DOM, such as the
-// editor's table menu.
 describe("listenForDismiss", () => {
   function mount(root: ParentNode = document.body) {
     const trigger = document.createElement("button");
@@ -177,20 +179,27 @@ describe("listenForDismiss", () => {
     fireEvent.focusOut(row, { relatedTarget: elsewhere });
     fireEvent.blur(window);
     fireEvent.keyDown(row, { key: "Escape" });
-    expect(onClose.mock.calls.map(([reason]) => reason)).toEqual(["press", "focus", "blur", "escape"]);
+    expect(onClose.mock.calls.map(([reason]) => reason)).toEqual([
+      "press",
+      "focus",
+      "blur",
+      "escape",
+    ]);
     stop();
   });
 
-  // The Escape that closes an IME's candidate list is the IME's own.
-  it.each([{ isComposing: true }, { keyCode: 229 }])("leaves an Escape that belongs to a composition ($isComposing, $keyCode)", (composing) => {
-    const { row, onClose, stop } = mount();
-    const escape = fireEvent.keyDown(row, { key: "Escape", ...composing });
-    expect(onClose).not.toHaveBeenCalled();
-    expect(escape).toBe(true);
-    fireEvent.keyDown(row, { key: "Escape" });
-    expect(onClose).toHaveBeenCalledExactlyOnceWith("escape");
-    stop();
-  });
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "leaves an Escape that belongs to a composition ($isComposing, $keyCode)",
+    (composing) => {
+      const { row, onClose, stop } = mount();
+      const escape = fireEvent.keyDown(row, { key: "Escape", ...composing });
+      expect(onClose).not.toHaveBeenCalled();
+      expect(escape).toBe(true);
+      fireEvent.keyDown(row, { key: "Escape" });
+      expect(onClose).toHaveBeenCalledExactlyOnceWith("escape");
+      stop();
+    },
+  );
 
   it("holds the open-menu flag until it stops, and listens no more after", () => {
     const { elsewhere, onClose, stop } = mount();

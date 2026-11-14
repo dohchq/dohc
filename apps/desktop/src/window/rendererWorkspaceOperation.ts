@@ -12,11 +12,13 @@ export interface PhysicalWorkspaceOperation<Workspace, State> {
   assertCurrent(): void;
 }
 
-export type ExactRendererWorkspaceOperation<Workspace, State, Session> =
-  PhysicalWorkspaceOperation<Workspace, State> & {
-    readonly session: Session;
-    isCurrent(): boolean;
-  };
+export type ExactRendererWorkspaceOperation<Workspace, State, Session> = PhysicalWorkspaceOperation<
+  Workspace,
+  State
+> & {
+  readonly session: Session;
+  isCurrent(): boolean;
+};
 
 export function createRendererWorkspaceOperationRunner<
   Sender,
@@ -30,9 +32,7 @@ export function createRendererWorkspaceOperationRunner<
   currentSession(sender: Sender): Session | undefined;
   withPhysicalOperation<Result>(
     workspaceId: string,
-    work: (
-      operation: PhysicalWorkspaceOperation<Workspace, State>,
-    ) => Result | Promise<Result>,
+    work: (operation: PhysicalWorkspaceOperation<Workspace, State>) => Result | Promise<Result>,
   ): Promise<Result>;
 }) {
   return function withRendererWorkspaceOperation<Result>(
@@ -44,43 +44,40 @@ export function createRendererWorkspaceOperationRunner<
     ) => Result | Promise<Result>,
   ): Promise<Result> {
     const session = dependencies.currentSession(sender);
-    return dependencies.withPhysicalOperation(
-      workspaceId,
-      async (physical) => {
-        const assertCurrent = (): void => {
-          physical.assertCurrent();
-          const workspace = physical.workspace;
-          if (
-            !session?.isCurrent() ||
-            session.workspaceId !== workspace.workspaceId ||
-            session.attachmentId !== workspace.attachmentId
-          ) {
-            throw new Error(inactiveMessage);
+    return dependencies.withPhysicalOperation(workspaceId, async (physical) => {
+      const assertCurrent = (): void => {
+        physical.assertCurrent();
+        const workspace = physical.workspace;
+        if (
+          !session?.isCurrent() ||
+          session.workspaceId !== workspace.workspaceId ||
+          session.attachmentId !== workspace.attachmentId
+        ) {
+          throw new Error(inactiveMessage);
+        }
+      };
+      assertCurrent();
+      if (!session) throw new Error(inactiveMessage);
+      const operation = Object.freeze({
+        get workspace() {
+          return physical.workspace;
+        },
+        state: physical.state,
+        signal: physical.signal,
+        session,
+        assertCurrent,
+        isCurrent(): boolean {
+          try {
+            assertCurrent();
+            return true;
+          } catch {
+            return false;
           }
-        };
-        assertCurrent();
-        if (!session) throw new Error(inactiveMessage);
-        const operation = Object.freeze({
-          get workspace() {
-            return physical.workspace;
-          },
-          state: physical.state,
-          signal: physical.signal,
-          session,
-          assertCurrent,
-          isCurrent(): boolean {
-            try {
-              assertCurrent();
-              return true;
-            } catch {
-              return false;
-            }
-          },
-        });
-        const result = await work(operation);
-        assertCurrent();
-        return result;
-      },
-    );
+        },
+      });
+      const result = await work(operation);
+      assertCurrent();
+      return result;
+    });
   };
 }

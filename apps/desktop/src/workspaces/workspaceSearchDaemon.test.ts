@@ -61,14 +61,8 @@ describe("queryWorkspaceSearchDaemon", () => {
       matchStart: 2,
       matchEnd: 8,
     });
-    expect(queryPage).toHaveBeenNthCalledWith(
-      1,
-      { query: "needle", limit: 50 },
-    );
-    expect(queryPage).toHaveBeenNthCalledWith(
-      2,
-      { query: "needle", limit: 50, cursor: "page-2" },
-    );
+    expect(queryPage).toHaveBeenNthCalledWith(1, { query: "needle", limit: 50 });
+    expect(queryPage).toHaveBeenNthCalledWith(2, { query: "needle", limit: 50, cursor: "page-2" });
   });
 
   it("fails closed on an unpaged daemon response", async () => {
@@ -202,10 +196,7 @@ describe("queryWorkspaceSearchDaemon", () => {
       versionId: "main",
       restartRequired: false,
     });
-    const isCurrent = vi
-      .fn<() => boolean>()
-      .mockReturnValueOnce(true)
-      .mockReturnValue(false);
+    const isCurrent = vi.fn<() => boolean>().mockReturnValueOnce(true).mockReturnValue(false);
 
     const results = await queryWorkspaceSearchDaemon({
       daemon: { queryPage },
@@ -253,9 +244,7 @@ describe("queryWorkspaceSearchDaemon", () => {
       matchStart: prefix.length,
       matchEnd: prefix.length + "needle".length,
     });
-    expect(
-      preview.slice(results![0].matchStart, results![0].matchEnd),
-    ).toBe("needle");
+    expect(preview.slice(results![0].matchStart, results![0].matchEnd)).toBe("needle");
   });
 });
 
@@ -326,10 +315,7 @@ describe("desktop workspace-search owner wiring", () => {
         once: vi.fn(),
       };
       type TestEvent = { sender: typeof sender };
-      const search = workspaceSearchHandlers<
-        TestEvent,
-        { workspaceId: string; rootPath: string }
-      >({
+      const search = workspaceSearchHandlers<TestEvent, { workspaceId: string; rootPath: string }>({
         withWorkspaceOperation: async (_event, workspaceId, work) =>
           work({
             workspace: { workspaceId, rootPath },

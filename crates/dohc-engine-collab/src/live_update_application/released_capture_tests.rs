@@ -1,4 +1,3 @@
-/// Accepted state at B=3, which the released chain's file at B shows.
 fn base_at_b(f: &Fixture) -> Ydoc {
     let held = f.handle.registration.lock().unwrap();
     f.store
@@ -8,8 +7,6 @@ fn base_at_b(f: &Fixture) -> Ydoc {
         .unwrap()
 }
 
-/// What a disk capture of `text` may do over `head`, decided before it
-/// ingests the file.
 fn disk_capture(f: &Fixture, text: &str, head: &Ydoc) -> Result<ReleasedCapture, ApplicationError> {
     disk_capture_within(f, text, head, RELEASED_CAPTURE_PROOF_BYTES)
 }
@@ -18,19 +15,14 @@ fn disk_capture_within(f: &Fixture, text: &str, head: &Ydoc, max_bytes: usize) -
     f.store.read_with(|conn| released_capture(conn, &f.key, &f.binding.lineage_claim_id, "owner.md", text, head, max_bytes))
 }
 
-/// The file the released chain settled at B, with a paragraph added on disk.
 fn edited_on_disk(f: &Fixture) -> String {
     edited_from(f, "retired")
 }
 
-/// The file the settlement recorded as `moment`, with a paragraph added.
 fn edited_from(f: &Fixture, moment: &str) -> String {
     format!("{}\nA disk edit.\n", moment_text(f, moment))
 }
 
-/// A root whose native update the host applied at B=3, settled at B and
-/// released with nothing Carried, its document back in the scope. Its file
-/// shows accepted state at B, which is its whole Y.Doc.
 fn released_without_carried() -> Fixture {
     let mut f = Fixture::new();
     f.adopt().unwrap();
@@ -47,7 +39,7 @@ fn released_without_carried() -> Fixture {
     f
 }
 
-/// Sol's 4b2b-1 ruling, branch selection. A proven base structurally the
+/// Branch selection: a proven base structurally the
 /// whole Y.Doc folds as ever. The same Markdown over another structure, and
 /// a Y.Doc holding the chain's Carried deliveries, refuse. The bytes capture
 /// last recorded keep the Y.Doc, Carried deliveries and all. Outside the
@@ -90,7 +82,6 @@ fn a_released_window_folds_only_over_a_proven_base_equal_to_the_head() {
     assert_eq!(disk_capture(&f, "# Anything\n", &local_doc(&f)).unwrap(), ReleasedCapture::Ordinary, "no chain");
 }
 
-/// A damage the released-window proof must refuse.
 type ProofDamage = (&'static str, fn(&mut Fixture, &mut Ydoc));
 
 /// Each condition of the released-window proof, failing alone, refuses a
@@ -150,7 +141,6 @@ fn the_released_window_proof_refuses_each_unproven_base() {
     }
 }
 
-/// The accepted-history bytes the proof of the file at B reads.
 fn proof_bytes(f: &Fixture) -> usize {
     let digest = hex_sha256(moment_text(f, "retired").as_bytes());
     let length = moment_text(f, "retired").len() as i64;
@@ -163,7 +153,7 @@ fn proof_bytes(f: &Fixture) -> usize {
     RELEASED_CAPTURE_PROOF_BYTES - budget.remaining
 }
 
-/// Sol's 4b2b-1 ruling, the released-window variants: content the file at B
+/// In a released window, content the file at B
 /// never showed refuses a disk edit, whether the chain Carried it, a seed
 /// accepted and never applied holds it, the owner typed it after the
 /// release, or ordinary sync caught it up and a moment records it.
@@ -191,13 +181,12 @@ fn a_released_window_refuses_a_disk_edit_over_content_its_file_never_showed() {
     let mut f = released_without_carried();
     catch_up_row(&mut f, 1);
     file_matches_local(&mut f, "caught-up");
-    // The file shows B again, while a moment of it holds the catch-up.
     write(&mut f, "UPDATE snapshots SET latest_moment_id='retired',
         blob_sha256=(SELECT after_blob_sha256 FROM moments WHERE moment_id='retired')");
     assert!(diverged(disk_capture(&f, &edited_on_disk(&f), &local_doc(&f))), "caught-up content a moment holds");
 }
 
-/// Sol's 4b2i-3 ruling: the namespaces of a document lineage come from
+/// The namespaces of a document lineage come from
 /// `live_owner_activations_document`, never a scan, across a history of
 /// several namespaces and documents with many released activations, with and
 /// without statistics.
@@ -246,7 +235,7 @@ fn diverged(decided: Result<ReleasedCapture, ApplicationError>) -> bool {
     matches!(decided, Err(ApplicationError::Conflict))
 }
 
-/// Sol's 4b2b-1 ruling, the shared budget: a successor's capture reads
+/// The shared budget: a successor's capture reads
 /// accepted state at B and replays the Carried updates onto it within one
 /// budget. Each fits it alone; together they refuse.
 #[test]

@@ -10,14 +10,7 @@ import { explorerMenuEntries, type ExplorerMenuScope } from "./explorerMenu";
 // position, never behaviour — it cannot tell a menu that offers the right
 // items from one that offers all of them.
 
-const WRITES = [
-  "new-file",
-  "new-folder",
-  "new-collection",
-  "import-files",
-  "rename",
-  "delete",
-];
+const WRITES = ["new-file", "new-folder", "new-collection", "import-files", "rename", "delete"];
 
 function scope(overrides: Partial<ExplorerMenuScope> = {}): ExplorerMenuScope {
   return {
@@ -139,8 +132,6 @@ describe("a share view", () => {
         "a share view offers Share… for files this account cannot grant",
       ).not.toContain("share");
     }
-    // And an ordinary workspace still gets it, so the guard above is not
-    // simply switching the item off everywhere.
     expect(commands({ kind: "file", shareView: null, canShare: true })).toContain("share");
   });
 });
@@ -180,24 +171,40 @@ describe("Show in the file manager", () => {
     ["win32", "Show in File Explorer"],
     ["linux", "Show in file manager"],
   ] as const)("names the %s file manager wherever the menu reveals a path", (platform, label) => {
-    for (const overrides of [{ kind: "file" }, { kind: "folder" }, { kind: "folder", isMountPath: true, hasMountRecord: true }] as const) {
-      const reveal = explorerMenuEntries(scope(overrides), platform).filter((entry) => entry.kind === "item" && entry.id === "open-externally");
-      expect(reveal, JSON.stringify(overrides)).toEqual([{ kind: "item", label, id: "open-externally" }]);
+    for (const overrides of [
+      { kind: "file" },
+      { kind: "folder" },
+      { kind: "folder", isMountPath: true, hasMountRecord: true },
+    ] as const) {
+      const reveal = explorerMenuEntries(scope(overrides), platform).filter(
+        (entry) => entry.kind === "item" && entry.id === "open-externally",
+      );
+      expect(reveal, JSON.stringify(overrides)).toEqual([
+        { kind: "item", label, id: "open-externally" },
+      ]);
     }
   });
 });
 
 describe("a selection of several rows", () => {
   const labels = (overrides: Partial<ExplorerMenuScope>) =>
-    explorerMenuEntries(scope(overrides), "linux").map((entry) => (entry.kind === "item" ? entry.label : "-"));
+    explorerMenuEntries(scope(overrides), "linux").map((entry) =>
+      entry.kind === "item" ? entry.label : "-",
+    );
 
   it("offers only what acts on every row, and says how many", () => {
     expect(labels({ kind: "file", count: 3 })).toEqual(["Delete 3 items", "Pin 3 items"]);
-    expect(labels({ kind: "folder", count: 2, canShare: true })).toEqual(["Delete 2 items", "Pin 2 items"]);
+    expect(labels({ kind: "folder", count: 2, canShare: true })).toEqual([
+      "Delete 2 items",
+      "Pin 2 items",
+    ]);
   });
 
   it("unpins when every row is pinned", () => {
-    expect(labels({ kind: "file", count: 4, pinned: true })).toEqual(["Delete 4 items", "Unpin 4 items"]);
+    expect(labels({ kind: "file", count: 4, pinned: true })).toEqual([
+      "Delete 4 items",
+      "Unpin 4 items",
+    ]);
   });
 
   it.each([

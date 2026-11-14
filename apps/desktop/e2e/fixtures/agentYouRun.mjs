@@ -12,12 +12,20 @@ import { fileURLToPath } from "node:url";
 //   node agentYouRun.mjs <reply> <dohc-mcp arguments...>
 const [body, ...serverArgs] = process.argv.slice(2);
 if (!body || !serverArgs.includes("--agent-id")) {
-  console.error("agent you run: expected a reply, then the dohc MCP server's arguments with --agent-id.");
+  console.error(
+    "agent you run: expected a reply, then the dohc MCP server's arguments with --agent-id.",
+  );
   process.exit(2);
 }
 
-const server = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../packages/mcp/bin/dohc-mcp.js");
-const child = spawn(process.execPath, [server, ...serverArgs], { stdio: ["pipe", "pipe", "inherit"], windowsHide: true });
+const server = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../packages/mcp/bin/dohc-mcp.js",
+);
+const child = spawn(process.execPath, [server, ...serverArgs], {
+  stdio: ["pipe", "pipe", "inherit"],
+  windowsHide: true,
+});
 child.on("exit", (code) => {
   console.error(`dohc-mcp exited early: ${code}`);
   process.exit(1);
@@ -47,11 +55,12 @@ child.stdout.setEncoding("utf8").on("data", (chunk) => {
   }
 });
 const send = (message) => child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
-const request = (method, params) => new Promise((resolveCall, rejectCall) => {
-  const id = nextId++;
-  pending.set(id, { resolve: resolveCall, reject: rejectCall });
-  send({ id, method, params });
-});
+const request = (method, params) =>
+  new Promise((resolveCall, rejectCall) => {
+    const id = nextId++;
+    pending.set(id, { resolve: resolveCall, reject: rejectCall });
+    send({ id, method, params });
+  });
 
 // What a dohc tool answered. A refusal ends the agent with its reason.
 async function callTool(name, args) {
@@ -64,7 +73,11 @@ async function callTool(name, args) {
   return answer;
 }
 
-await request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "agent-you-run", version: "0" } });
+await request("initialize", {
+  protocolVersion: "2025-06-18",
+  capabilities: {},
+  clientInfo: { name: "agent-you-run", version: "0" },
+});
 send({ method: "notifications/initialized" });
 
 // A wait that times out answers no messages and a cursor, and the agent waits again.

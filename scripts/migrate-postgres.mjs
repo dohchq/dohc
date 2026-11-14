@@ -12,9 +12,7 @@ const url = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/do
 const client = new pg.Client({ connectionString: url });
 await client.connect();
 try {
-  console.warn(
-    "[migrate] Back up Postgres before upgrading. Pending migrations can remove data.",
-  );
+  console.warn("[migrate] Back up Postgres before upgrading. Pending migrations can remove data.");
   const ran = await applyMigrations(client);
   if (ran.length === 0) {
     console.log("[migrate] Postgres is up to date — no migrations to apply.");

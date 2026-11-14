@@ -28,7 +28,6 @@ interface SelectFieldDefinition {
   name: string;
   type: "select" | "multi-select";
   options: string[];
-  /** Colors chosen for some options, keyed by option. Absent when none are chosen. */
   colors?: Record<string, OptionColor>;
 }
 
@@ -111,19 +110,22 @@ export const COLLECTION_SCHEMA_REASON_CODES = [
   "unknown-option-reference",
 ] as const;
 
-type CollectionSchemaReasonCode =
-  (typeof COLLECTION_SCHEMA_REASON_CODES)[number];
+type CollectionSchemaReasonCode = (typeof COLLECTION_SCHEMA_REASON_CODES)[number];
 
 export interface CollectionSchemaReason {
   code: CollectionSchemaReasonCode;
   path: string;
 }
 
-export function collectionVersionError(reasons: readonly CollectionSchemaReason[], file = COLLECTION_SCHEMA_FILENAME, reader: "dohc" | "sync service" = "dohc"): string | null {
-  if (reasons.some(reason => reason.code === "unsupported-version")) {
+export function collectionVersionError(
+  reasons: readonly CollectionSchemaReason[],
+  file = COLLECTION_SCHEMA_FILENAME,
+  reader: "dohc" | "sync service" = "dohc",
+): string | null {
+  if (reasons.some((reason) => reason.code === "unsupported-version")) {
     return `${file} uses a newer version. Update ${reader === "sync service" ? "the sync service" : "dohc"} to read this file.`;
   }
-  if (reasons.some(reason => reason.code === "invalid-version")) {
+  if (reasons.some((reason) => reason.code === "invalid-version")) {
     return `${file} has an invalid version. Set version to 1.`;
   }
   return null;
@@ -193,9 +195,7 @@ interface CollectionDetails extends CollectionSummary {
   recordCount: number;
 }
 
-type CollectionIndexedValueValidation =
-  | FieldValueValidation
-  | { status: "untyped" };
+type CollectionIndexedValueValidation = FieldValueValidation | { status: "untyped" };
 
 interface CollectionResolvedRelation {
   recordId: string;

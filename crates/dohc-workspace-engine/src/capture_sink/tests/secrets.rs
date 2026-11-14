@@ -33,7 +33,6 @@ fn secret_capture_encrypts_dedupes_and_retires() {
             sha256: hex_sha256(b"TOKEN=alpha"),
         }
     );
-    // The key file was minted on first use and is reused thereafter.
     let key_path = scratch.path().join(".dohc/engine/secret.key");
     let key_bytes = std::fs::read(&key_path).expect("key file exists");
     assert!(matches!(
@@ -46,7 +45,6 @@ fn secret_capture_encrypts_dedupes_and_retires() {
         "an existing key is never regenerated"
     );
 
-    // Delete from disk: the plan retire removes the encrypted tip.
     std::fs::remove_file(scratch.path().join(".env")).expect("delete");
     sink.retire(".env").expect("secret retire");
 
@@ -189,8 +187,6 @@ fn secret_retire_is_refused_when_the_file_reappeared() {
     write_file(scratch.path(), ".env", b"TOKEN=alpha");
     ingest(&mut sink, ".env").expect("seed secret");
 
-    // A Retire op prepared from an absent-scan must refuse if the secret
-    // file reappeared before the apply.
     assert_eq!(sink.retire(".env"), Err(RETIRE_RACED));
 
     drop(sink);
@@ -207,7 +203,6 @@ fn missing_key_over_existing_secret_state_fails_closed_instead_of_reminting() {
     ingest(&mut sink, ".env").expect("seed secret");
     drop(sink);
 
-    // A backup restored without the key file / accidental deletion.
     std::fs::remove_file(scratch.path().join(".dohc/engine/secret.key")).expect("lose key");
 
     let actor = supervisor.open(&db, 1).expect("reopen actor").actor;

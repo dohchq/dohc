@@ -7,7 +7,6 @@ const RELAY = "http://sync-relay:1788";
 
 afterEach(() => vi.restoreAllMocks());
 
-/** A relay stand-in that knows one pending invite and records what it was asked. */
 function relay(invites: string[]) {
   const asked: Array<{ url: string; key: string | null; email: unknown }> = [];
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -35,7 +34,9 @@ describe("closed sign-up", () => {
   it("admits an address with a pending invite, asking the relay with the key and the normalized address", async () => {
     const { asked, fetch } = relay(["guest@example.com"]);
     expect(await admission(fetch)(" Guest@Example.com ")).toBe("admitted");
-    expect(asked).toEqual([{ url: `${RELAY}/internal/sign-up-invite`, key: KEY, email: "guest@example.com" }]);
+    expect(asked).toEqual([
+      { url: `${RELAY}/internal/sign-up-invite`, key: KEY, email: "guest@example.com" },
+    ]);
   });
 
   it("refuses an address that is neither listed nor invited", async () => {
@@ -47,7 +48,6 @@ describe("closed sign-up", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const failing = [
       async () => new Response("not found", { status: 404 }),
-      // A relay that retired its storage answers every request this way.
       async () => Response.json({ ok: false, error: "service unavailable" }, { status: 503 }),
       async () => Response.json({ invited: "yes" }),
       async () => {
@@ -55,7 +55,9 @@ describe("closed sign-up", () => {
       },
     ];
     for (const fetch of failing) {
-      expect(await admission(fetch as unknown as typeof globalThis.fetch)("stranger@example.com")).toBe("unavailable");
+      expect(
+        await admission(fetch as unknown as typeof globalThis.fetch)("stranger@example.com"),
+      ).toBe("unavailable");
     }
   });
 });

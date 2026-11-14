@@ -22,7 +22,8 @@ function Workbench(props: { groups: { id: string; tabs: string[] }[]; active: st
   const close = (groupId: string, path: string) => {
     const index = groups.findIndex((group) => group.id === groupId);
     const next = groups.map((group) =>
-      group.id === groupId ? { ...group, tabs: group.tabs.filter((tab) => tab !== path) } : group);
+      group.id === groupId ? { ...group, tabs: group.tabs.filter((tab) => tab !== path) } : group,
+    );
     if (next[index].tabs.length > 0 || next.length === 1) return setGroups(next);
     const remaining = next.filter((group) => group.id !== groupId);
     setGroups(remaining);
@@ -35,10 +36,20 @@ function Workbench(props: { groups: { id: string; tabs: string[] }[]; active: st
           id: group.id,
           size: 1,
           content: (
-            <EditorTabs groupId={group.id} groupNumber={index + 1} tabs={group.tabs.map((path) => ({ path }))}
-              activeTab={group.tabs[0] ?? null} activeTabDirty={false} recoveryPaths={new Set<string>()}
-              onActivate={noop} onClose={close} onContextMenu={noop} onMove={noop} onMoveToGroup={noop}
-              onCreateGroupRight={noop} />
+            <EditorTabs
+              groupId={group.id}
+              groupNumber={index + 1}
+              tabs={group.tabs.map((path) => ({ path }))}
+              activeTab={group.tabs[0] ?? null}
+              activeTabDirty={false}
+              recoveryPaths={new Set<string>()}
+              onActivate={noop}
+              onClose={close}
+              onContextMenu={noop}
+              onMove={noop}
+              onMoveToGroup={noop}
+              onCreateGroupRight={noop}
+            />
           ),
         }))}
         activeGroupId={active}
@@ -67,19 +78,27 @@ function renderLayout(onResizeGroups = vi.fn()) {
 
 describe("EditorGroupLayout", () => {
   it("recedes only the unfocused group's active name and glyph as keyboard focus moves", () => {
-    const view = render(<Workbench groups={[
-      { id: "left", tabs: ["left.md", "left-other.md"] },
-      { id: "right", tabs: ["right.md", "right-other.md"] },
-    ]} active="left" />);
+    const view = render(
+      <Workbench
+        groups={[
+          { id: "left", tabs: ["left.md", "left-other.md"] },
+          { id: "right", tabs: ["right.md", "right-other.md"] },
+        ]}
+        active="left"
+      />,
+    );
     const left = screen.getByRole("tab", { name: "left.md" });
     const right = screen.getByRole("tab", { name: "right.md" });
     const leftGlyph = left.querySelector("svg:not(.lucide-x)");
     const rightGlyph = right.querySelector("svg:not(.lucide-x)");
     const nameTone = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
     const glyphTone = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-subtle";
-    const receded = (selector: string, tone: string) => Array.from(view.container.querySelectorAll(
-      `[data-split] [data-editor-group-id]:not([data-active]) ${selector}[class~="${tone}"]`,
-    ));
+    const receded = (selector: string, tone: string) =>
+      Array.from(
+        view.container.querySelectorAll(
+          `[data-split] [data-editor-group-id]:not([data-active]) ${selector}[class~="${tone}"]`,
+        ),
+      );
     const assertTones = (focused: HTMLElement, other: HTMLElement, otherGlyph: Element | null) => {
       expect(focused.classList.contains("text-ink")).toBe(true);
       const names = receded('[role="tab"][aria-selected="true"]', nameTone);
@@ -91,7 +110,9 @@ describe("EditorGroupLayout", () => {
       for (const tab of [focused, other]) {
         expect(tab.getAttribute("aria-selected")).toBe("true");
         expect(tab.classList.contains("bg-bg")).toBe(true);
-        expect(tab.querySelector('button[aria-label^="Close"]')?.classList.contains("opacity-0")).toBe(false);
+        expect(
+          tab.querySelector('button[aria-label^="Close"]')?.classList.contains("opacity-0"),
+        ).toBe(false);
       }
     };
     assertTones(left, right, rightGlyph);
@@ -119,16 +140,14 @@ describe("EditorGroupLayout", () => {
   it("exposes each stable group ID for tab drag hit-testing", () => {
     renderLayout();
 
-    expect(
-      screen.getByRole("region", { name: "Editor group 1" }).dataset.editorGroupId,
-    ).toBe("left");
-    expect(
-      screen.getByRole("region", { name: "Editor group 2" }).dataset.editorGroupId,
-    ).toBe("right");
+    expect(screen.getByRole("region", { name: "Editor group 1" }).dataset.editorGroupId).toBe(
+      "left",
+    );
+    expect(screen.getByRole("region", { name: "Editor group 2" }).dataset.editorGroupId).toBe(
+      "right",
+    );
   });
 
-  // EditorTabs reads the data attributes to mark the active group's strip,
-  // and aria-current says the same to a screen reader.
   it("marks a split and its active group, and leaves a single group unmarked", () => {
     renderLayout();
     expect(screen.getByTestId("editor-group-layout").dataset.split).toBe("true");
@@ -153,7 +172,6 @@ describe("EditorGroupLayout", () => {
     expect(screen.getByTestId("editor-group-layout").dataset.split).toBeUndefined();
     const only = screen.getByRole("region", { name: "Editor group 1" });
     expect(only.getAttribute("aria-current")).toBeNull();
-    // No frame around the group: the strip carries the mark in a split.
     expect(only.className).not.toContain("ring");
   });
 
@@ -162,15 +180,17 @@ describe("EditorGroupLayout", () => {
   it("draws keyboard focus on a layer inside the group, in place of the global halo", () => {
     renderLayout();
     const classes = screen.getByRole("region", { name: "Editor group 1" }).className.split(" ");
-    expect(classes).toEqual(expect.arrayContaining([
-      "relative",
-      "focus-visible:outline-none",
-      "keyboard:focus-visible:after:absolute",
-      "keyboard:focus-visible:after:inset-0",
-      "keyboard:focus-visible:after:-outline-offset-1",
-      "keyboard:focus-visible:after:outline-accent",
-      "forced-colors:keyboard:focus-visible:after:outline-[Highlight]",
-    ]));
+    expect(classes).toEqual(
+      expect.arrayContaining([
+        "relative",
+        "focus-visible:outline-none",
+        "keyboard:focus-visible:after:absolute",
+        "keyboard:focus-visible:after:inset-0",
+        "keyboard:focus-visible:after:-outline-offset-1",
+        "keyboard:focus-visible:after:outline-accent",
+        "forced-colors:keyboard:focus-visible:after:outline-[Highlight]",
+      ]),
+    );
   });
 
   it("focuses an emptied single group after a keyboard close of its last tab", async () => {
@@ -186,7 +206,11 @@ describe("EditorGroupLayout", () => {
   it("hands focus and the active mark to the empty group a keyboard close leaves in a split", async () => {
     render(
       <Workbench
-        groups={[{ id: "left", tabs: ["a.md"] }, { id: "middle", tabs: [] }, { id: "right", tabs: ["b.md"] }]}
+        groups={[
+          { id: "left", tabs: ["a.md"] },
+          { id: "middle", tabs: [] },
+          { id: "right", tabs: ["b.md"] },
+        ]}
         active="right"
       />,
     );
@@ -199,7 +223,6 @@ describe("EditorGroupLayout", () => {
     expect(screen.getByTestId("editor-group-layout").dataset.split).toBe("true");
     expect(middle.getAttribute("aria-current")).toBe("true");
     expect(left.getAttribute("aria-current")).toBeNull();
-    // The empty group keeps its strip, which carries the active mark.
     expect(middle.querySelector('[data-testid="editor-tabs-active-group"]')).not.toBeNull();
   });
 
@@ -210,12 +233,24 @@ describe("EditorGroupLayout", () => {
       { id: "right", size: 1, content: null },
     ];
     const { rerender } = render(
-      <EditorGroupLayout groups={groups} activeGroupId="left" onFocusGroup={onFocusGroup} onResizeGroups={vi.fn()} />,
+      <EditorGroupLayout
+        groups={groups}
+        activeGroupId="left"
+        onFocusGroup={onFocusGroup}
+        onResizeGroups={vi.fn()}
+      />,
     );
     const outside = document.createElement("button");
     document.body.append(outside);
     outside.focus();
-    rerender(<EditorGroupLayout groups={groups} activeGroupId="right" onFocusGroup={onFocusGroup} onResizeGroups={vi.fn()} />);
+    rerender(
+      <EditorGroupLayout
+        groups={groups}
+        activeGroupId="right"
+        onFocusGroup={onFocusGroup}
+        onResizeGroups={vi.fn()}
+      />,
+    );
     const [left, right] = [
       screen.getByRole("region", { name: "Editor group 1" }),
       screen.getByRole("region", { name: "Editor group 2" }),

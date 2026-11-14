@@ -5,8 +5,6 @@ import type { KeptCopy, SaveKeptCopyResult } from "../../ipc/bridgeContract";
 import { keptCopyMessage, keptCopyNoNameMessage, useKeptCopyNotices } from "./useKeptCopyNotices";
 import { useShellError } from "./useShellError";
 
-// These wait on async bridge answers; every wait runs until its condition
-// holds, within the test's own budget.
 configure({ asyncUtilTimeout: 10_000 });
 vi.setConfig({ testTimeout: 20_000 });
 
@@ -20,13 +18,15 @@ function harness(initial: KeptCopy[]) {
   let more = false;
   const bridge = {
     listKeptCopies: vi.fn(async () => ({ keptCopies: kept, more })),
-    saveKeptCopy: vi.fn(async ({ id }: { workspaceId: string; id: number }): Promise<SaveKeptCopyResult> => {
-      const copy = kept.find((entry) => entry.id === id);
-      kept = kept.filter((entry) => entry.id !== id);
-      return copy
-        ? { status: "saved", path: copy.path.replace(/\.md$/u, " (kept copy).md") }
-        : { status: "gone" };
-    }),
+    saveKeptCopy: vi.fn(
+      async ({ id }: { workspaceId: string; id: number }): Promise<SaveKeptCopyResult> => {
+        const copy = kept.find((entry) => entry.id === id);
+        kept = kept.filter((entry) => entry.id !== id);
+        return copy
+          ? { status: "saved", path: copy.path.replace(/\.md$/u, " (kept copy).md") }
+          : { status: "gone" };
+      },
+    ),
   };
   vi.stubGlobal("dohcDesktop", bridge);
   const openFile = vi.fn<(path: string) => void>();
@@ -47,7 +47,10 @@ function harness(initial: KeptCopy[]) {
     bridge,
     openFile,
     result: rendered.result,
-    keep: (copies: KeptCopy[], past = false) => { kept = copies; more = past; },
+    keep: (copies: KeptCopy[], past = false) => {
+      kept = copies;
+      more = past;
+    },
   };
 }
 
@@ -67,7 +70,8 @@ describe("useKeptCopyNotices", () => {
     await waitFor(() =>
       expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
         "Saved the other copy of notes/a.md as notes/a (kept copy).md",
-      ]));
+      ]),
+    );
     expect(h.bridge.saveKeptCopy).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a", id: 3 });
 
     const saved = h.result.current.shellErrors[0]!;
@@ -82,11 +86,15 @@ describe("useKeptCopyNotices", () => {
     await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));
     act(() => h.result.current.dismissShellError(h.result.current.shellErrors[0]!.id));
 
-    h.keep([{ id: 3, path: "a.md", keptAtMs: 1 }, { id: 4, path: "b.md", keptAtMs: 2 }]);
+    h.keep([
+      { id: 3, path: "a.md", keptAtMs: 1 },
+      { id: 4, path: "b.md", keptAtMs: 2 },
+    ]);
     await act(async () => await h.result.current.refresh());
-    expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([keptCopyMessage("b.md")]);
+    expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
+      keptCopyMessage("b.md"),
+    ]);
 
-    // A copy saved elsewhere, by an agent for example, loses its row.
     h.keep([{ id: 3, path: "a.md", keptAtMs: 1 }]);
     await act(async () => await h.result.current.refresh());
     expect(h.result.current.shellErrors).toEqual([]);
@@ -109,7 +117,8 @@ describe("useKeptCopyNotices", () => {
     await waitFor(() =>
       expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
         "Saved the other copy of a.md as a (kept copy).md",
-      ]));
+      ]),
+    );
   });
 
   it("says so when the copy was already saved or removed", async () => {
@@ -122,7 +131,8 @@ describe("useKeptCopyNotices", () => {
     await waitFor(() =>
       expect(h.result.current.shellErrors.map((error) => error.message)).toEqual([
         "The other copy of a.md was already saved or removed.",
-      ]));
+      ]),
+    );
     expect(h.result.current.shellErrors[0]!.action).toBeUndefined();
   });
 
@@ -132,7 +142,13 @@ describe("useKeptCopyNotices", () => {
       { id: 4, path: "b.md", keptAtMs: 2 },
     ]);
     await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(3));
-    h.keep([{ id: 3, path: "a.md", keptAtMs: 1 }, { id: 4, path: "b.md", keptAtMs: 2 }], true);
+    h.keep(
+      [
+        { id: 3, path: "a.md", keptAtMs: 1 },
+        { id: 4, path: "b.md", keptAtMs: 2 },
+      ],
+      true,
+    );
     await act(async () => await h.result.current.refresh());
     await act(async () => await h.result.current.refresh());
     const rows = h.result.current.shellErrors.map(({ message, seen }) => ({ message, seen }));
@@ -140,10 +156,12 @@ describe("useKeptCopyNotices", () => {
       { message: keptCopyMessage("a.md"), seen: true },
       { message: keptCopyMessage("b.md"), seen: true },
       { message: "dohc kept 2 copies of files other programs changed.", seen: false },
-      { message: "dohc kept more copies than Notices can list. Save these copies to see the rest.", seen: true },
+      {
+        message: "dohc kept more copies than Notices can list. Save these copies to see the rest.",
+        seen: true,
+      },
     ]);
 
-    // Once every copy is saved, the summary and the overflow row go too.
     h.keep([]);
     await act(async () => await h.result.current.refresh());
     expect(h.result.current.shellErrors).toEqual([]);

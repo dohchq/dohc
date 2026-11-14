@@ -78,7 +78,6 @@ describe("settings file watcher", () => {
     vi.advanceTimersByTime(150);
     onChange.mockClear();
 
-    // An editor's save: a temporary file, a rename onto the file, a touch.
     settingsWatch.emit("dohc-settings.json.tmp-1");
     settingsWatch.emit("dohc-settings.json");
     vi.advanceTimersByTime(100);
@@ -128,11 +127,9 @@ describe("settings file watcher", () => {
     expect(settingsWatch.close).toHaveBeenCalledOnce();
     vi.advanceTimersByTime(2000);
     expect(settingsWatch.watchSettings).toHaveBeenCalledTimes(2);
-    // An edit may have landed while nothing watched.
     vi.advanceTimersByTime(150);
     expect(onChange).toHaveBeenCalledOnce();
 
-    // The new watch hears the next save.
     settingsWatch.emit("dohc-settings.json");
     vi.runAllTimers();
     expect(onChange).toHaveBeenCalledTimes(2);
@@ -145,8 +142,12 @@ describe("settings file watcher", () => {
     const onChange = vi.fn();
     const onError = vi.fn();
     settingsWatch.watchSettings
-      .mockImplementationOnce(() => { throw new Error("ENOENT"); })
-      .mockImplementationOnce(() => { throw new Error("ENOENT"); });
+      .mockImplementationOnce(() => {
+        throw new Error("ENOENT");
+      })
+      .mockImplementationOnce(() => {
+        throw new Error("ENOENT");
+      });
     const stop = watchSettingsFile({
       directory: "/state",
       fileName: "dohc-settings.json",
@@ -233,8 +234,8 @@ describe("settings file watcher", () => {
     it("hears a save in place", async () => {
       const file = await watched({ ignoreDirectoryEvents: true });
       try {
-        const saved = file.changedTo("{\"a\":1}");
-        await writeFile(file.path, "{\"a\":1}");
+        const saved = file.changedTo('{"a":1}');
+        await writeFile(file.path, '{"a":1}');
         await saved;
       } finally {
         file.stop();
@@ -244,8 +245,8 @@ describe("settings file watcher", () => {
     it("hears a save that renames a new file over the old one", async () => {
       const file = await watched();
       try {
-        const saved = file.changedTo("{\"a\":2}");
-        await writeFile(join(file.root, "dohc-settings.json.new"), "{\"a\":2}");
+        const saved = file.changedTo('{"a":2}');
+        await writeFile(join(file.root, "dohc-settings.json.new"), '{"a":2}');
         await rename(join(file.root, "dohc-settings.json.new"), file.path);
         await saved;
       } finally {
@@ -256,14 +257,13 @@ describe("settings file watcher", () => {
     it("hears a save that deletes the file and renames a new one in", async () => {
       const file = await watched();
       try {
-        const recreated = file.changedTo("{\"a\":3}");
+        const recreated = file.changedTo('{"a":3}');
         await unlink(file.path);
-        await writeFile(join(file.root, "dohc-settings.json~"), "{\"a\":3}");
+        await writeFile(join(file.root, "dohc-settings.json~"), '{"a":3}');
         await rename(join(file.root, "dohc-settings.json~"), file.path);
         await recreated;
-        // The folder watch survives deletion and hears the next save too.
-        const saved = file.changedTo("{\"a\":4}");
-        await writeFile(file.path, "{\"a\":4}");
+        const saved = file.changedTo('{"a":4}');
+        await writeFile(file.path, '{"a":4}');
         await saved;
       } finally {
         file.stop();

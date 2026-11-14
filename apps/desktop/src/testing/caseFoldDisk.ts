@@ -29,14 +29,16 @@ export function caseFoldDisk(
 ): CaseFoldDisk {
   const kinds = new Map<string, "file" | "folder">([["/", "folder"]]);
   for (const [path, kind] of Object.entries(entries)) {
-    for (let at = posix.dirname(path); !kinds.has(at); at = posix.dirname(at)) kinds.set(at, "folder");
+    for (let at = posix.dirname(path); !kinds.has(at); at = posix.dirname(at))
+      kinds.set(at, "folder");
     kinds.set(path, kind);
   }
   const inodes = new Map([...kinds.keys()].map((path, index) => [path, BigInt(index + 1)]));
 
-  const namesIn = (folder: string) => [...kinds.keys()]
-    .filter((candidate) => candidate !== "/" && posix.dirname(candidate) === folder)
-    .map((candidate) => posix.basename(candidate));
+  const namesIn = (folder: string) =>
+    [...kinds.keys()]
+      .filter((candidate) => candidate !== "/" && posix.dirname(candidate) === folder)
+      .map((candidate) => posix.basename(candidate));
 
   function stored(path: string): string | null {
     const spelled = path.replaceAll("\\", "/");
@@ -47,7 +49,9 @@ export function caseFoldDisk(
       const names = namesIn(at);
       const found = names.includes(name)
         ? name
-        : options.foldsCase(at) ? names.find((candidate) => candidate.toLowerCase() === name.toLowerCase()) : undefined;
+        : options.foldsCase(at)
+          ? names.find((candidate) => candidate.toLowerCase() === name.toLowerCase())
+          : undefined;
       if (found === undefined) return null;
       at = posix.join(at, found);
     }
@@ -56,20 +60,27 @@ export function caseFoldDisk(
 
   return {
     stored,
-    realPath: (path) => stored(path) === null ? null : posix.normalize(path.replaceAll("\\", "/")).replace(/(.)\/$/u, "$1"),
+    realPath: (path) =>
+      stored(path) === null
+        ? null
+        : posix.normalize(path.replaceAll("\\", "/")).replace(/(.)\/$/u, "$1"),
     names: (path) => {
       const at = stored(path);
       return at !== null && kinds.get(at) === "folder" ? namesIn(at) : null;
     },
     kindOf: (path) => {
       const at = stored(path);
-      return at === null ? null : kinds.get(at) ?? null;
+      return at === null ? null : (kinds.get(at) ?? null);
     },
     stat: (path) => {
       const at = stored(path);
       if (at === null) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
       const identity = options.identities?.[at] ?? { dev: 1n, ino: inodes.get(at) ?? 0n };
-      return { dev: identity.dev, ino: identity.ino, isDirectory: () => kinds.get(at) === "folder" };
+      return {
+        dev: identity.dev,
+        ino: identity.ino,
+        isDirectory: () => kinds.get(at) === "folder",
+      };
     },
   };
 }

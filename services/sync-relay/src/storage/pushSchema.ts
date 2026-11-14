@@ -39,14 +39,20 @@ const normalize = (sql: string) => sql.trim().replace(/;$/u, "").replace(/\s+/gu
 
 function assertSchema(db: SqliteDb): void {
   const objects = db
-    .prepare(`SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (${TABLES.map(() => "?").join(", ")}) AND sql IS NOT NULL ORDER BY name`)
+    .prepare(
+      `SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (${TABLES.map(() => "?").join(", ")}) AND sql IS NOT NULL ORDER BY name`,
+    )
     .all(...TABLES);
   const expected = Object.keys(PUSH_SCHEMA).sort();
   const schema: Record<string, string> = PUSH_SCHEMA;
   if (
     objects.length !== expected.length ||
-    objects.some((row, index) => row.name !== expected[index] || typeof row.sql !== "string" ||
-      normalize(row.sql) !== normalize(schema[row.name as string]!)) ||
+    objects.some(
+      (row, index) =>
+        row.name !== expected[index] ||
+        typeof row.sql !== "string" ||
+        normalize(row.sql) !== normalize(schema[row.name as string]!),
+    ) ||
     !db.prepare(`SELECT 1 FROM ${PUSH_GENERATIONS} WHERE singleton = 1`).get()
   ) {
     throw new Error("push subscription schema is missing or damaged");
@@ -59,11 +65,18 @@ export function initializePushSchema(db: SqliteDb): void {
     return;
   }
   const names = Object.keys(PUSH_SCHEMA);
-  if (db.prepare(`SELECT 1 FROM sqlite_schema WHERE name IN (${names.map(() => "?").join(", ")})`).get(...names)) {
+  if (
+    db
+      .prepare(`SELECT 1 FROM sqlite_schema WHERE name IN (${names.map(() => "?").join(", ")})`)
+      .get(...names)
+  ) {
     throw new Error("unmarked push subscription schema already exists");
   }
   for (const sql of Object.values(PUSH_SCHEMA)) db.exec(sql);
   db.prepare(`INSERT INTO ${PUSH_GENERATIONS} (singleton, last_generation) VALUES (1, 0)`).run();
   assertSchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(MARKER, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    MARKER,
+    Date.now(),
+  );
 }

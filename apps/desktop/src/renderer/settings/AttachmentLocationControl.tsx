@@ -12,7 +12,6 @@ const OPTIONS = [
   { value: "same-folder", label: "Beside the document" },
 ] as const satisfies ReadonlyArray<{ value: AttachmentLocation; label: string }>;
 
-// The document each choice's example path is pasted into.
 const EXAMPLE_DOCUMENT = "Trips/Lisbon/itinerary.md";
 
 /**
@@ -61,7 +60,11 @@ export function AttachmentLocationControl(props: {
               {checked ? <span className="size-1.5 rounded-full bg-accent" /> : null}
             </span>
             {option.label}
-            <span id={`${id}-${option.value}`} title={path} className="col-start-2 min-w-0 overflow-hidden text-[12px] text-muted">
+            <span
+              id={`${id}-${option.value}`}
+              title={path}
+              className="col-start-2 min-w-0 overflow-hidden text-[12px] text-muted"
+            >
               <PathLine path={path} />
             </span>
           </button>

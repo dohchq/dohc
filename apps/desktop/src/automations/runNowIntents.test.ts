@@ -20,12 +20,13 @@ describe("Run now intents", () => {
     await first.save(intent("b"));
     await first.save({ ...intent("a"), account: null });
 
-    // As after a crash: a new start reads the same file.
     const restarted = createRunNowIntents(file);
     expect(await restarted.list()).toEqual([intent("b"), { ...intent("a"), account: null }]);
     await restarted.remove({ store: "account", noticeId: "b" });
     await restarted.remove({ store: "local", noticeId: "a" });
-    expect(await restarted.list(), "only the same store and id goes").toEqual([{ ...intent("a"), account: null }]);
+    expect(await restarted.list(), "only the same store and id goes").toEqual([
+      { ...intent("a"), account: null },
+    ]);
   });
 
   it("reads past a damaged file or entry", async () => {
@@ -33,7 +34,10 @@ describe("Run now intents", () => {
     const intents = createRunNowIntents(file);
     await writeFile(file, "{");
     expect(await intents.list()).toEqual([]);
-    await writeFile(file, JSON.stringify([intent("a"), { notice: { store: "elsewhere", noticeId: "b" } }]));
+    await writeFile(
+      file,
+      JSON.stringify([intent("a"), { notice: { store: "elsewhere", noticeId: "b" } }]),
+    );
     expect(await intents.list()).toEqual([intent("a")]);
   });
 });

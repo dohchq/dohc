@@ -64,7 +64,11 @@ it("autocaptures the site's own elements, not the demo's", async () => {
   // As PostHog does: the target and its ancestors, through shadow hosts.
   const chain = (el: Element) => {
     const elements: Element[] = [];
-    for (let node: Node | null = el; node; node = node instanceof ShadowRoot ? node.host : node.parentNode) {
+    for (
+      let node: Node | null = el;
+      node;
+      node = node instanceof ShadowRoot ? node.host : node.parentNode
+    ) {
       if (node instanceof Element && node.tagName !== "HTML") elements.push(node);
     }
     return elements;
@@ -72,7 +76,8 @@ it("autocaptures the site's own elements, not the demo's", async () => {
   const anyMatches = (el: Element, selectors: string[] = []) =>
     chain(el).some((node) => selectors.some((selector) => node.matches(selector)));
   const captured = (el: Element) =>
-    anyMatches(el, autocapture.css_selector_allowlist) && !anyMatches(el, autocapture.css_selector_ignorelist);
+    anyMatches(el, autocapture.css_selector_allowlist) &&
+    !anyMatches(el, autocapture.css_selector_ignorelist);
   document.body.innerHTML = `<main><a href="#">Read</a><section><div id="desktop-demo"></div></section>
     <div class="sync-stage"><div data-sync-demo><textarea></textarea></div>
     <label><input type="checkbox" data-sync-toggle /></label></div></main>`;

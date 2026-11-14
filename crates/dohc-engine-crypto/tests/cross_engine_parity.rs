@@ -58,7 +58,6 @@ fn ts_ciphertext_decrypts_byte_exact() {
         let ct_b64 = str_field(entry, "ciphertextBase64");
         let plaintext = str_field(entry, "plaintext");
 
-        // A TS ciphertext decrypts in Rust to the exact plaintext.
         let sealed = SealedSecret::from_base64(iv_b64, tag_b64, ct_b64, byte_length)
             .unwrap_or_else(|e| panic!("[{label}] from_base64: {}", e.code()));
         let opened = open(&key, workspace, path, &sealed)
@@ -82,7 +81,6 @@ fn aad_binds_workspace_and_path_fails_closed_across_paths() {
     let workspace = str_field(a, "workspaceId");
     let byte_length = a["byteLength"].as_u64().unwrap() as usize;
 
-    // entryA's ciphertext (identical bytes to entryB's) under entryA's path.
     let sealed_a = SealedSecret::from_base64(
         str_field(a, "ivBase64"),
         str_field(a, "authTagBase64"),
@@ -100,7 +98,6 @@ fn aad_binds_workspace_and_path_fails_closed_across_paths() {
         "path A ct under path B AAD must fail"
     );
 
-    // And under a foreign workspace id, too.
     let err_ws = open(&key, "ws_other", str_field(a, "path"), &sealed_a).unwrap_err();
     assert_eq!(
         err_ws,
@@ -108,6 +105,5 @@ fn aad_binds_workspace_and_path_fails_closed_across_paths() {
         "wrong workspace AAD must fail"
     );
 
-    // Sanity: under the correct path it still opens.
     assert!(open(&key, workspace, str_field(a, "path"), &sealed_a).is_ok());
 }

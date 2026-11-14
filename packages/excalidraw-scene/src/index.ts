@@ -133,9 +133,7 @@ export function setAppStateProperty(doc: Y.Doc, key: string, value: JsonValue): 
 
 export function putSceneAsset(doc: Y.Doc, input: unknown): void {
   const asset = validateAsset(input);
-  doc.transact(() =>
-    declareSceneRoots(doc).assets.set(asset.id, stableJson(asset)),
-  );
+  doc.transact(() => declareSceneRoots(doc).assets.set(asset.id, stableJson(asset)));
 }
 
 export function foldScene(doc: Y.Doc): FoldedScene {
@@ -216,15 +214,10 @@ class RetainedSceneFold implements IncrementalSceneFold {
 
   update(transaction: Y.Transaction): FoldedScene {
     if (transaction.doc !== this.doc) {
-      throw new SceneCodecError(
-        "The scene transaction belongs to another document.",
-      );
+      throw new SceneCodecError("The scene transaction belongs to another document.");
     }
 
-    const changedRevisionKeys = transactionChangedKeys(
-      transaction,
-      this.roots.revisions,
-    );
+    const changedRevisionKeys = transactionChangedKeys(transaction, this.roots.revisions);
     if (changedRevisionKeys) {
       const affectedIds = new Set<string>();
       for (const key of changedRevisionKeys) {
@@ -243,10 +236,7 @@ class RetainedSceneFold implements IncrementalSceneFold {
       if (affectedIds.size > 0) this.updateElements(affectedIds);
     }
 
-    const changedAppStateKeys = transactionChangedKeys(
-      transaction,
-      this.roots.appState,
-    );
+    const changedAppStateKeys = transactionChangedKeys(transaction, this.roots.appState);
     if (changedAppStateKeys) {
       const appState = { ...this.appState };
       for (const key of changedAppStateKeys) {
@@ -259,10 +249,7 @@ class RetainedSceneFold implements IncrementalSceneFold {
       this.appState = appState;
     }
 
-    const changedAssetIds = transactionChangedKeys(
-      transaction,
-      this.roots.assets,
-    );
+    const changedAssetIds = transactionChangedKeys(transaction, this.roots.assets);
     if (changedAssetIds) {
       const assets = { ...this.assets };
       for (const id of changedAssetIds) {
@@ -289,9 +276,7 @@ class RetainedSceneFold implements IncrementalSceneFold {
       }
     }
     replacements.sort(compareElementOrder);
-    const retained = this.elements.filter(
-      (element) => !affectedIds.has(element.id),
-    );
+    const retained = this.elements.filter((element) => !affectedIds.has(element.id));
     this.elements = mergeElements(retained, replacements);
   }
 
@@ -307,19 +292,14 @@ class RetainedSceneFold implements IncrementalSceneFold {
   }
 }
 
-function readElementRevision(
-  key: string,
-  encoded: unknown,
-): ElementSnapshot | undefined {
+function readElementRevision(key: string, encoded: unknown): ElementSnapshot | undefined {
   try {
     if (typeof encoded !== "string") return undefined;
     parseRevisionKey(key);
     const parsed = parseStored(encoded, "element revision");
     if (stableJson(parsed) !== encoded) return undefined;
     const element = validateElement(parsed);
-    if (
-      revisionKey(element.id, element.version, element.versionNonce) !== key
-    ) {
+    if (revisionKey(element.id, element.version, element.versionNonce) !== key) {
       return undefined;
     }
     return element;
@@ -439,14 +419,10 @@ export function stableJson(value: unknown): string {
   if (typeof value === "object") {
     const keys = Object.keys(value as object);
     keys.forEach(assertWellFormedUnicode);
-    const entries = keys
-      .sort(compareUnicodeScalar)
-      .flatMap((key) => {
-        const item = (value as Record<string, unknown>)[key];
-        return item === undefined
-          ? []
-          : [`${JSON.stringify(key)}:${stableJson(item)}`];
-      });
+    const entries = keys.sort(compareUnicodeScalar).flatMap((key) => {
+      const item = (value as Record<string, unknown>)[key];
+      return item === undefined ? [] : [`${JSON.stringify(key)}:${stableJson(item)}`];
+    });
     return `{${entries.join(",")}}`;
   }
   throw new SceneCodecError("Scene data must contain only JSON values.");
@@ -454,24 +430,14 @@ export function stableJson(value: unknown): string {
 
 // Keep both portable files and collaborative revisions within the input
 // assumptions of the pinned Excalidraw restore implementation.
-export function assertRestorableElement(
-  input: unknown,
-): asserts input is JsonObject {
-  if (
-    !isObject(input) ||
-    typeof input.type !== "string" ||
-    input.type.length === 0
-  ) {
+export function assertRestorableElement(input: unknown): asserts input is JsonObject {
+  if (!isObject(input) || typeof input.type !== "string" || input.type.length === 0) {
     throw new SceneCodecError("The drawing has an invalid element.");
   }
   if (!validFractionalIndex(input.index)) {
     throw new SceneCodecError("The drawing has an invalid element order.");
   }
-  if (
-    input.link !== undefined &&
-    input.link !== null &&
-    typeof input.link !== "string"
-  ) {
+  if (input.link !== undefined && input.link !== null && typeof input.link !== "string") {
     throw new SceneCodecError("The drawing has an invalid element link.");
   }
   if (input.type === "text") {
@@ -487,16 +453,12 @@ export function assertRestorableElement(
     input.boundElementIds !== null &&
     !Array.isArray(input.boundElementIds)
   ) {
-    throw new SceneCodecError(
-      "The drawing has invalid legacy element bindings.",
-    );
+    throw new SceneCodecError("The drawing has invalid legacy element bindings.");
   }
   if (input.boundElements !== undefined && input.boundElements !== null) {
     if (
       !Array.isArray(input.boundElements) ||
-      input.boundElements.some(
-        (binding) => !isObject(binding) || typeof binding.id !== "string",
-      )
+      input.boundElements.some((binding) => !isObject(binding) || typeof binding.id !== "string")
     ) {
       throw new SceneCodecError("The drawing has invalid element bindings.");
     }
@@ -635,7 +597,8 @@ function isWorkspaceRelativeRef(ref: string): boolean {
     ref.includes(":") ||
     ref.startsWith("/") ||
     /[\u0000-\u001f\u007f-\u009f]/.test(ref)
-  ) return false;
+  )
+    return false;
   const parts = ref.split("/");
   return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
 }
@@ -660,8 +623,7 @@ function compareElementOrder(left: ElementSnapshot, right: ElementSnapshot): num
   const leftIndex = indexKey(left);
   const rightIndex = indexKey(right);
   const indexOrder =
-    leftIndex[0] - rightIndex[0] ||
-    compareUnicodeScalar(leftIndex[1], rightIndex[1]);
+    leftIndex[0] - rightIndex[0] || compareUnicodeScalar(leftIndex[1], rightIndex[1]);
   return indexOrder || compareUnicodeScalar(left.id, right.id);
 }
 
@@ -720,7 +682,8 @@ function repairElementReferences(
         typeof bound.id !== "string" ||
         !liveIds.has(bound.id) ||
         seen.has(bound.id)
-      ) return false;
+      )
+        return false;
       seen.add(bound.id);
       return true;
     });

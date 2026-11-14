@@ -42,15 +42,6 @@ export function documentDir(docPath: string): string {
   return lastSlash === -1 ? "" : normalized.slice(0, lastSlash + 1);
 }
 
-// Joins a document-relative src onto the document's folder via pure lexical
-// normalization: `.`/`./` are collapsed and `..` pops the parent segment.
-//
-// Upward-relative links (`../attachments/x.png`) are now first-class — the
-// global-folder attachment mode writes them so a nested doc can reference one
-// folder at the workspace root. If `..` climbs above the workspace root the
-// escaping `..` segments are preserved at the front of the result (e.g.
-// "../escape.png"), so callers can detect the escape rather than have it
-// silently flattened; resolveWorkspaceImageSrc refuses to serve such a path.
 export function joinWorkspacePath(docPath: string, src: string): string {
   const combined = documentDir(docPath) + src.replace(/\\/g, "/");
   const segments: string[] = [];
@@ -79,9 +70,6 @@ function escapesWorkspaceRoot(workspacePath: string): boolean {
   return workspacePath === ".." || workspacePath.startsWith("../");
 }
 
-// Builds the privileged URL the dohc-file protocol serves bytes from (mirrors
-// FileInspector.assetUrl). The main process re-validates containment against
-// the real workspace root, so this URL can never escape the workspace.
 export function assetUrl(workspaceId: string, workspacePath: string): string {
   const encoded = workspacePath.split("/").map(encodeURIComponent).join("/");
   return `dohc-file://${workspaceId}/${encoded}`;
@@ -99,10 +87,7 @@ export const BLOCKED_IMAGE_SRC = "";
 // Maps an image node's stored src to the URL the renderer should actually load:
 // workspace-relative → dohc-file://…; http(s) is passed through untouched; a
 // src that cannot be served safely → BLOCKED_IMAGE_SRC (no request at all).
-export function resolveWorkspaceImageSrc(
-  context: ImageSrcContext,
-  src: string,
-): string {
+export function resolveWorkspaceImageSrc(context: ImageSrcContext, src: string): string {
   if (!isWorkspaceRelativeSrc(src)) return src;
   const workspacePath = joinWorkspacePath(context.docPath, src.trim());
   // Containment: refuse to mint a privileged dohc-file:// URL for a path that

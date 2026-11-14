@@ -1,10 +1,3 @@
-// Path-tree model for the desktop explorer. The workspace is path-addressed
-// with flat relative paths;
-// the explorer reads as a real recursive tree — buildTree bridges the two.
-// Slimmed: rows are the desktop's WorkspaceFileEntry shape ({path, kind}),
-// folders are plain path strings (pins/cosmetics live in ui-state, not here),
-// and the pre-pivot fields (_id/source/title/star/lock/icon) are gone.
-
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 
 export type FileRow = WorkspaceFileEntry;
@@ -43,7 +36,6 @@ export function buildTree(
     childrenBySegment: new Map(),
   };
 
-  // Ensure every explicit folder has a node (even if empty).
   for (const folder of folders) ensurePathNode(root, folder);
 
   for (const file of files) {

@@ -6,7 +6,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
-import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, resumeLiveEditing, stopLiveEditing, type ToolContext } from "./tools";
+import {
+  disconnectLinkAgent,
+  getShareCopyDetails,
+  listLinkAgents,
+  listLiveDocuments,
+  resumeLiveEditing,
+  stopLiveEditing,
+  type ToolContext,
+} from "./tools";
 
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
@@ -60,7 +68,6 @@ const SHARED_TOOLS = [
 ];
 
 const roots: string[] = [];
-// Document tools resolve their path inside a real workspace folder.
 async function workspaceRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "dohc-mcp-documents-"));
   roots.push(root);
@@ -72,10 +79,12 @@ afterEach(async () => {
 
 const connections: Array<{ client: Client; server: ReturnType<typeof createDohcMcpServer> }> = [];
 afterEach(async () => {
-  await Promise.all(connections.splice(0).map(async ({ client, server }) => {
-    await client.close();
-    await server.close();
-  }));
+  await Promise.all(
+    connections.splice(0).map(async ({ client, server }) => {
+      await client.close();
+      await server.close();
+    }),
+  );
 });
 
 async function connectedToolNames(
@@ -93,10 +102,17 @@ async function connectedToolNames(
 
 it("returns a pending document edit as a successful tool result", async () => {
   const root = await workspaceRoot();
-  const outcome = { ok: true, path: "n.md", changed: true,
-    warning: "Saved locally. The shared file update is pending. Do not repeat this edit." };
+  const outcome = {
+    ok: true,
+    path: "n.md",
+    changed: true,
+    warning: "Saved locally. The shared file update is pending. Do not repeat this edit.",
+  };
   const { client } = await connectedToolNames({ root, home: root, request: async () => outcome });
-  const reply = await client.callTool({ name: "dohc_edit_document", arguments: { path: "n.md", replacement: "After." } });
+  const reply = await client.callTool({
+    name: "dohc_edit_document",
+    arguments: { path: "n.md", replacement: "After." },
+  });
   expect(reply.isError).not.toBe(true);
   expect(JSON.stringify(reply)).toContain(outcome.warning);
 });
@@ -104,20 +120,56 @@ it("returns a pending document edit as a successful tool result", async () => {
 it("ends an automation's run with nothing to report through the reply tool, and posts nothing", async () => {
   const root = await workspaceRoot();
   const requests: Array<{ verb: string; args: unknown }> = [];
-  const { client } = await connectedToolNames({ root, home: root, request: async request => {
-    requests.push(request);
-    return { threadId: "th_1", nothingToReport: true };
-  } });
-  const quiet = await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1", runId: "run-1", nothingToReport: true, needsDecision: false, attachments: [] } });
+  const { client } = await connectedToolNames({
+    root,
+    home: root,
+    request: async (request) => {
+      requests.push(request);
+      return { threadId: "th_1", nothingToReport: true };
+    },
+  });
+  const quiet = await client.callTool({
+    name: "dohc_reply_to_chat",
+    arguments: {
+      threadId: "th_1",
+      runId: "run-1",
+      nothingToReport: true,
+      needsDecision: false,
+      attachments: [],
+    },
+  });
   expect(quiet.isError).not.toBe(true);
-  expect(quiet.structuredContent).toEqual({ ok: true, threadId: "thread-1", nothingToReport: true });
-  expect(requests).toEqual([{ protocolVersion: expect.any(Number), door: "mcp", verb: "nothingToReport", args: { cwd: root, actor: "agent", thread: "th_1", runId: "run-1" } }]);
+  expect(quiet.structuredContent).toEqual({
+    ok: true,
+    threadId: "thread-1",
+    nothingToReport: true,
+  });
+  expect(requests).toEqual([
+    {
+      protocolVersion: expect.any(Number),
+      door: "mcp",
+      verb: "nothingToReport",
+      args: { cwd: root, actor: "agent", thread: "th_1", runId: "run-1" },
+    },
+  ]);
 
-  for (const message of [{ body: "Nothing due." }, { to: "msg_1" }, { options: ["A"] }, { needsDecision: true }, { work: { status: "done" } }]) {
-    const refused = await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1", nothingToReport: true, ...message } });
+  for (const message of [
+    { body: "Nothing due." },
+    { to: "msg_1" },
+    { options: ["A"] },
+    { needsDecision: true },
+    { work: { status: "done" } },
+  ]) {
+    const refused = await client.callTool({
+      name: "dohc_reply_to_chat",
+      arguments: { threadId: "th_1", nothingToReport: true, ...message },
+    });
     expect(refused.isError, JSON.stringify(message)).toBe(true);
   }
-  const empty = await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1" } });
+  const empty = await client.callTool({
+    name: "dohc_reply_to_chat",
+    arguments: { threadId: "th_1" },
+  });
   expect(empty.isError).toBe(true);
   expect(requests).toHaveLength(1);
 });
@@ -126,25 +178,51 @@ it("uses the owner socket operation for held Review, Drop, and Undo", async () =
   const root = await workspaceRoot();
   const requests: unknown[] = [];
   const token = "a".repeat(64);
-  const {client} = await connectedToolNames({root, home: root, request: async request => {
-    requests.push(request);
-    return {ok: true, path: "note.md", token, authors: [], held: request.verb === "heldNoteChange" && request.args.action !== "drop", historyMomentId: "history"};
-  }});
-  const description = (await client.listTools()).tools.find(tool => tool.name === "dohc_held_note_change")!.description;
+  const { client } = await connectedToolNames({
+    root,
+    home: root,
+    request: async (request) => {
+      requests.push(request);
+      return {
+        ok: true,
+        path: "note.md",
+        token,
+        authors: [],
+        held: request.verb === "heldNoteChange" && request.args.action !== "drop",
+        historyMomentId: "history",
+      };
+    },
+  });
+  const description = (await client.listTools()).tools.find(
+    (tool) => tool.name === "dohc_held_note_change",
+  )!.description;
   for (const words of [
     "held-change-stale: Run review again and use its new token for drop.",
     "held-change-missing: Read the note again; there is no held change to drop.",
     "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
     "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
     "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
-  ]) expect(description).toContain(words);
+  ])
+    expect(description).toContain(words);
   expect(description).not.toContain("Edit anyway");
   for (const action of ["review", "drop", "undo"]) {
-    const result = await client.callTool({name: "dohc_held_note_change", arguments: {path: "note.md", action, ...(action === "review" ? {} : {token})}});
+    const result = await client.callTool({
+      name: "dohc_held_note_change",
+      arguments: { path: "note.md", action, ...(action === "review" ? {} : { token }) },
+    });
     expect(result.isError).not.toBe(true);
   }
-  expect(requests).toMatchObject(["review", "drop", "undo"].map(action => ({verb: "heldNoteChange", door: "mcp", args: {cwd: root, actor: "agent", path: "note.md", action}})));
-  const missing = await client.callTool({name: "dohc_held_note_change", arguments: {path: "note.md", action: "drop"}});
+  expect(requests).toMatchObject(
+    ["review", "drop", "undo"].map((action) => ({
+      verb: "heldNoteChange",
+      door: "mcp",
+      args: { cwd: root, actor: "agent", path: "note.md", action },
+    })),
+  );
+  const missing = await client.callTool({
+    name: "dohc_held_note_change",
+    arguments: { path: "note.md", action: "drop" },
+  });
   expect(missing.isError).toBe(true);
   expect(requests).toHaveLength(3);
 });
@@ -154,38 +232,104 @@ describe("share-level tool profiles", () => {
 
   it("stops the owner's workspace with the handshake name as provenance", async () => {
     const requests: unknown[] = [];
-    const { client } = await connectedToolNames({ ...base, request: async request => {
-      requests.push(request);
-      return { ok: true, workspaceId: "workspace", workspaceSynced: false };
-    } });
+    const { client } = await connectedToolNames({
+      ...base,
+      request: async (request) => {
+        requests.push(request);
+        return { ok: true, workspaceId: "workspace", workspaceSynced: false };
+      },
+    });
     const result = await client.callTool({ name: "dohc_stop_workspace_sync", arguments: {} });
     expect(result.isError).not.toBe(true);
-    expect(requests).toMatchObject([{ verb: "stopSync", door: "mcp", args: { cwd: base.root, actor: "agent", agent: "test" } }]);
+    expect(requests).toMatchObject([
+      { verb: "stopSync", door: "mcp", args: { cwd: base.root, actor: "agent", agent: "test" } },
+    ]);
   });
 
   it("saves, tries again and stops again an owner's kept edits by path, refusing a path outside the workspace", async () => {
     const root = await workspaceRoot();
     const requests: unknown[] = [];
-    const { client } = await connectedToolNames({ root, home: base.home, request: async request => {
-      requests.push(request);
-      return request.verb === "stopAgain" ? { ok: true, path: "plan.md", keptEdits: "recovered" }
-        : "incident" in request.args ? { ok: true, path: "plan.md" }
-        : { ok: true, copyPath: null, packagePath: "plan (recovered).dohc-recovery.json", folder: ".", storedOn: "this-computer", keptEdits: "kept" };
-    } });
-    expect((await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "plan.md" } })).isError).not.toBe(true);
-    expect((await client.callTool({ name: "dohc_retry_kept_edits", arguments: { path: "plan.md", incident: "outbox:delivery:0" } })).isError).not.toBe(true);
-    expect((await client.callTool({ name: "dohc_stop_again", arguments: { path: "plan.md", incident: "release:a:0" } })).isError).not.toBe(true);
-    expect((await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "../other/plan.md" } })).isError).toBe(true);
-    expect((await client.callTool({ name: "dohc_stop_again", arguments: { path: "../other/plan.md", incident: "release:a:0" } })).isError).toBe(true);
+    const { client } = await connectedToolNames({
+      root,
+      home: base.home,
+      request: async (request) => {
+        requests.push(request);
+        return request.verb === "stopAgain"
+          ? { ok: true, path: "plan.md", keptEdits: "recovered" }
+          : "incident" in request.args
+            ? { ok: true, path: "plan.md" }
+            : {
+                ok: true,
+                copyPath: null,
+                packagePath: "plan (recovered).dohc-recovery.json",
+                folder: ".",
+                storedOn: "this-computer",
+                keptEdits: "kept",
+              };
+      },
+    });
+    expect(
+      (await client.callTool({ name: "dohc_save_recovery_copy", arguments: { path: "plan.md" } }))
+        .isError,
+    ).not.toBe(true);
+    expect(
+      (
+        await client.callTool({
+          name: "dohc_retry_kept_edits",
+          arguments: { path: "plan.md", incident: "outbox:delivery:0" },
+        })
+      ).isError,
+    ).not.toBe(true);
+    expect(
+      (
+        await client.callTool({
+          name: "dohc_stop_again",
+          arguments: { path: "plan.md", incident: "release:a:0" },
+        })
+      ).isError,
+    ).not.toBe(true);
+    expect(
+      (
+        await client.callTool({
+          name: "dohc_save_recovery_copy",
+          arguments: { path: "../other/plan.md" },
+        })
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await client.callTool({
+          name: "dohc_stop_again",
+          arguments: { path: "../other/plan.md", incident: "release:a:0" },
+        })
+      ).isError,
+    ).toBe(true);
     expect(requests).toEqual([
-      { protocolVersion: expect.any(Number), door: "mcp", verb: "saveRecoveryCopy", args: { cwd: root, actor: "agent", path: "plan.md" } },
-      { protocolVersion: expect.any(Number), door: "mcp", verb: "retryKeptEdits", args: { cwd: root, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" } },
-      { protocolVersion: expect.any(Number), door: "mcp", verb: "stopAgain", args: { cwd: root, actor: "agent", path: "plan.md", incident: "release:a:0" } },
+      {
+        protocolVersion: expect.any(Number),
+        door: "mcp",
+        verb: "saveRecoveryCopy",
+        args: { cwd: root, actor: "agent", path: "plan.md" },
+      },
+      {
+        protocolVersion: expect.any(Number),
+        door: "mcp",
+        verb: "retryKeptEdits",
+        args: { cwd: root, actor: "agent", path: "plan.md", incident: "outbox:delivery:0" },
+      },
+      {
+        protocolVersion: expect.any(Number),
+        door: "mcp",
+        verb: "stopAgain",
+        args: { cwd: root, actor: "agent", path: "plan.md", incident: "release:a:0" },
+      },
     ]);
   });
 
   it("parses the --share-access flag", () => {
-    expect(parseArgs(["--workspace", "/w", "--home", "/h", "--share-access", "comment"])).toMatchObject({
+    expect(
+      parseArgs(["--workspace", "/w", "--home", "/h", "--share-access", "comment"]),
+    ).toMatchObject({
       root: "/w",
       home: "/h",
       shareAccess: "comment",
@@ -194,8 +338,6 @@ describe("share-level tool profiles", () => {
   });
 
   it("refuses an unrecognized --share-access value", () => {
-    // The refusal names the flag, the levels, and what it was given — an agent
-    // reads the error, not this file.
     expect(() => parseArgs(["--share-access", "read-only"])).toThrow(
       '--share-access must be one of view, comment, edit. Received: "read-only".',
     );
@@ -208,8 +350,14 @@ describe("share-level tool profiles", () => {
     const ctx = parseArgs(["--workspace", "/w", "--home", "/h", "--tool", "dohc_reply_to_chat"]);
     expect(ctx.tools).toEqual(new Set(["dohc_reply_to_chat"]));
     expect((await connectedToolNames(ctx)).names).toEqual(["dohc_reply_to_chat"]);
-    // The share level still decides: a view profile can't reply.
-    const view = parseArgs(["--share-access", "view", "--tool", "dohc_reply_to_chat", "--tool", "dohc_read_file"]);
+    const view = parseArgs([
+      "--share-access",
+      "view",
+      "--tool",
+      "dohc_reply_to_chat",
+      "--tool",
+      "dohc_read_file",
+    ]);
     expect((await connectedToolNames(view)).names).toEqual(["dohc_read_file"]);
   });
 
@@ -226,7 +374,6 @@ describe("share-level tool profiles", () => {
     for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
       expect(names, tool).not.toContain(tool);
     }
-    // The read surface is still available so agents can browse a shared view.
     for (const tool of SHARED_TOOLS) {
       expect(names, tool).toContain(tool);
     }
@@ -237,10 +384,9 @@ describe("share-level tool profiles", () => {
   it("registers no write tool at all for a comment profile, chat tools included", async () => {
     const { names } = await connectedToolNames({ ...base, shareAccess: "comment" });
     for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
-      expect(
-        names,
-        `${tool}: offering a write tool a shared view always refuses`,
-      ).not.toContain(tool);
+      expect(names, `${tool}: offering a write tool a shared view always refuses`).not.toContain(
+        tool,
+      );
     }
     for (const tool of SHARED_TOOLS) {
       expect(names, tool).toContain(tool);
@@ -276,14 +422,7 @@ describe("share-level tool profiles", () => {
 
 describe("parseArgs", () => {
   it("trims explicit path arguments", () => {
-    expect(
-      parseArgs([
-        "--workspace",
-        " /tmp/workspace ",
-        "--home",
-        " /tmp/home ",
-      ]),
-    ).toMatchObject({
+    expect(parseArgs(["--workspace", " /tmp/workspace ", "--home", " /tmp/home "])).toMatchObject({
       root: "/tmp/workspace",
       home: "/tmp/home",
     });
@@ -295,38 +434,80 @@ describe("parseArgs", () => {
   });
 });
 
-
 describe("MCP tool results", () => {
   it("refuses an argument a tool does not take, and names the ones it does", async () => {
     const request = vi.fn();
-    const { client, names } = await connectedToolNames({ root: "/workspace", home: "/home", request });
+    const { client, names } = await connectedToolNames({
+      root: "/workspace",
+      home: "/home",
+      request,
+    });
     const refusal = async (name: string, args: Record<string, unknown>) => {
       const result = await client.callTool({ name, arguments: args });
       expect(result.isError, name).toBe(true);
       return (result.content as { text: string }[])[0]!.text;
     };
     // `file` for `path` would otherwise list the whole workspace's history as a success.
-    expect(await refusal("dohc_list_changes", { file: "notes/plan.md", limit: 5 }))
-      .toContain('Unknown argument "file". This tool takes sinceMs, limit, includeFiles, path.');
-    expect(await refusal("dohc_list_groups", { group: "general", kind: "dm" }))
-      .toContain('Unknown arguments "group", "kind". This tool takes no arguments.');
-    for (const name of names) expect(await refusal(name, { notAnArgument: 1 }), name).toContain('Unknown argument "notAnArgument".');
+    expect(await refusal("dohc_list_changes", { file: "notes/plan.md", limit: 5 })).toContain(
+      'Unknown argument "file". This tool takes sinceMs, limit, includeFiles, path.',
+    );
+    expect(await refusal("dohc_list_groups", { group: "general", kind: "dm" })).toContain(
+      'Unknown arguments "group", "kind". This tool takes no arguments.',
+    );
+    for (const name of names)
+      expect(await refusal(name, { notAnArgument: 1 }), name).toContain(
+        'Unknown argument "notAnArgument".',
+      );
     for (const [name, args] of [
-      ["dohc_delete_retained_copies", { copies: [{ id: 1, revision: 1, force: true }], acceptLateWriteRisk: true }],
-      ["dohc_query_collection", { collectionPath: "tasks", filter: { field: "status", operator: "equals", value: "done", not: true } }],
-      ["dohc_query_collection", { collectionPath: "tasks", sort: [{ field: "status", direction: "asc", nulls: "last" }] }],
-    ] as const) expect(await refusal(name, args), name).toContain("Unrecognized key");
+      [
+        "dohc_delete_retained_copies",
+        { copies: [{ id: 1, revision: 1, force: true }], acceptLateWriteRisk: true },
+      ],
+      [
+        "dohc_query_collection",
+        {
+          collectionPath: "tasks",
+          filter: { field: "status", operator: "equals", value: "done", not: true },
+        },
+      ],
+      [
+        "dohc_query_collection",
+        { collectionPath: "tasks", sort: [{ field: "status", direction: "asc", nulls: "last" }] },
+      ],
+    ] as const)
+      expect(await refusal(name, args), name).toContain("Unrecognized key");
     expect(request).not.toHaveBeenCalled();
   });
   it("marks partial form creation as an error and preserves structured facts", async () => {
-    const partial = { kind: "partial", created: ["form/frontend.js"], failedStage: "capture", reason: "capture failed",
-      retry: { mode: "resume", instruction: "Try again with the same form settings and folder." } };
-    const { client } = await connectedToolNames({ root: "/workspace", home: "/home", request: async () => partial });
+    const partial = {
+      kind: "partial",
+      created: ["form/frontend.js"],
+      failedStage: "capture",
+      reason: "capture failed",
+      retry: { mode: "resume", instruction: "Try again with the same form settings and folder." },
+    };
+    const { client } = await connectedToolNames({
+      root: "/workspace",
+      home: "/home",
+      request: async () => partial,
+    });
     const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-    const result = await client.callTool({ name: "dohc_dataset", arguments: { request: {
-      action: "createForm", workspaceId: "workspace", datasetPath: "equipment/dataset.json", revision: 1, revisionSha256: "a".repeat(64),
-      tableId: id(2), createOperationId: id(4), appRoot: "form", fieldIds: [id(3)],
-    } } });
+    const result = await client.callTool({
+      name: "dohc_dataset",
+      arguments: {
+        request: {
+          action: "createForm",
+          workspaceId: "workspace",
+          datasetPath: "equipment/dataset.json",
+          revision: 1,
+          revisionSha256: "a".repeat(64),
+          tableId: id(2),
+          createOperationId: id(4),
+          appRoot: "form",
+          fieldIds: [id(3)],
+        },
+      },
+    });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toEqual(partial);
     expect(result.content).toEqual([{ type: "text", text: JSON.stringify(partial, null, 2) }]);
@@ -341,7 +522,8 @@ describe("MCP tool results", () => {
 
   it("returns structured chat output and preserves run-link warnings", async () => {
     const { client } = await connectedToolNames({
-      root: "/workspace", home: "/home",
+      root: "/workspace",
+      home: "/home",
       request: async (request) => {
         expect(request.verb).toBe("reply");
         expect(request.args).toMatchObject({ actor: "agent", thread: "thread-1", runId: "run-1" });
@@ -354,42 +536,67 @@ describe("MCP tool results", () => {
     });
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toEqual({
-      ok: true, threadId: "thread-1", messageId: "message-2", warning: "Run provenance pending.",
+      ok: true,
+      threadId: "thread-1",
+      messageId: "message-2",
+      warning: "Run provenance pending.",
     });
-    expect(result.content).toEqual([{ type: "text", text: JSON.stringify(result.structuredContent, null, 2) }]);
+    expect(result.content).toEqual([
+      { type: "text", text: JSON.stringify(result.structuredContent, null, 2) },
+    ]);
   });
 
   it("forwards a file path to list one file's history", async () => {
     const requests: unknown[] = [];
     const { client } = await connectedToolNames({
-      root: "/workspace", home: "/home",
+      root: "/workspace",
+      home: "/home",
       request: async (request) => {
         requests.push(request.args);
         return { changes: [], count: 0, totalAvailable: 0, hasMore: false, cursorMs: 0 };
       },
     });
-    const result = await client.callTool({ name: "dohc_list_changes", arguments: { path: "notes/plan.md", limit: 5 } });
+    const result = await client.callTool({
+      name: "dohc_list_changes",
+      arguments: { path: "notes/plan.md", limit: 5 },
+    });
     expect(result.isError).not.toBe(true);
-    expect(requests).toEqual([{ cwd: "/workspace", actor: "agent", path: "notes/plan.md", limit: 5 }]);
+    expect(requests).toEqual([
+      { cwd: "/workspace", actor: "agent", path: "notes/plan.md", limit: 5 },
+    ]);
   });
 
   it("lists old file copies and deletes them only with the late-write risk accepted", async () => {
     const requests: { verb: string; args: unknown }[] = [];
     const { client } = await connectedToolNames({
-      root: "/workspace", home: "/home",
+      root: "/workspace",
+      home: "/home",
       request: async (request) => {
         requests.push({ verb: request.verb, args: request.args });
         return request.verb === "retainedCopies"
-          ? { ok: true, copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } }
+          ? {
+              ok: true,
+              copies: [{ id: 3, revision: 10 }],
+              more: false,
+              total: { count: 1, bytes: 9 },
+            }
           : { ok: true, deleted: 1, skipped: 0, failed: 0, remaining: { count: 0, bytes: 0 } };
       },
     });
     const listed = await client.callTool({ name: "dohc_list_retained_copies", arguments: {} });
-    expect(listed.structuredContent).toEqual({ ok: true, copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } });
+    expect(listed.structuredContent).toEqual({
+      ok: true,
+      copies: [{ id: 3, revision: 10 }],
+      more: false,
+      total: { count: 1, bytes: 9 },
+    });
     for (const acceptLateWriteRisk of [undefined, false]) {
       const refused = await client.callTool({
         name: "dohc_delete_retained_copies",
-        arguments: { copies: [{ id: 3, revision: 10 }], ...(acceptLateWriteRisk === undefined ? {} : { acceptLateWriteRisk }) },
+        arguments: {
+          copies: [{ id: 3, revision: 10 }],
+          ...(acceptLateWriteRisk === undefined ? {} : { acceptLateWriteRisk }),
+        },
       });
       expect(refused.isError).toBe(true);
     }
@@ -400,44 +607,101 @@ describe("MCP tool results", () => {
     expect(deleted.isError).not.toBe(true);
     expect(requests).toEqual([
       { verb: "retainedCopies", args: { cwd: "/workspace", actor: "agent" } },
-      { verb: "deleteRetainedCopies", args: { cwd: "/workspace", actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true } },
+      {
+        verb: "deleteRetainedCopies",
+        args: {
+          cwd: "/workspace",
+          actor: "agent",
+          copies: [{ id: 3, revision: 10 }],
+          acceptLateWriteRisk: true,
+        },
+      },
     ]);
   });
 
   it("reports authorization refusals as tool errors", async () => {
     const { client } = await connectedToolNames({
-      root: "/workspace", home: "/home",
-      request: async () => { throw new DohcCliError("This group is read-only."); },
+      root: "/workspace",
+      home: "/home",
+      request: async () => {
+        throw new DohcCliError("This group is read-only.");
+      },
     });
     const result = await client.callTool({
-      name: "dohc_start_group_chat", arguments: { group: "general", body: "Hello" },
+      name: "dohc_start_group_chat",
+      arguments: { group: "general", body: "Hello" },
     });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toEqual({ ok: false, reason: "This group is read-only." });
   });
 
-  it.each(["view", "comment", "edit"] as const)("offers shared definitions and only the %s switch permission", async shareAccess => {
-    const root = await workspaceRoot(), requests: unknown[] = [];
-    const definitions = { file: { status: "missing" }, canSwitch: shareAccess === "edit", contentHash: null, sync: "accepted" };
-    const { client, names } = await connectedToolNames({ root, home: "/home", shareAccess, request: async request => {
-      requests.push(request);
-      return request.verb === "automationList" ? { ok: true, definitions } : { ok: true, result: { status: "written", contentHash: "b".repeat(64), sync: "pending" } };
-    } });
-    expect(names).toContain("dohc_list_automations");
-    expect(names.includes("dohc_switch_automation")).toBe(shareAccess === "edit");
-    const listed = await client.callTool({ name: "dohc_list_automations", arguments: { collectionPath: "notes" } });
-    expect(listed.structuredContent).toEqual({ ok: true, definitions });
-    if (shareAccess === "edit") {
-      const switched = await client.callTool({ name: "dohc_switch_automation", arguments: { collectionPath: "notes", automation: "stamp", enabled: false, expectedContentHash: "a".repeat(64), reformat: true, submitId: "switch-1" } });
-      expect(switched.structuredContent).toMatchObject({ result: { status: "written", sync: "pending" } });
-      expect(requests).toContainEqual(expect.objectContaining({ verb: "automationSwitch", args: expect.objectContaining({ automation: "stamp", enabled: false, reformat: true, submitId: "switch-1" }) }));
-    }
-  });
+  it.each(["view", "comment", "edit"] as const)(
+    "offers shared definitions and only the %s switch permission",
+    async (shareAccess) => {
+      const root = await workspaceRoot(),
+        requests: unknown[] = [];
+      const definitions = {
+        file: { status: "missing" },
+        canSwitch: shareAccess === "edit",
+        contentHash: null,
+        sync: "accepted",
+      };
+      const { client, names } = await connectedToolNames({
+        root,
+        home: "/home",
+        shareAccess,
+        request: async (request) => {
+          requests.push(request);
+          return request.verb === "automationList"
+            ? { ok: true, definitions }
+            : {
+                ok: true,
+                result: { status: "written", contentHash: "b".repeat(64), sync: "pending" },
+              };
+        },
+      });
+      expect(names).toContain("dohc_list_automations");
+      expect(names.includes("dohc_switch_automation")).toBe(shareAccess === "edit");
+      const listed = await client.callTool({
+        name: "dohc_list_automations",
+        arguments: { collectionPath: "notes" },
+      });
+      expect(listed.structuredContent).toEqual({ ok: true, definitions });
+      if (shareAccess === "edit") {
+        const switched = await client.callTool({
+          name: "dohc_switch_automation",
+          arguments: {
+            collectionPath: "notes",
+            automation: "stamp",
+            enabled: false,
+            expectedContentHash: "a".repeat(64),
+            reformat: true,
+            submitId: "switch-1",
+          },
+        });
+        expect(switched.structuredContent).toMatchObject({
+          result: { status: "written", sync: "pending" },
+        });
+        expect(requests).toContainEqual(
+          expect.objectContaining({
+            verb: "automationSwitch",
+            args: expect.objectContaining({
+              automation: "stamp",
+              enabled: false,
+              reformat: true,
+              submitId: "switch-1",
+            }),
+          }),
+        );
+      }
+    },
+  );
 
   it("reads a document through the desktop", async () => {
     const root = await workspaceRoot();
     const { client } = await connectedToolNames({
-      root, home: "/home",
+      root,
+      home: "/home",
       request: async (request) => {
         expect(request).toMatchObject({
           verb: "documentRead",
@@ -446,8 +710,15 @@ describe("MCP tool results", () => {
         return { ok: true, path: "notes/plan.md", markdown: "# Plan" };
       },
     });
-    const result = await client.callTool({ name: "dohc_read_document", arguments: { path: "notes/plan.md" } });
-    expect(result.structuredContent).toEqual({ ok: true, path: "notes/plan.md", markdown: "# Plan" });
+    const result = await client.callTool({
+      name: "dohc_read_document",
+      arguments: { path: "notes/plan.md" },
+    });
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      path: "notes/plan.md",
+      markdown: "# Plan",
+    });
   });
 
   it("names the agent from its handshake on a document edit, and invents no name", async () => {
@@ -457,7 +728,12 @@ describe("MCP tool results", () => {
       edits.push(sent.args);
       return { ok: true, path: "notes/plan.md", changed: true };
     };
-    const edit = { path: "notes/plan.md", find: "Draft", replacement: "Final", requestId: "plan-1" };
+    const edit = {
+      path: "notes/plan.md",
+      find: "Draft",
+      replacement: "Final",
+      requestId: "plan-1",
+    };
     for (const clientName of ["claude-code", "a/b"]) {
       const { client } = await connectedToolNames({ root, home: "/home", request }, clientName);
       const result = await client.callTool({ name: "dohc_edit_document", arguments: edit });
@@ -472,52 +748,99 @@ describe("MCP tool results", () => {
   it("creates a document under the agent name from the handshake", async () => {
     const root = await workspaceRoot();
     const sent: unknown[] = [];
-    const { client } = await connectedToolNames({
-      root, home: "/home",
-      request: async (request) => {
-        sent.push(request);
-        return { ok: true, path: "notes/new.md" };
+    const { client } = await connectedToolNames(
+      {
+        root,
+        home: "/home",
+        request: async (request) => {
+          sent.push(request);
+          return { ok: true, path: "notes/new.md" };
+        },
       },
-    }, "claude-code");
-    const result = await client.callTool({ name: "dohc_create_document", arguments: { path: "notes/new.md", markdown: "# New" } });
+      "claude-code",
+    );
+    const result = await client.callTool({
+      name: "dohc_create_document",
+      arguments: { path: "notes/new.md", markdown: "# New" },
+    });
     expect(result.structuredContent).toEqual({ ok: true, path: "notes/new.md" });
-    expect(sent).toMatchObject([{
-      verb: "documentCreate",
-      args: { cwd: root, actor: "agent", agent: "claude-code", path: "notes/new.md", markdown: "# New" },
-    }]);
+    expect(sent).toMatchObject([
+      {
+        verb: "documentCreate",
+        args: {
+          cwd: root,
+          actor: "agent",
+          agent: "claude-code",
+          path: "notes/new.md",
+          markdown: "# New",
+        },
+      },
+    ]);
   });
 
   it("comments on a file by starting its chat", async () => {
     const root = await workspaceRoot();
-    const { client } = await connectedToolNames({
-      root, home: "/home",
-      request: async (request) => {
-        expect(request).toMatchObject({
-          verb: "fileChatStart",
-          args: { cwd: root, actor: "agent", agent: "claude-code", path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
-        });
-        return { ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1" };
+    const { client } = await connectedToolNames(
+      {
+        root,
+        home: "/home",
+        request: async (request) => {
+          expect(request).toMatchObject({
+            verb: "fileChatStart",
+            args: {
+              cwd: root,
+              actor: "agent",
+              agent: "claude-code",
+              path: "notes/budget.md",
+              title: "Food",
+              body: "Is 400 enough?",
+              requestId: "budget-1",
+            },
+          });
+          return {
+            ok: true,
+            path: "notes/budget.md",
+            threadId: "thread-1",
+            messageId: "message-1",
+          };
+        },
       },
-    }, "claude-code");
+      "claude-code",
+    );
     const result = await client.callTool({
       name: "dohc_start_file_chat",
-      arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?", requestId: "budget-1" },
+      arguments: {
+        path: "notes/budget.md",
+        title: "Food",
+        body: "Is 400 enough?",
+        requestId: "budget-1",
+      },
     });
     expect(result.structuredContent).toEqual({
-      ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1",
+      ok: true,
+      path: "notes/budget.md",
+      threadId: "thread-1",
+      messageId: "message-1",
     });
   });
 
   it("sends what the client reports and the model the agent states with every chat write", async () => {
     const root = await workspaceRoot();
     const sent: unknown[] = [];
-    const server = createDohcMcpServer({ root, home: "/home",
-      request: async request => {
+    const server = createDohcMcpServer({
+      root,
+      home: "/home",
+      request: async (request) => {
         sent.push(request.args);
         return request.verb === "fileChatStart"
           ? { ok: true, path: "tracked.md", threadId: "thread-1", messageId: "message-1" }
           : request.verb === "post"
-            ? { group: { id: "ch_1", name: "general", slug: "general", kind: "group" }, threadId: "th_1", messageId: "msg_1", title: "" }
+            ? {
+                group: { id: "ch_1", name: "general", slug: "general", kind: "group" },
+                threadId: "th_1",
+                messageId: "msg_1",
+                title: "",
+              }
             : { threadId: "th_1", messageId: "msg_2" };
       },
     });
@@ -534,16 +857,20 @@ describe("MCP tool results", () => {
       expect(result, JSON.stringify(result)).not.toHaveProperty("isError", true);
     }
     expect(sent).toMatchObject([
-      { agent: "claude-code", reported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" } },
+      {
+        agent: "claude-code",
+        reported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" },
+      },
       { reported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" } },
       { reported: { product: "Claude Code", version: "2.1" } },
     ]);
-    expect(sent.every(args => !Object.hasOwn(args as object, "model"))).toBe(true);
+    expect(sent.every((args) => !Object.hasOwn(args as object, "model"))).toBe(true);
     expect((sent[2] as { reported: object }).reported).not.toHaveProperty("model");
 
     for (const model of [" Opus\n", "﻿Opus", "\u{1F600}".repeat(40)]) {
       const refused = await client.callTool({
-        name: "dohc_reply_to_chat", arguments: { threadId: "thread-1", body: "On it.", model },
+        name: "dohc_reply_to_chat",
+        arguments: { threadId: "thread-1", body: "On it.", model },
       });
       expect(refused.isError).toBe(true);
     }
@@ -555,14 +882,21 @@ describe("MCP tool results", () => {
     const body = "x".repeat(65_534) + "\r\ny\uFEFF ";
     const sent: unknown[] = [];
     const root = await workspaceRoot();
-    const { client } = await connectedToolNames({ root, home: "/home",
-      request: async request => {
+    const { client } = await connectedToolNames({
+      root,
+      home: "/home",
+      request: async (request) => {
         if (!("body" in request.args)) throw new Error("Expected a chat write");
         sent.push(request.args.body);
         return request.verb === "fileChatStart"
           ? { ok: true, path: "tracked.md", threadId: "thread-1", messageId: "message-1" }
           : request.verb === "post"
-            ? { group: { id: "ch_1", name: "general", slug: "general", kind: "group" }, threadId: "th_1", messageId: "msg_1", title: "" }
+            ? {
+                group: { id: "ch_1", name: "general", slug: "general", kind: "group" },
+                threadId: "th_1",
+                messageId: "msg_1",
+                title: "",
+              }
             : { threadId: "th_1", messageId: "msg_2" };
       },
     });
@@ -579,15 +913,21 @@ describe("MCP tool results", () => {
 
   it("turns poll options into a decision even without needsDecision", async () => {
     const { client } = await connectedToolNames({
-      root: "/workspace", home: "/home",
+      root: "/workspace",
+      home: "/home",
       request: async (request) => {
         expect(request.args).toMatchObject({ needsDecision: true, options: ["Yes", "No"] });
-        return { group: { id: "ch_1", name: "general", slug: "general", kind: "group" },
-          threadId: "th_1", messageId: "msg_1", title: "" };
+        return {
+          group: { id: "ch_1", name: "general", slug: "general", kind: "group" },
+          threadId: "th_1",
+          messageId: "msg_1",
+          title: "",
+        };
       },
     });
     const result = await client.callTool({
-      name: "dohc_start_group_chat", arguments: { group: "general", body: "Ready?", options: ["Yes", "No"] },
+      name: "dohc_start_group_chat",
+      arguments: { group: "general", body: "Ready?", options: ["Yes", "No"] },
     });
     expect(result.isError).not.toBe(true);
   });
@@ -598,63 +938,140 @@ it.each([
   { paused: "budget", failureReason: "runner failed to start", exitCode: 7 },
   { paused: null, failureReason: "no-reply", exitCode: 0 },
   { paused: "budget", failureReason: "no-reply", exitCode: 0 },
-] as const)("serves dispatch state through dohc_read_chat: $paused / $failureReason", async ({ paused, failureReason, exitCode }) => {
-  const response = {
-    ok: true, thread: { id: "thread-1", title: "Audit", createdAtMs: 1, updatedAtMs: 1 },
-    messages: [], projection: { path: ".dohc/chats/thread-1.md", readOnly: true, text: "" },
-    dispatch: { paused, lastRun: { state: "failed", failureReason, exitCode } },
-  };
-  const { client } = await connectedToolNames({ root: "/workspace", home: "/home", request: async () => response });
-  const result = await client.callTool({ name: "dohc_read_chat", arguments: { threadId: "thread-1" } });
-  const content = result.content as Array<{ type: string; text: string }>;
-  expect(content).toHaveLength(1);
-  expect(content[0]?.type).toBe("text");
-  expect(JSON.parse(content[0]!.text)).toEqual(response);
-});
-
+] as const)(
+  "serves dispatch state through dohc_read_chat: $paused / $failureReason",
+  async ({ paused, failureReason, exitCode }) => {
+    const response = {
+      ok: true,
+      thread: { id: "thread-1", title: "Audit", createdAtMs: 1, updatedAtMs: 1 },
+      messages: [],
+      projection: { path: ".dohc/chats/thread-1.md", readOnly: true, text: "" },
+      dispatch: { paused, lastRun: { state: "failed", failureReason, exitCode } },
+    };
+    const { client } = await connectedToolNames({
+      root: "/workspace",
+      home: "/home",
+      request: async () => response,
+    });
+    const result = await client.callTool({
+      name: "dohc_read_chat",
+      arguments: { threadId: "thread-1" },
+    });
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(content).toHaveLength(1);
+    expect(content[0]?.type).toBe("text");
+    expect(JSON.parse(content[0]!.text)).toEqual(response);
+  },
+);
 
 describe("file write handshake attribution", () => {
-  it.each(["Codex", "invalid/name"])("forwards %s to both Collection writes", async name => {
+  it.each(["Codex", "invalid/name"])("forwards %s to both Collection writes", async (name) => {
     const root = await workspaceRoot();
     const requests: unknown[] = [];
-    const { client } = await connectedToolNames({ root, home: "/home", request: async request => {
-      requests.push(request);
-      return { ok: false, reason: "Test refusal" };
-    } }, name);
-    await client.callTool({ name: "dohc_set_record_fields", arguments: { recordPath: "tasks/a.md", fields: { status: "done" } } });
-    await client.callTool({ name: "dohc_create_record", arguments: { collectionPath: "tasks", name: "b" } });
+    const { client } = await connectedToolNames(
+      {
+        root,
+        home: "/home",
+        request: async (request) => {
+          requests.push(request);
+          return { ok: false, reason: "Test refusal" };
+        },
+      },
+      name,
+    );
+    await client.callTool({
+      name: "dohc_set_record_fields",
+      arguments: { recordPath: "tasks/a.md", fields: { status: "done" } },
+    });
+    await client.callTool({
+      name: "dohc_create_record",
+      arguments: { collectionPath: "tasks", name: "b" },
+    });
     expect(requests).toMatchObject([
-      { verb: "collectionSetFields", args: { actor: "agent", agent: name === "Codex" ? name : undefined } },
-      { verb: "collectionCreateRecord", args: { actor: "agent", agent: name === "Codex" ? name : undefined } },
+      {
+        verb: "collectionSetFields",
+        args: { actor: "agent", agent: name === "Codex" ? name : undefined },
+      },
+      {
+        verb: "collectionCreateRecord",
+        args: { actor: "agent", agent: name === "Codex" ? name : undefined },
+      },
     ]);
   });
 
-  it.each(["Codex", "invalid/name"])("forwards the validated name from %s", async name => {
+  it.each(["Codex", "invalid/name"])("forwards the validated name from %s", async (name) => {
     const root = await workspaceRoot();
     const requests: unknown[] = [];
-    const { client } = await connectedToolNames({ root, home: root, request: async request => {
-      requests.push(request);
-      return { ok: true, written: ["note.txt"] };
-    } }, name);
-    await client.callTool({ name: "dohc_write_file", arguments: { path: "note.txt", content: "new" } });
+    const { client } = await connectedToolNames(
+      {
+        root,
+        home: root,
+        request: async (request) => {
+          requests.push(request);
+          return { ok: true, written: ["note.txt"] };
+        },
+      },
+      name,
+    );
+    await client.callTool({
+      name: "dohc_write_file",
+      arguments: { path: "note.txt", content: "new" },
+    });
     expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({ verb: "fileWrite", args: { actor: "agent", agent: name === "Codex" ? name : undefined } });
+    expect(requests[0]).toMatchObject({
+      verb: "fileWrite",
+      args: { actor: "agent", agent: name === "Codex" ? name : undefined },
+    });
   });
 });
 
-
 it("routes owner publication with a bearer warning and a stable link operation id", async () => {
-  const operationId="00000000-0000-4000-8000-000000000101";
-  const facts={kind:"linkCreated",shareId:"s",grantId:"g",selector:{paths:["app"],versionId:null},access:"view",url:"https://relay.example/s/#secret",bearerWarning:"This URL is a bearer credential at view access, usable by anyone who holds it."};
-  const {client}=await connectedToolNames({root:"/workspace",home:"/home",request:async request=>{
-    expect(request.verb).toBe("appPublication");
-    expect(request.args).toMatchObject({actor:"agent",request:{action:"createLink",workspaceId:"w",appRoot:"app",operationId,access:"view",agentLabel:"Builder"}});
-    return facts;
-  }});
-  const result=await client.callTool({name:"dohc_publish_app",arguments:{request:{action:"createLink",workspaceId:"w",appRoot:"app",operationId,agentLabel:"Builder"}}});
+  const operationId = "00000000-0000-4000-8000-000000000101";
+  const facts = {
+    kind: "linkCreated",
+    shareId: "s",
+    grantId: "g",
+    selector: { paths: ["app"], versionId: null },
+    access: "view",
+    url: "https://relay.example/s/#secret",
+    bearerWarning: "This URL is a bearer credential at view access, usable by anyone who holds it.",
+  };
+  const { client } = await connectedToolNames({
+    root: "/workspace",
+    home: "/home",
+    request: async (request) => {
+      expect(request.verb).toBe("appPublication");
+      expect(request.args).toMatchObject({
+        actor: "agent",
+        request: {
+          action: "createLink",
+          workspaceId: "w",
+          appRoot: "app",
+          operationId,
+          access: "view",
+          agentLabel: "Builder",
+        },
+      });
+      return facts;
+    },
+  });
+  const result = await client.callTool({
+    name: "dohc_publish_app",
+    arguments: {
+      request: {
+        action: "createLink",
+        workspaceId: "w",
+        appRoot: "app",
+        operationId,
+        agentLabel: "Builder",
+      },
+    },
+  });
   expect(result.structuredContent).toEqual(facts);
   expect(result.content).toHaveLength(1);
-  expect(JSON.parse((result.content as Array<{type:string;text:string}>)[0]!.text)).toEqual(facts);
+  expect(JSON.parse((result.content as Array<{ type: string; text: string }>)[0]!.text)).toEqual(
+    facts,
+  );
 });
 
 it("names the run it works for on every chat write, over a run the caller names", async () => {
@@ -665,137 +1082,321 @@ it("names the run it works for on every chat write, over a run the caller names"
     vi.unstubAllEnvs();
   }
   const sent: Array<{ verb: string; runId?: unknown }> = [];
-  const { client } = await connectedToolNames({ root: await workspaceRoot(), home: "/home", runId: "run_env", request: async (request) => {
-    sent.push({ verb: request.verb, runId: (request.args as { runId?: unknown }).runId });
-    return {};
-  } });
-  await client.callTool({ name: "dohc_start_group_chat", arguments: { group: "general", body: "Done." } });
-  await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1", body: "Done.", runId: "run_named" } });
-  await client.callTool({ name: "dohc_start_file_chat", arguments: { path: "notes/budget.md", title: "Food", body: "Is 400 enough?", runId: "run_named" } });
-  expect(sent).toEqual([{ verb: "post", runId: "run_env" }, { verb: "reply", runId: "run_env" }, { verb: "fileChatStart", runId: "run_env" }]);
+  const { client } = await connectedToolNames({
+    root: await workspaceRoot(),
+    home: "/home",
+    runId: "run_env",
+    request: async (request) => {
+      sent.push({ verb: request.verb, runId: (request.args as { runId?: unknown }).runId });
+      return {};
+    },
+  });
+  await client.callTool({
+    name: "dohc_start_group_chat",
+    arguments: { group: "general", body: "Done." },
+  });
+  await client.callTool({
+    name: "dohc_reply_to_chat",
+    arguments: { threadId: "th_1", body: "Done.", runId: "run_named" },
+  });
+  await client.callTool({
+    name: "dohc_start_file_chat",
+    arguments: {
+      path: "notes/budget.md",
+      title: "Food",
+      body: "Is 400 enough?",
+      runId: "run_named",
+    },
+  });
+  expect(sent).toEqual([
+    { verb: "post", runId: "run_env" },
+    { verb: "reply", runId: "run_env" },
+    { verb: "fileChatStart", runId: "run_env" },
+  ]);
 });
 
 it("names the agent you run from --agent-id on every request", async () => {
-  expect(parseArgs(["--workspace", "/w", "--home", "/h", "--agent-id", "terminal"])).toMatchObject({ agentId: "terminal" });
+  expect(parseArgs(["--workspace", "/w", "--home", "/h", "--agent-id", "terminal"])).toMatchObject({
+    agentId: "terminal",
+  });
   expect(parseArgs(["--workspace", "/w", "--home", "/h"])).not.toHaveProperty("agentId");
   expect(() => parseArgs(["--agent-id", "Terminal"])).toThrow(
     '--agent-id must be an agent\'s id from Settings › Agents. Received: "Terminal".',
   );
   expect(() => parseArgs(["--agent-id"])).toThrow(/Received: no value/u);
   const sent: Array<{ verb: string; agentId?: unknown }> = [];
-  const { client } = await connectedToolNames({ root: await workspaceRoot(), home: "/home", agentId: "terminal", request: async (request) => {
-    sent.push({ verb: request.verb, agentId: (request.args as { agentId?: unknown }).agentId });
-    return request.verb === "watch" ? { messages: [], cursor: "next" } : {};
-  } });
-  await client.callTool({ name: "dohc_start_group_chat", arguments: { group: "general", body: "Done." } });
+  const { client } = await connectedToolNames({
+    root: await workspaceRoot(),
+    home: "/home",
+    agentId: "terminal",
+    request: async (request) => {
+      sent.push({ verb: request.verb, agentId: (request.args as { agentId?: unknown }).agentId });
+      return request.verb === "watch" ? { messages: [], cursor: "next" } : {};
+    },
+  });
+  await client.callTool({
+    name: "dohc_start_group_chat",
+    arguments: { group: "general", body: "Done." },
+  });
   await client.callTool({ name: "dohc_wait_for_messages", arguments: { timeoutMs: 0 } });
-  expect(sent).toEqual([{ verb: "post", agentId: "terminal" }, { verb: "watch", agentId: "terminal" }]);
+  expect(sent).toEqual([
+    { verb: "post", agentId: "terminal" },
+    { verb: "watch", agentId: "terminal" },
+  ]);
 });
-
 
 describe("share copy profile admission", () => {
   const input = { shareId: "share", grantId: "grant" };
-  const details = { status: "active", shareCode: "dohc-share:share:https://relay.test", browserInvitationUrl: "https://share.test/s/edit/grant" };
+  const details = {
+    status: "active",
+    shareCode: "dohc-share:share:https://relay.test",
+    browserInvitationUrl: "https://share.test/s/edit/grant",
+  };
   it("advertises and calls the copy tool only for the owner profile", async () => {
     const request = vi.fn(async () => details);
-    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
+    const { names, client } = await connectedToolNames({
+      root: "/workspace",
+      home: "/state",
+      request,
+    });
     expect(names).toContain("dohc_read_share_copy");
     const result = await client.callTool({ name: "dohc_read_share_copy", arguments: input });
     expect(result.structuredContent).toEqual(details);
-    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "shareCopy", door: "mcp", args: { ...input, cwd: "/workspace", actor: "agent" } }));
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verb: "shareCopy",
+        door: "mcp",
+        args: { ...input, cwd: "/workspace", actor: "agent" },
+      }),
+    );
   });
-  it.each(["view", "comment", "edit"] as const)("refuses tools/call for a %s profile", async shareAccess => {
-    const request = vi.fn(async () => details);
-    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
-    expect(names).not.toContain("dohc_read_share_copy");
-    expect(await client.callTool({ name: "dohc_read_share_copy", arguments: input })).toMatchObject({ isError: true });
-    expect(request).not.toHaveBeenCalled();
-  });
-  it.each(["view", "comment", "edit"] as const)("refuses direct copy reads for a %s profile", async shareAccess => {
-    const request = vi.fn(async () => details);
-    expect(await getShareCopyDetails({ root: "/workspace", home: "/state", shareAccess, request }, input))
-      .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
-    expect(request).not.toHaveBeenCalled();
-  });
-  it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
-    const request = vi.fn(async () => details);
-    expect(await getShareCopyDetails({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
-    expect(request).not.toHaveBeenCalled();
-  });
+  it.each(["view", "comment", "edit"] as const)(
+    "refuses tools/call for a %s profile",
+    async (shareAccess) => {
+      const request = vi.fn(async () => details);
+      const { names, client } = await connectedToolNames({
+        root: "/workspace",
+        home: "/state",
+        shareAccess,
+        request,
+      });
+      expect(names).not.toContain("dohc_read_share_copy");
+      expect(
+        await client.callTool({ name: "dohc_read_share_copy", arguments: input }),
+      ).toMatchObject({ isError: true });
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["view", "comment", "edit"] as const)(
+    "refuses direct copy reads for a %s profile",
+    async (shareAccess) => {
+      const request = vi.fn(async () => details);
+      expect(
+        await getShareCopyDetails(
+          { root: "/workspace", home: "/state", shareAccess, request },
+          input,
+        ),
+      ).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])(
+    "refuses caller-supplied %s before transport",
+    async (key) => {
+      const request = vi.fn(async () => details);
+      expect(
+        await getShareCopyDetails(
+          { root: "/workspace", home: "/state", request },
+          { ...input, [key]: "other" },
+        ),
+      ).toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("live documents profile admission", () => {
-  const page = { ok: true, documents: [{ path: "plan.md", objectId: "object-plan", status: "retired", canResume: true }], nextCursor: null };
+  const page = {
+    ok: true,
+    documents: [{ path: "plan.md", objectId: "object-plan", status: "retired", canResume: true }],
+    nextCursor: null,
+  };
   it("advertises and calls dohc_list_live_documents only for the owner profile, with only the cursor", async () => {
     const request = vi.fn(async () => page);
-    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
+    const { names, client } = await connectedToolNames({
+      root: "/workspace",
+      home: "/state",
+      request,
+    });
     expect(names).toContain("dohc_list_live_documents");
-    expect((await client.callTool({ name: "dohc_list_live_documents", arguments: { cursor: "notes/old.md" } })).structuredContent).toEqual(page);
-    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "liveDocuments", door: "mcp", args: { cursor: "notes/old.md", cwd: "/workspace", actor: "agent" } }));
+    expect(
+      (
+        await client.callTool({
+          name: "dohc_list_live_documents",
+          arguments: { cursor: "notes/old.md" },
+        })
+      ).structuredContent,
+    ).toEqual(page);
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verb: "liveDocuments",
+        door: "mcp",
+        args: { cursor: "notes/old.md", cwd: "/workspace", actor: "agent" },
+      }),
+    );
   });
-  it.each(["view", "comment", "edit"] as const)("offers neither Stop nor Resume to a %s profile", async shareAccess => {
-    const request = vi.fn(async () => ({ ok: true, path: "plan.md" }));
-    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
-    for (const [name, call] of [["dohc_stop_live_editing", stopLiveEditing], ["dohc_resume_live_editing", resumeLiveEditing]] as const) {
-      expect(names).not.toContain(name);
-      expect(await client.callTool({ name, arguments: { path: "plan.md" } })).toMatchObject({ isError: true });
-      expect(await call({ root: "/workspace", home: "/state", shareAccess, request }, { path: "plan.md" }))
-        .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
-    }
-    expect(request).not.toHaveBeenCalled();
-  });
-  it.each(["view", "comment", "edit"] as const)("does not offer the list to a %s profile", async shareAccess => {
-    const request = vi.fn(async () => page);
-    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
-    expect(names).not.toContain("dohc_list_live_documents");
-    expect(await client.callTool({ name: "dohc_list_live_documents", arguments: {} })).toMatchObject({ isError: true });
-    expect(await listLiveDocuments({ root: "/workspace", home: "/state", shareAccess, request }, {}))
-      .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
-    expect(request).not.toHaveBeenCalled();
-  });
+  it.each(["view", "comment", "edit"] as const)(
+    "offers neither Stop nor Resume to a %s profile",
+    async (shareAccess) => {
+      const request = vi.fn(async () => ({ ok: true, path: "plan.md" }));
+      const { names, client } = await connectedToolNames({
+        root: "/workspace",
+        home: "/state",
+        shareAccess,
+        request,
+      });
+      for (const [name, call] of [
+        ["dohc_stop_live_editing", stopLiveEditing],
+        ["dohc_resume_live_editing", resumeLiveEditing],
+      ] as const) {
+        expect(names).not.toContain(name);
+        expect(await client.callTool({ name, arguments: { path: "plan.md" } })).toMatchObject({
+          isError: true,
+        });
+        expect(
+          await call(
+            { root: "/workspace", home: "/state", shareAccess, request },
+            { path: "plan.md" },
+          ),
+        ).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+      }
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["view", "comment", "edit"] as const)(
+    "does not offer the list to a %s profile",
+    async (shareAccess) => {
+      const request = vi.fn(async () => page);
+      const { names, client } = await connectedToolNames({
+        root: "/workspace",
+        home: "/state",
+        shareAccess,
+        request,
+      });
+      expect(names).not.toContain("dohc_list_live_documents");
+      expect(
+        await client.callTool({ name: "dohc_list_live_documents", arguments: {} }),
+      ).toMatchObject({ isError: true });
+      expect(
+        await listLiveDocuments({ root: "/workspace", home: "/state", shareAccess, request }, {}),
+      ).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("link agent profile admission", () => {
-  const page = { agents: [{ connectionId: "connection", reportedName: "Claude", connectedAtMs: 1, lastActionAtMs: null }], nextCursor: null };
+  const page = {
+    agents: [
+      {
+        connectionId: "connection",
+        reportedName: "Claude",
+        connectedAtMs: 1,
+        lastActionAtMs: null,
+      },
+    ],
+    nextCursor: null,
+  };
   const tools = [
-    { name: "dohc_list_link_agents", verb: "shareAgents", input: { shareId: "share", grantId: "grant", cursor: "next" }, reply: page, call: listLinkAgents },
-    { name: "dohc_disconnect_link_agent", verb: "shareDisconnect", input: { shareId: "share", grantId: "grant", connectionId: "connection" }, reply: { connectionId: "connection" }, call: disconnectLinkAgent },
+    {
+      name: "dohc_list_link_agents",
+      verb: "shareAgents",
+      input: { shareId: "share", grantId: "grant", cursor: "next" },
+      reply: page,
+      call: listLinkAgents,
+    },
+    {
+      name: "dohc_disconnect_link_agent",
+      verb: "shareDisconnect",
+      input: { shareId: "share", grantId: "grant", connectionId: "connection" },
+      reply: { connectionId: "connection" },
+      call: disconnectLinkAgent,
+    },
   ] as const;
-  it.each(tools)("advertises and calls $name only for the owner profile", async ({ name, verb, input, reply }) => {
-    const request = vi.fn(async () => reply);
-    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
-    expect(names).toContain(name);
-    expect((await client.callTool({ name, arguments: input })).structuredContent).toEqual(reply);
-    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb, door: "mcp", args: { ...input, cwd: "/workspace", actor: "agent" } }));
-  });
-  it.each(["view", "comment", "edit"] as const)("offers neither tool to a %s profile", async shareAccess => {
-    const request = vi.fn(async () => page);
-    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
-    for (const { name, input, call } of tools) {
-      expect(names).not.toContain(name);
-      expect(await client.callTool({ name, arguments: input })).toMatchObject({ isError: true });
-      expect(await call({ root: "/workspace", home: "/state", shareAccess, request }, input))
-        .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
-    }
-    expect(request).not.toHaveBeenCalled();
-  });
-  it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
-    const request = vi.fn(async () => page);
-    for (const { input, call } of tools) {
-      expect(await call({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
-    }
-    expect(request).not.toHaveBeenCalled();
-  });
+  it.each(tools)(
+    "advertises and calls $name only for the owner profile",
+    async ({ name, verb, input, reply }) => {
+      const request = vi.fn(async () => reply);
+      const { names, client } = await connectedToolNames({
+        root: "/workspace",
+        home: "/state",
+        request,
+      });
+      expect(names).toContain(name);
+      expect((await client.callTool({ name, arguments: input })).structuredContent).toEqual(reply);
+      expect(request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          verb,
+          door: "mcp",
+          args: { ...input, cwd: "/workspace", actor: "agent" },
+        }),
+      );
+    },
+  );
+  it.each(["view", "comment", "edit"] as const)(
+    "offers neither tool to a %s profile",
+    async (shareAccess) => {
+      const request = vi.fn(async () => page);
+      const { names, client } = await connectedToolNames({
+        root: "/workspace",
+        home: "/state",
+        shareAccess,
+        request,
+      });
+      for (const { name, input, call } of tools) {
+        expect(names).not.toContain(name);
+        expect(await client.callTool({ name, arguments: input })).toMatchObject({ isError: true });
+        expect(
+          await call({ root: "/workspace", home: "/state", shareAccess, request }, input),
+        ).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+      }
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])(
+    "refuses caller-supplied %s before transport",
+    async (key) => {
+      const request = vi.fn(async () => page);
+      for (const { input, call } of tools) {
+        expect(
+          await call({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" }),
+        ).toMatchObject({ ok: false });
+      }
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
   it("refuses a disconnect without a connection id before transport", async () => {
     const request = vi.fn(async () => page);
-    expect(await disconnectLinkAgent({ root: "/workspace", home: "/state", request }, { shareId: "share", grantId: "grant" })).toMatchObject({ ok: false });
+    expect(
+      await disconnectLinkAgent(
+        { root: "/workspace", home: "/state", request },
+        { shareId: "share", grantId: "grant" },
+      ),
+    ).toMatchObject({ ok: false });
     expect(request).not.toHaveBeenCalled();
   });
 });
 
 it("keeps an absent incoming subject as JSON null", async () => {
-  const { client } = await connectedToolNames({ root: "/tmp/links", home: "/tmp/home", request: async () => null });
-  const result = await client.callTool({ name: "dohc_links_in", arguments: { subject: { path: "missing.md" } } });
+  const { client } = await connectedToolNames({
+    root: "/tmp/links",
+    home: "/tmp/home",
+    request: async () => null,
+  });
+  const result = await client.callTool({
+    name: "dohc_links_in",
+    arguments: { subject: { path: "missing.md" } },
+  });
   expect(result.content).toEqual([{ type: "text", text: "null" }]);
   expect(result.structuredContent).toBeUndefined();
   expect(result.isError).not.toBe(true);

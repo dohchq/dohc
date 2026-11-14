@@ -8,8 +8,8 @@ import { buildChatCollaboration } from "./chatCollaboration";
 import { PresenceFaces } from "./PresenceIndicators";
 import { usePresence } from "./usePresence";
 
-// MU-C5 — the collaboration construction + the workspace-switch no-repaint
-// invariant, exercised through the REAL IPC presence transport (mocked bridge).
+// The collaboration construction and the workspace-switch no-repaint
+// invariant, exercised through the real IPC presence transport (mocked bridge).
 
 async function flush(): Promise<void> {
   await act(async () => {
@@ -40,10 +40,11 @@ describe("buildChatCollaboration", () => {
     });
     expect(collaboration).not.toBeNull();
     expect(collaboration?.clientId).toBe("device-1");
-    // Display name comes from the email, trimmed.
     expect(collaboration?.displayName).toBe("ada@x.com");
-    // The factory yields a real transport for either scope kind.
-    const wsTransport = collaboration?.transportForScope({ kind: "workspace", workspaceId: "ws-a" });
+    const wsTransport = collaboration?.transportForScope({
+      kind: "workspace",
+      workspaceId: "ws-a",
+    });
     expect(typeof wsTransport?.publish).toBe("function");
     expect(typeof wsTransport?.poll).toBe("function");
     expect(typeof wsTransport?.leave).toBe("function");
@@ -104,10 +105,12 @@ beforeEach(() => {
         });
       }),
   );
-  bridgeMock.presenceCancel.mockReset().mockImplementation(async ({ pollId }: { pollId: string }) => {
-    cancelledPollIds.push(pollId);
-    return undefined;
-  });
+  bridgeMock.presenceCancel
+    .mockReset()
+    .mockImplementation(async ({ pollId }: { pollId: string }) => {
+      cancelledPollIds.push(pollId);
+      return undefined;
+    });
   vi.stubGlobal("dohcDesktop", bridgeMock);
 });
 
@@ -167,7 +170,6 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       <Harness collaboration={collabA} topic="chat:channel:1" workspaceId="ws-a" />,
     );
     await flush();
-    // A registered exactly one poll, scoped to ws-a.
     const pollIdA = pollIdForWorkspace("ws-a");
 
     // Switch to workspace B: the collaboration is rebuilt per workspace, so the
@@ -179,40 +181,60 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       workspaceId: "ws-b",
       clientId: "me",
     });
-    view.rerender(
-      <Harness collaboration={collabB} topic="chat:channel:1" workspaceId="ws-b" />,
-    );
+    view.rerender(<Harness collaboration={collabB} topic="chat:channel:1" workspaceId="ws-b" />);
     await flush();
 
-    // The switch aborted A's in-flight poll over IPC (abort → presenceCancel).
     expect(cancelledPollIds).toContain(pollIdA);
     const pollIdB = pollIdForWorkspace("ws-b");
     expect(pollIdB).not.toBe(pollIdA);
 
-    // A slow response for the old workspace A now arrives with a ghost peer…
     act(() => {
       pollControls.get(pollIdA)?.resolve({
         ok: true,
         snapshot: {
           version: 1,
-          peers: [{ faceToken: "ghost", sessionToken: "cg", isSelf: false, displayName: "Ghost", paletteSlot: 0, state: { displayName: "Ghost" }, updatedAtMs: 0 }],
+          peers: [
+            {
+              faceToken: "ghost",
+              sessionToken: "cg",
+              isSelf: false,
+              displayName: "Ghost",
+              paletteSlot: 0,
+              state: { displayName: "Ghost" },
+              updatedAtMs: 0,
+            },
+          ],
         },
       });
     });
     await flush();
-    // …and it must never repaint B: no ghost, still zero others.
     expect(screen.queryByLabelText("Ghost is here")).toBeNull();
     expect(screen.getByTestId("count").textContent).toBe("0");
 
-    // B's own presence still works: a real B peer renders.
     act(() => {
       pollControls.get(pollIdB)?.resolve({
         ok: true,
         snapshot: {
           version: 1,
           peers: [
-            { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "a@x.com", paletteSlot: 0, state: { displayName: "a@x.com" }, updatedAtMs: 0 },
-            { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 0 },
+            {
+              faceToken: "me",
+              sessionToken: "me",
+              isSelf: true,
+              displayName: "a@x.com",
+              paletteSlot: 0,
+              state: { displayName: "a@x.com" },
+              updatedAtMs: 0,
+            },
+            {
+              faceToken: "bob",
+              sessionToken: "cb",
+              isSelf: false,
+              displayName: "Bob",
+              paletteSlot: 0,
+              state: { displayName: "Bob" },
+              updatedAtMs: 0,
+            },
           ],
         },
       });
@@ -222,14 +244,6 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
     expect(screen.getByTestId("count").textContent).toBe("1"); // self filtered out
   });
 });
-
-// ---------------------------------------------------------------------------
-// Scope-switch no-repaint: the same workspace, but a conversation switches
-// scope (a joined/shared channel in a SHARE scope -> a plain channel in the
-// WORKSPACE scope). Both the transport and the topic change, and the old
-// scope's parked poll must be aborted and its late response dropped — the same
-// invariant as the ws->ws switch, mirrored for a scope change.
-// ---------------------------------------------------------------------------
 
 // Mirrors ChatsView: the transport is memoized on the SCOPE identity (kind +
 // shareId/workspaceId), built from primitive props so a real scope switch tears
@@ -292,8 +306,6 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
     const sharePollId = pollIdForScopeKind("share");
     expect(pollControls.get(sharePollId)?.topic).toBe("wire-joined");
 
-    // Switch to a plain owned channel: WORKSPACE scope, on that channel's own
-    // topic — both the scope and the topic change at once.
     view.rerender(
       <ScopeHarness
         collaboration={collab}
@@ -304,38 +316,59 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
     );
     await flush();
 
-    // The scope switch aborted the share scope's in-flight poll over IPC.
     expect(cancelledPollIds).toContain(sharePollId);
     const wsPollId = pollIdForScopeKind("workspace");
     expect(wsPollId).not.toBe(sharePollId);
-    // The new poll runs under the new scope and the new topic.
     expect(pollControls.get(wsPollId)?.scope.kind).toBe("workspace");
     expect(pollControls.get(wsPollId)?.topic).toBe("wire-owned");
 
-    // A slow response for the old share scope arrives with a ghost peer…
     act(() => {
       pollControls.get(sharePollId)?.resolve({
         ok: true,
         snapshot: {
           version: 1,
-          peers: [{ faceToken: "ghost", sessionToken: "cg", isSelf: false, displayName: "Ghost", paletteSlot: 0, state: { displayName: "Ghost" }, updatedAtMs: 0 }],
+          peers: [
+            {
+              faceToken: "ghost",
+              sessionToken: "cg",
+              isSelf: false,
+              displayName: "Ghost",
+              paletteSlot: 0,
+              state: { displayName: "Ghost" },
+              updatedAtMs: 0,
+            },
+          ],
         },
       });
     });
     await flush();
-    // …and it must never repaint the workspace-scoped view.
     expect(screen.queryByLabelText("Ghost is here")).toBeNull();
     expect(screen.getByTestId("count").textContent).toBe("0");
 
-    // The new workspace scope still works: a real peer renders.
     act(() => {
       pollControls.get(wsPollId)?.resolve({
         ok: true,
         snapshot: {
           version: 1,
           peers: [
-            { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "a@x.com", paletteSlot: 0, state: { displayName: "a@x.com" }, updatedAtMs: 0 },
-            { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 0 },
+            {
+              faceToken: "me",
+              sessionToken: "me",
+              isSelf: true,
+              displayName: "a@x.com",
+              paletteSlot: 0,
+              state: { displayName: "a@x.com" },
+              updatedAtMs: 0,
+            },
+            {
+              faceToken: "bob",
+              sessionToken: "cb",
+              isSelf: false,
+              displayName: "Bob",
+              paletteSlot: 0,
+              state: { displayName: "Bob" },
+              updatedAtMs: 0,
+            },
           ],
         },
       });

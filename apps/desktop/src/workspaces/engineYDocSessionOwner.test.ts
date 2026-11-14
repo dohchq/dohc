@@ -16,35 +16,17 @@ interface TestSession {
   close: (options?: { shuttingDown?: boolean }) => Promise<void>;
 }
 
-type TestOutbound = EngineYDocSessionOutbound<
-  TestSender,
-  string,
-  string,
-  string
->;
+type TestOutbound = EngineYDocSessionOutbound<TestSender, string, string, string>;
 
 interface TestOwnerOptions {
-  onReleaseFailed?: (failure: {
-    path: string;
-    sessionId: string;
-    error: unknown;
-  }) => void;
+  onReleaseFailed?: (failure: { path: string; sessionId: string; error: unknown }) => void;
 }
 
 const AUTHORITY_A = Symbol("attachment-a");
 const AUTHORITY_B = Symbol("attachment-b");
 
-function createOwner(
-  outbound: TestOutbound[] = [],
-  options: TestOwnerOptions = {},
-) {
-  return new EngineYDocSessionOwner<
-    TestSender,
-    TestSession,
-    string,
-    string,
-    string
-  >({
+function createOwner(outbound: TestOutbound[] = [], options: TestOwnerOptions = {}) {
+  return new EngineYDocSessionOwner<TestSender, TestSession, string, string, string>({
     ...options,
     onOutbound: (message) => outbound.push(message),
   });
@@ -151,44 +133,41 @@ describe("EngineYDocSessionOwner", () => {
     expect(competingOpen).not.toHaveBeenCalled();
   });
 
-  it(
-    "keeps distinct resolved case spellings independent",
-    async () => {
-      const owner = createOwner();
-      const sender = { id: 7, label: "window-a" };
-      await expect(
-        owner.open(
-          openInput({
-            sender,
-            generation: 1,
-            sessionId: "first",
-            path: "Notes/A.md",
-            openSession: async () => ({
-              session: { close: async () => undefined },
-              value: "first",
-            }),
+  it("keeps distinct resolved case spellings independent", async () => {
+    const owner = createOwner();
+    const sender = { id: 7, label: "window-a" };
+    await expect(
+      owner.open(
+        openInput({
+          sender,
+          generation: 1,
+          sessionId: "first",
+          path: "Notes/A.md",
+          openSession: async () => ({
+            session: { close: async () => undefined },
+            value: "first",
           }),
-        ),
-      ).resolves.toMatchObject({ kind: "opened", value: "first" });
-      const distinctProvider = vi.fn(async () => ({
-        session: { close: async () => undefined },
-        value: "case alias",
-      }));
+        }),
+      ),
+    ).resolves.toMatchObject({ kind: "opened", value: "first" });
+    const distinctProvider = vi.fn(async () => ({
+      session: { close: async () => undefined },
+      value: "case alias",
+    }));
 
-      await expect(
-        owner.open(
-          openInput({
-            sender,
-            generation: 1,
-            sessionId: "second",
-            path: "notes/a.md",
-            openSession: distinctProvider,
-          }),
-        ),
-      ).resolves.toMatchObject({ kind: "opened", value: "case alias" });
-      expect(distinctProvider).toHaveBeenCalledOnce();
-    },
-  );
+    await expect(
+      owner.open(
+        openInput({
+          sender,
+          generation: 1,
+          sessionId: "second",
+          path: "notes/a.md",
+          openSession: distinctProvider,
+        }),
+      ),
+    ).resolves.toMatchObject({ kind: "opened", value: "case alias" });
+    expect(distinctProvider).toHaveBeenCalledOnce();
+  });
 
   it("does not let a stale open clear the newer generation's winner", async () => {
     const owner = createOwner();
@@ -572,8 +551,6 @@ describe("EngineYDocSessionOwner", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  // A closing settle can fail after the editor has gone, and the shell owes
-  // that failure a notice, so save states are the one message release keeps.
   it("keeps only save states once release starts", async () => {
     const outbound: TestOutbound[] = [];
     const owner = createOwner(outbound);
@@ -628,7 +605,6 @@ describe("EngineYDocSessionOwner", () => {
 
     closeGate.resolve();
     await expect(release).resolves.toEqual({ kind: "released" });
-    // A completed release forgets the session: nothing it emits later is sent.
     signals.emit("after-release");
     expect(outbound).toHaveLength(2);
   });
@@ -818,10 +794,7 @@ describe("EngineYDocSessionOwner", () => {
       sessionId: "renderer-session-1",
     });
     expect(
-      owner.accessSession(
-        { sender, generation: 1, sessionId: "renderer-session-1" },
-        () => "gone",
-      ),
+      owner.accessSession({ sender, generation: 1, sessionId: "renderer-session-1" }, () => "gone"),
     ).toEqual({ kind: "refused", reason: "session-unavailable" });
   });
 
@@ -879,41 +852,34 @@ describe("EngineYDocSessionOwner", () => {
     });
 
     expect(visited).toBe(1);
-    expect(owner.ownsDocument(AUTHORITY_B, "notes/folder/foreign.md")).toBe(
-      true,
-    );
-    expect(owner.ownsDocument(AUTHORITY_A, "notes/folder/foreign.md")).toBe(
-      false,
-    );
+    expect(owner.ownsDocument(AUTHORITY_B, "notes/folder/foreign.md")).toBe(true);
+    expect(owner.ownsDocument(AUTHORITY_A, "notes/folder/foreign.md")).toBe(false);
   });
 
-  it(
-    "keeps ownership and subtree visits exact after path resolution",
-    async () => {
-      const owner = createOwner();
-      const sender = { id: 7, label: "window-a" };
-      await owner.open(
-        openInput({
-          sender,
-          generation: 1,
-          sessionId: "mixed-case",
-          path: "Notes/Folder/A.md",
-          openSession: async () => ({
-            session: { close: async () => undefined },
-            value: "opened",
-          }),
+  it("keeps ownership and subtree visits exact after path resolution", async () => {
+    const owner = createOwner();
+    const sender = { id: 7, label: "window-a" };
+    await owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        sessionId: "mixed-case",
+        path: "Notes/Folder/A.md",
+        openSession: async () => ({
+          session: { close: async () => undefined },
+          value: "opened",
         }),
-      );
+      }),
+    );
 
-      expect(owner.ownsDocument(AUTHORITY_A, "notes/folder/a.md")).toBe(false);
-      expect(owner.ownsDocument(AUTHORITY_A, "Notes/Folder/A.md")).toBe(true);
-      const visit = vi.fn();
-      owner.forEachSessionUnderPath(AUTHORITY_A, "notes", visit);
-      expect(visit).not.toHaveBeenCalled();
-      owner.forEachSessionUnderPath(AUTHORITY_A, "Notes", visit);
-      expect(visit).toHaveBeenCalledOnce();
-    },
-  );
+    expect(owner.ownsDocument(AUTHORITY_A, "notes/folder/a.md")).toBe(false);
+    expect(owner.ownsDocument(AUTHORITY_A, "Notes/Folder/A.md")).toBe(true);
+    const visit = vi.fn();
+    owner.forEachSessionUnderPath(AUTHORITY_A, "notes", visit);
+    expect(visit).not.toHaveBeenCalled();
+    owner.forEachSessionUnderPath(AUTHORITY_A, "Notes", visit);
+    expect(visit).toHaveBeenCalledOnce();
+  });
 
   it("shuts down open and pending sessions with the quit-specific close", async () => {
     const owner = createOwner();
@@ -1033,13 +999,7 @@ describe("EngineYDocSessionOwner", () => {
     const close = vi.fn(() => closeGate.promise);
     const sender = { id: 7, label: "window-a" };
     let signals!: EngineYDocSessionSignals<string, string, string>;
-    const owner = new EngineYDocSessionOwner<
-      TestSender,
-      TestSession,
-      string,
-      string,
-      string
-    >({
+    const owner = new EngineYDocSessionOwner<TestSender, TestSession, string, string, string>({
       onOutbound: ({ message }) => {
         if (message.kind === "lineage-replacement") {
           throw new Error("renderer send failed");

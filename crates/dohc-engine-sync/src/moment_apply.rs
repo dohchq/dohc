@@ -1402,10 +1402,6 @@ fn apply_moment_append(
                             }
                             Err(_) => None,
                         };
-                        // Replay-state errors, including a draft frontmatter that
-                        // cannot be shown, must not invent an indexed change.
-                        // Otherwise the draft's own frontmatter text says which
-                        // fields hold YAML that their JSON values cannot show.
                         frontmatter = if replayed.is_some() {
                             visible.frontmatter_json()
                         } else {

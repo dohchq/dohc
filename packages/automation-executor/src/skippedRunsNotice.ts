@@ -23,9 +23,11 @@ export interface SkippedRunsNotice {
   target: { automation: string; path?: string };
 }
 
-
 // Open goes to the Collection's automations.yaml, where the automation is.
-function automationsFileTarget(automationId: string, collectionPath: string): SkippedRunsNotice["target"] {
+function automationsFileTarget(
+  automationId: string,
+  collectionPath: string,
+): SkippedRunsNotice["target"] {
   const path = `${collectionPath}/automations.yaml`;
   return [...path].length <= NOTICE_TARGET_FIELD_MAX_CHARS
     ? { automation: automationId, path }
@@ -53,7 +55,10 @@ export function skippedRunsNotice(input: {
   const first = skipped.first[0]!;
   let noticeId = `schedule-skipped:${workspaceId}:${schedule.automationId}:${first}`;
   if ([...noticeId].length > NOTICE_POSTED_ID_MAX_CHARS) {
-    const automation = createHash("sha256").update(schedule.automationId).digest("hex").slice(0, 32);
+    const automation = createHash("sha256")
+      .update(schedule.automationId)
+      .digest("hex")
+      .slice(0, 32);
     noticeId = `schedule-skipped:${workspaceId}:${automation}:${first}`;
   }
   const suffix = ` skipped ${skipped.count === 1 ? "once" : `${skipped.count.toLocaleString("en-US")} times`}`;

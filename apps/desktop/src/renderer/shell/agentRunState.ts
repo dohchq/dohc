@@ -27,9 +27,11 @@ export function createAgentRunStateStore(
   // A Try again after the store stopped showing does nothing.
   function read(): void {
     if (!stopListening) return;
-    void bridge().readAgentRunState({ workspaceId }).then(receive, (error: unknown) => {
-      if (stopListening) onReadError(error, read);
-    });
+    void bridge()
+      .readAgentRunState({ workspaceId })
+      .then(receive, (error: unknown) => {
+        if (stopListening) onReadError(error, read);
+      });
   }
 
   return {
@@ -53,7 +55,6 @@ export function createAgentRunStateStore(
 const listenToNothing = () => () => undefined;
 const idle = () => false;
 
-// Nothing is read or shown until the workspace is ready in this window.
 export function useAgentRunActive(
   workspaceId: string,
   workspaceIsReady: boolean,
@@ -62,9 +63,10 @@ export function useAgentRunActive(
   const report = useRef(onReadError);
   report.current = onReadError;
   const store = useMemo(
-    () => workspaceIsReady
-      ? createAgentRunStateStore(workspaceId, (error, retry) => report.current(error, retry))
-      : null,
+    () =>
+      workspaceIsReady
+        ? createAgentRunStateStore(workspaceId, (error, retry) => report.current(error, retry))
+        : null,
     [workspaceId, workspaceIsReady],
   );
   return useSyncExternalStore(store?.subscribe ?? listenToNothing, store?.active ?? idle);

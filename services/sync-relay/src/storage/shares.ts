@@ -21,6 +21,7 @@ import {
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
 import { accountIsFenced } from "./accountDeletion";
+import { advanceNoticeHead } from "./notices";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
 import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
@@ -33,9 +34,19 @@ import {
 } from "./rows";
 import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
 import { linkAccessLevels, parseStoredAnyShareSelectorJson } from "../shareFilter";
-import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
+import {
+  RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT,
+  GRANTED_INVENTORY_PAGE_SIZE,
+  RECEIVED_INVENTORY_PAGE_SIZE,
+  LINK_INVENTORY_PAGE_SIZE,
+  LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT,
+} from "./limits";
 import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
-import { retireUncoveredServiceActivations, serviceHostEnrollmentsCoveredByShare, type KeptServiceActivation } from "./serviceHostEnrollment";
+import {
+  retireUncoveredServiceActivations,
+  serviceHostEnrollmentsCoveredByShare,
+  type KeptServiceActivation,
+} from "./serviceHostEnrollment";
 import { retireAgentConnectionsInTransaction } from "./agentConnections";
 
 function dependentGrantIdsMatch(
@@ -52,136 +63,166 @@ function dependentGrantIdsMatch(
   );
 }
 
-export function createShare(storage: StorageContext, input: {
+export function createShare(
+  storage: StorageContext,
+  input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
-  }): boolean {
-    if (input.grant.shareId !== input.share.shareId) {
-      throw new Error("share and grant ids do not match");
-    }
-    if (input.grant.principalKind === "link") {
-      throw new Error("a link grant requires an existing share and a credential");
-    }
-    return storage.tx(() => {
-      // A deleted account gets no new access, so no later Undo can restore it.
-      const recipient = input.grant.principalUserId;
-      if (recipient !== null && accountIsFenced(storage, recipient)) return false;
-      insertShare(storage, input.share);
-      insertShareGrant(storage, input.grant);
-      // A named grant tells its person the share arrived. The waiting row
-      // commits with the grant, so a crash cannot lose the notice, and an
-      // email grant waits until an account claims it.
-      storage.db.prepare(
-        "INSERT INTO sync_relay_share_notice_deliveries (grant_id, created_at_ms) VALUES (?, ?)",
-      ).run(input.grant.grantId, Math.trunc(input.grant.createdAtMs));
-      return true;
-    });
+  },
+): boolean {
+  if (input.grant.shareId !== input.share.shareId) {
+    throw new Error("share and grant ids do not match");
   }
+  if (input.grant.principalKind === "link") {
+    throw new Error("a link grant requires an existing share and a credential");
+  }
+  return storage.tx(() => {
+    // A deleted account gets no new access, so no later Undo can restore it.
+    const recipient = input.grant.principalUserId;
+    if (recipient !== null && accountIsFenced(storage, recipient)) return false;
+    insertShare(storage, input.share);
+    insertShareGrant(storage, input.grant);
+    // A named grant tells its person the share arrived. The waiting row
+    // commits with the grant, so a crash cannot lose the notice, and an
+    // email grant waits until an account claims it.
+    storage.db
+      .prepare(
+        "INSERT INTO sync_relay_share_notice_deliveries (grant_id, created_at_ms) VALUES (?, ?)",
+      )
+      .run(input.grant.grantId, Math.trunc(input.grant.createdAtMs));
+    // Its person's list moves on with it, so a read waiting on the old head answers and the next read delivers it.
+    if (recipient !== null) advanceNoticeHead(storage, recipient);
+    return true;
+  });
+}
 
-export function createFileLinkShare(storage: StorageContext, input: {
+export function createFileLinkShare(
+  storage: StorageContext,
+  input: {
     operation?: { operationId: string; requestJson: string };
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
     credential: SyncRelayLinkCredentialRow;
     guard: () => void;
-  }): boolean {
-    const { share, grant, credential } = input;
-    if (
-      grant.shareId !== share.shareId ||
-      grant.principalKind !== "link" ||
-      grant.principalUserId !== null ||
-      grant.principalEmail !== null ||
-      grant.parentGrantId !== null ||
-      (grant.access !== "view" && grant.access !== "comment" && grant.access !== "edit") ||
-      grant.status !== "active" ||
-      grant.revokedAtMs !== null ||
-      grant.generation !== 1 ||
-      grant.createdAtMs !== share.createdAtMs ||
-      credential.grantId !== grant.grantId ||
-      credential.generation !== grant.generation ||
-      credential.mintedAtMs !== grant.createdAtMs ||
-      credential.retiredAtMs !== null ||
-      !credential.secretHash
-    ) {
-      return false;
-    }
-    return storage.tx(() => {
-      input.guard();
-      insertShare(storage, share);
-      insertShareGrant(storage, grant);
-      insertLinkCredential(storage, credential);
-      if (input.operation) storage.db.prepare("INSERT INTO sync_relay_link_creations(workspace_id,operation_id,owner_user_id,share_id,grant_id,request_json) VALUES(?,?,?,?,?,?)")
-        .run(share.workspaceId,input.operation.operationId,share.granterUserId,share.shareId,grant.grantId,input.operation.requestJson);
-      return true;
-    });
+  },
+): boolean {
+  const { share, grant, credential } = input;
+  if (
+    grant.shareId !== share.shareId ||
+    grant.principalKind !== "link" ||
+    grant.principalUserId !== null ||
+    grant.principalEmail !== null ||
+    grant.parentGrantId !== null ||
+    (grant.access !== "view" && grant.access !== "comment" && grant.access !== "edit") ||
+    grant.status !== "active" ||
+    grant.revokedAtMs !== null ||
+    grant.generation !== 1 ||
+    grant.createdAtMs !== share.createdAtMs ||
+    credential.grantId !== grant.grantId ||
+    credential.generation !== grant.generation ||
+    credential.mintedAtMs !== grant.createdAtMs ||
+    credential.retiredAtMs !== null ||
+    !credential.secretHash
+  ) {
+    return false;
   }
+  return storage.tx(() => {
+    input.guard();
+    insertShare(storage, share);
+    insertShareGrant(storage, grant);
+    insertLinkCredential(storage, credential);
+    if (input.operation)
+      storage.db
+        .prepare(
+          "INSERT INTO sync_relay_link_creations(workspace_id,operation_id,owner_user_id,share_id,grant_id,request_json) VALUES(?,?,?,?,?,?)",
+        )
+        .run(
+          share.workspaceId,
+          input.operation.operationId,
+          share.granterUserId,
+          share.shareId,
+          grant.grantId,
+          input.operation.requestJson,
+        );
+    return true;
+  });
+}
 
-export function createLinkGrant(storage: StorageContext, input: {
+export function createLinkGrant(
+  storage: StorageContext,
+  input: {
     grant: SyncRelayShareGrantRow;
     credential: SyncRelayLinkCredentialRow;
-  }): boolean {
-    const { grant, credential } = input;
-    if (
-      grant.principalKind !== "link" ||
-      grant.principalUserId !== null ||
-      grant.principalEmail !== null ||
-      grant.parentGrantId !== null ||
-      grant.status !== "active" ||
-      grant.revokedAtMs !== null ||
-      grant.generation !== 1 ||
-      credential.grantId !== grant.grantId ||
-      credential.generation !== grant.generation ||
-      credential.retiredAtMs !== null ||
-      !credential.secretHash
-    ) {
-      return false;
-    }
-    return storage.tx(() => {
-      const activeShare = storage.db
-        .prepare(
-          `SELECT 1 AS active
+  },
+): boolean {
+  const { grant, credential } = input;
+  if (
+    grant.principalKind !== "link" ||
+    grant.principalUserId !== null ||
+    grant.principalEmail !== null ||
+    grant.parentGrantId !== null ||
+    grant.status !== "active" ||
+    grant.revokedAtMs !== null ||
+    grant.generation !== 1 ||
+    credential.grantId !== grant.grantId ||
+    credential.generation !== grant.generation ||
+    credential.retiredAtMs !== null ||
+    !credential.secretHash
+  ) {
+    return false;
+  }
+  return storage.tx(() => {
+    const activeShare = storage.db
+      .prepare(
+        `SELECT 1 AS active
            FROM sync_relay_share_grants
            WHERE share_id = ? AND status = 'active'
            LIMIT 1`,
-        )
-        .get(grant.shareId);
-      if (!storage.getShare(grant.shareId) || !activeShare) return false;
-      insertShareGrant(storage, grant);
-      insertLinkCredential(storage, credential);
-      return true;
-    });
-  }
+      )
+      .get(grant.shareId);
+    if (!storage.getShare(grant.shareId) || !activeShare) return false;
+    insertShareGrant(storage, grant);
+    insertLinkCredential(storage, credential);
+    return true;
+  });
+}
 
-export function getShareGrant(storage: StorageContext, grantId: string): SyncRelayShareGrantRow | null {
-    const row = storage.db
-      .prepare(
-        `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
+export function getShareGrant(
+  storage: StorageContext,
+  grantId: string,
+): SyncRelayShareGrantRow | null {
+  const row = storage.db
+    .prepare(
+      `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
                 access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
          FROM sync_relay_share_grants WHERE grant_id = ?`,
-      )
-      .get(grantId);
-    return row ? rowToShareGrantRow(row) : null;
-  }
+    )
+    .get(grantId);
+  return row ? rowToShareGrantRow(row) : null;
+}
 
-export function getCurrentLinkCredential(storage: StorageContext, grantId: string): SyncRelayLinkCredentialRow | null {
-    const row = storage.db
-      .prepare(
-        `SELECT credential_id, grant_id, secret_hash, secret_sealed, generation, minted_at_ms, retired_at_ms
+export function getCurrentLinkCredential(
+  storage: StorageContext,
+  grantId: string,
+): SyncRelayLinkCredentialRow | null {
+  const row = storage.db
+    .prepare(
+      `SELECT credential_id, grant_id, secret_hash, secret_sealed, generation, minted_at_ms, retired_at_ms
          FROM sync_relay_link_credentials
          WHERE grant_id = ? AND retired_at_ms IS NULL
          LIMIT 1`,
-      )
-      .get(grantId);
-    return row ? rowToLinkCredentialRow(row) : null;
-  }
+    )
+    .get(grantId);
+  return row ? rowToLinkCredentialRow(row) : null;
+}
 
 export function findLinkGrantByCredentialHash(
-    storage: StorageContext,
-    secretHash: string,
-  ): SyncRelayLinkCredentialGrantRow | null {
-    const row = storage.db
-      .prepare(
-        `SELECT c.credential_id, c.grant_id AS credential_grant_id, c.secret_hash, c.secret_sealed,
+  storage: StorageContext,
+  secretHash: string,
+): SyncRelayLinkCredentialGrantRow | null {
+  const row = storage.db
+    .prepare(
+      `SELECT c.credential_id, c.grant_id AS credential_grant_id, c.secret_hash, c.secret_sealed,
                 c.generation AS credential_generation, c.minted_at_ms, c.retired_at_ms,
                 g.grant_id, g.share_id, g.principal_kind, g.principal_user_id,
                 g.principal_email, g.access, g.generation, g.status, g.created_at_ms,
@@ -190,74 +231,77 @@ export function findLinkGrantByCredentialHash(
          JOIN sync_relay_share_grants g ON g.grant_id = c.grant_id
          WHERE c.secret_hash = ? AND c.retired_at_ms IS NULL
          LIMIT 1`,
-      )
-      .get(secretHash);
-    if (!row) return null;
-    return {
-      credential: rowToLinkCredentialRow({
-        ...row,
-        grant_id: row.credential_grant_id,
-        generation: row.credential_generation,
-      }),
-      grant: rowToShareGrantRow(row),
-    };
-  }
+    )
+    .get(secretHash);
+  if (!row) return null;
+  return {
+    credential: rowToLinkCredentialRow({
+      ...row,
+      grant_id: row.credential_grant_id,
+      generation: row.credential_generation,
+    }),
+    grant: rowToShareGrantRow(row),
+  };
+}
 
-export function rotateLinkGrant(storage: StorageContext, input: {
+export function rotateLinkGrant(
+  storage: StorageContext,
+  input: {
     shareId: string;
     grantId: string;
     rotatedAtMs: number;
     expectedDependentGrantIds: readonly string[];
     guard: () => void;
     mintCredential: () => SyncRelayLinkCredentialMint;
-  }): LinkGrantTransitionResult {
-    return storage.tx(() => {
-      input.guard();
-      const grant = storage.getShareGrant(input.grantId);
-      if (
-        !grant ||
-        grant.shareId !== input.shareId ||
-        grant.principalKind !== "link" ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null
-      ) {
-        return { ok: false };
-      }
-      const dependents = activeDependentGrants(storage, grant.grantId);
-      if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
-        return { ok: false, reason: "dependents-changed", dependents };
-      }
-      const current = storage.getCurrentLinkCredential(input.grantId);
-      if (!current || current.generation !== grant.generation) {
-        return { ok: false };
-      }
-      const credential = input.mintCredential();
-      if (!credential.credentialId || !credential.secretHash) return { ok: false };
-      const generation = grant.generation + 1;
-      storage.db
-        .prepare("UPDATE sync_relay_share_grants SET generation = ? WHERE grant_id = ?")
-        .run(generation, grant.grantId);
-      retireCurrentLinkCredential(storage, grant.grantId, input.rotatedAtMs);
-      retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, input.rotatedAtMs);
-      insertLinkCredential(storage, {
-        credentialId: credential.credentialId,
-        grantId: grant.grantId,
-        secretHash: credential.secretHash,
-        secretSealed: credential.secretSealed,
-        generation,
-        mintedAtMs: input.rotatedAtMs,
-        retiredAtMs: null,
-      });
-      storage.db
-        .prepare("DELETE FROM sync_relay_link_usage WHERE grant_id = ?")
-        .run(grant.grantId);
-      pruneRetiredLinkCredentials(storage, grant.grantId);
-      incrementActiveDependentGenerations(storage, grant.grantId);
-      return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
+  },
+): LinkGrantTransitionResult {
+  return storage.tx(() => {
+    input.guard();
+    const grant = storage.getShareGrant(input.grantId);
+    if (
+      !grant ||
+      grant.shareId !== input.shareId ||
+      grant.principalKind !== "link" ||
+      grant.status !== "active" ||
+      grant.revokedAtMs !== null
+    ) {
+      return { ok: false };
+    }
+    const dependents = activeDependentGrants(storage, grant.grantId);
+    if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
+      return { ok: false, reason: "dependents-changed", dependents };
+    }
+    const current = storage.getCurrentLinkCredential(input.grantId);
+    if (!current || current.generation !== grant.generation) {
+      return { ok: false };
+    }
+    const credential = input.mintCredential();
+    if (!credential.credentialId || !credential.secretHash) return { ok: false };
+    const generation = grant.generation + 1;
+    storage.db
+      .prepare("UPDATE sync_relay_share_grants SET generation = ? WHERE grant_id = ?")
+      .run(generation, grant.grantId);
+    retireCurrentLinkCredential(storage, grant.grantId, input.rotatedAtMs);
+    retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, input.rotatedAtMs);
+    insertLinkCredential(storage, {
+      credentialId: credential.credentialId,
+      grantId: grant.grantId,
+      secretHash: credential.secretHash,
+      secretSealed: credential.secretSealed,
+      generation,
+      mintedAtMs: input.rotatedAtMs,
+      retiredAtMs: null,
     });
-  }
+    storage.db.prepare("DELETE FROM sync_relay_link_usage WHERE grant_id = ?").run(grant.grantId);
+    pruneRetiredLinkCredentials(storage, grant.grantId);
+    incrementActiveDependentGenerations(storage, grant.grantId);
+    return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
+  });
+}
 
-export function retuneShareGrant(storage: StorageContext, input: {
+export function retuneShareGrant(
+  storage: StorageContext,
+  input: {
     shareId: string;
     grantId: string;
     access: string;
@@ -265,240 +309,250 @@ export function retuneShareGrant(storage: StorageContext, input: {
     expectedDependentGrantIds: readonly string[];
     guard: () => void;
     mintCredential?: () => SyncRelayLinkCredentialMint;
-  }): LinkGrantTransitionResult {
-    return storage.tx(() => {
-      input.guard();
-      const grant = storage.getShareGrant(input.grantId);
-      const share = grant && storage.getShare(grant.shareId);
-      const levels = linkAccessLevels(share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null);
-      const from = grant ? levels.indexOf(grant.access) : -1;
-      const to = levels.indexOf(input.access);
-      if (
-        !grant ||
-        grant.shareId !== input.shareId ||
-        grant.principalKind !== "link" ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null ||
-        from < 0 ||
-        to < 0 ||
-        from === to
-      ) {
-        return { ok: false };
-      }
+  },
+): LinkGrantTransitionResult {
+  return storage.tx(() => {
+    input.guard();
+    const grant = storage.getShareGrant(input.grantId);
+    const share = grant && storage.getShare(grant.shareId);
+    const levels = linkAccessLevels(
+      share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null,
+    );
+    const from = grant ? levels.indexOf(grant.access) : -1;
+    const to = levels.indexOf(input.access);
+    if (
+      !grant ||
+      grant.shareId !== input.shareId ||
+      grant.principalKind !== "link" ||
+      grant.status !== "active" ||
+      grant.revokedAtMs !== null ||
+      from < 0 ||
+      to < 0 ||
+      from === to
+    ) {
+      return { ok: false };
+    }
 
-      const dependents = activeDependentGrants(storage, grant.grantId);
-      if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
-        return { ok: false, reason: "dependents-changed", dependents };
-      }
+    const dependents = activeDependentGrants(storage, grant.grantId);
+    if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
+      return { ok: false, reason: "dependents-changed", dependents };
+    }
 
-      const widening = to > from;
-      const current = storage.getCurrentLinkCredential(grant.grantId);
-      if (!current || current.generation !== grant.generation) {
-        return { ok: false };
-      }
-      if (widening && !input.mintCredential) {
-        return { ok: false };
-      }
-      if (!widening && input.mintCredential) {
-        return { ok: false };
-      }
+    const widening = to > from;
+    const current = storage.getCurrentLinkCredential(grant.grantId);
+    if (!current || current.generation !== grant.generation) {
+      return { ok: false };
+    }
+    if (widening && !input.mintCredential) {
+      return { ok: false };
+    }
+    if (!widening && input.mintCredential) {
+      return { ok: false };
+    }
 
-      const wideningCredential = widening ? input.mintCredential!() : null;
-      if (
-        wideningCredential &&
-        (!wideningCredential.credentialId || !wideningCredential.secretHash)
-      ) {
-        return { ok: false };
-      }
+    const wideningCredential = widening ? input.mintCredential!() : null;
+    if (
+      wideningCredential &&
+      (!wideningCredential.credentialId || !wideningCredential.secretHash)
+    ) {
+      return { ok: false };
+    }
 
-      const generation = widening ? grant.generation + 1 : grant.generation;
-      const covered = widening ? [] : serviceHostEnrollmentsCoveredByShare(storage, grant.shareId);
-      storage.db
-        .prepare(
-          "UPDATE sync_relay_share_grants SET access = ?, generation = ? WHERE grant_id = ?",
-        )
-        .run(input.access, generation, grant.grantId);
+    const generation = widening ? grant.generation + 1 : grant.generation;
+    const covered = widening ? [] : serviceHostEnrollmentsCoveredByShare(storage, grant.shareId);
+    storage.db
+      .prepare("UPDATE sync_relay_share_grants SET access = ?, generation = ? WHERE grant_id = ?")
+      .run(input.access, generation, grant.grantId);
 
-      if (wideningCredential) {
-        retireCurrentLinkCredential(storage, grant.grantId, input.changedAtMs);
-        retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, input.changedAtMs);
-        insertLinkCredential(storage, {
-          credentialId: wideningCredential.credentialId,
-          grantId: grant.grantId,
-          secretHash: wideningCredential.secretHash,
-          secretSealed: wideningCredential.secretSealed,
-          generation,
-          mintedAtMs: input.changedAtMs,
-          retiredAtMs: null,
-        });
-        storage.db
-          .prepare("DELETE FROM sync_relay_link_usage WHERE grant_id = ?")
-          .run(grant.grantId);
-        pruneRetiredLinkCredentials(storage, grant.grantId);
-        incrementActiveDependentGenerations(storage, grant.grantId);
-      } else {
-        nextShareDiscussionRevision(storage, grant.shareId);
-        for (const dependent of dependents) {
-          if (levels.indexOf(dependent.access) > to) {
-            storage.db
-              .prepare(
-                `UPDATE sync_relay_share_grants
+    if (wideningCredential) {
+      retireCurrentLinkCredential(storage, grant.grantId, input.changedAtMs);
+      retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, input.changedAtMs);
+      insertLinkCredential(storage, {
+        credentialId: wideningCredential.credentialId,
+        grantId: grant.grantId,
+        secretHash: wideningCredential.secretHash,
+        secretSealed: wideningCredential.secretSealed,
+        generation,
+        mintedAtMs: input.changedAtMs,
+        retiredAtMs: null,
+      });
+      storage.db.prepare("DELETE FROM sync_relay_link_usage WHERE grant_id = ?").run(grant.grantId);
+      pruneRetiredLinkCredentials(storage, grant.grantId);
+      incrementActiveDependentGenerations(storage, grant.grantId);
+    } else {
+      nextShareDiscussionRevision(storage, grant.shareId);
+      for (const dependent of dependents) {
+        if (levels.indexOf(dependent.access) > to) {
+          storage.db
+            .prepare(
+              `UPDATE sync_relay_share_grants
                  SET access = ?
                  WHERE grant_id = ? AND status = 'active'`,
-              )
-              .run(input.access, dependent.grantId);
-          }
+            )
+            .run(input.access, dependent.grantId);
         }
-        incrementActiveDependentGenerations(storage, grant.grantId);
-        retireUncoveredServiceActivations(storage, covered, Math.trunc(input.changedAtMs));
       }
-      return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
-    });
-  }
+      incrementActiveDependentGenerations(storage, grant.grantId);
+      retireUncoveredServiceActivations(storage, covered, Math.trunc(input.changedAtMs));
+    }
+    return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
+  });
+}
 
 type RevokeShareGrantInput = {
-    shareId: string;
-    grantId: string;
-    revokedAtMs: number;
-    expectedDependentGrantIds?: readonly string[];
-    guard?: () => void;
-  };
+  shareId: string;
+  grantId: string;
+  revokedAtMs: number;
+  expectedDependentGrantIds?: readonly string[];
+  guard?: () => void;
+};
 
-export function revokeShareGrant(storage: StorageContext, input: RevokeShareGrantInput): LinkGrantTransitionResult {
-    return storage.tx(() => revokeShareGrantInTransaction(storage, input));
-  }
+export function revokeShareGrant(
+  storage: StorageContext,
+  input: RevokeShareGrantInput,
+): LinkGrantTransitionResult {
+  return storage.tx(() => revokeShareGrantInTransaction(storage, input));
+}
 
 // The caller owns the synchronous relay transaction.
 /** `keep` is only for the owner's restore that revokes the grant; see `retireUncoveredServiceActivations`. */
-export function revokeShareGrantInTransaction(storage: StorageContext, input: RevokeShareGrantInput, keep?: KeptServiceActivation): LinkGrantTransitionResult {
-      input.guard?.();
-      const grant = storage.getShareGrant(input.grantId);
-      if (
-        !grant ||
-        grant.shareId !== input.shareId ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null
-      ) {
-        return { ok: false };
-      }
-      if (grant.principalKind === "link" && input.expectedDependentGrantIds !== undefined) {
-        const dependents = activeDependentGrants(storage, grant.grantId);
-        if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
-          return { ok: false, reason: "dependents-changed", dependents };
-        }
-      }
-      const revokedAtMs = Math.trunc(input.revokedAtMs);
-      const covered = serviceHostEnrollmentsCoveredByShare(storage, grant.shareId);
-      storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
+export function revokeShareGrantInTransaction(
+  storage: StorageContext,
+  input: RevokeShareGrantInput,
+  keep?: KeptServiceActivation,
+): LinkGrantTransitionResult {
+  input.guard?.();
+  const grant = storage.getShareGrant(input.grantId);
+  if (
+    !grant ||
+    grant.shareId !== input.shareId ||
+    grant.status !== "active" ||
+    grant.revokedAtMs !== null
+  ) {
+    return { ok: false };
+  }
+  if (grant.principalKind === "link" && input.expectedDependentGrantIds !== undefined) {
+    const dependents = activeDependentGrants(storage, grant.grantId);
+    if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
+      return { ok: false, reason: "dependents-changed", dependents };
+    }
+  }
+  const revokedAtMs = Math.trunc(input.revokedAtMs);
+  const covered = serviceHostEnrollmentsCoveredByShare(storage, grant.shareId);
+  storage.db
+    .prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND EXISTS (
           SELECT 1 FROM json_each(grants_json) receipt_grant
           JOIN sync_relay_share_grants g ON g.grant_id = json_extract(receipt_grant.value, '$.grantId')
           WHERE g.grant_id = ? OR g.parent_grant_id = ?
-        )`).run(input.shareId, grant.grantId, grant.grantId);
-      storage.db
-        .prepare(
-          `UPDATE sync_relay_share_grants
+        )`)
+    .run(input.shareId, grant.grantId, grant.grantId);
+  storage.db
+    .prepare(
+      `UPDATE sync_relay_share_grants
            SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
            WHERE grant_id = ?`,
-        )
-        .run(revokedAtMs, grant.grantId);
-      if (grant.principalKind === "link") {
-        retireCurrentLinkCredential(storage, grant.grantId, revokedAtMs);
-        retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, revokedAtMs);
-        storage.db
-          .prepare(
-            `UPDATE sync_relay_share_grants
+    )
+    .run(revokedAtMs, grant.grantId);
+  if (grant.principalKind === "link") {
+    retireCurrentLinkCredential(storage, grant.grantId, revokedAtMs);
+    retireAgentConnectionsInTransaction(storage, { grantId: grant.grantId }, revokedAtMs);
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_share_grants
              SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
              WHERE parent_grant_id = ? AND status = 'active'`,
-          )
-          .run(revokedAtMs, grant.grantId);
-      }
-      storage.db.prepare(`DELETE FROM sync_relay_share_labels WHERE share_id = ?
+      )
+      .run(revokedAtMs, grant.grantId);
+  }
+  storage.db
+    .prepare(`DELETE FROM sync_relay_share_labels WHERE share_id = ?
         AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
-        .run(grant.shareId, grant.shareId);
-      retireUncoveredServiceActivations(storage, covered, revokedAtMs, keep);
-      forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
-      return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
-  }
+    .run(grant.shareId, grant.shareId);
+  retireUncoveredServiceActivations(storage, covered, revokedAtMs, keep);
+  forgetReplicaCurrentViewCaches(storage, storage.getShare(input.shareId)!.workspaceId);
+  return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
+}
 
-export function promoteShareGrant(storage: StorageContext, input: {
+export function promoteShareGrant(
+  storage: StorageContext,
+  input: {
     shareId: string;
     grantId: string;
     expectedParentGrantId: string;
     expectedParentGeneration: number;
     guard: () => void;
-  }): ShareGrantTransitionResult {
-    return storage.tx(() => {
-      input.guard();
-      const grant = storage.getShareGrant(input.grantId);
-      const parent = grant?.parentGrantId
-        ? storage.getShareGrant(grant.parentGrantId)
-        : null;
-      if (
-        !grant ||
-        grant.shareId !== input.shareId ||
-        grant.principalKind !== "user" ||
-        !grant.principalUserId ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null ||
-        grant.parentGrantId !== input.expectedParentGrantId ||
-        !parent ||
-        parent.shareId !== grant.shareId ||
-        parent.principalKind !== "link" ||
-        parent.generation !== input.expectedParentGeneration ||
-        parent.status !== "active" ||
-        parent.revokedAtMs !== null
-      ) {
-        return { ok: false };
-      }
-      storage.db
-        .prepare(
-          `UPDATE sync_relay_share_grants
+  },
+): ShareGrantTransitionResult {
+  return storage.tx(() => {
+    input.guard();
+    const grant = storage.getShareGrant(input.grantId);
+    const parent = grant?.parentGrantId ? storage.getShareGrant(grant.parentGrantId) : null;
+    if (
+      !grant ||
+      grant.shareId !== input.shareId ||
+      grant.principalKind !== "user" ||
+      !grant.principalUserId ||
+      grant.status !== "active" ||
+      grant.revokedAtMs !== null ||
+      grant.parentGrantId !== input.expectedParentGrantId ||
+      !parent ||
+      parent.shareId !== grant.shareId ||
+      parent.principalKind !== "link" ||
+      parent.generation !== input.expectedParentGeneration ||
+      parent.status !== "active" ||
+      parent.revokedAtMs !== null
+    ) {
+      return { ok: false };
+    }
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_share_grants
            SET parent_grant_id = NULL, generation = generation + 1
            WHERE grant_id = ?`,
-        )
-        .run(grant.grantId);
-      return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
-    });
-  }
+      )
+      .run(grant.grantId);
+    return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
+  });
+}
 
-export function mintLinkSession(storage: StorageContext, input: {
+export function mintLinkSession(
+  storage: StorageContext,
+  input: {
     session: Omit<SyncRelayLinkSessionRow, "principalId">;
     guard?: () => void;
-  }): boolean {
-    const { session } = input;
-    if (
-      !session.capabilityHash ||
-      session.expiresAtMs <= session.mintedAtMs ||
-      session.generation < 1
-    ) {
-      return false;
-    }
-    return storage.tx(() => {
-      input.guard?.();
-      const current = readCurrentShareGrant(storage, {
-        grantId: session.grantId,
-        principal: { kind: "link" },
-        generation: session.generation,
-      });
-      if (!current) return false;
+  },
+): boolean {
+  const { session } = input;
+  if (
+    !session.capabilityHash ||
+    session.expiresAtMs <= session.mintedAtMs ||
+    session.generation < 1
+  ) {
+    return false;
+  }
+  return storage.tx(() => {
+    input.guard?.();
+    const current = readCurrentShareGrant(storage, {
+      grantId: session.grantId,
+      principal: { kind: "link" },
+      generation: session.generation,
+    });
+    if (!current) return false;
+    storage.db
+      .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms < ?")
+      .run(Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS));
+    const liveSessionCount = Number(
       storage.db
-        .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms < ?")
-        .run(Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS));
-      const liveSessionCount = Number(
-        storage.db
-          .prepare(
-            "SELECT COUNT(*) AS count FROM sync_relay_link_sessions WHERE grant_id = ?",
-          )
-          .get(session.grantId)?.count ?? 0,
-      );
-      const sessionsToDelete =
-        liveSessionCount - storage.options.linkSessionsPerGrantLimit + 1;
-      if (sessionsToDelete > 0) {
-        storage.db
-          .prepare(
-            `DELETE FROM sync_relay_link_sessions
+        .prepare("SELECT COUNT(*) AS count FROM sync_relay_link_sessions WHERE grant_id = ?")
+        .get(session.grantId)?.count ?? 0,
+    );
+    const sessionsToDelete = liveSessionCount - storage.options.linkSessionsPerGrantLimit + 1;
+    if (sessionsToDelete > 0) {
+      storage.db
+        .prepare(
+          `DELETE FROM sync_relay_link_sessions
              WHERE session_id IN (
                SELECT session_id
                FROM sync_relay_link_sessions
@@ -506,164 +560,185 @@ export function mintLinkSession(storage: StorageContext, input: {
                ORDER BY minted_at_ms ASC, session_id ASC
                LIMIT ?
              )`,
-          )
-          .run(session.grantId, sessionsToDelete);
-      }
-      storage.db
-        .prepare(
-          `INSERT INTO sync_relay_link_sessions (
+        )
+        .run(session.grantId, sessionsToDelete);
+    }
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_link_sessions (
              session_id, capability_hash, grant_id, generation, minted_at_ms,
              expires_at_ms, principal_id
            ) VALUES (?, ?, ?, ?, ?, ?, NULL)`,
-        )
-        .run(
-          session.sessionId,
-          session.capabilityHash,
-          session.grantId,
-          session.generation,
-          Math.trunc(session.mintedAtMs),
-          Math.trunc(session.expiresAtMs),
-        );
-      upsertLinkUsage(storage, session.grantId, session.mintedAtMs);
-      return true;
-    });
-  }
+      )
+      .run(
+        session.sessionId,
+        session.capabilityHash,
+        session.grantId,
+        session.generation,
+        Math.trunc(session.mintedAtMs),
+        Math.trunc(session.expiresAtMs),
+      );
+    upsertLinkUsage(storage, session.grantId, session.mintedAtMs);
+    return true;
+  });
+}
 
-export function replaceLinkSession(storage: StorageContext, input: {
+export function replaceLinkSession(
+  storage: StorageContext,
+  input: {
     currentSession: SyncRelayLinkSessionRow;
     session: Omit<SyncRelayLinkSessionRow, "principalId">;
     guard: () => void;
-  }): boolean {
-    const { currentSession, session } = input;
-    if (
-      !currentSession.capabilityHash ||
-      !session.capabilityHash ||
-      currentSession.sessionId !== session.sessionId ||
-      currentSession.capabilityHash === session.capabilityHash ||
-      currentSession.grantId !== session.grantId ||
-      currentSession.generation !== session.generation ||
-      currentSession.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS <
-        session.mintedAtMs ||
-      session.expiresAtMs <= session.mintedAtMs ||
-      session.generation < 1
-    ) {
-      return false;
-    }
-    return storage.tx(() => {
-      input.guard();
-      const replaced = storage.db.prepare(`UPDATE sync_relay_link_sessions
+  },
+): boolean {
+  const { currentSession, session } = input;
+  if (
+    !currentSession.capabilityHash ||
+    !session.capabilityHash ||
+    currentSession.sessionId !== session.sessionId ||
+    currentSession.capabilityHash === session.capabilityHash ||
+    currentSession.grantId !== session.grantId ||
+    currentSession.generation !== session.generation ||
+    currentSession.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS < session.mintedAtMs ||
+    session.expiresAtMs <= session.mintedAtMs ||
+    session.generation < 1
+  ) {
+    return false;
+  }
+  return storage.tx(() => {
+    input.guard();
+    const replaced = storage.db
+      .prepare(`UPDATE sync_relay_link_sessions
         SET capability_hash=?, minted_at_ms=?, expires_at_ms=?
         WHERE session_id=? AND capability_hash=? AND grant_id=? AND generation=? AND expires_at_ms>=?`)
-        .run(session.capabilityHash, Math.trunc(session.mintedAtMs), Math.trunc(session.expiresAtMs),
-          currentSession.sessionId, currentSession.capabilityHash, currentSession.grantId, currentSession.generation,
-          Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS));
-      if (Number(replaced.changes ?? 0) !== 1) return false;
-      upsertLinkUsage(storage, session.grantId, session.mintedAtMs);
-      return true;
-    });
-  }
+      .run(
+        session.capabilityHash,
+        Math.trunc(session.mintedAtMs),
+        Math.trunc(session.expiresAtMs),
+        currentSession.sessionId,
+        currentSession.capabilityHash,
+        currentSession.grantId,
+        currentSession.generation,
+        Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS),
+      );
+    if (Number(replaced.changes ?? 0) !== 1) return false;
+    upsertLinkUsage(storage, session.grantId, session.mintedAtMs);
+    return true;
+  });
+}
 
 export function findLinkSessionByCapabilityHash(
-    storage: StorageContext,
-    capabilityHash: string,
-  ): SyncRelayLinkSessionRow | null {
-    const row = storage.db
-      .prepare(
-        `SELECT session_id, capability_hash, grant_id, generation, minted_at_ms,
+  storage: StorageContext,
+  capabilityHash: string,
+): SyncRelayLinkSessionRow | null {
+  const row = storage.db
+    .prepare(
+      `SELECT session_id, capability_hash, grant_id, generation, minted_at_ms,
                 expires_at_ms, principal_id
          FROM sync_relay_link_sessions WHERE capability_hash = ? LIMIT 1`,
-      )
-      .get(capabilityHash);
-    return row ? rowToLinkSessionRow(row) : null;
-  }
+    )
+    .get(capabilityHash);
+  return row ? rowToLinkSessionRow(row) : null;
+}
 
 export function insertShareGrant(storage: StorageContext, grant: SyncRelayShareGrantRow): void {
-    storage.db
-      .prepare(
-        `INSERT INTO sync_relay_share_grants (
+  storage.db
+    .prepare(
+      `INSERT INTO sync_relay_share_grants (
            grant_id, share_id, principal_kind, principal_user_id, principal_email,
            access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        grant.grantId,
-        grant.shareId,
-        grant.principalKind,
-        grant.principalUserId,
-        grant.principalEmail,
-        grant.access,
-        grant.generation,
-        grant.status,
-        Math.trunc(grant.createdAtMs),
-        grant.revokedAtMs,
-        grant.parentGrantId,
-      );
-  }
+    )
+    .run(
+      grant.grantId,
+      grant.shareId,
+      grant.principalKind,
+      grant.principalUserId,
+      grant.principalEmail,
+      grant.access,
+      grant.generation,
+      grant.status,
+      Math.trunc(grant.createdAtMs),
+      grant.revokedAtMs,
+      grant.parentGrantId,
+    );
+}
 
 export function insertShare(storage: StorageContext, share: SyncRelayShareRow): void {
-    storage.db
-      .prepare(
-        `INSERT INTO sync_relay_shares (
+  storage.db
+    .prepare(
+      `INSERT INTO sync_relay_shares (
            share_id, workspace_id, granter_user_id, selector_json, created_at_ms
          ) VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(
-        share.shareId,
-        share.workspaceId,
-        share.granterUserId,
-        share.selectorJson,
-        Math.trunc(share.createdAtMs),
-      );
-    if (share.labels) storage.setShareLabels(share.shareId, share.labels, share.createdAtMs);
-  }
+    )
+    .run(
+      share.shareId,
+      share.workspaceId,
+      share.granterUserId,
+      share.selectorJson,
+      Math.trunc(share.createdAtMs),
+    );
+  if (share.labels) storage.setShareLabels(share.shareId, share.labels, share.createdAtMs);
+}
 
-export function insertLinkCredential(storage: StorageContext, credential: SyncRelayLinkCredentialRow): void {
-    storage.db
-      .prepare(
-        `INSERT INTO sync_relay_link_credentials (
+export function insertLinkCredential(
+  storage: StorageContext,
+  credential: SyncRelayLinkCredentialRow,
+): void {
+  storage.db
+    .prepare(
+      `INSERT INTO sync_relay_link_credentials (
            credential_id, grant_id, secret_hash, secret_sealed, generation, minted_at_ms, retired_at_ms
          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        credential.credentialId,
-        credential.grantId,
-        credential.secretHash,
-        credential.secretSealed,
-        credential.generation,
-        Math.trunc(credential.mintedAtMs),
-        credential.retiredAtMs,
-      );
-  }
+    )
+    .run(
+      credential.credentialId,
+      credential.grantId,
+      credential.secretHash,
+      credential.secretSealed,
+      credential.generation,
+      Math.trunc(credential.mintedAtMs),
+      credential.retiredAtMs,
+    );
+}
 
-export function upsertLinkUsage(storage: StorageContext, grantId: string, lastUsedAtMs: number): void {
-    storage.db
-      .prepare(
-        `INSERT INTO sync_relay_link_usage (grant_id, last_used_at_ms)
+export function upsertLinkUsage(
+  storage: StorageContext,
+  grantId: string,
+  lastUsedAtMs: number,
+): void {
+  storage.db
+    .prepare(
+      `INSERT INTO sync_relay_link_usage (grant_id, last_used_at_ms)
          VALUES (?, ?)
          ON CONFLICT (grant_id) DO UPDATE SET
            last_used_at_ms = MAX(
              sync_relay_link_usage.last_used_at_ms,
              excluded.last_used_at_ms
            )`,
-      )
-      .run(grantId, Math.trunc(lastUsedAtMs));
-  }
+    )
+    .run(grantId, Math.trunc(lastUsedAtMs));
+}
 
-export function retireCurrentLinkCredential(storage: StorageContext, grantId: string, retiredAtMs: number): boolean {
-    const result = storage.db
-      .prepare(
-        `UPDATE sync_relay_link_credentials
+export function retireCurrentLinkCredential(
+  storage: StorageContext,
+  grantId: string,
+  retiredAtMs: number,
+): boolean {
+  const result = storage.db
+    .prepare(
+      `UPDATE sync_relay_link_credentials
          SET retired_at_ms = ?
          WHERE grant_id = ? AND retired_at_ms IS NULL`,
-      )
-      .run(Math.trunc(retiredAtMs), grantId);
-    return Number(result.changes ?? 0) > 0;
-  }
+    )
+    .run(Math.trunc(retiredAtMs), grantId);
+  return Number(result.changes ?? 0) > 0;
+}
 
 export function pruneRetiredLinkCredentials(storage: StorageContext, grantId: string): void {
-    storage.db
-      .prepare(
-        `DELETE FROM sync_relay_link_credentials
+  storage.db
+    .prepare(
+      `DELETE FROM sync_relay_link_credentials
          WHERE credential_id IN (
            SELECT credential_id
            FROM sync_relay_link_credentials
@@ -671,93 +746,106 @@ export function pruneRetiredLinkCredentials(storage: StorageContext, grantId: st
            ORDER BY minted_at_ms DESC
            LIMIT -1 OFFSET ?
          )`,
-      )
-      .run(grantId, RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT);
-  }
+    )
+    .run(grantId, RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT);
+}
 
-export function activeDependentGrants(storage: StorageContext, parentGrantId: string): SyncRelayShareGrantRow[] {
-    return storage.db
-      .prepare(
-        `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
+export function activeDependentGrants(
+  storage: StorageContext,
+  parentGrantId: string,
+): SyncRelayShareGrantRow[] {
+  return storage.db
+    .prepare(
+      `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
                 access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
          FROM sync_relay_share_grants
          WHERE parent_grant_id = ? AND status = 'active'
          ORDER BY grant_id`,
-      )
-      .all(parentGrantId)
-      .map(rowToShareGrantRow);
-  }
+    )
+    .all(parentGrantId)
+    .map(rowToShareGrantRow);
+}
 
-export function incrementActiveDependentGenerations(storage: StorageContext, parentGrantId: string): void {
-    storage.db
-      .prepare(
-        `UPDATE sync_relay_share_grants
+export function incrementActiveDependentGenerations(
+  storage: StorageContext,
+  parentGrantId: string,
+): void {
+  storage.db
+    .prepare(
+      `UPDATE sync_relay_share_grants
          SET generation = generation + 1
          WHERE parent_grant_id = ? AND status = 'active'`,
-      )
-      .run(parentGrantId);
-  }
+    )
+    .run(parentGrantId);
+}
 
-export function claimPendingSharesForEmail(storage: StorageContext, email: string, userId: string): number {
-    const normalized = email.trim().toLowerCase();
-    if (!normalized) return 0;
-    return storage.tx(() => {
-      // A request that passed the fence before deletion began must not claim
-      // an invite sent to the address afterward.
-      if (accountIsFenced(storage, userId)) return 0;
-      const result = storage.db
-        .prepare(
-          `UPDATE sync_relay_share_grants
+export function claimPendingSharesForEmail(
+  storage: StorageContext,
+  email: string,
+  userId: string,
+): number {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return 0;
+  return storage.tx(() => {
+    // A request that passed the fence before deletion began must not claim
+    // an invite sent to the address afterward.
+    if (accountIsFenced(storage, userId)) return 0;
+    const result = storage.db
+      .prepare(
+        `UPDATE sync_relay_share_grants
            SET principal_kind = 'user', principal_user_id = ?, principal_email = NULL
            WHERE principal_kind = 'email' AND principal_email = ? AND status = 'active'`,
-        )
-        .run(userId, normalized);
-      return Number(result.changes ?? 0);
-    });
-  }
+      )
+      .run(userId, normalized);
+    return Number(result.changes ?? 0);
+  });
+}
 
 export function hasPendingInvite(storage: StorageContext, email: string): boolean {
-    return !!storage.db
-      .prepare(
-        `SELECT 1 FROM sync_relay_share_grants AS g JOIN sync_relay_shares AS s ON s.share_id = g.share_id
+  return !!storage.db
+    .prepare(
+      `SELECT 1 FROM sync_relay_share_grants AS g JOIN sync_relay_shares AS s ON s.share_id = g.share_id
          WHERE g.principal_kind = 'email' AND g.principal_email = ? AND ${currentShareGrantSql("g", "s")}
          LIMIT 1`,
-      )
-      .get(email.trim().toLowerCase());
-  }
+    )
+    .get(email.trim().toLowerCase());
+}
 
 export function getShare(storage: StorageContext, shareId: string): SyncRelayShareRow | null {
-    const row = storage.db
-      .prepare(
-        `SELECT share_id, workspace_id, granter_user_id, selector_json, created_at_ms
+  const row = storage.db
+    .prepare(
+      `SELECT share_id, workspace_id, granter_user_id, selector_json, created_at_ms
          FROM sync_relay_shares WHERE share_id = ?`,
-      )
-      .get(shareId);
-    return row ? rowToShareRow(row) : null;
-  }
+    )
+    .get(shareId);
+  return row ? rowToShareRow(row) : null;
+}
 
 export function listActiveShareGrantsForRecipient(
-    storage: StorageContext,
-    shareId: string,
-    recipientUserId: string,
-  ): SyncRelayShareGrantRow[] {
-    return storage.db
-      .prepare(
-        `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
+  storage: StorageContext,
+  shareId: string,
+  recipientUserId: string,
+): SyncRelayShareGrantRow[] {
+  return storage.db
+    .prepare(
+      `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
                 access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
          FROM sync_relay_share_grants
          WHERE share_id = ? AND principal_kind = 'user' AND principal_user_id = ?
            AND status = 'active'
          ORDER BY created_at_ms DESC, grant_id`,
-      )
-      .all(shareId, recipientUserId)
-      .map(rowToShareGrantRow);
-  }
+    )
+    .all(shareId, recipientUserId)
+    .map(rowToShareGrantRow);
+}
 
-export function listSharesGrantedBy(storage: StorageContext, granterUserId: string): SyncRelayGrantedShareRow[] {
-    return storage.db
-      .prepare(
-        `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+export function listSharesGrantedBy(
+  storage: StorageContext,
+  granterUserId: string,
+): SyncRelayGrantedShareRow[] {
+  return storage.db
+    .prepare(
+      `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
                 s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
                 g.principal_kind, g.principal_user_id, g.principal_email, g.access,
                 g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
@@ -767,10 +855,13 @@ export function listSharesGrantedBy(storage: StorageContext, granterUserId: stri
          JOIN sync_relay_share_grants g ON g.share_id = s.share_id
          WHERE s.granter_user_id = ? AND g.parent_grant_id IS NULL
          ORDER BY s.created_at_ms DESC, s.share_id, g.created_at_ms, g.grant_id`,
-      )
-      .all(granterUserId)
-      .map((row) => ({ ...rowToShareWithGrantRow(row), automationsGeneration: automationsGenerationOf(row) }));
-  }
+    )
+    .all(granterUserId)
+    .map((row) => ({
+      ...rowToShareWithGrantRow(row),
+      automationsGeneration: automationsGenerationOf(row),
+    }));
+}
 
 export function listSharesGrantedPage(
   storage: StorageContext,
@@ -778,8 +869,9 @@ export function listSharesGrantedPage(
   workspaceId: string,
   cursor?: SyncRelayGrantedInventoryCursor,
 ): SyncRelayGrantedInventoryPage {
-  const rows = storage.db.prepare(
-    `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+  const rows = storage.db
+    .prepare(
+      `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
             s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
             g.principal_kind, g.principal_user_id, g.principal_email, g.access,
             g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
@@ -792,12 +884,18 @@ export function listSharesGrantedPage(
        ${cursor ? "AND g.grant_id > ?" : ""}
      ORDER BY g.grant_id
      LIMIT ${GRANTED_INVENTORY_PAGE_SIZE + 1}`,
-  ).all(granterUserId, workspaceId, ...(cursor ? [cursor.grantId] : []));
+    )
+    .all(granterUserId, workspaceId, ...(cursor ? [cursor.grantId] : []));
   const granted = rows.slice(0, GRANTED_INVENTORY_PAGE_SIZE).map((row) => ({
-    ...rowToShareWithGrantRow(row), automationsGeneration: automationsGenerationOf(row),
+    ...rowToShareWithGrantRow(row),
+    automationsGeneration: automationsGenerationOf(row),
   }));
   const last = granted.at(-1);
-  return {granted, nextCursor: rows.length > GRANTED_INVENTORY_PAGE_SIZE && last ? {grantId: last.grant.grantId} : null};
+  return {
+    granted,
+    nextCursor:
+      rows.length > GRANTED_INVENTORY_PAGE_SIZE && last ? { grantId: last.grant.grantId } : null,
+  };
 }
 
 // The newest grant generation at which a grant wrote a Collection's
@@ -817,17 +915,17 @@ function automationsGenerationOf(row: Record<string, unknown>): number | null {
 }
 
 export function listLinkGrantsByWorkspace(
-    storage: StorageContext,
-    workspaceId: string,
-    cursor?: SyncRelayLinkInventoryCursor,
-  ): SyncRelayLinkInventoryPage {
-    const afterCursor = cursor
-      ? `AND (s.created_at_ms, s.share_id, link.created_at_ms, link.grant_id)
+  storage: StorageContext,
+  workspaceId: string,
+  cursor?: SyncRelayLinkInventoryCursor,
+): SyncRelayLinkInventoryPage {
+  const afterCursor = cursor
+    ? `AND (s.created_at_ms, s.share_id, link.created_at_ms, link.grant_id)
              > (?, ?, ?, ?)`
-      : "";
-    const rows = storage.db
-      .prepare(
-        `WITH page_links AS (
+    : "";
+  const rows = storage.db
+    .prepare(
+      `WITH page_links AS (
            SELECT s.created_at_ms AS share_created_at_ms, s.share_id,
                   link.created_at_ms AS link_created_at_ms, link.grant_id
            FROM sync_relay_shares s
@@ -884,92 +982,90 @@ export function listLinkGrantsByWorkspace(
           AND link.status = 'active'
          ORDER BY s.created_at_ms, s.share_id, link.created_at_ms, link.grant_id,
                   dependent.grant_id`,
-      )
-      .all(
-        workspaceId,
-        ...(cursor
-          ? [
-              cursor.shareCreatedAtMs,
-              cursor.shareId,
-              cursor.linkCreatedAtMs,
-              cursor.grantId,
-            ]
-          : []),
-      );
-    const links = new Map<string, SyncRelayLinkInventoryRow>();
-    for (const row of rows) {
-      const grantId = String(row.link_grant_id);
-      let link = links.get(grantId);
-      if (!link) {
-        link = {
-          share: rowToShareRow({
-            ...row,
-            created_at_ms: row.share_created_at_ms,
-          }),
-          grant: rowToShareGrantRow({
-            grant_id: row.link_grant_id,
-            share_id: row.link_share_id,
-            principal_kind: row.link_principal_kind,
-            principal_user_id: row.link_principal_user_id,
-            principal_email: row.link_principal_email,
-            access: row.link_access,
-            generation: row.link_generation,
-            status: row.link_status,
-            created_at_ms: row.link_created_at_ms,
-            revoked_at_ms: row.link_revoked_at_ms,
-            parent_grant_id: row.link_parent_grant_id,
-          }),
-          dependents: [],
-          lastUsedAtMs:
-            row.last_used_at_ms === null || row.last_used_at_ms === undefined
-              ? null
-              : Number(row.last_used_at_ms),
-          urlIssuedAtMs:
-            row.url_issued_at_ms === null || row.url_issued_at_ms === undefined
-              ? null
-              : Number(row.url_issued_at_ms),
-          automationsGeneration: automationsGenerationOf(row),
-        };
-        links.set(grantId, link);
-      }
-      if (row.dependent_grant_id !== null && row.dependent_grant_id !== undefined) {
-        link.dependents.push(
-          rowToShareGrantRow({
-            grant_id: row.dependent_grant_id,
-            share_id: row.dependent_share_id,
-            principal_kind: row.dependent_principal_kind,
-            principal_user_id: row.dependent_principal_user_id,
-            principal_email: row.dependent_principal_email,
-            access: row.dependent_access,
-            generation: row.dependent_generation,
-            status: row.dependent_status,
-            created_at_ms: row.dependent_created_at_ms,
-            revoked_at_ms: row.dependent_revoked_at_ms,
-            parent_grant_id: row.dependent_parent_grant_id,
-          }),
-        );
-      }
+    )
+    .all(
+      workspaceId,
+      ...(cursor
+        ? [cursor.shareCreatedAtMs, cursor.shareId, cursor.linkCreatedAtMs, cursor.grantId]
+        : []),
+    );
+  const links = new Map<string, SyncRelayLinkInventoryRow>();
+  for (const row of rows) {
+    const grantId = String(row.link_grant_id);
+    let link = links.get(grantId);
+    if (!link) {
+      link = {
+        share: rowToShareRow({
+          ...row,
+          created_at_ms: row.share_created_at_ms,
+        }),
+        grant: rowToShareGrantRow({
+          grant_id: row.link_grant_id,
+          share_id: row.link_share_id,
+          principal_kind: row.link_principal_kind,
+          principal_user_id: row.link_principal_user_id,
+          principal_email: row.link_principal_email,
+          access: row.link_access,
+          generation: row.link_generation,
+          status: row.link_status,
+          created_at_ms: row.link_created_at_ms,
+          revoked_at_ms: row.link_revoked_at_ms,
+          parent_grant_id: row.link_parent_grant_id,
+        }),
+        dependents: [],
+        lastUsedAtMs:
+          row.last_used_at_ms === null || row.last_used_at_ms === undefined
+            ? null
+            : Number(row.last_used_at_ms),
+        urlIssuedAtMs:
+          row.url_issued_at_ms === null || row.url_issued_at_ms === undefined
+            ? null
+            : Number(row.url_issued_at_ms),
+        automationsGeneration: automationsGenerationOf(row),
+      };
+      links.set(grantId, link);
     }
-    const pageLinks = [...links.values()];
-    const last = pageLinks.at(-1);
-    const hasMore = Number(rows[0]?.page_link_count ?? 0) > LINK_INVENTORY_PAGE_SIZE;
-    return {
-      links: pageLinks,
-      nextCursor:
-        hasMore && last
-          ? {
-              shareCreatedAtMs: last.share.createdAtMs,
-              shareId: last.share.shareId,
-              linkCreatedAtMs: last.grant.createdAtMs,
-              grantId: last.grant.grantId,
-            }
-          : null,
-    };
+    if (row.dependent_grant_id !== null && row.dependent_grant_id !== undefined) {
+      link.dependents.push(
+        rowToShareGrantRow({
+          grant_id: row.dependent_grant_id,
+          share_id: row.dependent_share_id,
+          principal_kind: row.dependent_principal_kind,
+          principal_user_id: row.dependent_principal_user_id,
+          principal_email: row.dependent_principal_email,
+          access: row.dependent_access,
+          generation: row.dependent_generation,
+          status: row.dependent_status,
+          created_at_ms: row.dependent_created_at_ms,
+          revoked_at_ms: row.dependent_revoked_at_ms,
+          parent_grant_id: row.dependent_parent_grant_id,
+        }),
+      );
+    }
   }
+  const pageLinks = [...links.values()];
+  const last = pageLinks.at(-1);
+  const hasMore = Number(rows[0]?.page_link_count ?? 0) > LINK_INVENTORY_PAGE_SIZE;
+  return {
+    links: pageLinks,
+    nextCursor:
+      hasMore && last
+        ? {
+            shareCreatedAtMs: last.share.createdAtMs,
+            shareId: last.share.shareId,
+            linkCreatedAtMs: last.grant.createdAtMs,
+            grantId: last.grant.grantId,
+          }
+        : null,
+  };
+}
 
 // Owner-only account attribution. Primary grant ids and the account index bound the lookup.
 export function lookupHistoryAccounts(
-  storage: StorageContext, workspaceId: string, grantIds: readonly string[], userIds: readonly string[],
+  storage: StorageContext,
+  workspaceId: string,
+  grantIds: readonly string[],
+  userIds: readonly string[],
 ): SyncRelayHistoryAccount[] {
   if (grantIds.length + userIds.length > 200) throw new Error("History lookup exceeds its limit");
   const join = `FROM sync_relay_share_grants dependent
@@ -977,33 +1073,53 @@ export function lookupHistoryAccounts(
     JOIN sync_relay_shares s ON s.share_id = dependent.share_id AND s.share_id = link.share_id
     WHERE s.workspace_id = ? AND dependent.status = 'revoked' AND dependent.principal_kind = 'user'`;
   const rows = [
-    ...(grantIds.length ? storage.db.prepare(`SELECT dependent.grant_id, dependent.principal_user_id, dependent.parent_grant_id
-      ${join} AND dependent.grant_id IN (${grantIds.map(() => "?").join(",")})`).all(workspaceId, ...grantIds) : []),
-    ...(userIds.length ? storage.db.prepare(`SELECT MIN(dependent.grant_id) AS grant_id, dependent.principal_user_id, dependent.parent_grant_id
+    ...(grantIds.length
+      ? storage.db
+          .prepare(`SELECT dependent.grant_id, dependent.principal_user_id, dependent.parent_grant_id
+      ${join} AND dependent.grant_id IN (${grantIds.map(() => "?").join(",")})`)
+          .all(workspaceId, ...grantIds)
+      : []),
+    ...(userIds.length
+      ? storage.db
+          .prepare(`SELECT MIN(dependent.grant_id) AS grant_id, dependent.principal_user_id, dependent.parent_grant_id
       ${join} AND dependent.principal_user_id IN (${userIds.map(() => "?").join(",")})
-      GROUP BY dependent.principal_user_id`).all(workspaceId, ...userIds) : []),
+      GROUP BY dependent.principal_user_id`)
+          .all(workspaceId, ...userIds)
+      : []),
   ];
-  return [...new Map(rows.map(row => [String(row.grant_id), {
-    grantId: String(row.grant_id), recipientUserId: String(row.principal_user_id), parentGrantId: String(row.parent_grant_id),
-  }])).values()];
+  return [
+    ...new Map(
+      rows.map((row) => [
+        String(row.grant_id),
+        {
+          grantId: String(row.grant_id),
+          recipientUserId: String(row.principal_user_id),
+          parentGrantId: String(row.parent_grant_id),
+        },
+      ]),
+    ).values(),
+  ];
 }
 
-export function listActiveIndependentShareGrants(storage: StorageContext, input: {
+export function listActiveIndependentShareGrants(
+  storage: StorageContext,
+  input: {
     workspaceId: string;
     shareIds: readonly string[];
     cursor?: SyncRelayIndependentGrantInventoryCursor;
-  }): SyncRelayIndependentGrantInventoryPage {
-    const shareIds = [...new Set(input.shareIds)];
-    if (shareIds.length === 0) return { grants: [], nextCursor: null };
-    if (shareIds.length > LINK_INVENTORY_PAGE_SIZE) {
-      throw new Error("link inventory share page exceeds its limit");
-    }
-    const afterCursor = input.cursor
-      ? "AND (grant.share_id, grant.created_at_ms, grant.grant_id) > (?, ?, ?)"
-      : "";
-    const rows = storage.db
-      .prepare(
-        `SELECT grant.grant_id, grant.share_id, grant.principal_kind,
+  },
+): SyncRelayIndependentGrantInventoryPage {
+  const shareIds = [...new Set(input.shareIds)];
+  if (shareIds.length === 0) return { grants: [], nextCursor: null };
+  if (shareIds.length > LINK_INVENTORY_PAGE_SIZE) {
+    throw new Error("link inventory share page exceeds its limit");
+  }
+  const afterCursor = input.cursor
+    ? "AND (grant.share_id, grant.created_at_ms, grant.grant_id) > (?, ?, ?)"
+    : "";
+  const rows = storage.db
+    .prepare(
+      `SELECT grant.grant_id, grant.share_id, grant.principal_kind,
                 grant.principal_user_id, grant.principal_email, grant.access,
                 grant.generation, grant.status, grant.created_at_ms,
                 grant.revoked_at_ms, grant.parent_grant_id
@@ -1017,54 +1133,64 @@ export function listActiveIndependentShareGrants(storage: StorageContext, input:
            ${afterCursor}
          ORDER BY grant.share_id, grant.created_at_ms, grant.grant_id
          LIMIT ${LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT + 1}`,
-      )
-      .all(
-        input.workspaceId,
-        ...shareIds,
-        ...(input.cursor
-          ? [
-              input.cursor.shareId,
-              input.cursor.grantCreatedAtMs,
-              input.cursor.grantId,
-            ]
-          : []),
-      )
-      .map(rowToShareGrantRow);
-    const grants = rows.slice(0, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT);
-    const last = grants.at(-1);
-    return {
-      grants,
-      nextCursor:
-        rows.length > LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT && last
-          ? {
-              shareId: last.shareId,
-              grantCreatedAtMs: last.createdAtMs,
-              grantId: last.grantId,
-            }
-          : null,
-    };
-  }
+    )
+    .all(
+      input.workspaceId,
+      ...shareIds,
+      ...(input.cursor
+        ? [input.cursor.shareId, input.cursor.grantCreatedAtMs, input.cursor.grantId]
+        : []),
+    )
+    .map(rowToShareGrantRow);
+  const grants = rows.slice(0, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT);
+  const last = grants.at(-1);
+  return {
+    grants,
+    nextCursor:
+      rows.length > LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT && last
+        ? {
+            shareId: last.shareId,
+            grantCreatedAtMs: last.createdAtMs,
+            grantId: last.grantId,
+          }
+        : null,
+  };
+}
 
 /** Pages share identities, so multiple grants cannot split one received share across pages. */
-export function listReceivedShareIdsPage(storage: StorageContext, recipientUserId: string,
-  cursor?: SyncRelayReceivedInventoryCursor): SyncRelayReceivedInventoryPage {
-  const removedIds = storage.listRemovedSharesForRecipient(recipientUserId).map(row => row.shareId);
-  const rows = storage.db.prepare(`SELECT share_id FROM (SELECT DISTINCT g.share_id
+export function listReceivedShareIdsPage(
+  storage: StorageContext,
+  recipientUserId: string,
+  cursor?: SyncRelayReceivedInventoryCursor,
+): SyncRelayReceivedInventoryPage {
+  const removedIds = storage
+    .listRemovedSharesForRecipient(recipientUserId)
+    .map((row) => row.shareId);
+  const rows = storage.db
+    .prepare(`SELECT share_id FROM (SELECT DISTINCT g.share_id
     FROM sync_relay_share_grants g JOIN sync_relay_shares s ON s.share_id = g.share_id
     JOIN sync_relay_workspaces w ON w.workspace_id = s.workspace_id AND w.owner_user_id = s.granter_user_id
     WHERE g.principal_kind = 'user' AND g.principal_user_id = ? AND g.status = 'active'
     UNION SELECT value AS share_id FROM json_each(?))
     ${cursor ? "WHERE share_id > ?" : ""}
     ORDER BY share_id LIMIT ${RECEIVED_INVENTORY_PAGE_SIZE + 1}`)
-    .all(recipientUserId, JSON.stringify(removedIds), ...(cursor ? [cursor.shareId] : [])) as { share_id: string }[];
-  const shareIds = rows.slice(0, RECEIVED_INVENTORY_PAGE_SIZE).map(row => row.share_id);
-  return { shareIds, nextCursor: rows.length > RECEIVED_INVENTORY_PAGE_SIZE ? { shareId: shareIds.at(-1)! } : null };
+    .all(recipientUserId, JSON.stringify(removedIds), ...(cursor ? [cursor.shareId] : [])) as {
+    share_id: string;
+  }[];
+  const shareIds = rows.slice(0, RECEIVED_INVENTORY_PAGE_SIZE).map((row) => row.share_id);
+  return {
+    shareIds,
+    nextCursor: rows.length > RECEIVED_INVENTORY_PAGE_SIZE ? { shareId: shareIds.at(-1)! } : null,
+  };
 }
 
-export function listSharesReceivedBy(storage: StorageContext, recipientUserId: string): SyncRelayShareWithGrantRow[] {
-    return storage.db
-      .prepare(
-        `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+export function listSharesReceivedBy(
+  storage: StorageContext,
+  recipientUserId: string,
+): SyncRelayShareWithGrantRow[] {
+  return storage.db
+    .prepare(
+      `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
                 s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
                 g.principal_kind, g.principal_user_id, g.principal_email, g.access,
                 g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
@@ -1073,52 +1199,61 @@ export function listSharesReceivedBy(storage: StorageContext, recipientUserId: s
          JOIN sync_relay_share_grants g ON g.share_id = s.share_id
          WHERE g.principal_kind = 'user' AND g.principal_user_id = ? AND g.status = 'active'
          ORDER BY s.created_at_ms DESC, s.share_id, g.created_at_ms, g.grant_id`,
-      )
-      .all(recipientUserId)
-      .map(rowToShareWithGrantRow);
-  }
+    )
+    .all(recipientUserId)
+    .map(rowToShareWithGrantRow);
+}
 
-export function revokeShare(storage: StorageContext, shareId: string, revokedAtMs: number): boolean {
+export function revokeShare(
+  storage: StorageContext,
+  shareId: string,
+  revokedAtMs: number,
+): boolean {
   return storage.tx(() => revokeShareInTransaction(storage, shareId, revokedAtMs));
 }
 
-export function revokeShareInTransaction(storage: StorageContext, shareId: string, revokedAtMs: number): boolean {
-      const existing = storage.db
-        .prepare("SELECT workspace_id FROM sync_relay_shares WHERE share_id = ?")
-        .get(shareId);
-      if (existing === undefined) return false;
-      const covered = serviceHostEnrollmentsCoveredByShare(storage, shareId);
-      storage.db.prepare("DELETE FROM sync_relay_share_labels WHERE share_id = ?").run(shareId);
-      const revoked = storage.db
-        .prepare(
-          `UPDATE sync_relay_share_grants
+export function revokeShareInTransaction(
+  storage: StorageContext,
+  shareId: string,
+  revokedAtMs: number,
+): boolean {
+  const existing = storage.db
+    .prepare("SELECT workspace_id FROM sync_relay_shares WHERE share_id = ?")
+    .get(shareId);
+  if (existing === undefined) return false;
+  const covered = serviceHostEnrollmentsCoveredByShare(storage, shareId);
+  storage.db.prepare("DELETE FROM sync_relay_share_labels WHERE share_id = ?").run(shareId);
+  const revoked = storage.db
+    .prepare(
+      `UPDATE sync_relay_share_grants
            SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
            WHERE share_id = ? AND status = 'active'`,
-        )
-        .run(Math.trunc(revokedAtMs), shareId);
-      storage.db
-        .prepare(
-          `UPDATE sync_relay_link_credentials
+    )
+    .run(Math.trunc(revokedAtMs), shareId);
+  storage.db
+    .prepare(
+      `UPDATE sync_relay_link_credentials
            SET retired_at_ms = ?
            WHERE retired_at_ms IS NULL
              AND grant_id IN (
                SELECT grant_id FROM sync_relay_share_grants WHERE share_id = ?
              )`,
-        )
-        .run(Math.trunc(revokedAtMs), shareId);
-      retireAgentConnectionsInTransaction(storage, { shareId }, revokedAtMs);
-      retireUncoveredServiceActivations(storage, covered, Math.trunc(revokedAtMs));
-      forgetReplicaCurrentViewCaches(storage,String(existing.workspace_id));
-      storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
+    )
+    .run(Math.trunc(revokedAtMs), shareId);
+  retireAgentConnectionsInTransaction(storage, { shareId }, revokedAtMs);
+  retireUncoveredServiceActivations(storage, covered, Math.trunc(revokedAtMs));
+  forgetReplicaCurrentViewCaches(storage, String(existing.workspace_id));
+  storage.db
+    .prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)
-        .run(shareId, Number(revoked.changes ?? 0));
-      // Open proposals can outlive their grants and still pin their blobs.
-      storage.db
-        .prepare(
-          `UPDATE sync_relay_share_proposals
+    .run(shareId, Number(revoked.changes ?? 0));
+  // Open proposals can outlive their grants and still pin their blobs.
+  storage.db
+    .prepare(
+      `UPDATE sync_relay_share_proposals
            SET state = 'declined', settled_at_ms = ?
            WHERE share_id = ? AND state = 'open'`,
-        )
-        .run(Math.trunc(revokedAtMs), shareId);
-      return true;
-  }
+    )
+    .run(Math.trunc(revokedAtMs), shareId);
+  return true;
+}

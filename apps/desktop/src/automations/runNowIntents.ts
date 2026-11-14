@@ -21,10 +21,16 @@ function isIntent(value: unknown): value is RunNowIntent {
   const { notice, account, workspaceId, automationId } = value as Record<string, unknown>;
   if (!notice || typeof notice !== "object") return false;
   const { store, noticeId } = notice as Record<string, unknown>;
-  return (store === "local" || store === "account") && typeof noticeId === "string" && noticeId.length > 0 &&
+  return (
+    (store === "local" || store === "account") &&
+    typeof noticeId === "string" &&
+    noticeId.length > 0 &&
     (account === null || typeof account === "string") &&
-    typeof workspaceId === "string" && workspaceId.length > 0 &&
-    typeof automationId === "string" && automationId.length > 0;
+    typeof workspaceId === "string" &&
+    workspaceId.length > 0 &&
+    typeof automationId === "string" &&
+    automationId.length > 0
+  );
 }
 
 export function createRunNowIntents(file: string) {
@@ -46,14 +52,19 @@ export function createRunNowIntents(file: string) {
   };
   const write = async (intents: RunNowIntent[]) => {
     await mkdir(dirname(file), { recursive: true });
-    await atomicReplaceFile(file, (temporary) => writeFile(temporary, `${JSON.stringify(intents)}\n`));
+    await atomicReplaceFile(file, (temporary) =>
+      writeFile(temporary, `${JSON.stringify(intents)}\n`),
+    );
   };
-  const same = (left: NoticeRef, right: NoticeRef) => left.store === right.store && left.noticeId === right.noticeId;
+  const same = (left: NoticeRef, right: NoticeRef) =>
+    left.store === right.store && left.noticeId === right.noticeId;
 
   return {
     list: () => serial(read),
     save: (intent: RunNowIntent) =>
-      serial(async () => write([...(await read()).filter((kept) => !same(kept.notice, intent.notice)), intent])),
+      serial(async () =>
+        write([...(await read()).filter((kept) => !same(kept.notice, intent.notice)), intent]),
+      ),
     remove: (notice: NoticeRef) =>
       serial(async () => write((await read()).filter((kept) => !same(kept.notice, notice)))),
   };

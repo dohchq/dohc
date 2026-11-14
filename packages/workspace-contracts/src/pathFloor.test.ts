@@ -6,7 +6,10 @@ import collisionFixtures from "../../../crates/dohc-engine-files/src/pathCollisi
 import { foldPathSegment, isIgnoredPathSegment, pathCollisionKey } from "./pathFloor";
 
 it("keeps the generated TypeScript data equal to the crate's canonical data", () => {
-  const canonical = new URL("../../../crates/dohc-engine-files/src/pathFoldData.json", import.meta.url);
+  const canonical = new URL(
+    "../../../crates/dohc-engine-files/src/pathFoldData.json",
+    import.meta.url,
+  );
   expect(data).toEqual(JSON.parse(readFileSync(canonical, "utf8")));
 });
 

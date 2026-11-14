@@ -60,9 +60,6 @@ pub enum RootBindingError {
     NotPrivate(dohc_windows_files::NotPrivate),
 }
 
-/// A macOS privacy refusal at `path`, a volume that shares new files, or a
-/// folder dohc refuses to keep private names itself; any other io failure is
-/// `otherwise`.
 fn io_failure(
     path: &Path,
     otherwise: RootBindingError,
@@ -651,7 +648,7 @@ mod tests {
     }
 
     /// An engine folder an older desktop build made 0755 is 0700 after the
-    /// next open, on Linux as on a Mac (#2376).
+    /// next open, on Linux as on a Mac.
     #[cfg(unix)]
     #[test]
     fn an_open_makes_an_engine_folder_an_older_build_left_open_private() {
@@ -670,7 +667,7 @@ mod tests {
 
     /// A link or a file at `.dohc` or the engine's folder is refused by name
     /// before anything is written through it, and what a link names is left
-    /// as it was (#2376).
+    /// as it was.
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_link_or_a_file_where_the_engines_folders_go_is_refused() {
@@ -718,7 +715,7 @@ mod tests {
     /// A folder another user owns, as `sudo` leaves one, is refused by name.
     /// Making one needs root, so the seam expects another owner instead.
     /// Then `.dohc` is another user's too, and the refusal names it, because
-    /// the folder in it can't be moved out (#2376).
+    /// the folder in it can't be moved out.
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn another_users_folder_is_refused_by_name() {
@@ -778,7 +775,7 @@ mod tests {
 
     /// The engine's folder moves after the open checks it, and another takes
     /// its name. The marker still lands in the checked folder, and the other
-    /// gets nothing (#2375).
+    /// gets nothing.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn the_marker_lands_in_the_folder_the_open_checked() {
@@ -797,9 +794,6 @@ mod tests {
         );
     }
 
-    /// Where the engine can't reach its checked folder through the descriptor
-    /// it holds, as without `/proc`, minting and writing a binding are refused,
-    /// naming the folder, and no marker, lock or temporary file is written.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_binding_whose_folder_cannot_be_held_is_refused_before_anything_is_written() {

@@ -37,7 +37,6 @@ describe("applying the settings file's look", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(property("--dohc-accent")).toBe(readableAccent("#ffd400", "dark"));
 
-    // Back to dohc's own accent: the stylesheet's value applies again.
     applyLookSettings(settings({ appearance: { themeMode: "dark" } }));
     expect(property("--dohc-accent")).toBe("");
   });
@@ -52,23 +51,26 @@ describe("applying the settings file's look", () => {
     applyLookSettings(settings({ editor: { fontFamily: "mono" } }));
     expect(property("--dohc-editor-number-suffix")).toBe("2");
 
-    // An installed font falls back to dohc's sans when this computer lacks it.
     applyLookSettings(settings({ editor: { fontFamily: "Iowan Old Style" } }));
     expect(property("--dohc-editor-font")).toBe('"Iowan Old Style", var(--font-sans)');
     expect(property("--dohc-editor-number-suffix")).toBe("");
   });
 
   it("measures whether an installed editor font is monospaced", () => {
-    // A canvas where a period is as wide as a zero only in Consolas.
-    vi.stubGlobal("OffscreenCanvas", class {
-      getContext() {
-        const context = {
-          font: "",
-          measureText: (text: string) => ({ width: text === "." && !context.font.includes('"Consolas"') ? 4 : 10 }),
-        };
-        return context;
-      }
-    });
+    vi.stubGlobal(
+      "OffscreenCanvas",
+      class {
+        getContext() {
+          const context = {
+            font: "",
+            measureText: (text: string) => ({
+              width: text === "." && !context.font.includes('"Consolas"') ? 4 : 10,
+            }),
+          };
+          return context;
+        }
+      },
+    );
     try {
       applyLookSettings(settings({ editor: { fontFamily: "Consolas" } }));
       expect(property("--dohc-editor-number-suffix")).toBe("2");
@@ -80,7 +82,10 @@ describe("applying the settings file's look", () => {
   });
 
   it("hands your colors to the avatars", () => {
-    applyLookSettings({ ...settingsWithAgent({ hue: "plum" }), appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "teal" } });
+    applyLookSettings({
+      ...settingsWithAgent({ hue: "plum" }),
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "teal" },
+    });
     expect(chosenHue("human")).toBe("teal");
     expect(chosenHue("agent")).toBe("plum");
     applyLookSettings(DEFAULT_USER_SETTINGS);
@@ -90,35 +95,45 @@ describe("applying the settings file's look", () => {
   it("tells a look-only change from one the shell must render", () => {
     const read = (value: DesktopUserSettings) => ({ settings: value, source: "stored" as const });
     const base = read(DEFAULT_USER_SETTINGS);
-    expect(differsOnlyInLook(base, read(settings({ appearance: { accentColor: "#224488" } })))).toBe(true);
-    expect(differsOnlyInLook(base, read(settings({ editor: { fontSize: 20, fontFamily: "mono" } })))).toBe(true);
-    // Line wrap and spellcheck change how the editor behaves, not how it looks.
+    expect(
+      differsOnlyInLook(base, read(settings({ appearance: { accentColor: "#224488" } }))),
+    ).toBe(true);
+    expect(
+      differsOnlyInLook(base, read(settings({ editor: { fontSize: 20, fontFamily: "mono" } }))),
+    ).toBe(true);
     expect(differsOnlyInLook(base, read(settings({ editor: { lineWrap: false } })))).toBe(false);
     expect(differsOnlyInLook(base, read(settings({ editor: { spellcheck: false } })))).toBe(false);
-    expect(differsOnlyInLook(base, read(settings({ profile: { preferredName: "Ada" } })))).toBe(false);
-    expect(differsOnlyInLook(base, {
-      ...read(DEFAULT_USER_SETTINGS),
-      ignored: [{ key: "editor.fontSize", reason: "invalid" }],
-    })).toBe(false);
+    expect(differsOnlyInLook(base, read(settings({ profile: { preferredName: "Ada" } })))).toBe(
+      false,
+    );
+    expect(
+      differsOnlyInLook(base, {
+        ...read(DEFAULT_USER_SETTINGS),
+        ignored: [{ key: "editor.fontSize", reason: "invalid" }],
+      }),
+    ).toBe(false);
     // dohc uses the agents in the order the file lists them.
-    const claude = testAgent({ name: "Claude Code" }), codex = testAgent({ name: "Codex" });
-    expect(differsOnlyInLook(
-      read({ ...DEFAULT_USER_SETTINGS, agents: { default: claude, codex } }),
-      read({ ...DEFAULT_USER_SETTINGS, agents: { codex, default: claude } }),
-    )).toBe(false);
+    const claude = testAgent({ name: "Claude Code" }),
+      codex = testAgent({ name: "Codex" });
+    expect(
+      differsOnlyInLook(
+        read({ ...DEFAULT_USER_SETTINGS, agents: { default: claude, codex } }),
+        read({ ...DEFAULT_USER_SETTINGS, agents: { codex, default: claude } }),
+      ),
+    ).toBe(false);
   });
 });
 
 describe("the startup read of the settings file", () => {
-  const read = (value: DesktopUserSettings): DesktopUserSettingsResult =>
-    ({ settings: value, source: "stored" });
+  const read = (value: DesktopUserSettings): DesktopUserSettingsResult => ({
+    settings: value,
+    source: "stored",
+  });
   const accepted = settings({
     appearance: { themeMode: "dark", accentColor: "#ffd400", yourColor: "teal" },
     editor: { fontFamily: "serif", fontSize: 18 },
   });
 
-  // Starts the theme with the startup read held open and the system
-  // preference under the test's control.
   function start(systemDark: boolean) {
     const startup = deferred<DesktopUserSettingsResult>();
     const setTitlebarTheme = vi.fn(async (_request: { theme: "light" | "dark" }) => undefined);

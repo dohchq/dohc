@@ -22,7 +22,6 @@ export async function firstFreeFolderName(
     );
     if (!taken) return candidate;
   }
-  // Past that, the name stays as the person sees it.
   return name;
 }
 
@@ -31,6 +30,7 @@ export function registerWorkspaceFolderNameIpc<Event, Operation>(
   usableRoot: (path: string) => string,
 ): void {
   registerOperations(boundary, workspaceFolderNameOperations, {
-    suggestWorkspaceFolderName: ({ rootPath, name }) => firstFreeFolderName(rootPath, name, usableRoot),
+    suggestWorkspaceFolderName: ({ rootPath, name }) =>
+      firstFreeFolderName(rootPath, name, usableRoot),
   });
 }

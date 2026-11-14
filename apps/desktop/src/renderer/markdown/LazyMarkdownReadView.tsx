@@ -1,11 +1,4 @@
-import {
-  Suspense,
-  lazy,
-  useCallback,
-  useMemo,
-  useState,
-  type ComponentType,
-} from "react";
+import { Suspense, lazy, useCallback, useMemo, useState, type ComponentType } from "react";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import type { MarkdownReadViewProps } from "./IncrementalMarkdownDocument";
@@ -40,14 +33,14 @@ export function LazyMarkdownReadView(
   );
 
   return (
-    <ErrorBoundary
-      scope="markdown-read-view"
-      resetKeys={[resetKey, attempt]}
-      onRetry={retry}
-    >
+    <ErrorBoundary scope="markdown-read-view" resetKeys={[resetKey, attempt]} onRetry={retry}>
       <Suspense
         fallback={
-          <SkeletonRows testId="markdown-read-loading" label="Loading document..." className="min-h-48" />
+          <SkeletonRows
+            testId="markdown-read-loading"
+            label="Loading document..."
+            className="min-h-48"
+          />
         }
       >
         <ReadView {...viewProps} />

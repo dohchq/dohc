@@ -29,9 +29,7 @@ describe("caretColorForClientId", () => {
   it("spreads a run of clientIds across more than one palette slot", () => {
     // Not a strict distribution guarantee (it's a hash), but a real Yjs
     // clientID sequence should not all collapse onto one color.
-    const colors = new Set(
-      Array.from({ length: 40 }, (_, i) => caretColorForClientId(i * 104729)),
-    );
+    const colors = new Set(Array.from({ length: 40 }, (_, i) => caretColorForClientId(i * 104729)));
     expect(colors.size).toBeGreaterThan(1);
   });
 });

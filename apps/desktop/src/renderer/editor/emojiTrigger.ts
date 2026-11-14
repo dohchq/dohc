@@ -1,58 +1,32 @@
 import { cursorText } from "./cursorText";
 import { makeTriggerPlugin } from "./triggerPlugin";
-// `:shortcode:` emoji autocomplete trigger.
-//
-// A third trigger surface alongside `[[` wikilinks (wikilinkPlugin.ts) and
-// `@`-mentions (mentionTrigger.ts) — same detection shape, same shared
-// picker infrastructure conventions, but it inserts PLAIN UNICODE TEXT
-// (see EmojiPicker.tsx's `applyEmojiPick`). No schema/node involved, so
-// there is zero round-trip surface: the emoji character is just text,
-// same as if the user had typed or pasted it directly.
-//
-// Detection mirrors wikilinkPlugin's `detectAutocomplete` / mentionTrigger's
-// `detectMentionAutocomplete`: resolve the text node under the cursor, look
-// at the text before it, apply the same code-block / inline-code-mark
-// exclusions, require the trigger character to sit at a word boundary
-// (start-of-node or after whitespace) so `12:30` and URLs don't fire.
-//
-// One extra rule the other two triggers don't need: the query must be at
-// least 2 characters before the picker opens (`:s` does nothing, `:sm`
-// opens) — a bare `:` shows up too often in prose (times, URLs, ratios) to
-// pop a picker on the very first character.
-//
-// A second behavior layered on top: typing the *closing* colon of a
-// complete, known shortcode (`:smile:`) inserts the emoji immediately,
-// Slack/GitHub-style, without waiting for the user to pick from the list.
-// That's handled via `appendTransaction` (not a manual `view.dispatch` from
-// inside `view.update`) so the replacement is folded into the same
-// transaction cycle instead of racing a second dispatch.
 
-import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
-import { PluginKey, type Transaction } from '@tiptap/pm/state'
-import { ReplaceStep } from '@tiptap/pm/transform'
-import { type AutocompleteState } from './wikilinkPlugin'
-import { EMOJI_DATA, type EmojiEntry } from './emojiData'
+import type { Node as ProseMirrorNode, ResolvedPos } from "@tiptap/pm/model";
+import { PluginKey, type Transaction } from "@tiptap/pm/state";
+import { ReplaceStep } from "@tiptap/pm/transform";
+import { type AutocompleteState } from "./wikilinkPlugin";
+import { EMOJI_DATA, type EmojiEntry } from "./emojiData";
 
-export const emojiPluginKey = new PluginKey('dohc-emoji')
+export const emojiPluginKey = new PluginKey("dohc-emoji");
 
 // Lazily-built shortcode -> entry map. A module-level constant is fine —
 // EMOJI_DATA is a static built-in table, not something that changes at
 // runtime.
 const EMOJI_BY_SHORTCODE: ReadonlyMap<string, EmojiEntry> = new Map(
   EMOJI_DATA.map((entry) => [entry.shortcode, entry]),
-)
+);
 
 export function lookupEmoji(shortcode: string): EmojiEntry | undefined {
-  return EMOJI_BY_SHORTCODE.get(shortcode)
+  return EMOJI_BY_SHORTCODE.get(shortcode);
 }
 
 // Opening trigger: `:` at a word boundary followed by 2+ shortcode-ish
 // characters (letters, digits, `_`, `+`, `-` — covers every entry in
 // emojiData.ts, e.g. `+1`, `t_rex`) with NO closing colon yet.
-const EMOJI_TRIGGER_RE = /(?<=^|\s):([a-zA-Z0-9_+-]{2,})$/
+const EMOJI_TRIGGER_RE = /(?<=^|\s):([a-zA-Z0-9_+-]{2,})$/;
 
 // Completion trigger: same, but the closing `:` has just been typed.
-const EMOJI_COMPLETE_RE = /(?<=^|\s):([a-zA-Z0-9_+-]{2,}):$/
+const EMOJI_COMPLETE_RE = /(?<=^|\s):([a-zA-Z0-9_+-]{2,}):$/;
 
 /** Pure: detect an incomplete `:shortcode` at the cursor, same shape and
  *  strategy as wikilinkPlugin's `detectAutocomplete` / mentionTrigger's
@@ -62,23 +36,23 @@ export function detectEmojiAutocomplete(
   cursorPos: number,
   position?: ResolvedPos,
 ): AutocompleteState {
-  const run = cursorText(doc, cursorPos, position)
-  if (!run) return { active: false }
-  const before = run.text
-  const m = EMOJI_TRIGGER_RE.exec(before)
-  if (!m) return { active: false }
+  const run = cursorText(doc, cursorPos, position);
+  if (!run) return { active: false };
+  const before = run.text;
+  const m = EMOJI_TRIGGER_RE.exec(before);
+  if (!m) return { active: false };
   return {
     active: true,
     from: run.from + before.length - m[0].length,
-    query: m[1] ?? '',
-  }
+    query: m[1] ?? "",
+  };
 }
 
 type CompleteEmojiShortcode = {
-  from: number
-  to: number
-  shortcode: string
-}
+  from: number;
+  to: number;
+  shortcode: string;
+};
 
 /** Pure: detect a JUST-CLOSED `:shortcode:` at the cursor (the closing
  *  colon is the last character before cursorPos). Doesn't check whether
@@ -89,16 +63,16 @@ export function detectCompleteEmojiShortcode(
   cursorPos: number,
   position?: ResolvedPos,
 ): CompleteEmojiShortcode | null {
-  const run = cursorText(doc, cursorPos, position)
-  if (!run) return null
-  const before = run.text
-  const m = EMOJI_COMPLETE_RE.exec(before)
-  if (!m) return null
+  const run = cursorText(doc, cursorPos, position);
+  if (!run) return null;
+  const before = run.text;
+  const m = EMOJI_COMPLETE_RE.exec(before);
+  if (!m) return null;
   return {
     from: run.from + before.length - m[0].length,
     to: cursorPos,
-    shortcode: m[1] ?? '',
-  }
+    shortcode: m[1] ?? "",
+  };
 }
 
 /** Pure: did this batch of transactions insert text ending in a colon exactly
@@ -118,28 +92,27 @@ function insertedClosingColonAtCursor(
   cursorPos: number,
 ): boolean {
   for (let t = 0; t < transactions.length; t++) {
-    const tr = transactions[t]
-    if (!tr.docChanged) continue
+    const tr = transactions[t];
+    if (!tr.docChanged) continue;
     for (let i = 0; i < tr.steps.length; i++) {
-      const step = tr.steps[i]
-      if (!(step instanceof ReplaceStep)) continue
-      const slice = step.slice
-      if (slice.size === 0) continue
-      const inserted = slice.content.textBetween(0, slice.content.size, '\n', '\n')
-      if (!inserted.endsWith(':')) continue
+      const step = tr.steps[i];
+      if (!(step instanceof ReplaceStep)) continue;
+      const slice = step.slice;
+      if (slice.size === 0) continue;
+      const inserted = slice.content.textBetween(0, slice.content.size, "\n", "\n");
+      if (!inserted.endsWith(":")) continue;
       // Position just past the inserted content, in this step's output doc…
-      let end = step.from + slice.size
-      // …mapped through the rest of this transaction's steps…
-      end = tr.mapping.slice(i + 1).map(end)
+      let end = step.from + slice.size;
+      end = tr.mapping.slice(i + 1).map(end);
       // …then through every later transaction in the batch, landing in the
       // same coordinate space as `cursorPos` (newState).
       for (let k = t + 1; k < transactions.length; k++) {
-        end = transactions[k].mapping.map(end)
+        end = transactions[k].mapping.map(end);
       }
-      if (end === cursorPos) return true
+      if (end === cursorPos) return true;
     }
   }
-  return false
+  return false;
 }
 
 /** Build the emoji-trigger plugin.
@@ -152,22 +125,25 @@ function insertedClosingColonAtCursor(
  *  - `view.update` handles the open-picker notification, same pattern as
  *    makeMentionPlugin / makeWikilinkPlugin. */
 export function makeEmojiPlugin(onAutocompleteChange: (s: AutocompleteState) => void) {
-  return makeTriggerPlugin({
-    key: emojiPluginKey,
-    appendTransaction(transactions, _oldState, newState) {
-      if (!transactions.some((tr) => tr.docChanged)) return null
-      const sel = newState.selection
-      if (!sel.empty) return null
-      // Only auto-replace when the LOCAL user just typed the closing colon at
-      // the cursor — not on remote collab edits or other doc changes that
-      // happen to leave the cursor after a literal `:shortcode:`.
-      if (!insertedClosingColonAtCursor(transactions, sel.from)) return null
-      const found = detectCompleteEmojiShortcode(newState.doc, sel.from, sel.$from)
-      if (!found) return null
-      const entry = lookupEmoji(found.shortcode)
-      if (!entry) return null
-      return newState.tr.insertText(entry.emoji, found.from, found.to)
+  return makeTriggerPlugin(
+    {
+      key: emojiPluginKey,
+      appendTransaction(transactions, _oldState, newState) {
+        if (!transactions.some((tr) => tr.docChanged)) return null;
+        const sel = newState.selection;
+        if (!sel.empty) return null;
+        // Only auto-replace when the LOCAL user just typed the closing colon at
+        // the cursor — not on remote collab edits or other doc changes that
+        // happen to leave the cursor after a literal `:shortcode:`.
+        if (!insertedClosingColonAtCursor(transactions, sel.from)) return null;
+        const found = detectCompleteEmojiShortcode(newState.doc, sel.from, sel.$from);
+        if (!found) return null;
+        const entry = lookupEmoji(found.shortcode);
+        if (!entry) return null;
+        return newState.tr.insertText(entry.emoji, found.from, found.to);
+      },
     },
-
-  }, detectEmojiAutocomplete, onAutocompleteChange)
+    detectEmojiAutocomplete,
+    onAutocompleteChange,
+  );
 }

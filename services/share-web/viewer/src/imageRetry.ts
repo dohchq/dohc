@@ -1,9 +1,5 @@
 import { useLayoutEffect, useRef, type SyntheticEvent } from "react";
-import {
-  RETRY_BUDGET_MS,
-  RETRY_INITIAL_MS,
-  RETRY_MAX_MS,
-} from "./retry";
+import { RETRY_BUDGET_MS, RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
 
 interface ImageRetryState {
   source: string;

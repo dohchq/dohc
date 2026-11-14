@@ -34,22 +34,33 @@ interface Group {
 }
 
 export const RUN_NOT_HERE = "Run not on this computer";
-export const RUN_NOT_HERE_WHY = "dohc keeps runs for 30 days after they end, on the computer that ran them.";
+export const RUN_NOT_HERE_WHY =
+  "dohc keeps runs for 30 days after they end, on the computer that ran them.";
 
 function valueText(side: RecordHistoryEntry["previous"]): string {
   const value = side.value;
   if (!side.present || value === null || value === "") return "empty";
-  if (Array.isArray(value)) return value.length === 0 ? "empty" : value.map((item) => valueText({ present: true, value: item })).join(", ");
+  if (Array.isArray(value))
+    return value.length === 0
+      ? "empty"
+      : value.map((item) => valueText({ present: true, value: item })).join(", ");
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
 function runOf(author: RecordHistoryEntry["author"]): string | null {
-  return author?.kind === "automation" && author.run !== null ? `${author.automationId}\n${author.run.claimId}` : null;
+  return author?.kind === "automation" && author.run !== null
+    ? `${author.automationId}\n${author.run.claimId}`
+    : null;
 }
 
-function runState(author: AutomationAuthor, located: ReadonlyMap<string, RunState>): RunState | null {
+function runState(
+  author: AutomationAuthor,
+  located: ReadonlyMap<string, RunState>,
+): RunState | null {
   if (author.run === null) return null;
-  return author.run.location === "available" ? "available" : located.get(runOf(author)!) ?? "pending";
+  return author.run.location === "available"
+    ? "available"
+    : (located.get(runOf(author)!) ?? "pending");
 }
 
 /** Newest first, with an automation run's changes side by side. */
@@ -62,7 +73,12 @@ export function recordHistoryGroups(entries: readonly RecordHistoryEntry[]): Gro
       last.changes.push(entry);
       continue;
     }
-    groups.push({ key: String(entry.historyId), author: entry.author, recordedAtMs: entry.recordedAtMs, changes: [entry] });
+    groups.push({
+      key: String(entry.historyId),
+      author: entry.author,
+      recordedAtMs: entry.recordedAtMs,
+      changes: [entry],
+    });
   }
   return groups;
 }
@@ -70,27 +86,45 @@ export function recordHistoryGroups(entries: readonly RecordHistoryEntry[]): Gro
 function AuthorName(props: { author: Author; id: string }) {
   const { author } = props;
   if (author.kind === "agent") {
-    return <span id={props.id} className="inline-flex min-w-0 items-center gap-1 text-[12px]">
-      <span className="truncate text-agent">{author.name}</span>
-      {author.person ? <span className="truncate text-muted">{` for ${author.person}`}</span> : null}
-    </span>;
+    return (
+      <span id={props.id} className="inline-flex min-w-0 items-center gap-1 text-[12px]">
+        <span className="truncate text-agent">{author.name}</span>
+        {author.person ? (
+          <span className="truncate text-muted">{` for ${author.person}`}</span>
+        ) : null}
+      </span>
+    );
   }
   // A link holder has no name dohc can confirm, so the row names the role.
   if (author.kind === "link") {
     const agentName = shownAgentName(author.agentName);
     if (agentName !== undefined) {
-      return <span id={props.id} className="inline-flex min-w-0 items-center gap-1 text-[12px]">
-        <span className="truncate text-agent">{agentName}</span>
-        <span className="truncate text-muted"> for a link holder</span>
-      </span>;
+      return (
+        <span id={props.id} className="inline-flex min-w-0 items-center gap-1 text-[12px]">
+          <span className="truncate text-agent">{agentName}</span>
+          <span className="truncate text-muted"> for a link holder</span>
+        </span>
+      );
     }
-    return <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">Link holder</span>;
+    return (
+      <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">
+        Link holder
+      </span>
+    );
   }
   if (author.kind === "human") {
-    return <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">{author.name}</span>;
+    return (
+      <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">
+        {author.name}
+      </span>
+    );
   }
   return (
-    <span id={props.id} data-testid="record-history-automation" className="inline-flex min-w-0 items-center gap-1 text-[12px] text-muted">
+    <span
+      id={props.id}
+      data-testid="record-history-automation"
+      className="inline-flex min-w-0 items-center gap-1 text-[12px] text-muted"
+    >
       <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
       <span className="sr-only">Automation </span>
       <span className="truncate">{author.name}</span>
@@ -99,12 +133,25 @@ function AuthorName(props: { author: Author; id: string }) {
   );
 }
 
-function RunLink(props: { author: AutomationAuthor; state: RunState | null; describedBy: string; onOpenRun: (automationId: string, claimId: string, name: string) => void }) {
+function RunLink(props: {
+  author: AutomationAuthor;
+  state: RunState | null;
+  describedBy: string;
+  onOpenRun: (automationId: string, claimId: string, name: string) => void;
+}) {
   const { author, state } = props;
-  if (author.run === null || state === null || state === "pending" || state === "unknown") return null;
+  if (author.run === null || state === null || state === "pending" || state === "unknown")
+    return null;
   if (state === "unavailable") {
     // Padded as View run is, so the two line up down the list.
-    return <span data-testid="record-history-run-not-here" className="shrink-0 px-1.5 text-[11px] text-subtle">{RUN_NOT_HERE}</span>;
+    return (
+      <span
+        data-testid="record-history-run-not-here"
+        className="shrink-0 px-1.5 text-[11px] text-subtle"
+      >
+        {RUN_NOT_HERE}
+      </span>
+    );
   }
   const claimId = author.run.claimId;
   return (
@@ -119,7 +166,11 @@ function RunLink(props: { author: AutomationAuthor; state: RunState | null; desc
   );
 }
 
-function GroupRow(props: { group: Group; located: ReadonlyMap<string, RunState>; onOpenRun: (automationId: string, claimId: string, name: string) => void }) {
+function GroupRow(props: {
+  group: Group;
+  located: ReadonlyMap<string, RunState>;
+  onOpenRun: (automationId: string, claimId: string, name: string) => void;
+}) {
   const { group } = props;
   const authorId = useId();
   return (
@@ -127,7 +178,12 @@ function GroupRow(props: { group: Group; located: ReadonlyMap<string, RunState>;
       <div className="flex items-center gap-2">
         {group.author === null ? null : <AuthorName author={group.author} id={authorId} />}
         {group.author?.kind === "automation" ? (
-          <RunLink author={group.author} state={runState(group.author, props.located)} describedBy={authorId} onOpenRun={props.onOpenRun} />
+          <RunLink
+            author={group.author}
+            state={runState(group.author, props.located)}
+            describedBy={authorId}
+            onOpenRun={props.onOpenRun}
+          />
         ) : null}
         <time
           dateTime={new Date(group.recordedAtMs).toISOString()}
@@ -139,8 +195,12 @@ function GroupRow(props: { group: Group; located: ReadonlyMap<string, RunState>;
       </div>
       <ul className="m-0 mt-1 list-none space-y-0.5 p-0">
         {group.changes.map((change) => (
-          <li key={change.historyId} className="break-words font-mono text-[11px] leading-snug text-ink">
-            {change.field}: <span className="text-muted">{valueText(change.previous)} → </span>{valueText(change.next)}
+          <li
+            key={change.historyId}
+            className="break-words font-mono text-[11px] leading-snug text-ink"
+          >
+            {change.field}: <span className="text-muted">{valueText(change.previous)} → </span>
+            {valueText(change.next)}
           </li>
         ))}
       </ul>
@@ -167,8 +227,9 @@ export function RecordHistoryDialog(props: {
   onRunsChecked: (runs: readonly string[]) => void;
 }) {
   const { workspaceId, collectionPath, recordId } = props;
-  const [page, setPage] = useState<{ entries: RecordHistoryEntry[]; next: number | null } | null>(null);
-  // The page being read: the first, or the one after the last shown.
+  const [page, setPage] = useState<{ entries: RecordHistoryEntry[]; next: number | null } | null>(
+    null,
+  );
   const [loading, setLoading] = useState<"first" | "older" | null>(null);
   // A page could not be read, so the dialog says so and offers Try again inside it; null when none failed.
   const [failed, setFailed] = useState<number | "first" | null>(null);
@@ -206,7 +267,13 @@ export function RecordHistoryDialog(props: {
         let state: RunState;
         let error: unknown = null;
         try {
-          state = (await bridge().locateRecordHistoryRun({ workspaceId, automationId: run.automationId, claimId: run.claimId })).location;
+          state = (
+            await bridge().locateRecordHistoryRun({
+              workspaceId,
+              automationId: run.automationId,
+              claimId: run.claimId,
+            })
+          ).location;
         } catch (caught) {
           state = "unknown";
           error = caught;
@@ -220,47 +287,67 @@ export function RecordHistoryDialog(props: {
     }
   }, [workspaceId, lookups]);
 
-  const load = useCallback((before: number | null) => {
-    const token = request.next();
-    setLoading(before === null ? "first" : "older");
-    void bridge()
-      .getCollectionRecordHistory({ workspaceId, collectionPath, recordId, ...(before === null ? {} : { beforeHistoryId: before }) })
-      .then((result) => {
-        if (!request.isCurrent(token)) return;
-        reports.current.onRead(result.nextBeforeHistoryId);
-        const focused = document.activeElement;
-        focusPanel.current = focused === retry.current || (focused === older.current && result.nextBeforeHistoryId === null);
-        setFailed(null);
-        oldest.current = before;
-        for (const { author } of result.entries) {
-          if (author?.kind !== "automation" || author.run?.location !== "unchecked") continue;
-          const key = runOf(author)!;
-          if (asked.current.has(key)) continue;
-          asked.current.add(key);
-          queue.current.push({ key, automationId: author.automationId, claimId: author.run.claimId });
-        }
-        lookUp();
-        setPage((current) => {
-          if (before === null || current === null) return { entries: result.entries, next: result.nextBeforeHistoryId };
-          const shown = new Set(current.entries.map((entry) => entry.historyId));
-          return { entries: [...current.entries, ...result.entries.filter((entry) => !shown.has(entry.historyId))], next: result.nextBeforeHistoryId };
+  const load = useCallback(
+    (before: number | null) => {
+      const token = request.next();
+      setLoading(before === null ? "first" : "older");
+      void bridge()
+        .getCollectionRecordHistory({
+          workspaceId,
+          collectionPath,
+          recordId,
+          ...(before === null ? {} : { beforeHistoryId: before }),
+        })
+        .then((result) => {
+          if (!request.isCurrent(token)) return;
+          reports.current.onRead(result.nextBeforeHistoryId);
+          const focused = document.activeElement;
+          focusPanel.current =
+            focused === retry.current ||
+            (focused === older.current && result.nextBeforeHistoryId === null);
+          setFailed(null);
+          oldest.current = before;
+          for (const { author } of result.entries) {
+            if (author?.kind !== "automation" || author.run?.location !== "unchecked") continue;
+            const key = runOf(author)!;
+            if (asked.current.has(key)) continue;
+            asked.current.add(key);
+            queue.current.push({
+              key,
+              automationId: author.automationId,
+              claimId: author.run.claimId,
+            });
+          }
+          lookUp();
+          setPage((current) => {
+            if (before === null || current === null)
+              return { entries: result.entries, next: result.nextBeforeHistoryId };
+            const shown = new Set(current.entries.map((entry) => entry.historyId));
+            return {
+              entries: [
+                ...current.entries,
+                ...result.entries.filter((entry) => !shown.has(entry.historyId)),
+              ],
+              next: result.nextBeforeHistoryId,
+            };
+          });
+          const until = reports.current.until ?? null;
+          const next = result.nextBeforeHistoryId;
+          if (until !== null && next !== null && next >= until) load(next);
+        })
+        .catch((error: unknown) => {
+          if (request.isCurrent(token)) {
+            focusRetry.current = document.activeElement === older.current;
+            setFailed(before ?? "first");
+            reports.current.onFailed(before, error);
+          }
+        })
+        .finally(() => {
+          if (request.isCurrent(token)) setLoading(null);
         });
-        // Read on until the page asked for is shown.
-        const until = reports.current.until ?? null;
-        const next = result.nextBeforeHistoryId;
-        if (until !== null && next !== null && next >= until) load(next);
-      })
-      .catch((error: unknown) => {
-        if (request.isCurrent(token)) {
-          focusRetry.current = document.activeElement === older.current;
-          setFailed(before ?? "first");
-          reports.current.onFailed(before, error);
-        }
-      })
-      .finally(() => {
-        if (request.isCurrent(token)) setLoading(null);
-      });
-  }, [workspaceId, collectionPath, recordId, request, lookUp]);
+    },
+    [workspaceId, collectionPath, recordId, request, lookUp],
+  );
 
   useEffect(() => {
     setPage(null);
@@ -277,24 +364,37 @@ export function RecordHistoryDialog(props: {
 
   const [namesRevision, setNamesRevision] = useState<{ workspaceId: string } | null>(null);
   const namedRevision = useRef<typeof namesRevision>(null);
-  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
-    if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
-  }), [workspaceId]);
+  useEffect(
+    () =>
+      bridge().onHistoryNamesChanged?.((event) => {
+        if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
+      }),
+    [workspaceId],
+  );
   useEffect(() => {
     if (
-      namesRevision?.workspaceId !== workspaceId || namedRevision.current === namesRevision ||
-      page === null || loading !== null || page.entries.length === 0
-    ) return;
+      namesRevision?.workspaceId !== workspaceId ||
+      namedRevision.current === namesRevision ||
+      page === null ||
+      loading !== null ||
+      page.entries.length === 0
+    )
+      return;
     let liveRequest = true;
     const token = request.next();
     const shown = page;
     const live = () => liveRequest && request.isCurrent(token);
     const scan = async () => {
       const authors = new Map<number, RecordHistoryEntry["author"]>();
-      let before = Math.max(...shown.entries.map(entry => entry.historyId)) + 1;
-      const last = Math.min(...shown.entries.map(entry => entry.historyId));
+      let before = Math.max(...shown.entries.map((entry) => entry.historyId)) + 1;
+      const last = Math.min(...shown.entries.map((entry) => entry.historyId));
       do {
-        const result = await bridge().getCollectionRecordHistory({ workspaceId, collectionPath, recordId, beforeHistoryId: before });
+        const result = await bridge().getCollectionRecordHistory({
+          workspaceId,
+          collectionPath,
+          recordId,
+          beforeHistoryId: before,
+        });
         if (!live()) return false;
         for (const entry of result.entries) authors.set(entry.historyId, entry.author);
         if (result.nextBeforeHistoryId === null || result.nextBeforeHistoryId <= last) break;
@@ -302,19 +402,32 @@ export function RecordHistoryDialog(props: {
         before = result.nextBeforeHistoryId;
       } while (live());
       if (!live()) return false;
-      const next = { ...shown, entries: shown.entries.map(entry => authors.has(entry.historyId) ? { ...entry, author: authors.get(entry.historyId)! } : entry) };
+      const next = {
+        ...shown,
+        entries: shown.entries.map((entry) =>
+          authors.has(entry.historyId)
+            ? { ...entry, author: authors.get(entry.historyId)! }
+            : entry,
+        ),
+      };
       // Older changes keeps the earlier entries. Only an applied scan
       // completes the event, so pagination cannot lose their names.
       namedRevision.current = namesRevision;
-      setPage(current => current === shown ? next : current);
+      setPage((current) => (current === shown ? next : current));
       return true;
     };
     void (async () => {
       for (let attempt = 0; attempt < 2 && live(); attempt++) {
-        try { if (await scan()) return; } catch { /* Retry once while this page is still current. */ }
+        try {
+          if (await scan()) return;
+        } catch {
+          /* Retry once while this page is still current. */
+        }
       }
     })();
-    return () => { liveRequest = false; };
+    return () => {
+      liveRequest = false;
+    };
   }, [workspaceId, collectionPath, recordId, page, loading, request, namesRevision]);
 
   // Said once the reads and lookups settle, so Try again reads back to every
@@ -322,9 +435,14 @@ export function RecordHistoryDialog(props: {
   useEffect(() => {
     if (page === null || loading !== null) return;
     const states = page.entries.flatMap(({ author }) =>
-      author?.kind === "automation" && author.run !== null ? [{ key: runOf(author)!, state: runState(author, located) }] : []);
+      author?.kind === "automation" && author.run !== null
+        ? [{ key: runOf(author)!, state: runState(author, located) }]
+        : [],
+    );
     if (states.some(({ state }) => state === "pending")) return;
-    const placed = states.filter(({ state }) => state === "available" || state === "unavailable").map(({ key }) => key);
+    const placed = states
+      .filter(({ state }) => state === "available" || state === "unavailable")
+      .map(({ key }) => key);
     if (placed.length > 0) reports.current.onRunsChecked(placed);
     const unknown = states.filter(({ state }) => state === "unknown").map(({ key }) => key);
     if (unknown.every((key) => reportedUnchecked.current.has(key))) return;
@@ -333,9 +451,14 @@ export function RecordHistoryDialog(props: {
   }, [page, located, loading]);
 
   const firstLoad = failed === null && page === null;
-  const status = failed !== null ? HISTORY_READ_FAILED
-    : page === null ? "Loading history…"
-    : page.entries.length === 0 ? "No field of this record has changed yet." : "";
+  const status =
+    failed !== null
+      ? HISTORY_READ_FAILED
+      : page === null
+        ? "Loading history…"
+        : page.entries.length === 0
+          ? "No field of this record has changed yet."
+          : "";
 
   useEffect(() => {
     if (!focusRetry.current) return;
@@ -358,7 +481,8 @@ export function RecordHistoryDialog(props: {
         "aria-modal": true,
         "aria-label": `History of ${props.recordName}`,
         "data-testid": "record-history",
-        className: "dohc-elevated dohc-pop-in flex max-h-[85vh] w-[min(560px,92vw)] flex-col gap-3 rounded-xl border border-line bg-panel p-5 text-ink",
+        className:
+          "dohc-elevated dohc-pop-in flex max-h-[85vh] w-[min(560px,92vw)] flex-col gap-3 rounded-xl border border-line bg-panel p-5 text-ink",
       }}
     >
       <div className="flex items-center justify-between gap-3">
@@ -379,7 +503,9 @@ export function RecordHistoryDialog(props: {
       {/* One status line that stays mounted, so a screen reader hears each change of its words.
           While the first page loads, the lines above show it and the words are for the screen reader. */}
       <div className={status === "" || firstLoad ? "sr-only" : "flex items-center gap-2"}>
-        <p role="status" className="m-0 text-[12px] text-muted">{status}</p>
+        <p role="status" className="m-0 text-[12px] text-muted">
+          {status}
+        </p>
         {failed === null ? null : (
           <SecondaryButton
             ref={retry}
@@ -391,14 +517,26 @@ export function RecordHistoryDialog(props: {
               if (loading === null) load(failed === "first" ? null : failed);
             }}
           >
-            {loading === null ? null : <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" />}
+            {loading === null ? null : (
+              <LoaderCircle
+                aria-hidden
+                size={12}
+                strokeWidth={1.9}
+                className="shrink-0 animate-spin"
+              />
+            )}
             Try again
           </SecondaryButton>
         )}
       </div>
       {/* Said once, as text everyone reads, not in a tooltip on each row. */}
-      {page?.entries.some(({ author }) => author?.kind === "automation" && runState(author, located) === "unavailable") ? (
-        <p data-testid="record-history-run-not-here-why" className="m-0 text-[12px] text-muted">{RUN_NOT_HERE_WHY}</p>
+      {page?.entries.some(
+        ({ author }) =>
+          author?.kind === "automation" && runState(author, located) === "unavailable",
+      ) ? (
+        <p data-testid="record-history-run-not-here-why" className="m-0 text-[12px] text-muted">
+          {RUN_NOT_HERE_WHY}
+        </p>
       ) : null}
       {page !== null && page.next !== null && failed === null ? (
         <div className="flex justify-center">
@@ -413,7 +551,14 @@ export function RecordHistoryDialog(props: {
               if (loading === null) load(page.next);
             }}
           >
-            {loading === "older" ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" /> : null}
+            {loading === "older" ? (
+              <LoaderCircle
+                aria-hidden
+                size={12}
+                strokeWidth={1.9}
+                className="shrink-0 animate-spin"
+              />
+            ) : null}
             Older changes
           </SecondaryButton>
         </div>

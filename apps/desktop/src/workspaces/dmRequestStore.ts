@@ -37,11 +37,11 @@ function readSet(file: string): ReadResult {
 
 function writeSet(file: string, declined: ReadonlySet<string>): boolean {
   try {
-    atomicReplaceFileSync(file, (tmp) => writeFileSync(
-      tmp,
-      `${JSON.stringify({ declined: [...declined].sort() }, null, 2)}\n`,
-      { mode: 0o600 },
-    ));
+    atomicReplaceFileSync(file, (tmp) =>
+      writeFileSync(tmp, `${JSON.stringify({ declined: [...declined].sort() }, null, 2)}\n`, {
+        mode: 0o600,
+      }),
+    );
     return true;
   } catch {
     return false;

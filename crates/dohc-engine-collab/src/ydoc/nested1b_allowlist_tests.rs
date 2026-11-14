@@ -269,7 +269,6 @@ fn generated_sources() -> Vec<String> {
                 for depth in 0..4 {
                     source.push_str(&format!("{}{parent} {inline}\n", " ".repeat(depth * width)));
                 }
-                // Tight siblings at each level, including later ordered starts.
                 let sibling = if parent.starts_with("1.") {
                     parent.replacen("1.", "2.", 1)
                 } else if parent.starts_with("3)") {
@@ -663,8 +662,6 @@ fn nested1b_forged_witness_is_not_authority() {
     doc.record_validated_markdown_source_reference("* forged\n  * child")
         .unwrap();
     assert!(doc.preserved_markdown_source(&canonical).is_none());
-    // Native baseline validation accepts well-formed metadata, but projection
-    // drops an unproved source. It must never become artifact authority.
     doc.validate_public_baseline(&doc.encode_full_state())
         .unwrap();
     assert_eq!(doc.project_richdoc().unwrap(), canonical);

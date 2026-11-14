@@ -8,9 +8,7 @@ enum Script {
     ActorLost,
     ReconcileFails,
     Healthy,
-    /// Nothing dirty: the reconcile round-trips CONVERGED.
     Idle,
-    /// The reconcile is cancelled mid-scan (teardown racing the tick).
     CancelledTick,
     HealthyButDirtyApply,
     FileFailureWithCollectionPending,
@@ -18,16 +16,12 @@ enum Script {
     /// A healthy tick during which the watcher records one more
     /// disruption (backend error / root-identity blip that re-attached).
     Disrupted,
-    /// The root's policy fingerprint differs from the layer's.
     PolicyChanged,
     /// The fingerprint differs and the tick converges — the exact pass
     /// where a flush could settle over a mid-debounce policy edit.
     PolicyChangedIdle,
-    /// The policy files cannot be read right now (transient lock).
     PolicyUnreadable,
-    /// The sink holds work after the loop already read a valid fingerprint.
     SinkPolicyHeld,
-    /// Policy is unreadable at the loop sample, but recovers before the sink.
     PolicyRecoversDuringApply,
 }
 
@@ -134,7 +128,6 @@ impl DriverEnv for FakeEnv {
         {
             let mut journal = self.journal.lock().expect("journal");
             journal.ticks.push(self.elapsed());
-            // What a status RPC arriving mid-tick would observe.
             let snapshot = self.status.snapshot();
             journal.degraded_seen.push(snapshot.degraded);
             journal.running_seen.push(snapshot.running);
@@ -190,8 +183,6 @@ impl DriverEnv for FakeEnv {
 
 type FlushSender = tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>>;
 
-/// Spawn the loop under paused time; the caller drives, flushes, then
-/// finishes to collect the journal.
 fn spawn_loop(
     script: Vec<Script>,
 ) -> (
@@ -215,7 +206,6 @@ fn spawn_loop(
     (handle, cancel, journal, status, flush_tx)
 }
 
-/// Run the loop under paused time for `budget` of virtual time.
 async fn drive_for(
     script: Vec<Script>,
     budget: std::time::Duration,
@@ -231,8 +221,6 @@ async fn drive_for(
     (journal, status)
 }
 
-/// Send one flush after `lead` of virtual time and return its outcome
-/// plus how much virtual time the answer took.
 async fn flush_after(
     script: Vec<Script>,
     lead: std::time::Duration,
@@ -249,7 +237,6 @@ async fn flush_after(
     (outcome, waited)
 }
 
-/// Gaps between successive timestamps.
 fn gaps(stamps: &[std::time::Duration]) -> Vec<std::time::Duration> {
     stamps.windows(2).map(|w| w[1] - w[0]).collect()
 }
@@ -301,9 +288,9 @@ async fn a_failing_start_is_retried_on_the_escalating_backoff() {
 
 #[tokio::test(start_paused = true)]
 async fn a_watch_that_dies_every_tick_rebuilds_on_the_backoff_not_hot() {
-    // The regression this shard exists for. The layer starts fine every
-    // time and then loses its watch, so a naive loop rebuilds — full
-    // actor + watcher + baseline scan — every drive interval forever.
+    // The layer starts fine every time and then loses its watch, so a naive
+    // loop rebuilds — full actor + watcher + baseline scan — every drive
+    // interval forever.
     let (journal, status) =
         drive_for(vec![Script::WatchLost], std::time::Duration::from_secs(20)).await;
     assert!(
@@ -385,10 +372,6 @@ async fn a_healthy_driver_polls_at_the_drive_interval() {
 
 #[tokio::test(start_paused = true)]
 async fn a_permanently_failing_reconcile_slows_down_and_is_finally_rebuilt() {
-    // Some reconcile errors are structural (a workspace over the scan
-    // cap) and no amount of retrying fixes them. The driver must not poll
-    // a wedged layer at the fast cadence forever, and must not advertise
-    // `running` while it reports `terminal`.
     let (journal, status) = drive_for(
         vec![Script::ReconcileFails],
         // Long enough to escalate to terminal (~31s) and wait out one
@@ -463,11 +446,6 @@ async fn a_rapidly_rewritten_policy_file_does_not_rebuild_every_tick() {
 
 #[tokio::test(start_paused = true)]
 async fn a_settled_policy_edit_does_rebuild_exactly_once() {
-    // One healthy tick on the base policy, then the edit appears and
-    // HOLDS. Exactly one rebuild: the debounce absorbs the first sighting,
-    // the second confirms, and the rebuilt layer adopts the new
-    // fingerprint so it must never rebuild again. `>= 2` here would hide
-    // a rebuild-forever regression.
     let (journal, _) = drive_for(
         vec![Script::Healthy, Script::PolicyChanged],
         std::time::Duration::from_secs(5),
@@ -482,12 +460,6 @@ async fn a_settled_policy_edit_does_rebuild_exactly_once() {
 
 #[tokio::test(start_paused = true)]
 async fn a_second_disruption_on_the_same_layer_is_rereported() {
-    // The counter seam exists for exactly this: a sticky bool can be
-    // edge-triggered once per layer, so after the first report-and-clear
-    // every later disruption on the same live watch was silently
-    // swallowed — a status reader saw "healthy" through a genuinely new
-    // root-swap. With the count, each new disruption re-raises degraded
-    // and a clean tick still clears it afterwards.
     let (journal, _) = drive_for(
         vec![
             Script::Healthy,
@@ -649,9 +621,7 @@ async fn a_flush_racing_teardown_never_claims_settled() {
 
 #[tokio::test(start_paused = true)]
 async fn cancellation_is_not_delayed_by_a_terminal_backoff() {
-    // The slow probe must never hold up workspace close.
     let (handle, cancel, _journal, _status, _flush_tx) = spawn_loop(vec![Script::StartFails]);
-    // Let it escalate deep into the backoff.
     tokio::time::sleep(std::time::Duration::from_secs(120)).await;
     let before = tokio::time::Instant::now();
     cancel.cancel();
@@ -690,14 +660,6 @@ async fn a_flush_during_a_backoff_answers_promptly_and_honestly() {
 
 #[tokio::test(start_paused = true)]
 async fn a_flush_does_not_settle_over_a_pending_policy_rebuild() {
-    // Pass 1 sees a new policy fingerprint for the first time (debounce
-    // arms) and the tick converges — without the guard, the flush would
-    // certify deterministic ownership state the very pass before the
-    // rebuild/re-offer runs. It must answer settled:false until the
-    // debounce confirms and the rebuild completes.
-    // Pass 1 (Idle) builds the layer under the original policy — the
-    // edit lands after the build, as it does in life (a build adopts
-    // the fingerprint it reads, so a pre-build change never debounces).
     let (handle, cancel, journal, _status, flush_tx) =
         spawn_loop(vec![Script::Idle, Script::PolicyChangedIdle]);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -734,12 +696,6 @@ async fn a_flush_does_not_settle_over_a_pending_policy_rebuild() {
 
 #[tokio::test(start_paused = true)]
 async fn flush_polling_does_not_defeat_the_restart_backoff() {
-    // A client polling capture.flush must neither drive start attempts
-    // at its poll rate (each early pass would rebuild hot) nor push the
-    // scheduled rebuild out by resetting the wait (the deadline is an
-    // Instant that flush interruptions leave standing). Both mutations
-    // are killed by the start-count window below: poll-rate rebuilds
-    // overshoot it, a reset-on-poll deadline starves it to one start.
     let (handle, cancel, journal, _status, flush_tx) = spawn_loop(vec![Script::StartFails]);
     // First pass fails immediately; a backoff is armed.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -791,7 +747,6 @@ async fn a_flush_retries_file_failure_with_a_collection_reconcile_pending() {
         Script::Healthy,
         Script::Idle,
     ]);
-    // Wait for the initial tick, then queue flush before the next drive tick.
     while journal.lock().unwrap().ticks.is_empty() {
         tokio::task::yield_now().await;
     }

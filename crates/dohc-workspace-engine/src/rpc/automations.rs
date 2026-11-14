@@ -615,7 +615,6 @@ struct AutomationListClaimsParams {
     limit: Option<i64>,
 }
 
-// A claim by its id, or by the trigger key it claimed under.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AutomationGetClaimParams {
@@ -634,7 +633,6 @@ struct AutomationPruneHistoryParams {
     now_ms: Option<i64>,
 }
 
-/// The claims a page of run history holds when the caller names no limit.
 const AUTOMATION_CLAIM_PAGE_DEFAULT: i64 = 20;
 
 /// A run history cursor on the wire: `<created ms>:<claim id>`.

@@ -5,11 +5,19 @@ import { useAutomationButtons, useButtonStates } from "./collections/useAutomati
 import { buttonAutomation } from "./collections/automationDraft";
 import { useDatasetAutomations } from "./collections/useDatasetAutomations";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
-import type { DatasetCopyStatus, DatasetMigrationPreparation, DatasetSchemaChange } from "@dohc/cli/dataset";
+import type {
+  DatasetCopyStatus,
+  DatasetMigrationPreparation,
+  DatasetSchemaChange,
+} from "@dohc/cli/dataset";
 import { useCollectionTableViews } from "./useCollectionTableViews";
 import { bridge } from "./bridge";
 import { dirnameOf } from "./path";
-import { TransactionalCollectionPage, type TransactionalButtons, type TransactionalInvoke } from "./TransactionalCollectionPage";
+import {
+  TransactionalCollectionPage,
+  type TransactionalButtons,
+  type TransactionalInvoke,
+} from "./TransactionalCollectionPage";
 import { transactionalDescription } from "./transactionalCollectionModel";
 import { CollectionActionDialog } from "./CollectionActionDialog";
 import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
@@ -17,7 +25,15 @@ import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog
 import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDialog";
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { Laptop, TriangleAlert } from "lucide-react";
-import { KEEPABLE_COLLECTIONS_REFUSALS, namingCollectionMove, readCollectionServerUnreachable, readCollectionsRefusal, USE_THIS_COMPUTER, waitedForCollectionMove, type CollectionsRefusalKind } from "../ipc/errorWords";
+import {
+  KEEPABLE_COLLECTIONS_REFUSALS,
+  namingCollectionMove,
+  readCollectionServerUnreachable,
+  readCollectionsRefusal,
+  USE_THIS_COMPUTER,
+  waitedForCollectionMove,
+  type CollectionsRefusalKind,
+} from "../ipc/errorWords";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
@@ -29,7 +45,10 @@ import { useCollectionHistoryUndo } from "./useCollectionHistoryUndo";
 import { CollectionFieldsDialog } from "./CollectionFieldsDialog";
 import { CollectionArchiveDialog } from "./CollectionArchiveDialog";
 import { CollectionDeleteDialog } from "./CollectionDeleteDialog";
-import { CollectionCustomizeDialog, automationsFile } from "./collections/CollectionCustomizeDialog";
+import {
+  CollectionCustomizeDialog,
+  automationsFile,
+} from "./collections/CollectionCustomizeDialog";
 import { display, parsePage, type TransactionalRow } from "./transactionalCollectionModel";
 
 export interface ConnectedTransactionalCollectionProps {
@@ -58,28 +77,60 @@ export interface ConnectedTransactionalCollectionProps {
   initialOpenRecord?: string | null;
   /** The page opened a record in its panel, or closed the panel, for null. The host keeps it with the tab. */
   onOpenRecordChange?(record: string | null): void;
-  /** The record panel's width when the page starts. */
   initialRecordPanelWidth?: number;
   /** A resize of the record panel ended. */
   onRecordPanelWidthChange?(width: number): void;
 }
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
-  return <ScopedCollection key={`${props.workspaceId}:${props.datasetPath}:${props.tableId}`} {...props} />;
+  return (
+    <ScopedCollection
+      key={`${props.workspaceId}:${props.datasetPath}:${props.tableId}`}
+      {...props}
+    />
+  );
 }
-function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportError, onKeepCollections, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, historyRequested, onHistoryShown, initialOpenRecord, onOpenRecordChange, initialRecordPanelWidth, onRecordPanelWidthChange, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({
+  workspaceId,
+  datasetPath,
+  tableId,
+  onError: reportError,
+  onKeepCollections,
+  onSettled,
+  onFormCreated,
+  onLifecycleChanged,
+  onNotice,
+  onOpenFile,
+  onOpenScheduleSettings,
+  historyRequested,
+  onHistoryShown,
+  initialOpenRecord,
+  onOpenRecordChange,
+  initialRecordPanelWidth,
+  onRecordPanelWidthChange,
+  owner = true,
+}: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   // A request that only waited for this Collection's move, which stopped,
   // files a quiet row, and the row names the Collection.
   const described = useRef(dataset);
   described.current = dataset;
-  const onError = useCallback((...report: Parameters<typeof reportError>) => {
-    const [fallback, error, ...rest] = report;
-    reportError(fallback, described.current && waitedForCollectionMove(error) ? namingCollectionMove(error, described.current.name) : error, ...rest);
-  }, [reportError]);
+  const onError = useCallback(
+    (...report: Parameters<typeof reportError>) => {
+      const [fallback, error, ...rest] = report;
+      reportError(
+        fallback,
+        described.current && waitedForCollectionMove(error)
+          ? namingCollectionMove(error, described.current.name)
+          : error,
+        ...rest,
+      );
+    },
+    [reportError],
+  );
   // One row in Notices for this page's failed reads of the Collection; a read that succeeds removes it.
   const openIdentity = `collection-open:${datasetPath}`;
-  const addressInput = <T extends { datasetId: string },>(input: T) => {
+  const addressInput = <T extends { datasetId: string }>(input: T) => {
     const { datasetId: expectedDatasetId, ...fields } = input;
     return { ...fields, datasetPath, expectedDatasetId };
   };
@@ -87,7 +138,9 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
   const [copy, setCopy] = useState<DatasetCopyStatus | undefined>();
   const [loading, setLoading] = useState(true);
   // Why this computer cannot use the workspace's Collections; the page says so in place.
-  const [refusal, setRefusal] = useState<{ kind: CollectionsRefusalKind; words: string } | null>(null);
+  const [refusal, setRefusal] = useState<{ kind: CollectionsRefusalKind; words: string } | null>(
+    null,
+  );
   // Why the page shows no records: its server is out of reach and this computer has no saved copy.
   const [unreachable, setUnreachable] = useState<string | null>(null);
   const [creatingForm, setCreatingForm] = useState(false);
@@ -110,8 +163,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
   const [customAction, setCustomAction] = useState<string | null>(null);
   const [managingAccess, setManagingAccess] = useState(false);
   const [exportingRecovery, setExportingRecovery] = useState(false);
-  const [archiving, setArchiving] = useState(false), [restoring, setRestoring] = useState(false);
-  const [deletingCollection, setDeletingCollection] = useState(false), [deleted, setDeleted] = useState(false);
+  const [archiving, setArchiving] = useState(false),
+    [restoring, setRestoring] = useState(false);
+  const [deletingCollection, setDeletingCollection] = useState(false),
+    [deleted, setDeleted] = useState(false);
   const restoreLock = useRef(false);
   const [recordsVersion, setRecordsVersion] = useState(0);
   // Rises when automations changed records; the table reads them again in place.
@@ -121,90 +176,190 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
   const request = useRef(0);
   // The page, not a dialog in it, decides whether an approval that finished still refreshes it and opens the builder.
   const pageOpen = useRef(true);
-  useEffect(() => { pageOpen.current = true; return () => { pageOpen.current = false; }; }, []);
+  useEffect(() => {
+    pageOpen.current = true;
+    return () => {
+      pageOpen.current = false;
+    };
+  }, []);
   // Says whether this read showed the Collection, failed, or gave way to a newer read.
   const refresh = useCallback(async (): Promise<"read" | "failed" | "superseded"> => {
     const sequence = ++request.current;
     setLoading(true);
     try {
-      const result = await bridge().dataset({ workspaceId, datasetPath, expectedDatasetId: describedId.current, action: "describe", ...(owner ? { includeArchived: true } : {}) });
+      const result = await bridge().dataset({
+        workspaceId,
+        datasetPath,
+        expectedDatasetId: describedId.current,
+        action: "describe",
+        ...(owner ? { includeArchived: true } : {}),
+      });
       if (sequence !== request.current) return "superseded";
-      if (result.kind !== "description") throw Error("dohc could not read this Collection. Try again.");
+      if (result.kind !== "description")
+        throw Error("dohc could not read this Collection. Try again.");
       describedId.current = result.dataset.datasetId;
       onSettled?.(openIdentity);
       setRefusal(null);
       setUnreachable(null);
       setDataset(result.dataset);
       setCopy(result.copy);
-      setRecordsVersion(value => value + 1);
+      setRecordsVersion((value) => value + 1);
       return "read";
     } catch (error) {
       if (sequence !== request.current) return "superseded";
-      setRecordsVersion(value => value + 1);
-      const refused = readCollectionsRefusal(error), away = refused ? null : readCollectionServerUnreachable(error);
+      setRecordsVersion((value) => value + 1);
+      const refused = readCollectionsRefusal(error),
+        away = refused ? null : readCollectionServerUnreachable(error);
       setRefusal(refused);
       setUnreachable(away);
-      // Collections this computer cannot use any more, or cannot reach, stop showing, in place.
       if (refused || away) setDataset(null);
-      else onError("Could not open this Collection.", error, () => { void refresh(); }, openIdentity);
+      else
+        onError(
+          "Could not open this Collection.",
+          error,
+          () => {
+            void refresh();
+          },
+          openIdentity,
+        );
       return "failed";
-    } finally { if (sequence === request.current) setLoading(false); }
+    } finally {
+      if (sequence === request.current) setLoading(false);
+    }
   }, [workspaceId, datasetPath, onError, onSettled, openIdentity, owner]);
-  useEffect(() => { void refresh(); return () => { request.current++; deleteResult.current?.(false); deleteResult.current = null; }; }, [refresh]);
-  // The Collection may have changed somewhere else, as through the CLI, which tells this page nothing.
-  const retryFieldChange = useCallback(async (change: DatasetSchemaChange) => {
-    // A newer read, as after a change to the rules, replaces this one, so read again until one shows the Collection.
-    let read;
-    do read = await refresh(); while (read === "superseded" && pageOpen.current);
-    if (read !== "read" || !pageOpen.current) return;
-    setFieldRetry({ change });
-    setEditingFields(open => open || true);
+  useEffect(() => {
+    void refresh();
+    return () => {
+      request.current++;
+      deleteResult.current?.(false);
+      deleteResult.current = null;
+    };
   }, [refresh]);
+  // The Collection may have changed somewhere else, as through the CLI, which tells this page nothing.
+  const retryFieldChange = useCallback(
+    async (change: DatasetSchemaChange) => {
+      // A newer read, as after a change to the rules, replaces this one, so read again until one shows the Collection.
+      let read;
+      do read = await refresh();
+      while (read === "superseded" && pageOpen.current);
+      if (read !== "read" || !pageOpen.current) return;
+      setFieldRetry({ change });
+      setEditingFields((open) => open || true);
+    },
+    [refresh],
+  );
   const loadMigrationPreview: MigrationDataPreviewProps["onLoad"] = async (input, signal) => {
     signal.throwIfAborted();
     const result = await bridge().dataset({ ...input, action: "migrationPreviewPage" });
     signal.throwIfAborted();
-    if (result.kind !== "migration-preview-page") throw Error("dohc could not read the data preview. Prepare this review again.");
+    if (result.kind !== "migration-preview-page")
+      throw Error("dohc could not read the data preview. Prepare this review again.");
     const { kind: _, ...page } = result;
     return page;
   };
-  const invoke = async (input: TransactionalInvoke, signal: AbortSignal, cancellableAction = false) => {
+  const invoke = async (
+    input: TransactionalInvoke,
+    signal: AbortSignal,
+    cancellableAction = false,
+  ) => {
     const sequence = request.current;
     signal.throwIfAborted();
     const invocationId = cancellableAction ? crypto.randomUUID() : undefined;
-    const cancel = () => { if (invocationId) void bridge().dataset({ action: "cancelInvoke", workspaceId: input.workspaceId, invocationId }).catch(() => {}); };
+    const cancel = () => {
+      if (invocationId)
+        void bridge()
+          .dataset({ action: "cancelInvoke", workspaceId: input.workspaceId, invocationId })
+          .catch(() => {});
+    };
     if (invocationId) signal.addEventListener("abort", cancel, { once: true });
     let result;
-    try { result = await bridge().dataset({ ...addressInput(input), action: "invoke", ...(invocationId ? { invocationId } : {}) }); }
-    finally { signal.removeEventListener("abort", cancel); }
+    try {
+      result = await bridge().dataset({
+        ...addressInput(input),
+        action: "invoke",
+        ...(invocationId ? { invocationId } : {}),
+      });
+    } finally {
+      signal.removeEventListener("abort", cancel);
+    }
     if (!cancellableAction) signal.throwIfAborted();
-    if (result.kind === "refused") throw Object.assign(new Error(result.message), { code: "operation_refused", refusal: { code: result.code, message: result.message } });
-    if (result.kind !== "invoked") throw Error("dohc could not confirm the Collection action. Try again.");
+    if (result.kind === "refused")
+      throw Object.assign(new Error(result.message), {
+        code: "operation_refused",
+        refusal: { code: result.code, message: result.message },
+      });
+    if (result.kind !== "invoked")
+      throw Error("dohc could not confirm the Collection action. Try again.");
     if (sequence === request.current && !signal.aborted) setCopy(result.copy);
     return result;
   };
-  const invokeAction = (input: TransactionalInvoke, signal: AbortSignal) => invoke(input, signal, true);
-  const historyUndo = useCollectionHistoryUndo({ workspaceId, datasetId, revision: dataset?.revision, revisionSha256: dataset?.revisionSha256, invoke, onError,
-    onChanged: () => { setRecordsVersion(value => value + 1); onNotice?.("Reversed the edit"); } });
+  const invokeAction = (input: TransactionalInvoke, signal: AbortSignal) =>
+    invoke(input, signal, true);
+  const historyUndo = useCollectionHistoryUndo({
+    workspaceId,
+    datasetId,
+    revision: dataset?.revision,
+    revisionSha256: dataset?.revisionSha256,
+    invoke,
+    onError,
+    onChanged: () => {
+      setRecordsVersion((value) => value + 1);
+      onNotice?.("Reversed the edit");
+    },
+  });
   const columns = useMemo(() => dataset && transactionalDescription(dataset), [dataset]);
   // Button fields: what each shows, and presses in flight from this window.
   // A table with none asks main nothing.
-  const table = dataset?.tables.find(candidate => candidate.tableId === tableId);
-  const buttonFields = useMemo(() => table?.fields.flatMap(field => field.type === "button" ? [field.name] : []) ?? [], [table]);
-  const buttons = useAutomationButtons({ workspaceId, of: table && buttonFields.length > 0 ? { datasetId, table: table.name } : null, onError, onNotice: message => onNotice?.(message) });
-  useEffect(() => { void buttons?.refresh(); }, [buttons, dataset]);
+  const table = dataset?.tables.find((candidate) => candidate.tableId === tableId);
+  const buttonFields = useMemo(
+    () => table?.fields.flatMap((field) => (field.type === "button" ? [field.name] : [])) ?? [],
+    [table],
+  );
+  const buttons = useAutomationButtons({
+    workspaceId,
+    of: table && buttonFields.length > 0 ? { datasetId, table: table.name } : null,
+    onError,
+    onNotice: (message) => onNotice?.(message),
+  });
+  useEffect(() => {
+    void buttons?.refresh();
+  }, [buttons, dataset]);
   // A run or its Undo changes records without touching a file, whether a press, a record change, or a schedule
   // started it, so the table reads them again when runs end.
-  useEffect(() => bridge().onAutomationRunsChanged(event => { if (event.workspaceId === workspaceId) setRecordsChanged(value => value + 1); }), [workspaceId]);
+  useEffect(
+    () =>
+      bridge().onAutomationRunsChanged((event) => {
+        if (event.workspaceId === workspaceId) setRecordsChanged((value) => value + 1);
+      }),
+    [workspaceId],
+  );
   // A change to this Collection's fields applied, as from a chat's change card, so the page reads it again.
-  useEffect(() => bridge().onCollectionRulesChanged(event => {
-    if (event.workspaceId === workspaceId && event.datasetId === describedId.current) void refresh();
-  }), [workspaceId, refresh]);
-  const buttonColumns = useMemo((): TransactionalButtons | undefined => buttons === null || buttonFields.length === 0 ? undefined : {
-    fields: buttonFields,
-    // A dataset record's id goes to main as JSON, since the table's key can be a number.
-    render: (field, row) => <RecordButton buttons={buttons} field={field} recordId={JSON.stringify(row.id)} recordLabel={`record ${String(row.id)}`} />,
-  }, [buttons, buttonFields]);
+  useEffect(
+    () =>
+      bridge().onCollectionRulesChanged((event) => {
+        if (event.workspaceId === workspaceId && event.datasetId === describedId.current)
+          void refresh();
+      }),
+    [workspaceId, refresh],
+  );
+  const buttonColumns = useMemo(
+    (): TransactionalButtons | undefined =>
+      buttons === null || buttonFields.length === 0
+        ? undefined
+        : {
+            fields: buttonFields,
+            // A dataset record's id goes to main as JSON, since the table's key can be a number.
+            render: (field, row) => (
+              <RecordButton
+                buttons={buttons}
+                field={field}
+                recordId={JSON.stringify(row.id)}
+                recordLabel={`record ${String(row.id)}`}
+              />
+            ),
+          },
+    [buttons, buttonFields],
+  );
   const buttonStates = useButtonStates(editingFields ? buttons : null);
   // Choose what a button does: the ⚡ builder opens on an automation that
   // the button starts, which runs the table's action of the same name on
@@ -215,324 +370,767 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
     if (!table || !dataset || !pageOpen.current) return;
     setEditingFields(false);
     // Labels need not be unique, so only one action of that name fills the step in.
-    const named = dataset.operations.filter(operation => operation.tableId === table.tableId && operation.kind === "action" && !operation.readOnly && operation.label === field);
+    const named = dataset.operations.filter(
+      (operation) =>
+        operation.tableId === table.tableId &&
+        operation.kind === "action" &&
+        !operation.readOnly &&
+        operation.label === field,
+    );
     const action = named.length === 1 ? named[0] : undefined;
-    automations.start(buttonAutomation(field, table.name, action === undefined ? []
-      : [{ kind: "invoke", collection: null, operation: action.name, input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }]));
+    automations.start(
+      buttonAutomation(
+        field,
+        table.name,
+        action === undefined
+          ? []
+          : [
+              {
+                kind: "invoke",
+                collection: null,
+                operation: action.name,
+                input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }],
+              },
+            ],
+      ),
+    );
   };
-  const automations = useDatasetAutomations({ workspaceId, datasetId, tableId, dataset, onError,
-    onRecordsChanged: () => setRecordsVersion(value => value + 1),
-    onNotice: (message, undo) => onNotice?.(message, undo), onOpenFile, onOpenScheduleSettings,
-    onOpenFields: owner ? () => { setViewingHistory(false); setEditingFields(true); } : undefined });
+  const automations = useDatasetAutomations({
+    workspaceId,
+    datasetId,
+    tableId,
+    dataset,
+    onError,
+    onRecordsChanged: () => setRecordsVersion((value) => value + 1),
+    onNotice: (message, undo) => onNotice?.(message, undo),
+    onOpenFile,
+    onOpenScheduleSettings,
+    onOpenFields: owner
+      ? () => {
+          setViewingHistory(false);
+          setEditingFields(true);
+        }
+      : undefined,
+  });
   // The view source controls are the owner's. Anyone else changes the layout on their own computer.
-  const views = useCollectionTableViews({ enabled: owner, workspaceId, dataset, tableId, onError, onNotice });
+  const views = useCollectionTableViews({
+    enabled: owner,
+    workspaceId,
+    dataset,
+    tableId,
+    onError,
+    onNotice,
+  });
   async function exportRecovery(signal: AbortSignal) {
     signal.throwIfAborted();
-    const result = await bridge().dataset({ action: "export", workspaceId, datasetPath, expectedDatasetId: datasetId });
+    const result = await bridge().dataset({
+      action: "export",
+      workspaceId,
+      datasetPath,
+      expectedDatasetId: datasetId,
+    });
     signal.throwIfAborted();
-    if (result.kind !== "exported") throw Error("dohc could not save this recovery file. Try again.");
+    if (result.kind !== "exported")
+      throw Error("dohc could not save this recovery file. Try again.");
     return result.savedPath;
   }
-  if (deleted) return <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted">Collection deleted</div>;
+  if (deleted)
+    return (
+      <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted">
+        Collection deleted
+      </div>
+    );
   // The same place as the tab's fallback lines, which these take over.
   if ((!dataset || !columns) && refusal && !loading) {
     const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
-    return <EmptyState data-testid="collection-refusal" icon={held ? Laptop : TriangleAlert} tone={held ? "warning" : "danger"} title={refusal.words}>
-      <div className="flex flex-wrap justify-center gap-2">
-        {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeepCollections &&
-          <SecondaryButton onClick={() => onKeepCollections(() => { void refresh(); })}>{USE_THIS_COMPUTER}</SecondaryButton>}
-        {refusal.kind !== "unclaimed" && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
-      </div>
-    </EmptyState>;
+    return (
+      <EmptyState
+        data-testid="collection-refusal"
+        icon={held ? Laptop : TriangleAlert}
+        tone={held ? "warning" : "danger"}
+        title={refusal.words}
+      >
+        <div className="flex flex-wrap justify-center gap-2">
+          {KEEPABLE_COLLECTIONS_REFUSALS.includes(refusal.kind) && onKeepCollections && (
+            <SecondaryButton
+              onClick={() =>
+                onKeepCollections(() => {
+                  void refresh();
+                })
+              }
+            >
+              {USE_THIS_COMPUTER}
+            </SecondaryButton>
+          )}
+          {refusal.kind !== "unclaimed" && (
+            <SecondaryButton
+              onClick={() => {
+                void refresh();
+              }}
+            >
+              Try again
+            </SecondaryButton>
+          )}
+        </div>
+      </EmptyState>
+    );
   }
-  if (!dataset || !columns) return loading ? <SkeletonRows inSlot layout="panel" label="Opening collection…" /> : <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
-    <span className="text-sm text-muted">{unreachable ?? "Open this Collection to see its records."}</span>
-    <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>
-  </div>;
+  if (!dataset || !columns)
+    return loading ? (
+      <SkeletonRows inSlot layout="panel" label="Opening collection…" />
+    ) : (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
+        <span className="text-sm text-muted">
+          {unreachable ?? "Open this Collection to see its records."}
+        </span>
+        <SecondaryButton
+          onClick={() => {
+            void refresh();
+          }}
+        >
+          Try again
+        </SecondaryButton>
+      </div>
+    );
   async function restore() {
     if (restoreLock.current || !owner || copy?.offline) return;
-    restoreLock.current = true; const sequence = request.current; setRestoring(true);
+    restoreLock.current = true;
+    const sequence = request.current;
+    setRestoring(true);
     try {
-      const result = await bridge().dataset({ workspaceId, datasetPath, expectedDatasetId: datasetId, action: "restore" });
+      const result = await bridge().dataset({
+        workspaceId,
+        datasetPath,
+        expectedDatasetId: datasetId,
+        action: "restore",
+      });
       if (sequence !== request.current) return;
-      if (result.kind !== "lifecycle-updated" || result.archived) throw Error("dohc could not confirm the restore. Refresh the Collection.");
-      setRestoring(false); onLifecycleChanged?.(); await refresh();
-    } catch (error) { if (sequence === request.current) onError("Could not restore this Collection.", error, () => { void restore(); }); }
-    finally { restoreLock.current = false; if (sequence === request.current) setRestoring(false); }
+      if (result.kind !== "lifecycle-updated" || result.archived)
+        throw Error("dohc could not confirm the restore. Refresh the Collection.");
+      setRestoring(false);
+      onLifecycleChanged?.();
+      await refresh();
+    } catch (error) {
+      if (sequence === request.current)
+        onError("Could not restore this Collection.", error, () => {
+          void restore();
+        });
+    } finally {
+      restoreLock.current = false;
+      if (sequence === request.current) setRestoring(false);
+    }
   }
-  if (dataset.archived) return <><div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
-    <h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2>
-    <p className="m-0 text-sm text-muted">Records and files are saved. Restore the Collection to use them.</p>
-    {copy?.offline && <p role="status" className="m-0 text-[12px] text-muted">Offline copy · {copy.host ? `Restoring needs ${copy.host}` : "Connect to restore this Collection."}</p>}
-    {owner && <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>{restoring ? "Restoring…" : "Restore Collection"}</SecondaryButton>}
-    <SecondaryButton disabled={loading || restoring} onClick={() => void refresh()}>Refresh</SecondaryButton>
-    {owner && !copy?.offline && <SecondaryButton className="text-danger" disabled={loading || restoring} onClick={() => setDeletingCollection(true)}>Delete permanently…</SecondaryButton>}
-  </div>{deletingCollection && owner && !copy?.offline && <CollectionDeleteDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} folder={dirnameOf(datasetPath)}
-    onClose={() => setDeletingCollection(false)} onError={onError} onExport={exportRecovery} onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
-    onDeleted={() => { request.current++; setDeletingCollection(false); setDeleted(true); onLifecycleChanged?.(); onNotice?.("Collection deleted"); }}
-    onLoad={async (input, signal) => {
-      signal.throwIfAborted();
-      const result = await bridge().dataset({ ...addressInput(input), action: "deletePreview" });
-      signal.throwIfAborted();
-      if (result.kind !== "delete-preview") throw Error("dohc could not read the deletion preview. Try again.");
-      return result;
-    }} onDelete={async (input, signal) => {
-      signal.throwIfAborted();
-      const result = await bridge().dataset({ ...addressInput(input), action: "delete" });
-      signal.throwIfAborted();
-      if (result.kind !== "deleted") throw Error("dohc could not confirm deletion. Refresh the Collection.");
-      return result;
-    }} />}</>;
+  if (dataset.archived)
+    return (
+      <>
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
+          <h2 className="m-0 text-sm font-semibold text-ink">{dataset.name} is archived</h2>
+          <p className="m-0 text-sm text-muted">
+            Records and files are saved. Restore the Collection to use them.
+          </p>
+          {copy?.offline && (
+            <p role="status" className="m-0 text-[12px] text-muted">
+              Offline copy ·{" "}
+              {copy.host ? `Restoring needs ${copy.host}` : "Connect to restore this Collection."}
+            </p>
+          )}
+          {owner && (
+            <SecondaryButton disabled={restoring || copy?.offline} onClick={() => void restore()}>
+              {restoring ? "Restoring…" : "Restore Collection"}
+            </SecondaryButton>
+          )}
+          <SecondaryButton disabled={loading || restoring} onClick={() => void refresh()}>
+            Refresh
+          </SecondaryButton>
+          {owner && !copy?.offline && (
+            <SecondaryButton
+              className="text-danger"
+              disabled={loading || restoring}
+              onClick={() => setDeletingCollection(true)}
+            >
+              Delete permanently…
+            </SecondaryButton>
+          )}
+        </div>
+        {deletingCollection && owner && !copy?.offline && (
+          <CollectionDeleteDialog
+            workspaceId={workspaceId}
+            datasetId={datasetId}
+            name={dataset.name}
+            folder={dirnameOf(datasetPath)}
+            onClose={() => setDeletingCollection(false)}
+            onError={onError}
+            onExport={exportRecovery}
+            onSaved={(path) => onNotice?.(`Saved recovery file: ${path}`)}
+            onDeleted={() => {
+              request.current++;
+              setDeletingCollection(false);
+              setDeleted(true);
+              onLifecycleChanged?.();
+              onNotice?.("Collection deleted");
+            }}
+            onLoad={async (input, signal) => {
+              signal.throwIfAborted();
+              const result = await bridge().dataset({
+                ...addressInput(input),
+                action: "deletePreview",
+              });
+              signal.throwIfAborted();
+              if (result.kind !== "delete-preview")
+                throw Error("dohc could not read the deletion preview. Try again.");
+              return result;
+            }}
+            onDelete={async (input, signal) => {
+              signal.throwIfAborted();
+              const result = await bridge().dataset({ ...addressInput(input), action: "delete" });
+              signal.throwIfAborted();
+              if (result.kind !== "deleted")
+                throw Error("dohc could not confirm deletion. Refresh the Collection.");
+              return result;
+            }}
+          />
+        )}
+      </>
+    );
   // The page docks the ⚡ panel at the right of its view. Open source opens the file that describes the Collection.
-  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onSettled={onSettled}
-    buttons={buttonColumns}
-    automations={automations.toggle}
-    panel={automations.panel}
-    initialOpenRecord={initialOpenRecord}
-    onOpenRecordChange={onOpenRecordChange}
-    initialRecordPanelWidth={initialRecordPanelWidth}
-    onRecordPanelWidthChange={onRecordPanelWidthChange}
-    fieldMarks={automations.fieldMarks}
-    onNotice={message => onNotice?.(message)}
-    activeView={views?.active ?? null}
-    views={views ?? undefined}
-    onOpenSource={() => onOpenFile(datasetPath)}
-    copy={copy}
-    onRefresh={() => { void refresh(); }}
-    onArchive={owner && !copy?.offline ? () => setArchiving(true) : undefined}
-    onCreateForm={owner && !copy?.offline ? () => setCreatingForm(true) : undefined}
-    onTransferCsv={owner && !copy?.offline ? () => setTransferringCsv(true) : undefined}
-    onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
-    onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
-    onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
-    onAddDateField={owner && !copy?.offline ? () => setEditingFields("date") : undefined}
-    onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
-    onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
-    onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
-    onCustomAction={setCustomAction}
-    confirmDelete={row => new Promise(resolve => { deleteResult.current?.(false); deleteResult.current = resolve; setDeletion(row); })}
-    uploadFile={async ({ file, ...input }, signal) => {
-      signal.throwIfAborted();
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      signal.throwIfAborted();
-      let binary = "";
-      for (let offset = 0; offset < bytes.length; offset += 16_384) binary += String.fromCharCode(...bytes.subarray(offset, offset + 16_384));
-      const result = await bridge().dataset({ ...addressInput(input), action: "upload", name: file.name, contentType: file.type, bytesBase64: btoa(binary) });
-      signal.throwIfAborted();
-      if (result.kind !== "uploaded") throw Error("dohc could not confirm the file upload. Try again.");
-      return result.file;
-    }}
-    readFile={async (input, signal) => {
-      signal.throwIfAborted();
-      const result = await bridge().dataset({ ...addressInput(input), action: "file" });
-      signal.throwIfAborted();
-      if (result.kind !== "file") throw Error("dohc could not read the file. Try again.");
-      return result;
-    }}
-    resolveRelation={async (input, signal) => {
-      signal.throwIfAborted();
-      const relation = columns.tables.flatMap(table => table.fields).find(field => field.fieldId === input.fieldId)?.relation;
-      if (!relation || relation.datasetId !== datasetId) throw Error("This related Collection is unavailable.");
-      const target = dataset.tables.find(table => table.tableId === relation.tableId);
-      const read = dataset.operations.find(operation => operation.tableId === relation.tableId && operation.kind === "read" && operation.readOnly && operation.fieldIds.includes(relation.fieldId));
-      if (!target || !read) throw Error("This related Collection has no permitted read action.");
-      const response = await bridge().dataset({ action: "invoke", workspaceId, datasetPath, expectedDatasetId: datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256,
-        operationId: read.operationId, input: { limit: 20, search: input.search }, idempotencyKey: crypto.randomUUID() });
-      signal.throwIfAborted();
-      if (response.kind !== "invoked") throw Error("dohc could not read related records. Try again.");
-      const page = parsePage(response.result, read.fieldIds);
-      const label = target.fields.find(field => read.fieldIds.includes(field.fieldId) && field.fieldId !== relation.fieldId && field.type === "text");
-      return { options: page.rows.map(row => {
-        const value = row.values[relation.fieldId];
-        if (!(typeof value === "string" || typeof value === "number" && Number.isSafeInteger(value))) throw Error("The related Collection returned an invalid identity.");
-        return { value, label: display(label ? row.values[label.fieldId] : value) || String(value) };
-      }), hasMore: page.nextCursor !== null };
-    }}
-    invoke={invoke} /></div>
-    {views?.dialog}
-    {viewingPending && owner && !copy?.offline && <CollectionPendingResponsesDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
-      onClose={() => setViewingPending(false)} onLoad={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...addressInput(input), action: "pendingAttempts" });
-        signal.throwIfAborted();
-        if (result.kind !== "pending-attempts") throw Error("dohc could not read pending responses. Try again.");
-        const { kind: _, ...page } = result;
-        return page;
-      }} onReconcile={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...addressInput(input), action: "reconcileAttempt" });
-        signal.throwIfAborted();
-        if (result.kind !== "attempt-reconciled") throw Error("dohc could not confirm the cleared retry. Refresh pending responses.");
-        onNotice?.("Cleared the saved response's retry");
-        return result;
-      }} onCancel={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...addressInput(input), action: "cancelAttempt" });
-        signal.throwIfAborted();
-        if (result.kind !== "attempt-cancelled") throw Error("dohc could not confirm cancellation. Refresh pending responses.");
-        onNotice?.("Cancelled the pending response");
-        return result;
-      }} />}
-    {archiving && <CollectionArchiveDialog datasetPath={datasetPath} workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
-      onClose={() => setArchiving(false)} onChanged={() => { onLifecycleChanged?.(); void refresh(); }} />}
-    {viewingHistory && owner && !copy?.offline && <CollectionHistoryDialog workspaceId={workspaceId} datasetId={datasetId} name={dataset.name} onError={onError}
-      onOpenSource={path => { setViewingHistory(false); onOpenFile(path); }}
-      onEditFields={() => { setViewingHistory(false); setEditingFields(true); }}
-      onReviewSource={() => { setViewingHistory(false); setHistoryRestore(undefined); setReviewingSchema(true); }}
-      onLoadRevision={async (revisionSha256, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetPath, expectedDatasetId: datasetId, revisionSha256 });
-        signal.throwIfAborted();
-        if (result.kind !== "history-revision") throw Error("The saved Collection rules are unavailable.");
-        return result;
-      }}
-      onRestoreRevision={async (targetRevisionSha256, changedRevisionSha256, signal) => {
-        signal.throwIfAborted(); const sequence = request.current;
-        const result = await bridge().dataset({ action: "prepareHistoryRestore", workspaceId, datasetPath, expectedDatasetId: datasetId,
-          revision: dataset.revision, revisionSha256: dataset.revisionSha256, targetRevisionSha256, changedRevisionSha256 });
-        signal.throwIfAborted(); if (sequence !== request.current) return;
-        if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this reversal. Refresh History.");
-        setHistoryRestore(result); setViewingHistory(false); setReviewingSchema(true);
-      }}
-      onUndo={input => { void historyUndo.run(input); }} pendingUndo={historyUndo.pending} undoBusy={historyUndo.busy} refreshVersion={recordsVersion}
-      onClose={() => setViewingHistory(false)} onLoad={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...addressInput(input), action: "history" });
-        signal.throwIfAborted();
-        if (result.kind !== "history") throw Error("dohc could not read this Collection's history. Try again.");
-        const { kind: _, ...page } = result;
-        return page;
-      }} />}
-    {transferringCsv && <DatasetTransferDialog workspaceId={workspaceId} dataset={columns} tableId={tableId} invoke={invoke} onError={onError}
-      onClose={() => setTransferringCsv(false)} onImported={() => setRecordsVersion(value => value + 1)}
-      onSave={async (file, signal) => {
-        signal.throwIfAborted();
-        if (new TextEncoder().encode(file.content).byteLength > 10 * 1024 * 1024) throw Error("This file is larger than the workspace text limit. Export a smaller Collection view.");
-        const sequence = request.current;
-        const dot = file.name.lastIndexOf(".");
-        const stem = dot > 0 ? file.name.slice(0, dot) : file.name;
-        const extension = dot > 0 ? file.name.slice(dot) : ".txt";
-        const relativePath = `${stem}-${crypto.randomUUID()}${extension}`;
-        const result = await bridge().createWorkspaceFile({ workspaceId, relativePath, initialText: file.content });
-        signal.throwIfAborted();
-        if (sequence !== request.current) throw Error("The workspace changed while saving this file.");
-        return result;
-      }} />}
-    {managingAccess && <CollectionPermissionsDialog datasetPath={datasetPath} workspaceId={workspaceId} dataset={dataset} onClose={() => setManagingAccess(false)} onError={onError} onSettled={onSettled} onMoved={() => void refresh()} />}
-    {exportingRecovery && owner && !copy?.offline && <CollectionRecoveryExportDialog collectionName={dataset.name} onClose={() => setExportingRecovery(false)} onError={onError}
-      onSaved={path => onNotice?.(`Saved recovery file: ${path}`)}
-      onExport={exportRecovery} />}
-    {customAction && <CollectionActionDialog workspaceId={workspaceId} dataset={dataset} operationId={customAction} invoke={invokeAction}
-      onClose={() => setCustomAction(null)} onSettled={() => setRecordsVersion(value => value + 1)} />}
-    {customizing && automations.collectionPath !== null && <CollectionCustomizeDialog name={table?.name ?? dataset.name}
-      files={[automationsFile(automations.collectionPath, automations.fileMade)]} onOpenFile={onOpenFile} onClose={() => setCustomizing(false)} />}
-    {editingFields && <CollectionFieldsDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId} onError={onError}
-      addType={editingFields === "date" ? "date" : undefined}
-      buttonStates={buttonStates}
-      onChooseButton={table ? chooseButton : undefined}
-      onButtonAdded={table ? chooseButton : undefined}
-      onLoadPreview={loadMigrationPreview}
-      retry={fieldRetry} onRetry={change => { void retryFieldChange(change); }}
-      onClose={() => { setEditingFields(false); setFieldRetry(null); }} onReviewSource={() => { setEditingFields(false); setFieldRetry(null); setReviewingSchema(true); }}
-      onPrepare={async (change, signal) => {
-        setFieldRetry(null);
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ action: "prepareSchemaChange", workspaceId, datasetPath, expectedDatasetId: datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, change });
-        signal.throwIfAborted();
-        if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this field change. Try again.");
-        return result;
-      }}
-      onApprove={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "approveMigration" });
-        if (result.kind !== "migrated") throw Error("dohc could not confirm this change. Refresh the Collection.");
-        // The change is approved even if its review closed meanwhile, so what
-        // follows it still happens, but only while this page is open.
-        if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
-        await refresh();
-      }}
-      onDiscard={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "discardMigration" });
-        signal.throwIfAborted();
-        if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
-      }} />}
-    {reviewingSchema && <CollectionMigrationReviewDialog initialPreparation={historyRestore} workspaceId={workspaceId} datasetId={datasetId} datasetPath={datasetPath} onError={onError}
-      onLoadPreview={loadMigrationPreview}
-      onClose={() => { setReviewingSchema(false); setHistoryRestore(undefined); }}
-      onPrepare={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...addressInput(input), datasetPath: input.datasetPath, action: "prepareMigration" });
-        signal.throwIfAborted();
-        if (result.kind !== "migration-prepared") throw Error("dohc could not prepare this change. Try again.");
-        return result;
-      }}
-      onApprove={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "approveMigration" });
-        if (result.kind !== "migrated") throw Error("dohc could not confirm this change. Refresh the Collection.");
-        // The change is approved even if its review closed meanwhile, so what
-        // follows it still happens, but only while this page is open.
-        if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
-        await refresh();
-      }}
-      onDiscard={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "discardMigration" });
-        signal.throwIfAborted();
-        if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
-      }} />}
-    {deletion && <DeleteCollectionRecordDialog collectionName={dataset.tables.find(table => table.tableId === tableId)?.name ?? dataset.name} recordId={deletion.id}
-      onCancel={() => { deleteResult.current?.(false); deleteResult.current = null; setDeletion(null); }}
-      onConfirm={() => { deleteResult.current?.(true); deleteResult.current = null; setDeletion(null); }} />}
-    {creatingForm && <CreateDatasetFormDialog workspaceId={workspaceId} dataset={dataset} tableId={tableId}
-      onClose={() => setCreatingForm(false)} onError={onError}
-      onLoadPreview={loadMigrationPreview}
-      onLoadSource={async signal => {
-        signal.throwIfAborted();
-        const sequence = request.current;
-        const result = await bridge().dataset({ action: "historyRevision", workspaceId, datasetPath, expectedDatasetId: datasetId, revisionSha256: dataset.revisionSha256 });
-        signal.throwIfAborted();
-        if (sequence !== request.current) throw Error("The Collection changed. Review its current rules again.");
-        if (result.kind !== "history-revision") throw Error("The saved Collection rules are unavailable.");
-        return { path: result.revision.definition.operationsPath, source: result.operationSource, sha256: result.revision.operationsSha256 };
-      }}
-      onPrepareChoices={async (input, signal) => {
-        signal.throwIfAborted();
-        const sequence = request.current;
-        const result = await bridge().dataset({ ...input, action: "prepareRelationChoices", workspaceId, datasetPath, expectedDatasetId: datasetId,
-          revision: dataset.revision, revisionSha256: dataset.revisionSha256, tableId });
-        signal.throwIfAborted();
-        if (sequence !== request.current) throw Error("The Collection changed. Prepare the choices again.");
-        if (result.kind !== "migration-prepared") throw Error("dohc could not prepare these choices. Try again.");
-        return result;
-      }}
-      onApproveChoices={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "approveMigration" });
-        if (result.kind !== "migrated") throw Error("dohc could not confirm these choices. Refresh the Collection.");
-        // The choices are approved even if the page read the Collection again
-        // meanwhile, as it does when they apply, so what follows still happens.
-        if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
-        setCreatingForm(false);
-        await refresh();
-      }}
-      onDiscardChoices={async (input, signal) => {
-        signal.throwIfAborted();
-        const result = await bridge().dataset({ ...input, action: "discardMigration" });
-        signal.throwIfAborted();
-        if (result.kind !== "migration-discarded") throw Error("dohc could not discard this review. Try again.");
-      }}
-      onCreate={async (input, signal) => {
-        signal.throwIfAborted();
-        const sequence = request.current;
-        const result = await bridge().dataset({ ...addressInput(input), action: "createForm", workspaceId });
-        signal.throwIfAborted();
-        if (sequence !== request.current) return;
-        if (result.kind === "partial") throw new CreationPartialError(result);
-        if (result.kind !== "form-created") throw Error("dohc could not confirm the form files. Try again.");
-        setCreatingForm(false);
-        onFormCreated(result.appRoot);
-      }} />}
-  </>;
+  return (
+    <>
+      <div className="flex h-full min-h-0 min-w-0 flex-1">
+        <TransactionalCollectionPage
+          recordsVersion={recordsVersion}
+          recordsChanged={recordsChanged}
+          workspaceId={workspaceId}
+          dataset={columns}
+          tableId={tableId}
+          onError={onError}
+          onSettled={onSettled}
+          buttons={buttonColumns}
+          automations={automations.toggle}
+          panel={automations.panel}
+          initialOpenRecord={initialOpenRecord}
+          onOpenRecordChange={onOpenRecordChange}
+          initialRecordPanelWidth={initialRecordPanelWidth}
+          onRecordPanelWidthChange={onRecordPanelWidthChange}
+          fieldMarks={automations.fieldMarks}
+          onNotice={(message) => onNotice?.(message)}
+          activeView={views?.active ?? null}
+          views={views ?? undefined}
+          onOpenSource={() => onOpenFile(datasetPath)}
+          copy={copy}
+          onRefresh={() => {
+            void refresh();
+          }}
+          onArchive={owner && !copy?.offline ? () => setArchiving(true) : undefined}
+          onCreateForm={owner && !copy?.offline ? () => setCreatingForm(true) : undefined}
+          onTransferCsv={owner && !copy?.offline ? () => setTransferringCsv(true) : undefined}
+          onHistory={owner && !copy?.offline ? () => setViewingHistory(true) : undefined}
+          onPendingResponses={owner && !copy?.offline ? () => setViewingPending(true) : undefined}
+          onReviewSchema={owner && !copy?.offline ? () => setEditingFields(true) : undefined}
+          onAddDateField={owner && !copy?.offline ? () => setEditingFields("date") : undefined}
+          onCustomize={automations.collectionPath !== null ? () => setCustomizing(true) : undefined}
+          onManageAccess={owner && !copy?.offline ? () => setManagingAccess(true) : undefined}
+          onExportRecovery={owner && !copy?.offline ? () => setExportingRecovery(true) : undefined}
+          onCustomAction={setCustomAction}
+          confirmDelete={(row) =>
+            new Promise((resolve) => {
+              deleteResult.current?.(false);
+              deleteResult.current = resolve;
+              setDeletion(row);
+            })
+          }
+          uploadFile={async ({ file, ...input }, signal) => {
+            signal.throwIfAborted();
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            signal.throwIfAborted();
+            let binary = "";
+            for (let offset = 0; offset < bytes.length; offset += 16_384)
+              binary += String.fromCharCode(...bytes.subarray(offset, offset + 16_384));
+            const result = await bridge().dataset({
+              ...addressInput(input),
+              action: "upload",
+              name: file.name,
+              contentType: file.type,
+              bytesBase64: btoa(binary),
+            });
+            signal.throwIfAborted();
+            if (result.kind !== "uploaded")
+              throw Error("dohc could not confirm the file upload. Try again.");
+            return result.file;
+          }}
+          readFile={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({ ...addressInput(input), action: "file" });
+            signal.throwIfAborted();
+            if (result.kind !== "file") throw Error("dohc could not read the file. Try again.");
+            return result;
+          }}
+          resolveRelation={async (input, signal) => {
+            signal.throwIfAborted();
+            const relation = columns.tables
+              .flatMap((table) => table.fields)
+              .find((field) => field.fieldId === input.fieldId)?.relation;
+            if (!relation || relation.datasetId !== datasetId)
+              throw Error("This related Collection is unavailable.");
+            const target = dataset.tables.find((table) => table.tableId === relation.tableId);
+            const read = dataset.operations.find(
+              (operation) =>
+                operation.tableId === relation.tableId &&
+                operation.kind === "read" &&
+                operation.readOnly &&
+                operation.fieldIds.includes(relation.fieldId),
+            );
+            if (!target || !read)
+              throw Error("This related Collection has no permitted read action.");
+            const response = await bridge().dataset({
+              action: "invoke",
+              workspaceId,
+              datasetPath,
+              expectedDatasetId: datasetId,
+              revision: dataset.revision,
+              revisionSha256: dataset.revisionSha256,
+              operationId: read.operationId,
+              input: { limit: 20, search: input.search },
+              idempotencyKey: crypto.randomUUID(),
+            });
+            signal.throwIfAborted();
+            if (response.kind !== "invoked")
+              throw Error("dohc could not read related records. Try again.");
+            const page = parsePage(response.result, read.fieldIds);
+            const label = target.fields.find(
+              (field) =>
+                read.fieldIds.includes(field.fieldId) &&
+                field.fieldId !== relation.fieldId &&
+                field.type === "text",
+            );
+            return {
+              options: page.rows.map((row) => {
+                const value = row.values[relation.fieldId];
+                if (
+                  !(
+                    typeof value === "string" ||
+                    (typeof value === "number" && Number.isSafeInteger(value))
+                  )
+                )
+                  throw Error("The related Collection returned an invalid identity.");
+                return {
+                  value,
+                  label: display(label ? row.values[label.fieldId] : value) || String(value),
+                };
+              }),
+              hasMore: page.nextCursor !== null,
+            };
+          }}
+          invoke={invoke}
+        />
+      </div>
+      {views?.dialog}
+      {viewingPending && owner && !copy?.offline && (
+        <CollectionPendingResponsesDialog
+          workspaceId={workspaceId}
+          datasetId={datasetId}
+          name={dataset.name}
+          onError={onError}
+          onClose={() => setViewingPending(false)}
+          onLoad={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({
+              ...addressInput(input),
+              action: "pendingAttempts",
+            });
+            signal.throwIfAborted();
+            if (result.kind !== "pending-attempts")
+              throw Error("dohc could not read pending responses. Try again.");
+            const { kind: _, ...page } = result;
+            return page;
+          }}
+          onReconcile={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({
+              ...addressInput(input),
+              action: "reconcileAttempt",
+            });
+            signal.throwIfAborted();
+            if (result.kind !== "attempt-reconciled")
+              throw Error("dohc could not confirm the cleared retry. Refresh pending responses.");
+            onNotice?.("Cleared the saved response's retry");
+            return result;
+          }}
+          onCancel={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({
+              ...addressInput(input),
+              action: "cancelAttempt",
+            });
+            signal.throwIfAborted();
+            if (result.kind !== "attempt-cancelled")
+              throw Error("dohc could not confirm cancellation. Refresh pending responses.");
+            onNotice?.("Cancelled the pending response");
+            return result;
+          }}
+        />
+      )}
+      {archiving && (
+        <CollectionArchiveDialog
+          datasetPath={datasetPath}
+          workspaceId={workspaceId}
+          datasetId={datasetId}
+          name={dataset.name}
+          onError={onError}
+          onClose={() => setArchiving(false)}
+          onChanged={() => {
+            onLifecycleChanged?.();
+            void refresh();
+          }}
+        />
+      )}
+      {viewingHistory && owner && !copy?.offline && (
+        <CollectionHistoryDialog
+          workspaceId={workspaceId}
+          datasetId={datasetId}
+          name={dataset.name}
+          onError={onError}
+          onOpenSource={(path) => {
+            setViewingHistory(false);
+            onOpenFile(path);
+          }}
+          onEditFields={() => {
+            setViewingHistory(false);
+            setEditingFields(true);
+          }}
+          onReviewSource={() => {
+            setViewingHistory(false);
+            setHistoryRestore(undefined);
+            setReviewingSchema(true);
+          }}
+          onLoadRevision={async (revisionSha256, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({
+              action: "historyRevision",
+              workspaceId,
+              datasetPath,
+              expectedDatasetId: datasetId,
+              revisionSha256,
+            });
+            signal.throwIfAborted();
+            if (result.kind !== "history-revision")
+              throw Error("The saved Collection rules are unavailable.");
+            return result;
+          }}
+          onRestoreRevision={async (targetRevisionSha256, changedRevisionSha256, signal) => {
+            signal.throwIfAborted();
+            const sequence = request.current;
+            const result = await bridge().dataset({
+              action: "prepareHistoryRestore",
+              workspaceId,
+              datasetPath,
+              expectedDatasetId: datasetId,
+              revision: dataset.revision,
+              revisionSha256: dataset.revisionSha256,
+              targetRevisionSha256,
+              changedRevisionSha256,
+            });
+            signal.throwIfAborted();
+            if (sequence !== request.current) return;
+            if (result.kind !== "migration-prepared")
+              throw Error("dohc could not prepare this reversal. Refresh History.");
+            setHistoryRestore(result);
+            setViewingHistory(false);
+            setReviewingSchema(true);
+          }}
+          onUndo={(input) => {
+            void historyUndo.run(input);
+          }}
+          pendingUndo={historyUndo.pending}
+          undoBusy={historyUndo.busy}
+          refreshVersion={recordsVersion}
+          onClose={() => setViewingHistory(false)}
+          onLoad={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({ ...addressInput(input), action: "history" });
+            signal.throwIfAborted();
+            if (result.kind !== "history")
+              throw Error("dohc could not read this Collection's history. Try again.");
+            const { kind: _, ...page } = result;
+            return page;
+          }}
+        />
+      )}
+      {transferringCsv && (
+        <DatasetTransferDialog
+          workspaceId={workspaceId}
+          dataset={columns}
+          tableId={tableId}
+          invoke={invoke}
+          onError={onError}
+          onClose={() => setTransferringCsv(false)}
+          onImported={() => setRecordsVersion((value) => value + 1)}
+          onSave={async (file, signal) => {
+            signal.throwIfAborted();
+            if (new TextEncoder().encode(file.content).byteLength > 10 * 1024 * 1024)
+              throw Error(
+                "This file is larger than the workspace text limit. Export a smaller Collection view.",
+              );
+            const sequence = request.current;
+            const dot = file.name.lastIndexOf(".");
+            const stem = dot > 0 ? file.name.slice(0, dot) : file.name;
+            const extension = dot > 0 ? file.name.slice(dot) : ".txt";
+            const relativePath = `${stem}-${crypto.randomUUID()}${extension}`;
+            const result = await bridge().createWorkspaceFile({
+              workspaceId,
+              relativePath,
+              initialText: file.content,
+            });
+            signal.throwIfAborted();
+            if (sequence !== request.current)
+              throw Error("The workspace changed while saving this file.");
+            return result;
+          }}
+        />
+      )}
+      {managingAccess && (
+        <CollectionPermissionsDialog
+          datasetPath={datasetPath}
+          workspaceId={workspaceId}
+          dataset={dataset}
+          onClose={() => setManagingAccess(false)}
+          onError={onError}
+          onSettled={onSettled}
+          onMoved={() => void refresh()}
+        />
+      )}
+      {exportingRecovery && owner && !copy?.offline && (
+        <CollectionRecoveryExportDialog
+          collectionName={dataset.name}
+          onClose={() => setExportingRecovery(false)}
+          onError={onError}
+          onSaved={(path) => onNotice?.(`Saved recovery file: ${path}`)}
+          onExport={exportRecovery}
+        />
+      )}
+      {customAction && (
+        <CollectionActionDialog
+          workspaceId={workspaceId}
+          dataset={dataset}
+          operationId={customAction}
+          invoke={invokeAction}
+          onClose={() => setCustomAction(null)}
+          onSettled={() => setRecordsVersion((value) => value + 1)}
+        />
+      )}
+      {customizing && automations.collectionPath !== null && (
+        <CollectionCustomizeDialog
+          name={table?.name ?? dataset.name}
+          files={[automationsFile(automations.collectionPath, automations.fileMade)]}
+          onOpenFile={onOpenFile}
+          onClose={() => setCustomizing(false)}
+        />
+      )}
+      {editingFields && (
+        <CollectionFieldsDialog
+          workspaceId={workspaceId}
+          dataset={dataset}
+          tableId={tableId}
+          onError={onError}
+          addType={editingFields === "date" ? "date" : undefined}
+          buttonStates={buttonStates}
+          onChooseButton={table ? chooseButton : undefined}
+          onButtonAdded={table ? chooseButton : undefined}
+          onLoadPreview={loadMigrationPreview}
+          retry={fieldRetry}
+          onRetry={(change) => {
+            void retryFieldChange(change);
+          }}
+          onClose={() => {
+            setEditingFields(false);
+            setFieldRetry(null);
+          }}
+          onReviewSource={() => {
+            setEditingFields(false);
+            setFieldRetry(null);
+            setReviewingSchema(true);
+          }}
+          onPrepare={async (change, signal) => {
+            setFieldRetry(null);
+            signal.throwIfAborted();
+            const result = await bridge().dataset({
+              action: "prepareSchemaChange",
+              workspaceId,
+              datasetPath,
+              expectedDatasetId: datasetId,
+              revision: dataset.revision,
+              revisionSha256: dataset.revisionSha256,
+              change,
+            });
+            signal.throwIfAborted();
+            if (result.kind !== "migration-prepared")
+              throw Error("dohc could not prepare this field change. Try again.");
+            return result;
+          }}
+          onApprove={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({ ...input, action: "approveMigration" });
+            if (result.kind !== "migrated")
+              throw Error("dohc could not confirm this change. Refresh the Collection.");
+            // The change is approved even if its review closed meanwhile, so what
+            // follows it still happens, but only while this page is open.
+            if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
+            await refresh();
+          }}
+          onDiscard={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({ ...input, action: "discardMigration" });
+            signal.throwIfAborted();
+            if (result.kind !== "migration-discarded")
+              throw Error("dohc could not discard this review. Try again.");
+          }}
+        />
+      )}
+      {reviewingSchema && (
+        <CollectionMigrationReviewDialog
+          initialPreparation={historyRestore}
+          workspaceId={workspaceId}
+          datasetId={datasetId}
+          datasetPath={datasetPath}
+          onError={onError}
+          onLoadPreview={loadMigrationPreview}
+          onClose={() => {
+            setReviewingSchema(false);
+            setHistoryRestore(undefined);
+          }}
+          onPrepare={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({
+              ...addressInput(input),
+              datasetPath: input.datasetPath,
+              action: "prepareMigration",
+            });
+            signal.throwIfAborted();
+            if (result.kind !== "migration-prepared")
+              throw Error("dohc could not prepare this change. Try again.");
+            return result;
+          }}
+          onApprove={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({ ...input, action: "approveMigration" });
+            if (result.kind !== "migrated")
+              throw Error("dohc could not confirm this change. Refresh the Collection.");
+            // The change is approved even if its review closed meanwhile, so what
+            // follows it still happens, but only while this page is open.
+            if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
+            await refresh();
+          }}
+          onDiscard={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({ ...input, action: "discardMigration" });
+            signal.throwIfAborted();
+            if (result.kind !== "migration-discarded")
+              throw Error("dohc could not discard this review. Try again.");
+          }}
+        />
+      )}
+      {deletion && (
+        <DeleteCollectionRecordDialog
+          collectionName={
+            dataset.tables.find((table) => table.tableId === tableId)?.name ?? dataset.name
+          }
+          recordId={deletion.id}
+          onCancel={() => {
+            deleteResult.current?.(false);
+            deleteResult.current = null;
+            setDeletion(null);
+          }}
+          onConfirm={() => {
+            deleteResult.current?.(true);
+            deleteResult.current = null;
+            setDeletion(null);
+          }}
+        />
+      )}
+      {creatingForm && (
+        <CreateDatasetFormDialog
+          workspaceId={workspaceId}
+          dataset={dataset}
+          tableId={tableId}
+          onClose={() => setCreatingForm(false)}
+          onError={onError}
+          onLoadPreview={loadMigrationPreview}
+          onLoadSource={async (signal) => {
+            signal.throwIfAborted();
+            const sequence = request.current;
+            const result = await bridge().dataset({
+              action: "historyRevision",
+              workspaceId,
+              datasetPath,
+              expectedDatasetId: datasetId,
+              revisionSha256: dataset.revisionSha256,
+            });
+            signal.throwIfAborted();
+            if (sequence !== request.current)
+              throw Error("The Collection changed. Review its current rules again.");
+            if (result.kind !== "history-revision")
+              throw Error("The saved Collection rules are unavailable.");
+            return {
+              path: result.revision.definition.operationsPath,
+              source: result.operationSource,
+              sha256: result.revision.operationsSha256,
+            };
+          }}
+          onPrepareChoices={async (input, signal) => {
+            signal.throwIfAborted();
+            const sequence = request.current;
+            const result = await bridge().dataset({
+              ...input,
+              action: "prepareRelationChoices",
+              workspaceId,
+              datasetPath,
+              expectedDatasetId: datasetId,
+              revision: dataset.revision,
+              revisionSha256: dataset.revisionSha256,
+              tableId,
+            });
+            signal.throwIfAborted();
+            if (sequence !== request.current)
+              throw Error("The Collection changed. Prepare the choices again.");
+            if (result.kind !== "migration-prepared")
+              throw Error("dohc could not prepare these choices. Try again.");
+            return result;
+          }}
+          onApproveChoices={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({ ...input, action: "approveMigration" });
+            if (result.kind !== "migrated")
+              throw Error("dohc could not confirm these choices. Refresh the Collection.");
+            // The choices are approved even if the page read the Collection again
+            // meanwhile, as it does when they apply, so what follows still happens.
+            if (!pageOpen.current) throw new DOMException("The Collection closed.", "AbortError");
+            setCreatingForm(false);
+            await refresh();
+          }}
+          onDiscardChoices={async (input, signal) => {
+            signal.throwIfAborted();
+            const result = await bridge().dataset({ ...input, action: "discardMigration" });
+            signal.throwIfAborted();
+            if (result.kind !== "migration-discarded")
+              throw Error("dohc could not discard this review. Try again.");
+          }}
+          onCreate={async (input, signal) => {
+            signal.throwIfAborted();
+            const sequence = request.current;
+            const result = await bridge().dataset({
+              ...addressInput(input),
+              action: "createForm",
+              workspaceId,
+            });
+            signal.throwIfAborted();
+            if (sequence !== request.current) return;
+            if (result.kind === "partial") throw new CreationPartialError(result);
+            if (result.kind !== "form-created")
+              throw Error("dohc could not confirm the form files. Try again.");
+            setCreatingForm(false);
+            onFormCreated(result.appRoot);
+          }}
+        />
+      )}
+    </>
+  );
 }

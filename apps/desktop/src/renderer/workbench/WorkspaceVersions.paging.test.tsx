@@ -93,25 +93,62 @@ afterEach(() => {
 describe.each(["review", "merge"] as const)("%s conflict resolution write boundary", (surface) => {
   const remaining = { conflicts: [], nextAfterConflictId: null };
 
-  async function openSurface(beginLineageOperation: () => Promise<() => void>, changed: () => void, row = conflict("c-1"), onError = vi.fn()) {
+  async function openSurface(
+    beginLineageOperation: () => Promise<() => void>,
+    changed: () => void,
+    row = conflict("c-1"),
+    onError = vi.fn(),
+  ) {
     const conflicts = [row];
-    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts,
+      nextAfterConflictId: null,
+    });
     bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
-      mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 1, replacedProtectedPaths: [], conflicts, nextAfterConflictId: null,
+      mergedFileCount: 0,
+      unchangedFileCount: 0,
+      conflictCount: 1,
+      replacedProtectedPaths: [],
+      conflicts,
+      nextAfterConflictId: null,
     });
     // The initial merge's gate has already released when its conflict cards appear.
-    const mergeBegin = vi.fn().mockResolvedValueOnce(() => {}).mockImplementation(beginLineageOperation);
-    const mergeChanged = vi.fn().mockImplementationOnce(() => {}).mockImplementation(changed);
-    const view = render(surface === "review" ? (
-      <ConflictReviewDialog workspaceId="ws-1" beginLineageOperation={beginLineageOperation}
-        onWorkspaceStateChanged={changed} onClose={() => {}} onError={onError} />
-    ) : (
-      <VersionMergeDialog workspaceId="ws-1"
-        source={{ id: "v-1", name: "Feature", kind: "named", createdAtMs: 1, canMergeIntoMain: true }}
-        beginLineageOperation={mergeBegin}
-        onWorkspaceStateChanged={mergeChanged} onMerged={() => {}} onAnsweredAway={() => {}} onConflictError={onError}
-        onClose={() => {}} />
-    ));
+    const mergeBegin = vi
+      .fn()
+      .mockResolvedValueOnce(() => {})
+      .mockImplementation(beginLineageOperation);
+    const mergeChanged = vi
+      .fn()
+      .mockImplementationOnce(() => {})
+      .mockImplementation(changed);
+    const view = render(
+      surface === "review" ? (
+        <ConflictReviewDialog
+          workspaceId="ws-1"
+          beginLineageOperation={beginLineageOperation}
+          onWorkspaceStateChanged={changed}
+          onClose={() => {}}
+          onError={onError}
+        />
+      ) : (
+        <VersionMergeDialog
+          workspaceId="ws-1"
+          source={{
+            id: "v-1",
+            name: "Feature",
+            kind: "named",
+            createdAtMs: 1,
+            canMergeIntoMain: true,
+          }}
+          beginLineageOperation={mergeBegin}
+          onWorkspaceStateChanged={mergeChanged}
+          onMerged={() => {}}
+          onAnsweredAway={() => {}}
+          onConflictError={onError}
+          onClose={() => {}}
+        />
+      ),
+    );
     if (surface === "merge") fireEvent.click(screen.getByTestId("version-merge-confirm"));
     await settle();
     return view;
@@ -122,7 +159,10 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     await openSurface(() => beginCollectionLineageOperation("ws-1"), changed);
     const paused = beginCollectionWriteOperation("ws-1");
     enqueueCollectionFieldWrite("ws-1", "tasks", {
-      recordId: "rec-1", recordPath: "tasks/one.md", field: "done", value: true,
+      recordId: "rec-1",
+      recordPath: "tasks/one.md",
+      field: "done",
+      value: true,
     });
     paused.release();
     const failure = collectionWriteFailures()[0];
@@ -132,40 +172,71 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
     expect(bridgeMock.resolveWorkspaceVersionConflict).not.toHaveBeenCalled();
     expect(changed).not.toHaveBeenCalled();
     expect(collectionWriteFailures()).toEqual([failure]);
-    expect(screen.getByTestId("version-conflict-error").textContent).toContain("Retry or discard it");
+    expect(screen.getByTestId("version-conflict-error").textContent).toContain(
+      "Retry or discard it",
+    );
     expect(collectionWritesPaused("ws-1")).toBe(false);
   });
 
-  it.each([false, true])("holds the pause through successful resolution (unmount during IPC: %s)", async (unmount) => {
-    let finishFlush!: () => void;
-    const flush = new Promise<void>((resolve) => { finishFlush = resolve; });
-    let finishResolution!: (value: typeof remaining) => void;
-    bridgeMock.resolveWorkspaceVersionConflict.mockReturnValue(new Promise((resolve) => { finishResolution = resolve; }));
-    const changed = vi.fn(() => { expect(collectionWritesPaused("ws-1")).toBe(true); });
-    const view = await openSurface(() => beginCollectionLineageOperation("ws-1", () => flush), changed);
-    fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
-    expect(collectionWritesPaused("ws-1")).toBe(true);
-    expect(bridgeMock.resolveWorkspaceVersionConflict).not.toHaveBeenCalled();
+  it.each([false, true])(
+    "holds the pause through successful resolution (unmount during IPC: %s)",
+    async (unmount) => {
+      let finishFlush!: () => void;
+      const flush = new Promise<void>((resolve) => {
+        finishFlush = resolve;
+      });
+      let finishResolution!: (value: typeof remaining) => void;
+      bridgeMock.resolveWorkspaceVersionConflict.mockReturnValue(
+        new Promise((resolve) => {
+          finishResolution = resolve;
+        }),
+      );
+      const changed = vi.fn(() => {
+        expect(collectionWritesPaused("ws-1")).toBe(true);
+      });
+      const view = await openSurface(
+        () => beginCollectionLineageOperation("ws-1", () => flush),
+        changed,
+      );
+      fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
+      expect(collectionWritesPaused("ws-1")).toBe(true);
+      expect(bridgeMock.resolveWorkspaceVersionConflict).not.toHaveBeenCalled();
 
-    await act(async () => { finishFlush(); await flush; });
-    expect(bridgeMock.resolveWorkspaceVersionConflict).toHaveBeenCalledExactlyOnceWith({
-      workspaceId: "ws-1", conflictId: "c-1", resolution: { kind: "keep-current" },
-    });
-    expect(collectionWritesPaused("ws-1")).toBe(true);
-    if (unmount) view.unmount();
-    await act(async () => { finishResolution(remaining); });
-    expect(changed).toHaveBeenCalledOnce();
-    expect(collectionWritesPaused("ws-1")).toBe(false);
-  });
+      await act(async () => {
+        finishFlush();
+        await flush;
+      });
+      expect(bridgeMock.resolveWorkspaceVersionConflict).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: "ws-1",
+        conflictId: "c-1",
+        resolution: { kind: "keep-current" },
+      });
+      expect(collectionWritesPaused("ws-1")).toBe(true);
+      if (unmount) view.unmount();
+      await act(async () => {
+        finishResolution(remaining);
+      });
+      expect(changed).toHaveBeenCalledOnce();
+      expect(collectionWritesPaused("ws-1")).toBe(false);
+    },
+  );
 
   it("cancels before issuing resolution if the dialog closes during the drain", async () => {
     let finishFlush!: () => void;
-    const flush = new Promise<void>((resolve) => { finishFlush = resolve; });
+    const flush = new Promise<void>((resolve) => {
+      finishFlush = resolve;
+    });
     const changed = vi.fn();
-    const view = await openSurface(() => beginCollectionLineageOperation("ws-1", () => flush), changed);
+    const view = await openSurface(
+      () => beginCollectionLineageOperation("ws-1", () => flush),
+      changed,
+    );
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     view.unmount();
-    await act(async () => { finishFlush(); await flush; });
+    await act(async () => {
+      finishFlush();
+      await flush;
+    });
     expect(bridgeMock.resolveWorkspaceVersionConflict).not.toHaveBeenCalled();
     expect(changed).not.toHaveBeenCalled();
     expect(collectionWritesPaused("ws-1")).toBe(false);
@@ -173,7 +244,9 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
 
   it("releases the pause and reopens the editors after a failed resolution", async () => {
     bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(new Error("Resolution refused"));
-    const changed = vi.fn(() => { expect(collectionWritesPaused("ws-1")).toBe(true); });
+    const changed = vi.fn(() => {
+      expect(collectionWritesPaused("ws-1")).toBe(true);
+    });
     await openSurface(() => beginCollectionLineageOperation("ws-1"), changed);
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await settle();
@@ -184,37 +257,56 @@ describe.each(["review", "merge"] as const)("%s conflict resolution write bounda
   });
 
   it("shows the synced deletion refusal beside the conflict choice", async () => {
-    bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(new Error("DaemonRefusalError [INVALID_PARAMS]: synced-deletion-revival-refused"));
+    bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(
+      new Error("DaemonRefusalError [INVALID_PARAMS]: synced-deletion-revival-refused"),
+    );
     const report = vi.fn();
     await openSurface(async () => () => {}, vi.fn(), conflict("c-1"), report);
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await settle();
-    expect(screen.getByTestId("version-conflict-error").textContent).toBe("dohc can't bring back c-1.md, because that could stop sync");
+    expect(screen.getByTestId("version-conflict-error").textContent).toBe(
+      "dohc can't bring back c-1.md, because that could stop sync",
+    );
     const notice = readError(report.mock.calls[0]![1]);
-    expect(notice.words).toBe("Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for c-1.md, keep the removal there.");
+    expect(notice.words).toBe(
+      "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for c-1.md, keep the removal there.",
+    );
     expect(notice.canRetry).toBe(false);
   });
 
-  it.each(["sync-delete", "sync-edit", "merge-delete"].flatMap(shape =>
-    ["DaemonRefusalError [INVALID_PARAMS]", "VersionedTextStoreError [conflict-stale-target]"].map(wire => ({shape, wire})),
-  ))("scopes stale deletion words to $shape ($wire)", async ({shape, wire}) => {
+  it.each(
+    ["sync-delete", "sync-edit", "merge-delete"].flatMap((shape) =>
+      [
+        "DaemonRefusalError [INVALID_PARAMS]",
+        "VersionedTextStoreError [conflict-stale-target]",
+      ].map((wire) => ({ shape, wire })),
+    ),
+  )("scopes stale deletion words to $shape ($wire)", async ({ shape, wire }) => {
     const row = conflict("c-1");
     row.origin = shape === "merge-delete" ? "merge" : "sync";
     row.incomingText = shape === "sync-edit" ? "other text" : null;
-    bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(new Error(`${wire}: conflict-stale-target`));
+    bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(
+      new Error(`${wire}: conflict-stale-target`),
+    );
     const report = vi.fn();
     await openSurface(async () => () => {}, vi.fn(), row, report);
     fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
     await settle();
     const title = "dohc can't settle the conflict in c-1.md";
-    expect(screen.getByTestId("version-conflict-error").textContent).toBe(shape === "sync-delete" ? title : "dohc could not apply that choice.");
+    expect(screen.getByTestId("version-conflict-error").textContent).toBe(
+      shape === "sync-delete" ? title : "dohc could not apply that choice.",
+    );
     expect(report).toHaveBeenCalled();
     if (shape === "sync-delete") {
       const notice = readError(report.mock.calls[0]![1]);
-      expect(notice.words).toBe("Move your newer lines into the new file, and leave c-1.md and its copies alone. Your other files keep syncing.");
+      expect(notice.words).toBe(
+        "Move your newer lines into the new file, and leave c-1.md and its copies alone. Your other files keep syncing.",
+      );
       expect(notice.canRetry).toBe(false);
       // The Reason says why once. The error's own message repeats it, so it adds no Cause.
-      expect(notice.details).toBe("c-1.md changed on this machine after the conflict appeared, so either choice would overwrite the newer lines.");
+      expect(notice.details).toBe(
+        "c-1.md changed on this machine after the conflict appeared, so either choice would overwrite the newer lines.",
+      );
       expect(notice.cause).toBeNull();
     }
   });
@@ -224,8 +316,6 @@ describe("conflictCountCopy", () => {
   it("states the exact count only when the listing is complete", () => {
     expect(conflictCountCopy(1, false)).toBe("One file has two copies.");
     expect(conflictCountCopy(3, false)).toBe("3 files have two copies.");
-    // A continuation means more conflicts exist past the window, so an exact
-    // "3 files" would be under the truth.
     expect(conflictCountCopy(1, true)).toBe("More than one file has two copies.");
     expect(conflictCountCopy(3, true)).toBe("More than 3 files have two copies.");
   });
@@ -238,7 +328,8 @@ describe("ConflictReviewDialog paging", () => {
       nextAfterConflictId: null,
     });
     render(
-      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+      <ConflictReviewDialog
+        beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -260,7 +351,8 @@ describe("ConflictReviewDialog paging", () => {
           : { conflicts: [conflict("c-2")], nextAfterConflictId: null },
     );
     render(
-      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+      <ConflictReviewDialog
+        beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -274,7 +366,6 @@ describe("ConflictReviewDialog paging", () => {
     await settle();
     screen.getByText("2 files have two copies.", { exact: false });
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
-    // The window is complete now: the affordance goes away.
     expect(screen.queryByTestId("conflict-list-show-more")).toBeNull();
     expect(bridgeMock.listWorkspaceVersionConflicts.mock.calls).toEqual([
       [{ workspaceId: "ws-1" }],
@@ -292,16 +383,15 @@ describe("ConflictReviewDialog paging", () => {
       nextAfterConflictId: null,
     });
     render(
-      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+      <ConflictReviewDialog
+        beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
       />,
     );
     await settle();
-    fireEvent.click(
-      screen.getAllByTestId("version-conflict-keep-current")[0]!,
-    );
+    fireEvent.click(screen.getAllByTestId("version-conflict-keep-current")[0]!);
     await settle();
     screen.getByText("One file has two copies.", { exact: false });
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
@@ -335,7 +425,8 @@ describe("ConflictReviewDialog paging", () => {
       nextAfterConflictId: null,
     });
     render(
-      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+      <ConflictReviewDialog
+        beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -343,9 +434,7 @@ describe("ConflictReviewDialog paging", () => {
     );
     await settle();
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
-    fireEvent.click(
-      screen.getAllByTestId("version-conflict-keep-current")[0]!,
-    );
+    fireEvent.click(screen.getAllByTestId("version-conflict-keep-current")[0]!);
     await settle();
     screen.getByText("One file has two copies.", { exact: false });
 
@@ -356,13 +445,13 @@ describe("ConflictReviewDialog paging", () => {
     // Let the stale answer's whole continuation run before asserting — a
     // waitFor here would pass on the first paint and never see the append.
     await settle();
-    expect(screen.getAllByTestId("version-conflict"), "drop the window-generation guard -> c-3 (a row of the replaced window) appends to the remaining page.").toHaveLength(1);
+    expect(
+      screen.getAllByTestId("version-conflict"),
+      "drop the window-generation guard -> c-3 (a row of the replaced window) appends to the remaining page.",
+    ).toHaveLength(1);
   });
 
   it("a replaced window does not inherit the abandoned page's Loading state", async () => {
-    // Show more hangs; a resolution replaces the window with a continuation.
-    // The new window's button must be usable immediately — not "Loading…"
-    // until a request that may never settle does.
     bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
       async (payload: { afterConflictId?: string }) => {
         if (payload.afterConflictId === undefined) {
@@ -381,7 +470,8 @@ describe("ConflictReviewDialog paging", () => {
       nextAfterConflictId: "c-2",
     });
     render(
-      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+      <ConflictReviewDialog
+        beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -389,16 +479,15 @@ describe("ConflictReviewDialog paging", () => {
     );
     await settle();
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
-    fireEvent.click(
-      screen.getAllByTestId("version-conflict-keep-current")[0]!,
-    );
+    fireEvent.click(screen.getAllByTestId("version-conflict-keep-current")[0]!);
     await settle();
     screen.getByText("More than one file has two copies.", { exact: false });
 
-    const showMore = screen.getByTestId(
-      "conflict-list-show-more",
-    ) as HTMLButtonElement;
-    expect(showMore.textContent, "clear loadingMore only in the abandoned request's finally -> the button reads 'Loading…', disabled, forever (the request never settles) and this assertion fails.").toBe("Show more files");
+    const showMore = screen.getByTestId("conflict-list-show-more") as HTMLButtonElement;
+    expect(
+      showMore.textContent,
+      "clear loadingMore only in the abandoned request's finally -> the button reads 'Loading…', disabled, forever (the request never settles) and this assertion fails.",
+    ).toBe("Show more files");
     expect(showMore.disabled).toBe(false);
   });
 
@@ -412,7 +501,8 @@ describe("ConflictReviewDialog paging", () => {
       },
     );
     render(
-      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+      <ConflictReviewDialog
+        beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -422,12 +512,12 @@ describe("ConflictReviewDialog paging", () => {
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
     await settle();
     screen.getByRole("alert");
-    // The window is unchanged and the button remains for a retry.
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
-    const showMore = screen.getByTestId(
-      "conflict-list-show-more",
-    ) as HTMLButtonElement;
-    expect(showMore.textContent, "clear loadingMore only in the success path -> the button reads 'Loading…', disabled, forever after a failed page and this assertion fails.").toBe("Show more files");
+    const showMore = screen.getByTestId("conflict-list-show-more") as HTMLButtonElement;
+    expect(
+      showMore.textContent,
+      "clear loadingMore only in the success path -> the button reads 'Loading…', disabled, forever after a failed page and this assertion fails.",
+    ).toBe("Show more files");
     expect(showMore.disabled).toBe(false);
   });
 });
@@ -554,9 +644,7 @@ describe("VersionMergeDialog conflict paging", () => {
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
     await settle();
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
-    fireEvent.click(
-      screen.getAllByTestId("version-conflict-keep-current")[0]!,
-    );
+    fireEvent.click(screen.getAllByTestId("version-conflict-keep-current")[0]!);
     await settle();
     screen.getByText("One file has two copies.", { exact: false });
 
@@ -567,7 +655,10 @@ describe("VersionMergeDialog conflict paging", () => {
     // Let the stale answer's whole continuation run before asserting — a
     // waitFor here would pass on the first paint and never see the append.
     await settle();
-    expect(screen.getAllByTestId("version-conflict"), "drop this dialog's window-generation guard -> c-3 (a row of the replaced window) appends to the remaining page.").toHaveLength(1);
+    expect(
+      screen.getAllByTestId("version-conflict"),
+      "drop this dialog's window-generation guard -> c-3 (a row of the replaced window) appends to the remaining page.",
+    ).toHaveLength(1);
   });
 });
 
@@ -623,9 +714,7 @@ describe("VersionComparePage paging", () => {
         files: [compareRow("second.md")],
         nextAfterPath: null,
       });
-    const view = render(
-      <VersionComparePage workspaceId="ws-1" versionId="v-1" />,
-    );
+    const view = render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
 
     view.rerender(<VersionComparePage workspaceId="ws-1" versionId="v-2" />);
     await settle();
@@ -649,9 +738,7 @@ describe("VersionComparePage paging", () => {
     render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     await settle();
 
-    expect(screen.getByRole("alert").textContent).toBe(
-      "Could not compare with Main.",
-    );
+    expect(screen.getByRole("alert").textContent).toBe("Could not compare with Main.");
   });
 
   it("says a version with no differences matches Main, under the versions picture", async () => {
@@ -712,12 +799,7 @@ describe("VersionComparePage paging", () => {
     await settle();
     screen.getByTestId("version-compare-file");
 
-    // The replaced window must not inherit the abandoned page's pending
-    // flag: the stale request is still unsettled here, and the button must
-    // already be usable.
-    const showMore = screen.getByTestId(
-      "version-compare-show-more",
-    ) as HTMLButtonElement;
+    const showMore = screen.getByTestId("version-compare-show-more") as HTMLButtonElement;
     expect(showMore.textContent).toBe("Show more files");
     expect(showMore.disabled).toBe(false);
 
@@ -725,7 +807,10 @@ describe("VersionComparePage paging", () => {
     // Let the stale answer's whole continuation run before asserting — a
     // waitFor here would pass on the first paint and never see the append.
     await settle();
-    expect(screen.getAllByTestId("version-compare-file"), "drop the window-generation guard -> the old generation's page appends to the refreshed window (the cursor matches, so a cursor check alone cannot reject it).").toHaveLength(1);
+    expect(
+      screen.getAllByTestId("version-compare-file"),
+      "drop the window-generation guard -> the old generation's page appends to the refreshed window (the cursor matches, so a cursor check alone cannot reject it).",
+    ).toHaveLength(1);
     expect(screen.getByTestId("version-compare-show-more")).toBeTruthy();
   });
 
@@ -744,27 +829,48 @@ describe("VersionComparePage paging", () => {
     await settle();
     screen.getByRole("alert");
     expect(screen.getAllByTestId("version-compare-file")).toHaveLength(1);
-    const showMore = screen.getByTestId(
-      "version-compare-show-more",
-    ) as HTMLButtonElement;
-    expect(showMore.textContent, "clear loadingMore only in the success path -> the button reads 'Loading…', disabled, forever after a failed page and this assertion fails.").toBe("Show more files");
+    const showMore = screen.getByTestId("version-compare-show-more") as HTMLButtonElement;
+    expect(
+      showMore.textContent,
+      "clear loadingMore only in the success path -> the button reads 'Loading…', disabled, forever after a failed page and this assertion fails.",
+    ).toBe("Show more files");
     expect(showMore.disabled).toBe(false);
   });
 });
 
 it("reports a refused conflict choice from the Versions menu's merge with the refusal's own words", async () => {
   const conflicts = [syncConflict("c-1")];
-  bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
-  bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
-    mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 1, replacedProtectedPaths: [], conflicts, nextAfterConflictId: null,
+  bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+    conflicts,
+    nextAfterConflictId: null,
   });
-  bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(new Error("DaemonRefusalError [INVALID_PARAMS]: synced-deletion-revival-refused"));
+  bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
+    mergedFileCount: 0,
+    unchangedFileCount: 0,
+    conflictCount: 1,
+    replacedProtectedPaths: [],
+    conflicts,
+    nextAfterConflictId: null,
+  });
+  bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(
+    new Error("DaemonRefusalError [INVALID_PARAMS]: synced-deletion-revival-refused"),
+  );
   const onError = vi.fn();
   const onConflictError = vi.fn();
   const user = userEvent.setup();
-  render(<VersionMenuHarness workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
-    onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={onError} clearError={() => {}}
-    onMergeNotice={() => {}} onConflictError={onConflictError} />);
+  render(
+    <VersionMenuHarness
+      workspaceId="ws-1"
+      activeTabDirty={false}
+      beginLineageOperation={async () => () => {}}
+      onOpenCompare={() => {}}
+      onWorkspaceStateChanged={() => {}}
+      onError={onError}
+      clearError={() => {}}
+      onMergeNotice={() => {}}
+      onConflictError={onConflictError}
+    />,
+  );
   await settle();
   await user.click(screen.getByTestId("version-menu-button"));
   await user.click(screen.getByTestId("version-merge"));
@@ -772,8 +878,13 @@ it("reports a refused conflict choice from the Versions menu's merge with the re
   await settle();
   fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
   await settle();
-  expect(onConflictError).toHaveBeenCalledExactlyOnceWith("dohc could not apply that choice.", expect.anything());
-  expect(readError(onConflictError.mock.calls[0]![1]).title).toBe("dohc can't bring back c-1.md, because that could stop sync");
+  expect(onConflictError).toHaveBeenCalledExactlyOnceWith(
+    "dohc could not apply that choice.",
+    expect.anything(),
+  );
+  expect(readError(onConflictError.mock.calls[0]![1]).title).toBe(
+    "dohc can't bring back c-1.md, because that could stop sync",
+  );
   expect(onError).not.toHaveBeenCalled();
 });
 
@@ -781,12 +892,24 @@ it("returns focus after a press on blank space closes the Versions menu", async 
   const user = userEvent.setup();
   function Shell() {
     const root = useRef<HTMLDivElement>(null);
-    useFocusSurface(root, () => root.current?.querySelector<HTMLElement>('[data-testid="version-menu-button"]'));
-    return <div ref={root} data-focus-surface="workspace" data-testid="workspace">
-      <VersionMenuHarness workspaceId="ws-1" activeTabDirty={false} beginLineageOperation={async () => () => {}}
-        onOpenCompare={() => {}} onWorkspaceStateChanged={() => {}} onError={() => {}} clearError={() => {}}
-        onMergeNotice={() => {}} onConflictError={() => {}} />
-    </div>;
+    useFocusSurface(root, () =>
+      root.current?.querySelector<HTMLElement>('[data-testid="version-menu-button"]'),
+    );
+    return (
+      <div ref={root} data-focus-surface="workspace" data-testid="workspace">
+        <VersionMenuHarness
+          workspaceId="ws-1"
+          activeTabDirty={false}
+          beginLineageOperation={async () => () => {}}
+          onOpenCompare={() => {}}
+          onWorkspaceStateChanged={() => {}}
+          onError={() => {}}
+          clearError={() => {}}
+          onMergeNotice={() => {}}
+          onConflictError={() => {}}
+        />
+      </div>
+    );
   }
   render(<Shell />);
   await settle();
@@ -803,22 +926,43 @@ it("returns focus after a press on blank space closes the Versions menu", async 
 });
 
 describe("VersionMergeDialog result", () => {
-  const source = { id: "v-1", name: "Feature", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true };
-  const merged = { mergedFileCount: 3, unchangedFileCount: 0, conflictCount: 0, conflicts: [], nextAfterConflictId: null };
+  const source = {
+    id: "v-1",
+    name: "Feature",
+    kind: "named" as const,
+    createdAtMs: 1,
+    canMergeIntoMain: true,
+  };
+  const merged = {
+    mergedFileCount: 3,
+    unchangedFileCount: 0,
+    conflictCount: 0,
+    conflicts: [],
+    nextAfterConflictId: null,
+  };
 
   function renderMerge() {
     render(
-      <VersionMergeDialog workspaceId="ws-1" source={source} beginLineageOperation={async () => () => {}}
-        onWorkspaceStateChanged={() => {}} onMerged={() => {}} onAnsweredAway={() => {}} onConflictError={() => {}}
-        onClose={() => {}} />,
+      <VersionMergeDialog
+        workspaceId="ws-1"
+        source={source}
+        beginLineageOperation={async () => () => {}}
+        onWorkspaceStateChanged={() => {}}
+        onMerged={() => {}}
+        onAnsweredAway={() => {}}
+        onConflictError={() => {}}
+        onClose={() => {}}
+      />,
     );
   }
 
   it("says it is merging on the primary, then gives Done the focus", async () => {
     let finishMerge: (() => void) | null = null;
-    bridgeMock.mergeWorkspaceVersion.mockReturnValue(new Promise((resolve) => {
-      finishMerge = () => resolve({ ...merged, replacedProtectedPaths: [] });
-    }));
+    bridgeMock.mergeWorkspaceVersion.mockReturnValue(
+      new Promise((resolve) => {
+        finishMerge = () => resolve({ ...merged, replacedProtectedPaths: [] });
+      }),
+    );
     renderMerge();
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
     await settle();
@@ -840,28 +984,44 @@ describe("VersionMergeDialog result", () => {
   });
 
   it("lists the protected files the merge replaced, open on the result", async () => {
-    bridgeMock.mergeWorkspaceVersion.mockResolvedValue({ ...merged, replacedProtectedPaths: [".env", "config/deploy/secrets.json"] });
+    bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
+      ...merged,
+      replacedProtectedPaths: [".env", "config/deploy/secrets.json"],
+    });
     renderMerge();
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
     await settle();
     const block = screen.getByTestId("version-merge-protected");
-    expect(block.querySelector("p")?.textContent).toBe("These 2 protected files took Feature's copy.");
+    expect(block.querySelector("p")?.textContent).toBe(
+      "These 2 protected files took Feature's copy.",
+    );
     const rows = screen.getAllByRole("listitem");
-    expect(rows.map((row) => row.getAttribute("title"))).toEqual([".env", "config/deploy/secrets.json"]);
+    expect(rows.map((row) => row.getAttribute("title"))).toEqual([
+      ".env",
+      "config/deploy/secrets.json",
+    ]);
     expect(rows[1]!.textContent).toBe("config/deploy/secrets.json");
     expect(screen.queryByTestId("version-merge-protected-toggle")).toBeNull();
   });
 
   it("keeps the protected list behind Show files while conflicts are open", async () => {
     const conflicts = [conflict("c-1")];
-    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+      conflicts,
+      nextAfterConflictId: null,
+    });
     bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
-      ...merged, conflictCount: 1, conflicts, replacedProtectedPaths: [".env"],
+      ...merged,
+      conflictCount: 1,
+      conflicts,
+      replacedProtectedPaths: [".env"],
     });
     renderMerge();
     fireEvent.click(screen.getByTestId("version-merge-confirm"));
     await settle();
-    expect(screen.getByTestId("version-merge-protected").querySelector("p")?.textContent).toBe("This protected file took Feature's copy.");
+    expect(screen.getByTestId("version-merge-protected").querySelector("p")?.textContent).toBe(
+      "This protected file took Feature's copy.",
+    );
     const toggle = screen.getByTestId("version-merge-protected-toggle");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("list", { name: "Protected files" })).toBeNull();
@@ -878,7 +1038,8 @@ describe("ConflictReviewDialog read failure", () => {
       .mockRejectedValueOnce(new Error("daemon busy"))
       .mockResolvedValue({ conflicts: [conflict("c-1")], nextAfterConflictId: null });
     render(
-      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+      <ConflictReviewDialog
+        beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -902,7 +1063,10 @@ describe("ConflictReviewDialog waiting version", () => {
     originId: "computer-d",
     originSeq: 4,
   };
-  const waiting = (id: string): WorkspaceVersionConflict => ({ ...syncConflict(id), waitingVersion });
+  const waiting = (id: string): WorkspaceVersionConflict => ({
+    ...syncConflict(id),
+    waitingVersion,
+  });
 
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -913,7 +1077,9 @@ describe("ConflictReviewDialog waiting version", () => {
 
   // A sync pass tells the windows without paths; the dialog reads again once
   // the burst quiets.
-  async function signal(event: { workspaceId?: string; paths?: string[] } = { workspaceId: "ws-1" }) {
+  async function signal(
+    event: { workspaceId?: string; paths?: string[] } = { workspaceId: "ws-1" },
+  ) {
     await act(async () => {
       for (const listener of [...activityListeners]) listener(event);
       await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
@@ -923,7 +1089,8 @@ describe("ConflictReviewDialog waiting version", () => {
 
   function openReview(onError = vi.fn(), workspaceId = "ws-1") {
     const view = render(
-      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+      <ConflictReviewDialog
+        beginLineageOperation={async () => () => {}}
         workspaceId={workspaceId}
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -942,11 +1109,15 @@ describe("ConflictReviewDialog waiting version", () => {
     await settle();
     expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
     // It comes before the two sides, so it's read before choosing one.
-    expect(screen.getByTestId("version-conflict-waiting").compareDocumentPosition(
-      screen.getAllByTestId("version-conflict-side-text")[0]!,
-    ) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // Coordinates stay out of the card.
-    expect(screen.getByTestId("conflict-review-dialog").textContent).not.toMatch(/computer-d|object-1/);
+    expect(
+      screen
+        .getByTestId("version-conflict-waiting")
+        .compareDocumentPosition(screen.getAllByTestId("version-conflict-side-text")[0]!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getByTestId("conflict-review-dialog").textContent).not.toMatch(
+      /computer-d|object-1/,
+    );
 
     cleanup();
     bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
@@ -983,8 +1154,9 @@ describe("ConflictReviewDialog waiting version", () => {
       (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
     ).toBe("my combined draft\n");
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
-    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({ workspaceId: "ws-1" });
-    // No toast or Notices row: the card is the only place it shows.
+    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+    });
     expect(onError).not.toHaveBeenCalled();
   });
 
@@ -1006,7 +1178,9 @@ describe("ConflictReviewDialog waiting version", () => {
 
     await signal({ workspaceId: "ws-1" });
     expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenCalledTimes(2);
-    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({ workspaceId: "ws-1" });
+    expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({
+      workspaceId: "ws-1",
+    });
     expect(screen.getByTestId("version-conflict-waiting").textContent).toBe(WAITING_COPY);
   });
 
@@ -1044,9 +1218,14 @@ describe("ConflictReviewDialog waiting version", () => {
     );
     openReview();
     await settle();
-    let answer!: (page: { conflicts: WorkspaceVersionConflict[]; nextAfterConflictId: string | null }) => void;
+    let answer!: (page: {
+      conflicts: WorkspaceVersionConflict[];
+      nextAfterConflictId: string | null;
+    }) => void;
     bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(
-      new Promise((resolve) => { answer = resolve; }),
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
     );
     await signal();
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
@@ -1059,7 +1238,6 @@ describe("ConflictReviewDialog waiting version", () => {
           ? { conflicts: [syncConflict("c-1")], nextAfterConflictId: "c-1" }
           : { conflicts: [waiting("c-2")], nextAfterConflictId: null },
     );
-    // The reread started with one row; its answer must not shrink the list.
     await act(async () => {
       answer({ conflicts: [syncConflict("c-1")], nextAfterConflictId: "c-1" });
     });
@@ -1084,12 +1262,16 @@ describe("ConflictReviewDialog waiting version", () => {
     await settle();
     let answerReread!: (page: Page) => void;
     bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(
-      new Promise((resolve) => { answerReread = resolve; }),
+      new Promise((resolve) => {
+        answerReread = resolve;
+      }),
     );
     await signal();
     let answerPage!: (page: Page) => void;
     bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(
-      new Promise((resolve) => { answerPage = resolve; }),
+      new Promise((resolve) => {
+        answerPage = resolve;
+      }),
     );
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
     await settle();
@@ -1123,7 +1305,10 @@ describe("ConflictReviewDialog waiting version", () => {
     bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
       async (payload: { afterConflictId?: string }) => {
         if (payload.afterConflictId === undefined) {
-          return { conflicts: [syncConflict("c-1"), syncConflict("c-2")], nextAfterConflictId: "c-2" };
+          return {
+            conflicts: [syncConflict("c-1"), syncConflict("c-2")],
+            nextAfterConflictId: "c-2",
+          };
         }
         return new Promise(() => {});
       },
@@ -1150,7 +1335,9 @@ describe("ConflictReviewDialog waiting version", () => {
   it("reads again after the first load when sync signalled during it", async () => {
     let versionsAnswer!: (value: { versions: []; activeVersionId: string }) => void;
     bridgeMock.listWorkspaceVersions.mockReturnValueOnce(
-      new Promise((resolve) => { versionsAnswer = resolve; }),
+      new Promise((resolve) => {
+        versionsAnswer = resolve;
+      }),
     );
     bridgeMock.listWorkspaceVersionConflicts
       .mockResolvedValueOnce({ conflicts: [syncConflict("c-1")], nextAfterConflictId: null })
@@ -1176,9 +1363,14 @@ describe("ConflictReviewDialog waiting version", () => {
     });
     const { view } = openReview();
     await settle();
-    let answer!: (page: { conflicts: WorkspaceVersionConflict[]; nextAfterConflictId: null }) => void;
+    let answer!: (page: {
+      conflicts: WorkspaceVersionConflict[];
+      nextAfterConflictId: null;
+    }) => void;
     bridgeMock.listWorkspaceVersionConflicts.mockReturnValueOnce(
-      new Promise((resolve) => { answer = resolve; }),
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
     );
     await signal();
 
@@ -1187,7 +1379,8 @@ describe("ConflictReviewDialog waiting version", () => {
       nextAfterConflictId: null,
     });
     view.rerender(
-      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+      <ConflictReviewDialog
+        beginLineageOperation={async () => () => {}}
         workspaceId="ws-2"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}

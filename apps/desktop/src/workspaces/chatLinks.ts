@@ -6,7 +6,10 @@ import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { ChatScope } from "../ipc/chatScope";
 import type { RegistryEntry } from "./registryStore";
 import type { EngineFileResolver } from "./resolveEngineFiles";
-import { chatLinkMessageForPresentation, type createActorPresentationRequest } from "./actorPresentation";
+import {
+  chatLinkMessageForPresentation,
+  type createActorPresentationRequest,
+} from "./actorPresentation";
 import { recordedShareSelector } from "./shareViewRecords";
 import { workspaceFileRefs } from "./workspaceFileReferenceScopes";
 
@@ -17,7 +20,10 @@ export function createChatLinksReader(deps: {
   principalGeneration(): number;
   currentAttachment(workspaceId: string): symbol;
   resolveEngineFiles: EngineFileResolver<EngineWorkspace>;
-  presentationRequest(scope: ChatScope, check: () => void): Promise<ReturnType<typeof createActorPresentationRequest>>;
+  presentationRequest(
+    scope: ChatScope,
+    check: () => void,
+  ): Promise<ReturnType<typeof createActorPresentationRequest>>;
 }) {
   const attachments = new Map<string, { id: symbol; key: string }>();
   const binding = (workspace: RegistryEntry) => {
@@ -27,20 +33,37 @@ export function createChatLinksReader(deps: {
       attachment = { id, key: randomUUID() };
       attachments.set(workspace.workspaceId, attachment);
     }
-    return createHash("sha256").update(JSON.stringify([
-      attachment.key, workspace.workspaceId, workspace.rootPath,
-      workspace.shareView === undefined ? ["owned"] : ["share",
-        workspace.shareView?.shareId, workspace.shareView?.grantedSelector, workspace.shareView?.ended,
-        workspace.shareView?.receivedIdentity, workspace.shareView?.recipientUserId, workspace.shareView?.relayUrl],
-      workspace.sharedChannels ?? [],
-      // Warning bookkeeping does not change access. Bind every other field by default.
-      (workspace.shareMounts ?? []).map(({ skippedOps: _skippedOps, ...record }) => record),
-      workspace.remote ?? null,
-      workspace.pausedRemote ?? null, deps.principalGeneration(),
-    ])).digest("hex");
+    return createHash("sha256")
+      .update(
+        JSON.stringify([
+          attachment.key,
+          workspace.workspaceId,
+          workspace.rootPath,
+          workspace.shareView === undefined
+            ? ["owned"]
+            : [
+                "share",
+                workspace.shareView?.shareId,
+                workspace.shareView?.grantedSelector,
+                workspace.shareView?.ended,
+                workspace.shareView?.receivedIdentity,
+                workspace.shareView?.recipientUserId,
+                workspace.shareView?.relayUrl,
+              ],
+          workspace.sharedChannels ?? [],
+          // Warning bookkeeping does not change access. Bind every other field by default.
+          (workspace.shareMounts ?? []).map(({ skippedOps: _skippedOps, ...record }) => record),
+          workspace.remote ?? null,
+          workspace.pausedRemote ?? null,
+          deps.principalGeneration(),
+        ]),
+      )
+      .digest("hex");
   };
   return async (
-    workspaceId: string, input: ChatLinksInput, assertCurrent: () => void = () => {},
+    workspaceId: string,
+    input: ChatLinksInput,
+    assertCurrent: () => void = () => {},
   ): Promise<ChatLinksPage> => {
     const parsed = ChatLinksInput.parse(input);
     let uncovered = 0;
@@ -71,18 +94,26 @@ export function createChatLinksReader(deps: {
       const read = async (): Promise<ChatLinksPage> => {
         const channels = await store.listChannels({ workspaceId });
         check();
-        const wires = await Promise.all(channels.map(channel =>
-          store.getChannelWireId({ workspaceId, channelId: channel.id }).catch(() => null)));
+        const wires = await Promise.all(
+          channels.map((channel) =>
+            store.getChannelWireId({ workspaceId, channelId: channel.id }).catch(() => null),
+          ),
+        );
         check();
         if (!wires.includes(parsed.channelWireId)) return null;
         const page = await store.linksPage({
-          workspaceId, ...parsed, scope: key, sharedChannelRowsUncovered: uncovered,
+          workspaceId,
+          ...parsed,
+          scope: key,
+          sharedChannelRowsUncovered: uncovered,
         });
         check();
         if (!page) return null;
 
         // Resolve the page together, through the same file boundary used by file reads.
-        const candidates = page.entries.map(row => workspaceFileRefs(workspace, row.file.objectId));
+        const candidates = page.entries.map((row) =>
+          workspaceFileRefs(workspace, row.file.objectId),
+        );
         const refs = candidates.flat();
         const resolved = refs.length ? await deps.resolveEngineFiles(workspace, refs) : [];
         check();
@@ -93,11 +124,18 @@ export function createChatLinksReader(deps: {
           const rowRefs = candidates[rowIndex]!;
           const matches = resolved.slice(offset, offset + rowRefs.length);
           offset += rowRefs.length;
-          const index = matches.findIndex(file => file.status === "found" && file.objectId === row.file.objectId);
-          const file = matches[index], ref = rowRefs[index];
+          const index = matches.findIndex(
+            (file) => file.status === "found" && file.objectId === row.file.objectId,
+          );
+          const file = matches[index],
+            ref = rowRefs[index];
           if (!file || file.status !== "found" || !ref) continue;
-          if (classifyEngineFilePath(file.path).kind !== "tracked" ||
-              (scope.kind === "share" && (!selector || visibleSharePath(selector, file.path) === null))) continue;
+          if (
+            classifyEngineFilePath(file.path).kind !== "tracked" ||
+            (scope.kind === "share" &&
+              (!selector || visibleSharePath(selector, file.path) === null))
+          )
+            continue;
 
           // Omitted files never cause author lookups or contribute metadata.
           if (!present) {
@@ -109,22 +147,34 @@ export function createChatLinksReader(deps: {
           check();
           entries.push({
             file: {
-              objectId: file.objectId, path: file.path,
+              objectId: file.objectId,
+              path: file.path,
               folder: file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "",
-              ...("receivedSource" in ref.source ? { receivedSource: ref.source.receivedSource } : {}),
+              ...("receivedSource" in ref.source
+                ? { receivedSource: ref.source.receivedSource }
+                : {}),
             },
-            threadId: row.threadId, messageId: row.messageId, mentionedAtMs: row.mentionedAtMs,
+            threadId: row.threadId,
+            messageId: row.messageId,
+            mentionedAtMs: row.mentionedAtMs,
             author: {
-              kind: author.authorKind, displayName: author.authorDisplayName, presentation,
+              kind: author.authorKind,
+              displayName: author.authorDisplayName,
+              presentation,
               ...(author.authorKind === "link" || author.authorOwnerDisplayName === undefined
-                ? {} : { ownerDisplayName: author.authorOwnerDisplayName }),
-              ...(author.authorKind === "link" && author.agentConnectionId ? { linkAgent: true as const } : {}),
+                ? {}
+                : { ownerDisplayName: author.authorOwnerDisplayName }),
+              ...(author.authorKind === "link" && author.agentConnectionId
+                ? { linkAgent: true as const }
+                : {}),
             },
           });
         }
         check();
         return ChatLinksPage.parse({
-          ...page, entries, unchecked: [],
+          ...page,
+          entries,
+          unchecked: [],
           complete: scope.kind === "workspace" && page.complete,
           mountsCovered: !workspace.shareMounts?.length,
         });

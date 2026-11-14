@@ -428,21 +428,20 @@ impl DeferredRelayTransport {
     fn complete(&self, request: RelayIoRequest, result: Result<RelayIoResponse, RelayError>) {
         if let (RelayIoRequest::BlobsHave(have), Ok(RelayIoResponse::BlobsHave(response))) =
             (&request, &result)
+            && let Ok(missing) = response.validated_missing(&have.sha256s)
         {
-            if let Ok(missing) = response.validated_missing(&have.sha256s) {
-                self.push_progress
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .confirm_blob_presence(
-                        &have.workspace_id,
-                        &have.replication_epoch,
-                        &have.stream_identity,
-                        have.sha256s
-                            .iter()
-                            .filter(|sha| !missing.contains(sha))
-                            .cloned(),
-                    );
-            }
+            self.push_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .confirm_blob_presence(
+                    &have.workspace_id,
+                    &have.replication_epoch,
+                    &have.stream_identity,
+                    have.sha256s
+                        .iter()
+                        .filter(|sha| !missing.contains(sha))
+                        .cloned(),
+                );
         }
         let uploads = match (&request, &result) {
             (RelayIoRequest::UploadBlob(upload), Ok(RelayIoResponse::UploadBlob)) => {
@@ -3588,7 +3587,7 @@ fn park_departed_hosted(
 /// `active`, the version the root holds, where the file already holds its
 /// head. A document that left the scope with writes queued, and that no
 /// session settles, would otherwise wait at the unload check for the next
-/// restart (#3793).
+/// restart.
 ///
 /// `end_superseded_writes` cancels each queued write of an earlier state.
 /// The write of the head itself is replayed, which only records that the
@@ -4068,9 +4067,9 @@ mod hosted_refusal_tests {
             .unwrap()
     }
 
-    /// Sol's slice-4 review: ordinary operations reached ordinary relay
-    /// routes from a hosted replica, and a claim left `pending` behind.
-    /// Each is refused with its reason before it writes or sends anything.
+    /// A hosted replica refuses each ordinary operation with its reason
+    /// before it writes or sends anything, so none reaches an ordinary relay
+    /// route and no claim leaves `pending` behind.
     #[test]
     fn a_hosted_replica_refuses_every_ordinary_operation_untouched() {
         let scratch = ScratchDir::new().unwrap();
@@ -4204,10 +4203,6 @@ mod hosted_refusal_tests {
         }
     }
 
-    /// The switch-over plan: a retired file holding anything but its head was
-    /// forgotten before it was named, so its document left `departed` while
-    /// the file stayed. Its path stays held now: every pass names the file,
-    /// across a restart, until it holds its head again and goes.
     #[test]
     fn a_retired_file_holding_anything_else_keeps_its_document_departed() {
         let scratch = ScratchDir::new().unwrap();
@@ -4277,10 +4272,9 @@ mod hosted_refusal_tests {
         assert!(!file.exists());
     }
 
-    /// The durability review: a stuck retired file returned before the
-    /// retired files after it and every departed document, so nothing else
-    /// in the workspace ever retired. The others still go or park; the stuck
-    /// one stays departed, and the pass still names it.
+    /// A stuck retired file must not stop the retired files after it or the
+    /// departed documents. The others still go or park; the stuck one stays
+    /// departed, and the pass still names it.
     #[test]
     fn a_stuck_retired_file_does_not_hold_back_other_departed_documents() {
         let scratch = ScratchDir::new().unwrap();
@@ -4348,9 +4342,9 @@ mod hosted_refusal_tests {
         assert!(!root.path().join("z.md").exists());
     }
 
-    /// The durability review: a retired `a.md/x/c.md` left the folder
-    /// `a.md`, which a file at `a.md` could never replace. The folders its
-    /// file leaves empty go with it, up to one that still holds something.
+    /// A retired `a.md/x/c.md` that left the folder `a.md` would keep a file
+    /// at `a.md` from ever replacing it. The folders its file leaves empty go
+    /// with it, up to one that still holds something.
     #[test]
     fn a_retired_file_takes_the_folders_it_leaves_empty() {
         let scratch = ScratchDir::new().unwrap();
@@ -4410,9 +4404,9 @@ mod hosted_refusal_tests {
         );
     }
 
-    /// Sol's sixth park review: a finish that stops after writing a
-    /// document's file keeps only that document departed while the others
-    /// park, and after a restart the next pass parks it too.
+    /// A finish that stops after writing a document's file keeps only that
+    /// document departed while the others park, and after a restart the next
+    /// pass parks it too.
     #[test]
     fn an_interrupted_finish_holds_back_only_its_document_until_a_restart() {
         let scratch = ScratchDir::new().unwrap();
@@ -4525,12 +4519,11 @@ mod hosted_refusal_tests {
         assert!(!a.exists());
     }
 
-    /// #3793: each pull's projection of a Y.Doc update queues a write of
-    /// the note's file, and the pull's page writes the file itself. Nothing
-    /// replayed the queued writes for a note no session opened, so they
-    /// stayed pending past the note's departure. Parking ends them first:
-    /// the write of an earlier state is cancelled and leaves no conflict
-    /// file, and the write of the head is recorded as on disk.
+    /// Each pull's projection of a Y.Doc update queues a write of the note's
+    /// file, and the pull's page writes the file itself. Nothing replays the
+    /// queued writes for a note no session opened, so parking ends them
+    /// first: the write of an earlier state is cancelled and leaves no
+    /// conflict file, and the write of the head is recorded as on disk.
     #[test]
     fn parking_ends_the_writes_a_departed_document_left_pending() {
         let scratch = ScratchDir::new().unwrap();
@@ -4653,6 +4646,100 @@ mod hosted_refusal_tests {
                 .is_empty()
         );
         assert!(!file.exists());
+    }
+
+    /// A hosted text file larger than 5 MiB that stopped being hosted made
+    /// every pass repeat a refusal: the file probe read no text past 5 MiB,
+    /// so the file never seemed to hold its head. It now parks and its file
+    /// goes, as a smaller one does, up to the largest text a head can hold.
+    #[test]
+    fn a_departed_text_file_past_five_mebibytes_parks_and_goes() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        let files = [
+            (
+                "past-binary-cap.md",
+                dohc_engine_files::MAX_CAPTURE_BINARY_BYTES as usize + 95,
+            ),
+            (
+                "at-text-cap.md",
+                dohc_engine_files::MAX_CAPTURE_TEXT_BYTES as usize,
+            ),
+        ];
+        for (seq, (file, len)) in (1..).zip(files) {
+            let text = "x".repeat(len);
+            dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: format!("doc-{seq}"),
+                        path: file.to_owned(),
+                        text: text.clone(),
+                        moment_id: format!("moment-{seq}"),
+                        metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1_000 + seq,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            std::fs::write(root.path().join(file), text).unwrap();
+        }
+        // Both were ready, then left the scope.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_documents \
+                     (workspace_id,object_id,path,state,scope_generation) \
+                     VALUES ('ws','doc-1','past-binary-cap.md','ready',1),\
+                     ('ws','doc-2','at-text-cap.md','ready',1)",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+
+        let parked = park_departed_hosted(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &LeaseRegistry::default(),
+            "ws",
+            root.path(),
+            2_000,
+        );
+        assert!(matches!(parked, Ok(true)), "{parked:?}");
+        assert!(
+            dohc_engine_sync::departed_hosted_object_ids(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+        for (file, _) in files {
+            assert!(!root.path().join(file).exists(), "{file}");
+        }
+        assert!(
+            dohc_engine_sync::retired_hosted_files(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 

@@ -121,7 +121,9 @@ function respellings(anchor: string, root: string): Respelling[] | null {
   if (fromNames.length !== toNames.length) return null;
   return fromNames.flatMap((name, index) => {
     const other = toNames[index] ?? name;
-    return name === other ? [] : [{ folder: join(top, ...fromNames.slice(0, index)), names: [name, other] as const }];
+    return name === other
+      ? []
+      : [{ folder: join(top, ...fromNames.slice(0, index)), names: [name, other] as const }];
   });
 }
 
@@ -156,7 +158,9 @@ export function deepestRootSync<Entry>(
     const respelled = respelledRoots(roots, keys, at);
     const identity = respelled.length > 0 ? identify(at) : null;
     if (identity !== null) {
-      const [match, ...others] = respelled.filter((root) => sameFolder(identify(root.path), identity));
+      const [match, ...others] = respelled.filter((root) =>
+        sameFolder(identify(root.path), identity),
+      );
       if (others.length > 0) return null;
       const names = match ? respellings(at, match.path) : null;
       if (match && names?.every(({ folder, names: pair }) => listsOneOf(list(folder), pair))) {
@@ -182,11 +186,16 @@ export async function deepestRoot<Entry>(
     const identity = respelled.length > 0 ? await identify(at) : null;
     if (identity !== null) {
       const known = await Promise.all(respelled.map((root) => identify(root.path)));
-      const [match, ...others] = respelled.filter((_, index) => sameFolder(known[index] ?? null, identity));
+      const [match, ...others] = respelled.filter((_, index) =>
+        sameFolder(known[index] ?? null, identity),
+      );
       if (others.length > 0) return null;
       const names = match ? respellings(at, match.path) : null;
       const listed = names ? await Promise.all(names.map(({ folder }) => list(folder))) : [];
-      if (match && names?.every(({ names: pair }, index) => listsOneOf(listed[index] ?? null, pair))) {
+      if (
+        match &&
+        names?.every(({ names: pair }, index) => listsOneOf(listed[index] ?? null, pair))
+      ) {
         return { entry: match.entry, root: match.path, anchor: at };
       }
     }
@@ -196,7 +205,10 @@ export async function deepestRoot<Entry>(
 
 // `path` moved from its anchor onto the matched root's spelling. The part
 // below the anchor keeps the caller's capitals.
-export function onMatchedRoot(match: Pick<RootMatch<unknown>, "root" | "anchor">, path: string): string {
+export function onMatchedRoot(
+  match: Pick<RootMatch<unknown>, "root" | "anchor">,
+  path: string,
+): string {
   const suffix = relative(match.anchor, path);
   return suffix === "" ? match.root : join(match.root, suffix);
 }

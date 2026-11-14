@@ -10,9 +10,7 @@ type FileListingIndex = {
   graphRefreshKey: string;
 };
 
-export function indexFileListing(
-  files: ReadonlyArray<WorkspaceFileEntry>,
-): FileListingIndex {
+export function indexFileListing(files: ReadonlyArray<WorkspaceFileEntry>): FileListingIndex {
   const markdownWikilinkFiles: WikilinkFile[] = [];
   const conflictSummaries: string[] = [];
   const presentPaths = new Set<string>();
@@ -30,11 +28,7 @@ export function indexFileListing(
       if (file.kind === "file") markdownWikilinkFiles.push({ path: file.path, fileId: null });
     }
 
-    if (
-      conflictSummaries.length < 5 &&
-      file.kind === "file" &&
-      file.path.endsWith(".conflict")
-    ) {
+    if (conflictSummaries.length < 5 && file.kind === "file" && file.path.endsWith(".conflict")) {
       conflictSummaries.push(
         `${file.path.replace(/\.conflict$/, "")} has a sync conflict (${file.path})`,
       );

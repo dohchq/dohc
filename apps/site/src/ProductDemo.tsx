@@ -1,26 +1,13 @@
 import { Layers } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import type {
-  SyncStatusResult,
-  WorkspaceSummary,
-} from "../../desktop/src/ipc/bridgeContract";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { SyncStatusResult, WorkspaceSummary } from "../../desktop/src/ipc/bridgeContract";
 import { CommandPalette, type Command } from "../../desktop/src/renderer/CommandPalette";
 import { COMMAND_ROWS } from "../../desktop/src/renderer/commands/commandRows";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "../../desktop/src/renderer/editor/MarkdownEditor";
-import {
-  DocumentControls,
-  ViewActions,
-} from "../../desktop/src/renderer/fileInspectorUi";
+import { DocumentControls, ViewActions } from "../../desktop/src/renderer/fileInspectorUi";
 import { PageIdentity } from "../../desktop/src/renderer/PageIdentity";
 import { PropertiesPanel } from "../../desktop/src/renderer/PropertiesPanel";
 import { QuickOpenPalette } from "../../desktop/src/renderer/QuickOpenPalette";
@@ -35,13 +22,13 @@ import { EmptyEditorGroup } from "../../desktop/src/renderer/workbench/EmptyEdit
 import { NoticeCenter } from "../../desktop/src/renderer/workbench/NoticeCenter";
 import { EditorGroupFrame } from "../../desktop/src/renderer/workbench/tabRowActions";
 import { WorkspaceSyncStatus } from "../../desktop/src/renderer/workbench/WorkspaceSyncStatus";
-import { ShellErrorReporter, ShellNoticeClear, useShellError } from "../../desktop/src/renderer/shell/useShellError";
-import { matchShellShortcut } from "../../desktop/src/shortcuts/shortcutRegistry";
 import {
-  DEMO_EDITOR_GROUP_ID,
-  DemoSidebar,
-  type DemoWorkspaceDocument,
-} from "./DemoSidebar";
+  ShellErrorReporter,
+  ShellNoticeClear,
+  useShellError,
+} from "../../desktop/src/renderer/shell/useShellError";
+import { matchShellShortcut } from "../../desktop/src/shortcuts/shortcutRegistry";
+import { DEMO_EDITOR_GROUP_ID, DemoSidebar, type DemoWorkspaceDocument } from "./DemoSidebar";
 import { DEMO_PANEL_IDS, isDemoPanelId, type DemoPanelId } from "./demoPanels";
 import {
   configureDemoDesktopBridge,
@@ -49,11 +36,7 @@ import {
   demoWorkspaceAssetsPersistAcrossSessions,
   resolveDemoWorkspaceAssetUrl,
 } from "./demoDesktopBridge";
-import {
-  collectWorkspacePaths,
-  isPathAtOrBelow,
-  rewritePathPrefix,
-} from "./demoWorkspacePaths";
+import { collectWorkspacePaths, isPathAtOrBelow, rewritePathPrefix } from "./demoWorkspacePaths";
 
 type DemoDocument = {
   path: string;
@@ -64,7 +47,6 @@ type SaveState = "saved" | "saving";
 
 const STORAGE_KEY = "dohc-marketing-demo-documents-v2";
 const FOLDERS_STORAGE_KEY = "dohc-marketing-demo-folders-v1";
-
 
 const DEMO_WORKSPACE: WorkspaceSummary = {
   workspaceId: "marketing-demo",
@@ -175,11 +157,7 @@ function initialDrafts(): Record<string, string> {
     }
     const restored: Record<string, string> = {};
     for (const [path, markdown] of Object.entries(parsed)) {
-      if (
-        typeof markdown === "string" &&
-        path.endsWith(".md") &&
-        !path.split("/").includes("..")
-      ) {
+      if (typeof markdown === "string" && path.endsWith(".md") && !path.split("/").includes("..")) {
         restored[path] = markdown;
       }
     }
@@ -240,7 +218,6 @@ function initialSidebarVisible(): boolean {
   return window.matchMedia("(min-width: 721px)").matches;
 }
 
-
 // The demo records no versions, so it names Main without the picker's menu.
 function DemoVersion() {
   return (
@@ -255,8 +232,10 @@ function DemoVersion() {
 }
 
 const SESSION_ONLY_MESSAGES = {
-  workspace: "This browser does not let the demo store files. Your edits last until you close this tab.",
-  assets: "This browser does not let the demo store images. Your images last until you close this tab.",
+  workspace:
+    "This browser does not let the demo store files. Your edits last until you close this tab.",
+  assets:
+    "This browser does not let the demo store images. Your images last until you close this tab.",
 } as const;
 
 // The demo has no editing pipeline, so no tab ever holds a set-aside draft.
@@ -284,8 +263,7 @@ export function ProductDemo() {
   const [openTabs, setOpenTabs] = useState(() => Object.keys(drafts).slice(0, 5));
   const [recentPaths, setRecentPaths] = useState<string[]>([]);
   const [palette, setPalette] = useState<"commands" | "quick-open" | null>(null);
-  const [activeActivity, setActiveActivity] =
-    useState<DemoPanelId>("explorer");
+  const [activeActivity, setActiveActivity] = useState<DemoPanelId>("explorer");
   const [sidebarVisible, setSidebarVisible] = useState(initialSidebarVisible);
   const [emptyFolders, setEmptyFolders] = useState<string[]>(initialFolders);
   const [saveState, setSaveState] = useState<SaveState>("saved");
@@ -334,9 +312,7 @@ export function ProductDemo() {
             path,
             title: String(parsed.meta.title ?? filenameStem(path)),
             body: parsed.body,
-            ...(typeof parsed.meta.icon === "string"
-              ? { icon: parsed.meta.icon }
-              : {}),
+            ...(typeof parsed.meta.icon === "string" ? { icon: parsed.meta.icon } : {}),
           };
         })
         .sort((left, right) => left.path.localeCompare(right.path)),
@@ -379,8 +355,7 @@ export function ProductDemo() {
     if (!demoWorkspaceAssetsPersistAcrossSessions()) reportSessionOnly("assets");
     const markSessionOnly = () => reportSessionOnly("assets");
     window.addEventListener(DEMO_ASSET_PERSISTENCE_EVENT, markSessionOnly);
-    return () =>
-      window.removeEventListener(DEMO_ASSET_PERSISTENCE_EVENT, markSessionOnly);
+    return () => window.removeEventListener(DEMO_ASSET_PERSISTENCE_EVENT, markSessionOnly);
   }, [reportSessionOnly]);
 
   useEffect(
@@ -401,17 +376,19 @@ export function ProductDemo() {
 
   const composeCurrentDocument = useCallback(
     (path = activePath, fallback = drafts[path] ?? "") => {
-      const editorMarkdown =
-        path === activePath ? editorRef.current?.getMarkdown() : null;
+      const editorMarkdown = path === activePath ? editorRef.current?.getMarkdown() : null;
       const body = editorMarkdown ?? parseFrontmatter(fallback).body;
       return applyFrontmatter(body, parseFrontmatter(fallback).meta);
     },
     [activePath, drafts],
   );
 
-  const storeDraft = useCallback((path: string, markdown: string) => {
-    updateDrafts((current) => ({ ...current, [path]: markdown }));
-  }, [updateDrafts]);
+  const storeDraft = useCallback(
+    (path: string, markdown: string) => {
+      updateDrafts((current) => ({ ...current, [path]: markdown }));
+    },
+    [updateDrafts],
+  );
 
   const cancelPendingSave = useCallback(() => {
     if (saveFrame.current === null) return;
@@ -496,9 +473,8 @@ export function ProductDemo() {
     (target: string) => {
       const normalized = target.replace(/\.md$/i, "");
       const match =
-        knownFiles.find(
-          (file) => file.path.replace(/\.md$/i, "") === normalized,
-        ) ?? knownFiles.find((file) => file.path === target);
+        knownFiles.find((file) => file.path.replace(/\.md$/i, "") === normalized) ??
+        knownFiles.find((file) => file.path === target);
       openDocument(match?.path ?? `${normalized}.md`);
     },
     [knownFiles, openDocument],
@@ -507,10 +483,7 @@ export function ProductDemo() {
   const createDocument = useCallback(() => {
     flushActiveDraft();
     const workspacePaths = new Set(
-      collectWorkspacePaths([
-        ...Object.keys(draftsRef.current),
-        ...emptyFolders,
-      ]),
+      collectWorkspacePaths([...Object.keys(draftsRef.current), ...emptyFolders]),
     );
     let index = 1;
     let path = "notes/quick-note.md";
@@ -542,54 +515,56 @@ export function ProductDemo() {
     [showDocument, storeDraft],
   );
 
-  const moveDraftPath = useCallback((fromPath: string, toPath: string) => {
-    updateDrafts((current) => {
-      return Object.fromEntries(
-        Object.entries(current).map(([path, markdown]) => [
-          rewritePathPrefix(path, fromPath, toPath),
-          markdown,
-        ]),
+  const moveDraftPath = useCallback(
+    (fromPath: string, toPath: string) => {
+      updateDrafts((current) => {
+        return Object.fromEntries(
+          Object.entries(current).map(([path, markdown]) => [
+            rewritePathPrefix(path, fromPath, toPath),
+            markdown,
+          ]),
+        );
+      });
+      setActivePath((current) => rewritePathPrefix(current, fromPath, toPath));
+      setEmptyFolders((current) =>
+        current.map((path) => rewritePathPrefix(path, fromPath, toPath)),
       );
-    });
-    setActivePath((current) =>
-      rewritePathPrefix(current, fromPath, toPath),
-    );
-    setEmptyFolders((current) =>
-      current.map((path) => rewritePathPrefix(path, fromPath, toPath)),
-    );
-  }, [updateDrafts]);
+    },
+    [updateDrafts],
+  );
 
-  const deleteDraftPath = useCallback((path: string) => {
-    const next = updateDrafts((current) => {
-      const filtered = Object.fromEntries(
-        Object.entries(current).filter(
-          ([entry]) => !isPathAtOrBelow(entry, path),
-        ),
-      );
-      if (Object.keys(filtered).length === 0) {
-        const fallback = DEMO_DOCUMENTS[0];
-        filtered[fallback.path] = fallback.markdown;
+  const deleteDraftPath = useCallback(
+    (path: string) => {
+      const next = updateDrafts((current) => {
+        const filtered = Object.fromEntries(
+          Object.entries(current).filter(([entry]) => !isPathAtOrBelow(entry, path)),
+        );
+        if (Object.keys(filtered).length === 0) {
+          const fallback = DEMO_DOCUMENTS[0];
+          filtered[fallback.path] = fallback.markdown;
+        }
+        return filtered;
+      });
+      const remainingTabs = openTabs.filter((tab) => !isPathAtOrBelow(tab, path));
+      setOpenTabs(remainingTabs);
+      if (isPathAtOrBelow(activePath, path)) {
+        // The next open tab takes over, as when the tab closes; with none left
+        // the editor group is empty.
+        const index = Math.max(0, openTabs.indexOf(activePath));
+        setActivePath(
+          remainingTabs[Math.min(index, remainingTabs.length - 1)] ??
+            Object.keys(next)[0] ??
+            DEMO_DOCUMENTS[0].path,
+        );
+        setShowSource(false);
+        setSourceText("");
       }
-      return filtered;
-    });
-    const remainingTabs = openTabs.filter((tab) => !isPathAtOrBelow(tab, path));
-    setOpenTabs(remainingTabs);
-    if (isPathAtOrBelow(activePath, path)) {
-      // The next open tab takes over, as when the tab closes; with none left
-      // the editor group is empty.
-      const index = Math.max(0, openTabs.indexOf(activePath));
-      setActivePath(
-        remainingTabs[Math.min(index, remainingTabs.length - 1)] ??
-          Object.keys(next)[0] ??
-          DEMO_DOCUMENTS[0].path,
+      setEmptyFolders((current) =>
+        current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
       );
-      setShowSource(false);
-      setSourceText("");
-    }
-    setEmptyFolders((current) =>
-      current.filter((entry) => entry !== path && !entry.startsWith(`${path}/`)),
-    );
-  }, [activePath, openTabs, updateDrafts]);
+    },
+    [activePath, openTabs, updateDrafts],
+  );
 
   const updateIdentity = useCallback(
     (nextFullText: string) => {
@@ -617,13 +592,7 @@ export function ProductDemo() {
       setSourceText(next);
     }
     setShowSource((current) => !current);
-  }, [
-    activePath,
-    cancelPendingSave,
-    composeCurrentDocument,
-    showSource,
-    storeDraft,
-  ]);
+  }, [activePath, cancelPendingSave, composeCurrentDocument, showSource, storeDraft]);
 
   const selectActivity = useCallback(
     (next: DemoPanelId) => {
@@ -695,14 +664,21 @@ export function ProductDemo() {
     (event: React.KeyboardEvent) => {
       const id = matchShellShortcut(event.nativeEvent, window.dohcDesktop?.platform);
       const run =
-        id === "command-palette" ? () => setPalette("commands")
-        : id === "quick-open" ? () => setPalette("quick-open")
-        : id === "toggle-sidebar" ? toggleSidebar
-        : id === "new-file" ? createDocument
-        : id === "close-tab" && editorOpen ? () => closeTab(activePath)
-        : id === "next-tab" ? () => showNeighbourTab(1)
-        : id === "previous-tab" ? () => showNeighbourTab(-1)
-        : null;
+        id === "command-palette"
+          ? () => setPalette("commands")
+          : id === "quick-open"
+            ? () => setPalette("quick-open")
+            : id === "toggle-sidebar"
+              ? toggleSidebar
+              : id === "new-file"
+                ? createDocument
+                : id === "close-tab" && editorOpen
+                  ? () => closeTab(activePath)
+                  : id === "next-tab"
+                    ? () => showNeighbourTab(1)
+                    : id === "previous-tab"
+                      ? () => showNeighbourTab(-1)
+                      : null;
       if (!run) return;
       event.preventDefault();
       run();
@@ -711,9 +687,7 @@ export function ProductDemo() {
   );
 
   const createFolder = useCallback((path: string) => {
-    setEmptyFolders((current) =>
-      current.includes(path) ? current : [...current, path],
-    );
+    setEmptyFolders((current) => (current.includes(path) ? current : [...current, path]));
   }, []);
 
   useLayoutEffect(() => {
@@ -725,14 +699,7 @@ export function ProductDemo() {
       movePath: moveDraftPath,
       deletePath: deleteDraftPath,
     });
-  }, [
-    createDocumentAtPath,
-    createFolder,
-    deleteDraftPath,
-    documents,
-    emptyFolders,
-    moveDraftPath,
-  ]);
+  }, [createDocumentAtPath, createFolder, deleteDraftPath, documents, emptyFolders, moveDraftPath]);
 
   return (
     <div
@@ -747,9 +714,7 @@ export function ProductDemo() {
         onSwitchWorkspace={() => undefined}
         onQuickOpen={() => setPalette("quick-open")}
         version={<DemoVersion />}
-        workspaceStatus={
-          <WorkspaceSyncStatus syncStatus={DEMO_SYNC_STATUS} failedSaves={0} />
-        }
+        workspaceStatus={<WorkspaceSyncStatus syncStatus={DEMO_SYNC_STATUS} failedSaves={0} />}
         primarySidebar={{ visible: sidebarVisible, onToggle: toggleSidebar }}
       />
       <span className="demo-window-controls" aria-hidden>
@@ -874,7 +839,11 @@ export function ProductDemo() {
                       filenameStem={filenameStem(activePath)}
                       onEnterBody={() => editorRef.current?.focus("start")}
                     />
-                    <PropertiesPanel body={activeFullText} onChange={updateIdentity} onShowSource={toggleSource} />
+                    <PropertiesPanel
+                      body={activeFullText}
+                      onChange={updateIdentity}
+                      onShowSource={toggleSource}
+                    />
                   </div>
                   <MarkdownEditor
                     key={activePath}

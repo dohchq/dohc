@@ -12,4 +12,5 @@ export interface NativeDurableFile {
 }
 
 /** Loads the native module on first use, so importing this file does nothing on its own. */
-export const nativeDurableFile = (): NativeDurableFile => requireNativeModule<NativeDurableFile>("DurableFile");
+export const nativeDurableFile = (): NativeDurableFile =>
+  requireNativeModule<NativeDurableFile>("DurableFile");

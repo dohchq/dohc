@@ -1,13 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { fstatSync, type BigIntStats } from "node:fs";
-import {
-  lstat,
-  mkdtemp,
-  open,
-  rm,
-  writeFile,
-  type FileHandle,
-} from "node:fs/promises";
+import { lstat, mkdtemp, open, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -71,9 +64,7 @@ function sanitizeCell(value: unknown): unknown {
 }
 
 function sanitizeRow(row: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(row).map(([key, value]) => [key, sanitizeCell(value)]),
-  );
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, sanitizeCell(value)]));
 }
 
 function displayedValueBytes(value: unknown): number {
@@ -96,11 +87,7 @@ function displayedRowBytes(row: Record<string, unknown>): number {
 function bindable(value: unknown): unknown {
   if (value === undefined || value === null) return null;
   if (typeof value === "boolean") return value ? 1 : 0;
-  if (
-    typeof value === "number" ||
-    typeof value === "bigint" ||
-    typeof value === "string"
-  ) {
+  if (typeof value === "number" || typeof value === "bigint" || typeof value === "string") {
     return value;
   }
   return JSON.stringify(value);
@@ -118,11 +105,7 @@ function tableColumns(db: SqliteDb, table: string): DatabaseColumnView[] {
     }));
 }
 
-function rawTableRows(
-  db: SqliteDb,
-  table: string,
-  offset: number,
-): Array<Record<string, unknown>> {
+function rawTableRows(db: SqliteDb, table: string, offset: number): Array<Record<string, unknown>> {
   try {
     return db
       .prepare(
@@ -131,21 +114,13 @@ function rawTableRows(
       .all(offset);
   } catch {
     return db
-      .prepare(
-        `SELECT * FROM ${quoteIdent(table)} LIMIT ${DATABASE_MAX_ROWS} OFFSET ?`,
-      )
+      .prepare(`SELECT * FROM ${quoteIdent(table)} LIMIT ${DATABASE_MAX_ROWS} OFFSET ?`)
       .all(offset);
   }
 }
 
-function hasTableRowAtOffset(
-  db: SqliteDb,
-  table: string,
-  offset: number,
-): boolean {
-  return Boolean(
-    db.prepare(`SELECT 1 FROM ${quoteIdent(table)} LIMIT 1 OFFSET ?`).get(offset),
-  );
+function hasTableRowAtOffset(db: SqliteDb, table: string, offset: number): boolean {
+  return Boolean(db.prepare(`SELECT 1 FROM ${quoteIdent(table)} LIMIT 1 OFFSET ?`).get(offset));
 }
 
 function tablePage(
@@ -169,8 +144,7 @@ function tablePage(
   }
   const hasMore =
     rows.length < rawRows.length ||
-    (rawRows.length === DATABASE_MAX_ROWS &&
-      hasTableRowAtOffset(db, table, offset + rows.length));
+    (rawRows.length === DATABASE_MAX_ROWS && hasTableRowAtOffset(db, table, offset + rows.length));
   return {
     path: resultPath,
     table,
@@ -229,9 +203,7 @@ async function withTemporaryDatabase<T>(
   bytes: Uint8Array,
   run: (absolutePath: string) => T,
 ): Promise<T> {
-  const temporaryRoot = await mkdtemp(
-    join(tmpdir(), "dohc-database-worker-snapshot-"),
-  );
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "dohc-database-worker-snapshot-"));
   try {
     const absolutePath = join(temporaryRoot, `${randomUUID()}.sqlite`);
     await writeFile(absolutePath, bytes, { flag: "wx", mode: 0o600 });
@@ -265,18 +237,14 @@ function runEdit(db: SqliteDb, edit: DatabaseEdit): void {
   const table = quoteIdent(edit.table);
   const primaryKey = quoteIdent(edit.pkColumn);
   if (edit.op === "delete") {
-    db.prepare(`DELETE FROM ${table} WHERE ${primaryKey} = ?`).run(
-      bindable(edit.rowId),
-    );
+    db.prepare(`DELETE FROM ${table} WHERE ${primaryKey} = ?`).run(bindable(edit.rowId));
     return;
   }
   const payload = edit.payload ?? {};
   if (edit.op === "update") {
     const columns = Object.keys(payload);
     if (columns.length === 0) return;
-    const setClause = columns
-      .map((column) => `${quoteIdent(column)} = ?`)
-      .join(", ");
+    const setClause = columns.map((column) => `${quoteIdent(column)} = ?`).join(", ");
     db.prepare(`UPDATE ${table} SET ${setClause} WHERE ${primaryKey} = ?`).run(
       ...columns.map((column) => bindable(payload[column])),
       bindable(edit.rowId),
@@ -284,15 +252,9 @@ function runEdit(db: SqliteDb, edit: DatabaseEdit): void {
     return;
   }
   const columns =
-    edit.pkColumn in payload
-      ? Object.keys(payload)
-      : [edit.pkColumn, ...Object.keys(payload)];
+    edit.pkColumn in payload ? Object.keys(payload) : [edit.pkColumn, ...Object.keys(payload)];
   const values = columns.map((column) =>
-    bindable(
-      column === edit.pkColumn && !(column in payload)
-        ? edit.rowId
-        : payload[column],
-    ),
+    bindable(column === edit.pkColumn && !(column in payload) ? edit.rowId : payload[column]),
   );
   const verb = edit.op === "upsert" ? "INSERT OR REPLACE" : "INSERT";
   db.prepare(
@@ -311,7 +273,13 @@ interface LoggedOperations {
 // A sync that replaces the log, or anything that writes it, changes at least
 // one of these, except another writer rewriting a line in place, at the same
 // size, during dohc's own append.
-type LogVersion = readonly [dev: bigint, ino: bigint, size: bigint, mtimeNs: bigint, ctimeNs: bigint];
+type LogVersion = readonly [
+  dev: bigint,
+  ino: bigint,
+  size: bigint,
+  mtimeNs: bigint,
+  ctimeNs: bigint,
+];
 
 function logVersion(stats: BigIntStats): LogVersion {
   return [stats.dev, stats.ino, stats.size, stats.mtimeNs, stats.ctimeNs];
@@ -364,19 +332,20 @@ function openCounter(statePath: string): SqliteDb {
   return state;
 }
 
-async function reserveOperationVersion(input: {
-  logPath: string;
-  statePath: string;
-}, handle: FileHandle): Promise<number> {
+async function reserveOperationVersion(
+  input: {
+    logPath: string;
+    statePath: string;
+  },
+  handle: FileHandle,
+): Promise<number> {
   const state = openCounter(input.statePath);
   let transactionOpen = false;
   try {
     state.exec("BEGIN IMMEDIATE");
     transactionOpen = true;
     const row = state
-      .prepare(
-        "SELECT value FROM database_operation_state WHERE key = 'last_version'",
-      )
+      .prepare("SELECT value FROM database_operation_state WHERE key = 'last_version'")
       .get();
     // The next number comes after this computer's counter and after every
     // number in the shared log, which another computer may have added to.
@@ -384,7 +353,10 @@ async function reserveOperationVersion(input: {
     // counter, every line in the log counts as a number given out.
     const logged = await loggedOperations(input.logPath, handle);
     if (logged.uncountable) {
-      throw Object.assign(new Error("The operations log has a version past the safe integer range."), { code: UNCOUNTABLE_LOG_VERSION });
+      throw Object.assign(
+        new Error("The operations log has a version past the safe integer range."),
+        { code: UNCOUNTABLE_LOG_VERSION },
+      );
     }
     const currentVersion = Math.max(row ? Number(row.value) : logged.lines, logged.highest);
     const version = currentVersion + 1;
@@ -423,7 +395,10 @@ async function withOperationLog<T>(
   ) => Promise<T>,
 ): Promise<T> {
   const { logPath, storageIdentity } = input;
-  const folderGuard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${basename(dirname(logPath))}` };
+  const folderGuard = {
+    ...DOHC_DATABASES_GUARD,
+    path: `.dohc/databases/${basename(dirname(logPath))}`,
+  };
   const checkFolder = async () => {
     const stats = await lstat(dirname(logPath), { bigint: true });
     if (stats.isSymbolicLink() || !stats.isDirectory()) {
@@ -435,7 +410,10 @@ async function withOperationLog<T>(
   };
   // Refuse a queued edit before creating its log in a replacement folder.
   await checkFolder();
-  const guard = { ...DOHC_DATABASES_GUARD, path: `.dohc/databases/${basename(dirname(logPath))}/operations.jsonl` };
+  const guard = {
+    ...DOHC_DATABASES_GUARD,
+    path: `.dohc/databases/${basename(dirname(logPath))}/operations.jsonl`,
+  };
   const checkFile = (stats: BigIntStats) => {
     if (!stats.isFile()) throw new Error(notAFileRefusal(guard, stats));
     if (stats.nlink > 1n) throw new Error(hardLinkedFileRefusal(guard));
@@ -450,7 +428,7 @@ async function withOperationLog<T>(
   let synced = false;
   try {
     // Windows cannot truncate an append-mode handle. Open both before SQLite locks.
-    const writable = restoreHandle = await open(logPath, "r+");
+    const writable = (restoreHandle = await open(logPath, "r+"));
     const checkLog = async () => {
       const opened = await handle.stat({ bigint: true });
       const writableStats = await writable.stat({ bigint: true });
@@ -458,9 +436,11 @@ async function withOperationLog<T>(
       checkFile(opened);
       checkFile(writableStats);
       checkFile(named);
-      if (sameFsEntry(opened, writableStats) !== "same" ||
-          sameFsEntry(opened, named) !== "same" ||
-          (before && sameFsEntry(before, opened) !== "same")) {
+      if (
+        sameFsEntry(opened, writableStats) !== "same" ||
+        sameFsEntry(opened, named) !== "same" ||
+        (before && sameFsEntry(before, opened) !== "same")
+      ) {
         throw new Error(fileChangedWhileOpeningRefusal(guard));
       }
     };
@@ -483,8 +463,14 @@ async function withOperationLog<T>(
       const tail = Buffer.alloc(after.size - size);
       let offset = 0;
       while (offset < tail.byteLength) {
-        const { bytesRead } = await writable.read(tail, offset, tail.byteLength - offset, size + offset);
-        if (bytesRead === 0) throw new Error("Cannot read the operations log tail for restoration.");
+        const { bytesRead } = await writable.read(
+          tail,
+          offset,
+          tail.byteLength - offset,
+          size + offset,
+        );
+        if (bytesRead === 0)
+          throw new Error("Cannot read the operations log tail for restoration.");
         offset += bytesRead;
       }
       if (!tail.equals(line.subarray(0, tail.byteLength))) {
@@ -493,33 +479,42 @@ async function withOperationLog<T>(
       await writable.truncate(size);
       await writable.sync();
     };
-    return await run(async (operation) => {
-      await checkLog();
-      const line = `${JSON.stringify(operation)}\n`;
-      const beforeAppend = logVersion(fstatSync(handle.fd, { bigint: true }));
-      pendingAppend = { size: Number(beforeAppend[2]), line: Buffer.from(line, "utf8") };
-      await handle.appendFile(line, "utf8");
-      await handle.sync();
-      const after = fstatSync(handle.fd, { bigint: true });
-      // When only this line went in since dohc last read the log, the next edit
-      // needn't read it again. Anything else makes it read the whole log.
-      const known = readLogs.get(logPath);
-      if (known && sameLogVersion(known.version, beforeAppend) && after.size === beforeAppend[2] + BigInt(Buffer.byteLength(line))) {
-        readLogs.set(logPath, {
-          ...known,
-          lines: known.lines + 1,
-          highest: Math.max(known.highest, operation.version),
-          version: logVersion(after),
-        });
-      } else {
-        readLogs.delete(logPath);
-      }
-      synced = true;
-    }, handle, restore);
+    return await run(
+      async (operation) => {
+        await checkLog();
+        const line = `${JSON.stringify(operation)}\n`;
+        const beforeAppend = logVersion(fstatSync(handle.fd, { bigint: true }));
+        pendingAppend = { size: Number(beforeAppend[2]), line: Buffer.from(line, "utf8") };
+        await handle.appendFile(line, "utf8");
+        await handle.sync();
+        const after = fstatSync(handle.fd, { bigint: true });
+        // When only this line went in since dohc last read the log, the next edit
+        // needn't read it again. Anything else makes it read the whole log.
+        const known = readLogs.get(logPath);
+        if (
+          known &&
+          sameLogVersion(known.version, beforeAppend) &&
+          after.size === beforeAppend[2] + BigInt(Buffer.byteLength(line))
+        ) {
+          readLogs.set(logPath, {
+            ...known,
+            lines: known.lines + 1,
+            highest: Math.max(known.highest, operation.version),
+            version: logVersion(after),
+          });
+        } else {
+          readLogs.delete(logPath);
+        }
+        synced = true;
+      },
+      handle,
+      restore,
+    );
   } finally {
     for (const opened of [restoreHandle, handle]) {
       await opened?.close().catch((error) => {
-        if (synced) console.error("[desktop] database operation log close failed after sync:", error);
+        if (synced)
+          console.error("[desktop] database operation log close failed after sync:", error);
       });
     }
   }
@@ -586,12 +581,7 @@ export async function editDatabaseAtPath(input: {
       await append(operation);
       db.exec("COMMIT");
       transactionOpen = false;
-      const page = tablePage(
-        db,
-        input.resultPath,
-        input.edit.table,
-        input.pageOffset,
-      );
+      const page = tablePage(db, input.resultPath, input.edit.table, input.pageOffset);
       return {
         path: input.resultPath,
         table: input.edit.table,

@@ -55,8 +55,6 @@ impl Root {
             commit.wait();
         }
     }
-    /// Count `bytes` a delete read and has not recorded yet, until the
-    /// returned guard drops.
     #[cfg(test)]
     fn hold_unrecorded(&self, bytes: usize) -> Unrecorded {
         let mut state = self.0.0.lock().unwrap();
@@ -267,7 +265,6 @@ impl Worker {
 /// What became of a row [`release`] was asked to release.
 enum Released {
     Done,
-    /// A hold on the target forbids the release for now.
     Held,
     /// The source stays: it changed, a process has it open, or its volume
     /// cannot tell.

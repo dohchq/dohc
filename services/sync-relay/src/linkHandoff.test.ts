@@ -1,7 +1,10 @@
 import { namedShareOrigin } from "./relayLogInputs";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { hashLinkHandoffCode as hashHandoffCode, LINK_HANDOFF_CODES_PER_GRANT_LIMIT } from "./linkSecurity";
+import {
+  hashLinkHandoffCode as hashHandoffCode,
+  LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
+} from "./linkSecurity";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
@@ -28,7 +31,7 @@ const RECIPIENT = "recipient";
 const OTHER_ACCOUNT = "other-account";
 const WORKSPACE = "workspace-link-handoff";
 const SHARE_ID = "share-link-handoff";
- const HANDOFF_TTL_MS = 5 * 60 * 1_000;
+const HANDOFF_TTL_MS = 5 * 60 * 1_000;
 const GENERIC_REFUSAL = {
   status: 404,
   body: '{"ok":false,"error":"not found"}',
@@ -98,11 +101,7 @@ async function setup(
     ).status,
   ).toBe(200);
   const linkResponse = await h(
-    request(
-      OWNER,
-      `/sync/${WORKSPACE}/shares/${SHARE_ID}/links`,
-      jsonBody({ access }),
-    ),
+    request(OWNER, `/sync/${WORKSPACE}/shares/${SHARE_ID}/links`, jsonBody({ access })),
   );
   expect(linkResponse.status).toBe(200);
   const link = await json(linkResponse);
@@ -187,13 +186,9 @@ function countHandoffStorageCalls(storage: SyncRelayStorage): {
 function codeCount(database: SqliteDatabase, grantId?: string): number {
   const row = grantId
     ? database
-        .prepare(
-          "SELECT COUNT(*) AS count FROM sync_relay_link_handoff_codes WHERE grant_id = ?",
-        )
+        .prepare("SELECT COUNT(*) AS count FROM sync_relay_link_handoff_codes WHERE grant_id = ?")
         .get(grantId)
-    : database
-        .prepare("SELECT COUNT(*) AS count FROM sync_relay_link_handoff_codes")
-        .get();
+    : database.prepare("SELECT COUNT(*) AS count FROM sync_relay_link_handoff_codes").get();
   return Number(row?.count ?? 0);
 }
 
@@ -218,9 +213,7 @@ function dependentRows(
 }
 
 async function ownerInventory(setupState: Setup): Promise<Array<Record<string, unknown>>> {
-  const response = await setupState.h(
-    request(OWNER, `/sync/${WORKSPACE}/shares/links`),
-  );
+  const response = await setupState.h(request(OWNER, `/sync/${WORKSPACE}/shares/links`));
   expect(response.status).toBe(200);
   return (await json(response)).links as Array<Record<string, unknown>>;
 }
@@ -322,9 +315,7 @@ describe("single-use authenticated link handoff", () => {
     expect(responseText).not.toContain(String(state.link.grantId));
     expect(responseText).not.toContain(SHARE_ID);
 
-    const row = database
-      .prepare("SELECT * FROM sync_relay_link_handoff_codes")
-      .get();
+    const row = database.prepare("SELECT * FROM sync_relay_link_handoff_codes").get();
     expect(row).toMatchObject({
       code_hash: hashLinkHandoffCode(code),
       grant_id: state.link.grantId,
@@ -347,8 +338,9 @@ describe("single-use authenticated link handoff", () => {
       "expires_at_ms",
       "result_grant_id",
     ]);
-    expect(columns.some((column) => /user|redeem|identity|session|secret|plain|ip/iu.test(column)))
-      .toBe(false);
+    expect(
+      columns.some((column) => /user|redeem|identity|session|secret|plain|ip/iu.test(column)),
+    ).toBe(false);
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
@@ -418,16 +410,12 @@ describe("single-use authenticated link handoff", () => {
     expect(codeCount(database, String(state.link.grantId))).toBe(32);
     expect(
       database
-        .prepare(
-          "SELECT code_id FROM sync_relay_link_handoff_codes WHERE code_hash = ?",
-        )
+        .prepare("SELECT code_id FROM sync_relay_link_handoff_codes WHERE code_hash = ?")
         .get(hashLinkHandoffCode(codes[0]!)),
     ).toBeUndefined();
     expect(
       database
-        .prepare(
-          "SELECT code_id FROM sync_relay_link_handoff_codes WHERE code_hash = ?",
-        )
+        .prepare("SELECT code_id FROM sync_relay_link_handoff_codes WHERE code_hash = ?")
         .get(hashLinkHandoffCode(codes[32]!)),
     ).toBeDefined();
     await expectGeneric(await state.h(redeemRequest(RECIPIENT, codes[0])));
@@ -442,9 +430,7 @@ describe("single-use authenticated link handoff", () => {
     const state = await setup();
     const database = inspect(state.dbPath, true);
     const receiptCode = await mint(state);
-    const receipt = await serialized(
-      await state.h(redeemRequest(RECIPIENT, receiptCode.code)),
-    );
+    const receipt = await serialized(await state.h(redeemRequest(RECIPIENT, receiptCode.code)));
     expect(receipt.status).toBe(200);
 
     const unredeemed: Array<Record<string, unknown>> = [];
@@ -461,34 +447,24 @@ describe("single-use authenticated link handoff", () => {
     expect(codeCount(database, String(state.link.grantId))).toBe(
       LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
     );
-    expect(
-      await serialized(
-        await state.h(redeemRequest(RECIPIENT, receiptCode.code)),
-      ),
-    ).toEqual(receipt);
+    expect(await serialized(await state.h(redeemRequest(RECIPIENT, receiptCode.code)))).toEqual(
+      receipt,
+    );
 
     for (const code of [...unredeemed.slice(1), newest]) {
-      expect(
-        await serialized(
-          await state.h(redeemRequest(RECIPIENT, code.code)),
-        ),
-      ).toEqual(receipt);
+      expect(await serialized(await state.h(redeemRequest(RECIPIENT, code.code)))).toEqual(receipt);
     }
 
     state.now.value += 1;
-    const refusedMint = await serialized(
-      await state.h(handoffRequest(state.capability)),
-    );
+    const refusedMint = await serialized(await state.h(handoffRequest(state.capability)));
     expect(refusedMint.status).toBe(GENERIC_REFUSAL.status);
     expect(refusedMint).toEqual(GENERIC_REFUSAL);
     expect(codeCount(database, String(state.link.grantId))).toBe(
       LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
     );
-    expect(
-      await serialized(
-        await state.h(redeemRequest(RECIPIENT, receiptCode.code)),
-      ),
-    ).toEqual(receipt);
+    expect(await serialized(await state.h(redeemRequest(RECIPIENT, receiptCode.code)))).toEqual(
+      receipt,
+    );
   });
 
   it("shows no redeemer identity before redeem and one server-derived View dependent after success", async () => {
@@ -501,12 +477,7 @@ describe("single-use authenticated link handoff", () => {
     const response = await state.h(redeemRequest(RECIPIENT, minted.code));
     expect(response.status).toBe(200);
     const redeemed = await json(response);
-    expect(Object.keys(redeemed).sort()).toEqual([
-      "access",
-      "grantId",
-      "ok",
-      "shareId",
-    ]);
+    expect(Object.keys(redeemed).sort()).toEqual(["access", "grantId", "ok", "shareId"]);
     expect(redeemed).toMatchObject({ ok: true, shareId: SHARE_ID, access: "view" });
 
     const after = await ownerInventory(state);
@@ -544,17 +515,13 @@ describe("single-use authenticated link handoff", () => {
 
   it("keeps Comment handoff dependents in discussion without granting share-log append authority", async () => {
     const state = await setup({}, "comment");
-    const redeemed = await json(
-      await state.h(redeemRequest(RECIPIENT, (await mint(state)).code)),
-    );
+    const redeemed = await json(await state.h(redeemRequest(RECIPIENT, (await mint(state)).code)));
     expect(redeemed).toMatchObject({ ok: true, access: "comment" });
 
     const dependentExact = await json(
       await state.h(request(RECIPIENT, `/sync/shares/${SHARE_ID}`)),
     );
-    const dependentList = await json(
-      await state.h(request(RECIPIENT, "/sync/shares")),
-    );
+    const dependentList = await json(await state.h(request(RECIPIENT, "/sync/shares")));
     expect(dependentExact.genericChatWritable).toBe(false);
     expect(dependentList.received).toEqual([
       expect.objectContaining({
@@ -666,9 +633,7 @@ describe("single-use authenticated link handoff", () => {
     const independentExact = await json(
       await state.h(request(OTHER_ACCOUNT, `/sync/shares/${SHARE_ID}`)),
     );
-    const independentList = await json(
-      await state.h(request(OTHER_ACCOUNT, "/sync/shares")),
-    );
+    const independentList = await json(await state.h(request(OTHER_ACCOUNT, "/sync/shares")));
     expect(independentExact.genericChatWritable).toBe(true);
     expect(independentList.received).toEqual([
       expect.objectContaining({
@@ -678,11 +643,7 @@ describe("single-use authenticated link handoff", () => {
     ]);
 
     const refused = await state.h(
-      request(
-        RECIPIENT,
-        `/sync/shares/${SHARE_ID}/log`,
-        jsonBody(batch),
-      ),
+      request(RECIPIENT, `/sync/shares/${SHARE_ID}/log`, jsonBody(batch)),
     );
     expect(await serialized(refused)).toEqual({
       status: 403,
@@ -704,12 +665,8 @@ describe("single-use authenticated link handoff", () => {
         .map((grant) => grant.grantId),
     ).toEqual([redeemed.grantId, "owner-issued-recipient-comment"]);
 
-    const mixedExact = await json(
-      await state.h(request(RECIPIENT, `/sync/shares/${SHARE_ID}`)),
-    );
-    const mixedList = await json(
-      await state.h(request(RECIPIENT, "/sync/shares")),
-    );
+    const mixedExact = await json(await state.h(request(RECIPIENT, `/sync/shares/${SHARE_ID}`)));
+    const mixedList = await json(await state.h(request(RECIPIENT, "/sync/shares")));
     expect(mixedExact.genericChatWritable).toBe(true);
     expect(mixedList.received).toEqual([
       expect.objectContaining({
@@ -719,11 +676,7 @@ describe("single-use authenticated link handoff", () => {
     ]);
 
     const accepted = await state.h(
-      request(
-        RECIPIENT,
-        `/sync/shares/${SHARE_ID}/log`,
-        jsonBody(batch),
-      ),
+      request(RECIPIENT, `/sync/shares/${SHARE_ID}/log`, jsonBody(batch)),
     );
     expect(accepted.status, await accepted.clone().text()).toBe(200);
     expect(await json(accepted)).toMatchObject({
@@ -742,30 +695,30 @@ describe("single-use authenticated link handoff", () => {
       let armed = true;
       const racedStorage = interceptStorage(state.storage, {
         redeemLinkHandoffCode: (target, input) => {
-            if (armed) {
-              armed = false;
-              if (transition === "retune") {
-                expect(
-                  target.retuneShareGrant({
-                    shareId: SHARE_ID,
-                    grantId: String(state.link.grantId),
-                    access: "view",
-                    changedAtMs: state.now.value + 1,
-                    expectedDependentGrantIds: [],
-                    guard: () => undefined,
-                  }),
-                ).toMatchObject({ ok: true });
-              } else {
-                expect(
-                  target.revokeShareGrant({
-                    shareId: SHARE_ID,
-                    grantId: String(state.link.grantId),
-                    revokedAtMs: state.now.value + 1,
-                  }),
-                ).toMatchObject({ ok: true });
-              }
+          if (armed) {
+            armed = false;
+            if (transition === "retune") {
+              expect(
+                target.retuneShareGrant({
+                  shareId: SHARE_ID,
+                  grantId: String(state.link.grantId),
+                  access: "view",
+                  changedAtMs: state.now.value + 1,
+                  expectedDependentGrantIds: [],
+                  guard: () => undefined,
+                }),
+              ).toMatchObject({ ok: true });
+            } else {
+              expect(
+                target.revokeShareGrant({
+                  shareId: SHARE_ID,
+                  grantId: String(state.link.grantId),
+                  revokedAtMs: state.now.value + 1,
+                }),
+              ).toMatchObject({ ok: true });
             }
-            return target.redeemLinkHandoffCode(input);
+          }
+          return target.redeemLinkHandoffCode(input);
         },
       });
       const racedHandler = handler(state.storage, {
@@ -810,7 +763,12 @@ describe("single-use authenticated link handoff", () => {
       redeemLinkHandoffCode: (target, input) => {
         if (armed) {
           armed = false;
-          fenceAccount(target as StorageContext, deletionKey, RECIPIENT, `${RECIPIENT}@example.test`);
+          fenceAccount(
+            target as StorageContext,
+            deletionKey,
+            RECIPIENT,
+            `${RECIPIENT}@example.test`,
+          );
         }
         return target.redeemLinkHandoffCode(input);
       },
@@ -870,23 +828,19 @@ describe("single-use authenticated link handoff", () => {
       grantId: dependentIds[0],
       access: "view",
     });
-    expect(
-      await serialized(
-        await state.h(redeemRequest(RECIPIENT, existingCode.code)),
-      ),
-    ).toEqual(existingFirst);
-
-    await expectGeneric(
-      await state.h(redeemRequest(OTHER_ACCOUNT, overflowCode.code)),
+    expect(await serialized(await state.h(redeemRequest(RECIPIENT, existingCode.code)))).toEqual(
+      existingFirst,
     );
+
+    await expectGeneric(await state.h(redeemRequest(OTHER_ACCOUNT, overflowCode.code)));
     expect(dependentRows(database, parentGrantId)).toHaveLength(1_000);
     expect(dependentRows(database, parentGrantId, OTHER_ACCOUNT)).toEqual([]);
 
     const inventory = await ownerInventory(state);
     expect(inventory).toHaveLength(1);
-    const inventoryDependentIds = (
-      inventory[0]?.dependents as Array<Record<string, unknown>>
-    ).map((dependent) => String(dependent.grantId));
+    const inventoryDependentIds = (inventory[0]?.dependents as Array<Record<string, unknown>>).map(
+      (dependent) => String(dependent.grantId),
+    );
     expect(inventoryDependentIds).toEqual(dependentIds);
 
     const rotated = await state.h(
@@ -907,32 +861,24 @@ describe("single-use authenticated link handoff", () => {
     const state = await setup();
     const database = inspect(state.dbPath, true);
     const minted = await mint(state);
-    const first = await serialized(
-      await state.h(redeemRequest(RECIPIENT, minted.code)),
-    );
+    const first = await serialized(await state.h(redeemRequest(RECIPIENT, minted.code)));
     expect(first.status).toBe(200);
     const firstBody = JSON.parse(first.body) as Record<string, unknown>;
     expect(firstBody).toMatchObject({ ok: true, access: "view" });
 
-    const retry = await serialized(
-      await state.h(redeemRequest(RECIPIENT, minted.code)),
-    );
+    const retry = await serialized(await state.h(redeemRequest(RECIPIENT, minted.code)));
     expect(retry).toEqual(first);
     expect(dependentRows(database, String(state.link.grantId), RECIPIENT)).toHaveLength(1);
     expect(codeCount(database)).toBe(1);
     expect(
       database
-        .prepare(
-          "SELECT result_grant_id FROM sync_relay_link_handoff_codes WHERE code_hash = ?",
-        )
+        .prepare("SELECT result_grant_id FROM sync_relay_link_handoff_codes WHERE code_hash = ?")
         .get(hashLinkHandoffCode(String(minted.code))),
     ).toEqual({ result_grant_id: firstBody.grantId });
 
-    expect(
-      await serialized(
-        await state.h(redeemRequest(OTHER_ACCOUNT, minted.code)),
-      ),
-    ).toEqual(GENERIC_REFUSAL);
+    expect(await serialized(await state.h(redeemRequest(OTHER_ACCOUNT, minted.code)))).toEqual(
+      GENERIC_REFUSAL,
+    );
 
     state.now.value = Number(minted.expiresAtMs);
     await expectGeneric(await state.h(redeemRequest(RECIPIENT, minted.code)));
@@ -999,9 +945,7 @@ describe("single-use authenticated link handoff", () => {
   it("does not count a promoted grant as an existing dependent", async () => {
     const state = await setup();
     const database = inspect(state.dbPath, true);
-    const first = await json(
-      await state.h(redeemRequest(OTHER_ACCOUNT, (await mint(state)).code)),
-    );
+    const first = await json(await state.h(redeemRequest(OTHER_ACCOUNT, (await mint(state)).code)));
     expect(
       state.storage.promoteShareGrant({
         shareId: SHARE_ID,
@@ -1027,68 +971,64 @@ describe("single-use authenticated link handoff", () => {
     ).toBe(1);
   });
 
-  it.each([
-    "rotation",
-    "storage retune generation change",
-  ] as const)("refuses a stale code after %s", async (transition) => {
-    const state = await setup();
-    const database = inspect(state.dbPath);
-    const minted = await mint(state);
-    if (transition === "rotation") {
-      const rotated = await state.h(
-        request(
-          OWNER,
-          `/sync/shares/${SHARE_ID}/links/${String(state.link.grantId)}/rotate`,
-          jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
-        ),
-      );
-      expect(rotated.status).toBe(200);
-    } else {
-      database
-        .prepare(
-          "UPDATE sync_relay_share_grants SET generation = generation + 1 WHERE grant_id = ?",
-        )
-        .run(String(state.link.grantId));
-    }
+  it.each(["rotation", "storage retune generation change"] as const)(
+    "refuses a stale code after %s",
+    async (transition) => {
+      const state = await setup();
+      const database = inspect(state.dbPath);
+      const minted = await mint(state);
+      if (transition === "rotation") {
+        const rotated = await state.h(
+          request(
+            OWNER,
+            `/sync/shares/${SHARE_ID}/links/${String(state.link.grantId)}/rotate`,
+            jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+          ),
+        );
+        expect(rotated.status).toBe(200);
+      } else {
+        database
+          .prepare(
+            "UPDATE sync_relay_share_grants SET generation = generation + 1 WHERE grant_id = ?",
+          )
+          .run(String(state.link.grantId));
+      }
 
-    await expectGeneric(await state.h(redeemRequest(RECIPIENT, minted.code)));
-    expect(codeCount(database)).toBe(0);
-    expect(dependentRows(database, String(state.link.grantId), RECIPIENT)).toEqual([]);
-  });
+      await expectGeneric(await state.h(redeemRequest(RECIPIENT, minted.code)));
+      expect(codeCount(database)).toBe(0);
+      expect(dependentRows(database, String(state.link.grantId), RECIPIENT)).toEqual([]);
+    },
+  );
 
-  it.each([
-    "expiry",
-    "link revoke",
-    "whole-share revoke",
-    "granter ownership loss",
-  ] as const)("consumes and generically refuses after %s", async (transition) => {
-    const state = await setup();
-    const database = inspect(state.dbPath);
-    const minted = await mint(state);
-    if (transition === "expiry") {
-      state.now.value = Number(minted.expiresAtMs);
-    } else if (transition === "link revoke") {
-      expect(
-        state.storage.revokeShareGrant({
-          shareId: SHARE_ID,
-          grantId: String(state.link.grantId),
-          revokedAtMs: state.now.value + 1,
-        }),
-      ).toMatchObject({ ok: true });
-    } else if (transition === "whole-share revoke") {
-      expect(state.storage.revokeShare(SHARE_ID, state.now.value + 1)).toBe(true);
-    } else {
-      database
-        .prepare(
-          "UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?",
-        )
-        .run("new-owner", WORKSPACE);
-    }
+  it.each(["expiry", "link revoke", "whole-share revoke", "granter ownership loss"] as const)(
+    "consumes and generically refuses after %s",
+    async (transition) => {
+      const state = await setup();
+      const database = inspect(state.dbPath);
+      const minted = await mint(state);
+      if (transition === "expiry") {
+        state.now.value = Number(minted.expiresAtMs);
+      } else if (transition === "link revoke") {
+        expect(
+          state.storage.revokeShareGrant({
+            shareId: SHARE_ID,
+            grantId: String(state.link.grantId),
+            revokedAtMs: state.now.value + 1,
+          }),
+        ).toMatchObject({ ok: true });
+      } else if (transition === "whole-share revoke") {
+        expect(state.storage.revokeShare(SHARE_ID, state.now.value + 1)).toBe(true);
+      } else {
+        database
+          .prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?")
+          .run("new-owner", WORKSPACE);
+      }
 
-    await expectGeneric(await state.h(redeemRequest(RECIPIENT, minted.code)));
-    expect(codeCount(database)).toBe(0);
-    expect(dependentRows(database, String(state.link.grantId), RECIPIENT)).toEqual([]);
-  });
+      await expectGeneric(await state.h(redeemRequest(RECIPIENT, minted.code)));
+      expect(codeCount(database)).toBe(0);
+      expect(dependentRows(database, String(state.link.grantId), RECIPIENT)).toEqual([]);
+    },
+  );
 
   it("keeps link secrets, live capabilities, malformed values, and unknown codes in separate credential families", async () => {
     const state = await setup();
@@ -1119,9 +1059,7 @@ describe("single-use authenticated link handoff", () => {
     const state = await setup();
     const database = inspect(state.dbPath);
     const firstCode = await mint(state);
-    const redeemed = await json(
-      await state.h(redeemRequest(RECIPIENT, firstCode.code)),
-    );
+    const redeemed = await json(await state.h(redeemRequest(RECIPIENT, firstCode.code)));
     expect(() =>
       database
         .prepare(
@@ -1153,11 +1091,7 @@ describe("single-use authenticated link handoff", () => {
     expect(codeCount(database)).toBe(0);
 
     const secondLinkResponse = await state.h(
-      request(
-        OWNER,
-        `/sync/${WORKSPACE}/shares/${SHARE_ID}/links`,
-        jsonBody({ access: "view" }),
-      ),
+      request(OWNER, `/sync/${WORKSPACE}/shares/${SHARE_ID}/links`, jsonBody({ access: "view" })),
     );
     expect(secondLinkResponse.status).toBe(200);
     const secondLink = await json(secondLinkResponse);
@@ -1172,13 +1106,7 @@ describe("single-use authenticated link handoff", () => {
         }),
       ),
     );
-    expect(
-      (
-        await state.h(
-          handoffRequest(String(exchange.capabilityToken)),
-        )
-      ).status,
-    ).toBe(200);
+    expect((await state.h(handoffRequest(String(exchange.capabilityToken)))).status).toBe(200);
     expect(codeCount(database, String(secondLink.grantId))).toBe(1);
     database.prepare("DELETE FROM sync_relay_shares WHERE share_id = ?").run(SHARE_ID);
     expect(codeCount(database)).toBe(0);
@@ -1187,8 +1115,20 @@ describe("single-use authenticated link handoff", () => {
 
 describe("released Edit handoff", () => {
   it("preserves Edit dependency authority and refuses mint/replay after release is removed", async () => {
-    const state = await setup({publicEditRelease: {version: 1},
-      namedBrowserSessionLimits: {maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000}}, "edit");
+    const state = await setup(
+      {
+        publicEditRelease: { version: 1 },
+        namedBrowserSessionLimits: {
+          maxSessions: 8,
+          retentionMs: 60_000,
+          maxPendingRequests: 4,
+          maxRequestBytes: 8192,
+          maxResponseBytes: 16384,
+          timeoutMs: 1000,
+        },
+      },
+      "edit",
+    );
     const handoff = await mint(state);
     const response = await state.h(redeemRequest(RECIPIENT, handoff.code));
     expect(response.status).toBe(200);
@@ -1203,18 +1143,37 @@ describe("released Edit handoff", () => {
   });
 });
 
-it.each(["view", "comment", "edit"] as const)("rechecks parent generation before replaying a redeemed %s handoff", async access => {
-  const state = await setup(access === "edit" ? {publicEditRelease: {version: 1},
-    namedBrowserSessionLimits: {maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000}} : {}, access);
-  const code = await mint(state);
-  const accepted = await serialized(await state.h(redeemRequest(RECIPIENT, code.code)));
-  expect(accepted.status).toBe(200);
-  expect(await serialized(await state.h(redeemRequest(RECIPIENT, code.code)))).toEqual(accepted);
-  const database = inspect(state.dbPath);
-  expect(codeCount(database)).toBe(1);
-  const before = dependentRows(database, String(state.link.grantId));
-  database.prepare("UPDATE sync_relay_share_grants SET generation = generation + 1 WHERE grant_id = ?").run(String(state.link.grantId));
-  await expectGeneric(await state.h(redeemRequest(RECIPIENT, code.code)));
-  expect(codeCount(database)).toBe(0);
-  expect(dependentRows(database, String(state.link.grantId))).toEqual(before);
-});
+it.each(["view", "comment", "edit"] as const)(
+  "rechecks parent generation before replaying a redeemed %s handoff",
+  async (access) => {
+    const state = await setup(
+      access === "edit"
+        ? {
+            publicEditRelease: { version: 1 },
+            namedBrowserSessionLimits: {
+              maxSessions: 8,
+              retentionMs: 60_000,
+              maxPendingRequests: 4,
+              maxRequestBytes: 8192,
+              maxResponseBytes: 16384,
+              timeoutMs: 1000,
+            },
+          }
+        : {},
+      access,
+    );
+    const code = await mint(state);
+    const accepted = await serialized(await state.h(redeemRequest(RECIPIENT, code.code)));
+    expect(accepted.status).toBe(200);
+    expect(await serialized(await state.h(redeemRequest(RECIPIENT, code.code)))).toEqual(accepted);
+    const database = inspect(state.dbPath);
+    expect(codeCount(database)).toBe(1);
+    const before = dependentRows(database, String(state.link.grantId));
+    database
+      .prepare("UPDATE sync_relay_share_grants SET generation = generation + 1 WHERE grant_id = ?")
+      .run(String(state.link.grantId));
+    await expectGeneric(await state.h(redeemRequest(RECIPIENT, code.code)));
+    expect(codeCount(database)).toBe(0);
+    expect(dependentRows(database, String(state.link.grantId))).toEqual(before);
+  },
+);

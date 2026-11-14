@@ -38,11 +38,22 @@ describe("workspaceName", () => {
     expect(workspaceName({ ...workspace, rootPath: "/" })).toBe("workspace");
   });
 
-  // #2887: a shared view's folder is named after its share ID.
+  // A shared view's folder is named after its share ID.
   it("names a shared view after what it shares, and after its folder when the share has no name", () => {
     const shared = { ...workspace, rootPath: "/home/sam/dohc/shared/k3x9q2m7" };
-    expect(workspaceName({ ...shared, shareView: { shareId: "k3x9q2m7", subjectName: "Trip plans", granterEmail: "sam@example.com" } })).toBe("Trip plans");
-    expect(workspaceName({ ...shared, shareView: { damaged: true, granterEmail: null } })).toBe("k3x9q2m7");
+    expect(
+      workspaceName({
+        ...shared,
+        shareView: {
+          shareId: "k3x9q2m7",
+          subjectName: "Trip plans",
+          granterEmail: "sam@example.com",
+        },
+      }),
+    ).toBe("Trip plans");
+    expect(workspaceName({ ...shared, shareView: { damaged: true, granterEmail: null } })).toBe(
+      "k3x9q2m7",
+    );
   });
 });
 
@@ -70,7 +81,9 @@ describe("Titlebar", () => {
   it("shows the macOS quick-open shortcut on macOS", () => {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
 
-    render(<Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />);
+    render(
+      <Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />,
+    );
 
     expect(screen.getByTestId("titlebar-quick-open").textContent).toContain("⌘P");
   });
@@ -79,7 +92,9 @@ describe("Titlebar", () => {
   // them in full screen. Main tells the window which state it is in.
   it("starts 12px after the macOS traffic lights, or 12px from the edge in full screen", () => {
     const sendFullScreen = stubFullScreen("darwin");
-    render(<Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />);
+    render(
+      <Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />,
+    );
     const titlebar = screen.getByTestId("titlebar");
     expect(titlebar.style.paddingLeft).toBe("88px");
 
@@ -91,7 +106,9 @@ describe("Titlebar", () => {
 
   it("keeps the window-controls inset in full screen off macOS", () => {
     const sendFullScreen = stubFullScreen("win32");
-    render(<Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />);
+    render(
+      <Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />,
+    );
     const titlebar = screen.getByTestId("titlebar");
     const windowed = titlebar.getAttribute("style");
 
@@ -103,7 +120,9 @@ describe("Titlebar", () => {
   it("shows Ctrl P quick-open shortcut off macOS", () => {
     vi.stubGlobal("dohcDesktop", { platform: "win32" });
 
-    render(<Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />);
+    render(
+      <Titlebar workspace={workspace} workspaces={[workspace]} onQuickOpen={() => undefined} />,
+    );
 
     expect(screen.getByTestId("titlebar-quick-open").textContent).toContain("Ctrl P");
   });
@@ -133,8 +152,8 @@ describe("Titlebar", () => {
   });
 
   // The quick-open button is centered on the window, so a long workspace name
-  // used to run under it and hide the status beside it. Everything on the left
-  // now shares one clamped group and shortens inside it.
+  // must not run under it and hide the status beside it. Everything on the
+  // left shares one clamped group and shortens inside it.
   it("clamps the workspace name and its status into the space left of quick-open", () => {
     vi.stubGlobal("dohcDesktop", { platform: "win32" });
 
@@ -155,16 +174,20 @@ describe("Titlebar", () => {
     expect(group.contains(screen.getByTestId("titlebar-quick-open"))).toBe(false);
   });
 
-  // The breadcrumb: the mark, the workspace's own name, then its version and
-  // one saved dot. The product word shows only before a workspace is open.
   it("reads mark, workspace, version, then the saved dot, with no product word", () => {
     render(
       <Titlebar
         workspace={workspace}
         workspaces={[workspace]}
         onSwitchWorkspace={() => undefined}
-        version={<button type="button" data-testid="stub-version">Main</button>}
-        workspaceStatus={<span data-testid="stub-status" role="status" aria-label="Local · saved" />}
+        version={
+          <button type="button" data-testid="stub-version">
+            Main
+          </button>
+        }
+        workspaceStatus={
+          <span data-testid="stub-status" role="status" aria-label="Local · saved" />
+        }
       />,
     );
     const group = screen.getByTestId("titlebar-left-group");
@@ -174,10 +197,8 @@ describe("Titlebar", () => {
     expect(group.contains(version)).toBe(true);
     expect(name.compareDocumentPosition(version) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(version.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // The switcher names the workspace and nothing else.
     expect(name.textContent).toBe("dohc");
     expect(group.textContent).toBe("dohcMain");
-    // The separator hides with its version while the picker has nothing to name.
     expect(version.parentElement?.className).toContain("empty:hidden");
     expect(version.parentElement?.className).toContain("before:content-['/']");
   });
@@ -196,7 +217,9 @@ describe("Titlebar", () => {
         workspaceStatus={<span data-testid="stub-status" />}
       />,
     );
-    expect(screen.getByTestId("titlebar-left-group").querySelector("[class*=\"before:content-['/']\"]")).toBeNull();
+    expect(
+      screen.getByTestId("titlebar-left-group").querySelector("[class*=\"before:content-['/']\"]"),
+    ).toBeNull();
     expect(screen.getByTestId("titlebar-left-group").textContent).toBe("trip");
   });
 
@@ -214,7 +237,6 @@ describe("Titlebar", () => {
     // ends it in an ellipsis instead of pushing the status out of the window.
     expect(name.className).toContain("min-w-0");
     expect(name.className).toContain("truncate");
-    // A shortened name stays readable on hover.
     expect(screen.getByTestId("workspace-switcher").getAttribute("title")).toBe(
       "launch-readiness-and-self-hosting",
     );
@@ -233,13 +255,19 @@ describe("Titlebar", () => {
         workspaces={[workspace]}
         onSwitchWorkspace={() => undefined}
         onQuickOpen={() => undefined}
-        version={<button type="button" data-testid="stub-version">Main</button>}
+        version={
+          <button type="button" data-testid="stub-version">
+            Main
+          </button>
+        }
         workspaceStatus={<RestrictedModeIndicator asking={false} onTrust={() => undefined} />}
         update={<span />}
       />,
     );
 
-    expect(screen.getByTestId("titlebar").className).toContain("max-[1100px]:[--quick-open-width:5rem]");
+    expect(screen.getByTestId("titlebar").className).toContain(
+      "max-[1100px]:[--quick-open-width:5rem]",
+    );
     const quickOpen = screen.getByTestId("titlebar-quick-open");
     expect(quickOpen.getAttribute("title")).toBe("Go to…");
     // 5rem below 1100px, and narrower than its 20rem when the names take its room.
@@ -247,19 +275,35 @@ describe("Titlebar", () => {
     expect(within(quickOpen).getByText("Go to…").className).toContain("@max-[8.5rem]:sr-only");
     expect(quickOpen.querySelector("kbd")?.className).not.toContain("sr-only");
     const restricted = screen.getByRole("button", { name: "Restricted Mode" });
-    expect(within(restricted).getByText("Restricted Mode").className).toContain("max-[1100px]:sr-only");
+    expect(within(restricted).getByText("Restricted Mode").className).toContain(
+      "max-[1100px]:sr-only",
+    );
 
-    expect(screen.getByTestId("workspace-switcher").className).toContain("min-w-[calc-size(max-content,min(size,4rem))]");
-    expect(screen.getByTestId("stub-version").parentElement?.className).toContain("min-w-[calc-size(max-content,min(size,7.5rem))]");
-    expect(screen.getByTestId("titlebar").className).toContain("[anchor-scope:--titlebar-names-end]");
+    expect(screen.getByTestId("workspace-switcher").className).toContain(
+      "min-w-[calc-size(max-content,min(size,4rem))]",
+    );
+    expect(screen.getByTestId("stub-version").parentElement?.className).toContain(
+      "min-w-[calc-size(max-content,min(size,7.5rem))]",
+    );
+    expect(screen.getByTestId("titlebar").className).toContain(
+      "[anchor-scope:--titlebar-names-end]",
+    );
     expect(document.querySelector('[class*="[anchor-name:--titlebar-names-end]"]')).not.toBeNull();
-    expect(quickOpen.getAttribute("style")).toContain("anchor(--titlebar-names-end right, 0px) + 12px");
-    expect(screen.getByTestId("titlebar-right-group").getAttribute("style")).toContain("anchor(--titlebar-names-end right, 0px) + 12px");
+    expect(quickOpen.getAttribute("style")).toContain(
+      "anchor(--titlebar-names-end right, 0px) + 12px",
+    );
+    expect(screen.getByTestId("titlebar-right-group").getAttribute("style")).toContain(
+      "anchor(--titlebar-names-end right, 0px) + 12px",
+    );
   });
 
   it("closes the workspace switcher on Escape and returns focus to it", () => {
     render(
-      <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />,
+      <Titlebar
+        workspace={workspace}
+        workspaces={[workspace]}
+        onSwitchWorkspace={() => undefined}
+      />,
     );
     const trigger = screen.getByTestId("workspace-switcher");
 
@@ -275,9 +319,18 @@ describe("Titlebar", () => {
   });
 
   it("marks only a shared workspace in the switcher", () => {
-    const shared = { ...workspace, workspaceId: "ws-2", rootPath: "/trip", kind: "shared" as const };
+    const shared = {
+      ...workspace,
+      workspaceId: "ws-2",
+      rootPath: "/trip",
+      kind: "shared" as const,
+    };
     render(
-      <Titlebar workspace={workspace} workspaces={[workspace, shared]} onSwitchWorkspace={() => undefined} />,
+      <Titlebar
+        workspace={workspace}
+        workspaces={[workspace, shared]}
+        onSwitchWorkspace={() => undefined}
+      />,
     );
 
     fireEvent.click(screen.getByTestId("workspace-switcher"));
@@ -290,7 +343,11 @@ describe("Titlebar", () => {
     render(
       <div>
         <button type="button">Elsewhere</button>
-        <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />
+        <Titlebar
+          workspace={workspace}
+          workspaces={[workspace]}
+          onSwitchWorkspace={() => undefined}
+        />
       </div>,
     );
 
@@ -306,7 +363,11 @@ describe("Titlebar", () => {
   // drag regions off while the root says a menu is open.
   it("marks a menu open while the switcher is open, so a press on the titlebar closes it", () => {
     render(
-      <Titlebar workspace={workspace} workspaces={[workspace]} onSwitchWorkspace={() => undefined} />,
+      <Titlebar
+        workspace={workspace}
+        workspaces={[workspace]}
+        onSwitchWorkspace={() => undefined}
+      />,
     );
     const titlebar = screen.getByTestId("titlebar");
     expect(document.documentElement.dataset.menuOpen).toBeUndefined();
@@ -335,7 +396,13 @@ describe("Titlebar", () => {
 
 it("returns focus after choosing a workspace", async () => {
   const second = { ...workspace, workspaceId: "ws-2", rootPath: "/second" };
-  render(<Titlebar workspace={workspace} workspaces={[workspace, second]} onSwitchWorkspace={() => {}} />);
+  render(
+    <Titlebar
+      workspace={workspace}
+      workspaces={[workspace, second]}
+      onSwitchWorkspace={() => {}}
+    />,
+  );
   const trigger = screen.getByTestId("workspace-switcher");
   trigger.focus();
   fireEvent.click(trigger);

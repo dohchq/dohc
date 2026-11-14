@@ -57,16 +57,19 @@ export function Step(props: {
 // The folder picker chip shared by every step that needs an empty folder:
 // icon, the chosen path in the OS's own spelling, and a Browse or Change
 // affordance so it reads as a control at rest.
-export const FolderChip = forwardRef<HTMLButtonElement, {
-  folder: string | null;
-  placeholder: string;
-  testId?: string;
-  // The id of the FieldError under the chip while it shows one. A button
-  // takes no aria-invalid, so the error reaches it as its description.
-  errorId?: string;
-  disabled?: boolean;
-  onClick: () => void;
-}>(function FolderChip(props, ref) {
+export const FolderChip = forwardRef<
+  HTMLButtonElement,
+  {
+    folder: string | null;
+    placeholder: string;
+    testId?: string;
+    // The id of the FieldError under the chip while it shows one. A button
+    // takes no aria-invalid, so the error reaches it as its description.
+    errorId?: string;
+    disabled?: boolean;
+    onClick: () => void;
+  }
+>(function FolderChip(props, ref) {
   return (
     <button
       ref={ref}

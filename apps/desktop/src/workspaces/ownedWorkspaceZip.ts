@@ -1,13 +1,7 @@
-import {
-  isSharedWithMePath,
-  validateUserReadPath,
-} from "@dohc/workspace-core";
+import { isSharedWithMePath, validateUserReadPath } from "@dohc/workspace-core";
 import { basename } from "node:path";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
-import {
-  resolveShareProjectionPath,
-  usableShareMountRecord,
-} from "./shareMounts";
+import { resolveShareProjectionPath, usableShareMountRecord } from "./shareMounts";
 import type { ShareViewFilesTarget } from "./shareViewFiles";
 import {
   shareMountRegistryIsPresent,
@@ -57,8 +51,7 @@ export function ownedZipProjectionPlan(selection: OwnedZipSelection): {
     };
   }
 
-  const archivePrefix =
-    selection.archiveRoot === null ? "" : `${selection.archiveRoot}/`;
+  const archivePrefix = selection.archiveRoot === null ? "" : `${selection.archiveRoot}/`;
   return {
     includesMounts: true,
     keepDiskEntry: (path) => {
@@ -68,8 +61,7 @@ export function ownedZipProjectionPlan(selection: OwnedZipSelection): {
           : path;
       return !isSharedWithMePath(workspacePath);
     },
-    mountArchivePrefix: (label) =>
-      `${archivePrefix}${SHARED_WITH_ME_FOLDER}/${label}`,
+    mountArchivePrefix: (label) => `${archivePrefix}${SHARED_WITH_ME_FOLDER}/${label}`,
   };
 }
 
@@ -90,18 +82,14 @@ export interface OwnedZipShareRequest {
 export async function collectOwnedWorkspaceZipEntries(input: {
   workspace: ShareViewFilesWorkspaceRecord;
   relativePath?: string;
-  collectShare(
-    request: OwnedZipShareRequest,
-  ): Promise<{ entries: ZipEntry[]; baseName: string }>;
+  collectShare(request: OwnedZipShareRequest): Promise<{ entries: ZipEntry[]; baseName: string }>;
 }): Promise<{ entries: ZipEntry[]; baseName: string }> {
   const { workspace } = input;
   if (shareViewIsPresent(workspace.shareView)) {
     return input.collectShare({
       target: { kind: "standalone", workspaceId: workspace.workspaceId },
       rootName: basename(workspace.rootPath),
-      ...(input.relativePath === undefined
-        ? {}
-        : { relativePath: input.relativePath }),
+      ...(input.relativePath === undefined ? {} : { relativePath: input.relativePath }),
     });
   }
 
@@ -115,9 +103,7 @@ export async function collectOwnedWorkspaceZipEntries(input: {
     selection = { kind: "local" };
     if (hasMountRegistry) {
       const validated = validateUserReadPath(input.relativePath, { platform: process.platform });
-      const archiveRoot = basename(
-        validated.ok ? validated.normalized : input.relativePath,
-      );
+      const archiveRoot = basename(validated.ok ? validated.normalized : input.relativePath);
       const resolved = await resolveShareProjectionPath(
         workspace.rootPath,
         input.relativePath,
@@ -142,23 +128,17 @@ export async function collectOwnedWorkspaceZipEntries(input: {
     }
   }
 
-  const projection = hasMountRegistry
-    ? ownedZipProjectionPlan(selection)
-    : null;
+  const projection = hasMountRegistry ? ownedZipProjectionPlan(selection) : null;
   const disk =
     selection.kind === "projection-root"
       ? {
           entries: [],
-          baseName:
-            selection.archiveRoot.replace(/\.[^.]+$/, "") ||
-            selection.archiveRoot,
+          baseName: selection.archiveRoot.replace(/\.[^.]+$/, "") || selection.archiveRoot,
         }
       : await collectZipEntries(
           workspace.rootPath,
           input.relativePath,
-          projection === null
-            ? undefined
-            : { includeArchivePath: projection.keepDiskEntry },
+          projection === null ? undefined : { includeArchivePath: projection.keepDiskEntry },
         );
   if (projection === null) return disk;
 
@@ -184,10 +164,7 @@ export async function collectOwnedWorkspaceZipEntries(input: {
       );
     }
   }
-  const totalBytes = entries.reduce(
-    (total, entry) => total + entry.data.byteLength,
-    0,
-  );
+  const totalBytes = entries.reduce((total, entry) => total + entry.data.byteLength, 0);
   if (entries.length > MAX_ZIP_ENTRIES || totalBytes > MAX_ZIP_TOTAL_BYTES) {
     throw new Error(ZIP_TOO_LARGE_REFUSAL);
   }

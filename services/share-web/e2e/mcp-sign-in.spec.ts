@@ -1,16 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, type IncomingHttpHeaders } from "node:http";
-import {
-  type APIRequestContext,
-  type APIResponse,
-  type BrowserContext,
-} from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  stopServer,
-  test,
-} from "./harness";
+import { type APIRequestContext, type APIResponse, type BrowserContext } from "@playwright/test";
+import { expect, seedShare, stopServer, test } from "./harness";
 
 // share-web names its sign-in addresses https://<Host>, so the browser and the
 // agent reach it through the harness's HTTPS front and its self-signed certificate.
@@ -28,7 +19,7 @@ interface AgentCallback {
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : null;
 }
 
@@ -37,12 +28,12 @@ function requiredText(value: unknown, field: string): string {
   return value;
 }
 
-// The agent's loopback redirect URI, as a desktop MCP client opens one.
 async function startAgentCallback() {
   const received: AgentCallback[] = [];
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (url.pathname === "/callback") received.push({ headers: request.headers, query: url.searchParams });
+    if (url.pathname === "/callback")
+      received.push({ headers: request.headers, query: url.searchParams });
     request.resume();
     response.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
@@ -86,12 +77,19 @@ async function jsonBody(response: APIResponse, status: number): Promise<Record<s
 async function rpcResult(response: APIResponse): Promise<Record<string, unknown> | null> {
   const body = await response.text();
   const message = (response.headers()["content-type"] ?? "").startsWith("text/event-stream")
-    ? body.split("\n").find((line) => line.startsWith("data:"))?.slice("data:".length) ?? ""
+    ? (body
+        .split("\n")
+        .find((line) => line.startsWith("data:"))
+        ?.slice("data:".length) ?? "")
     : body;
   return record(record(JSON.parse(message))?.result);
 }
 
-function listTools(request: APIRequestContext, resource: string, accessToken?: string): Promise<APIResponse> {
+function listTools(
+  request: APIRequestContext,
+  resource: string,
+  accessToken?: string,
+): Promise<APIResponse> {
   return request.post(resource, {
     headers: {
       ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
@@ -117,15 +115,24 @@ test("a person allows an agent from the consent page, and the agent reaches the 
   const callback = await startAgentCallback();
   const request = await playwright.request.newContext({ ignoreHTTPSErrors: true });
   try {
-    // Discovery, as an MCP client does it: the endpoint's 401 names its metadata.
     const resource = `${front}/mcp/s/${seeded.secret}`;
     const unsigned = await listTools(request, resource);
     expect(unsigned.status()).toBe(401);
-    const metadataUrl = /resource_metadata="([^"]+)"/u.exec(unsigned.headers()["www-authenticate"] ?? "")?.[1];
-    expect(metadataUrl).toBe(`${front}/.well-known/oauth-protected-resource/mcp/s/${seeded.secret}`);
-    const protectedResource = await jsonBody(await request.get(requiredText(metadataUrl, "resource_metadata")), 200);
+    const metadataUrl = /resource_metadata="([^"]+)"/u.exec(
+      unsigned.headers()["www-authenticate"] ?? "",
+    )?.[1];
+    expect(metadataUrl).toBe(
+      `${front}/.well-known/oauth-protected-resource/mcp/s/${seeded.secret}`,
+    );
+    const protectedResource = await jsonBody(
+      await request.get(requiredText(metadataUrl, "resource_metadata")),
+      200,
+    );
     expect(protectedResource).toMatchObject({ resource, authorization_servers: [front] });
-    const server = await jsonBody(await request.get(`${front}/.well-known/oauth-authorization-server`), 200);
+    const server = await jsonBody(
+      await request.get(`${front}/.well-known/oauth-authorization-server`),
+      200,
+    );
     expect(server.issuer).toBe(front);
     const registered = await jsonBody(
       await request.post(requiredText(server.registration_endpoint, "registration_endpoint"), {
@@ -144,19 +151,19 @@ test("a person allows an agent from the consent page, and the agent reaches the 
         code_challenge_method: "S256",
         state,
         resource,
-      })) url.searchParams.set(name, value);
+      }))
+        url.searchParams.set(name, value);
       return url.href;
     };
 
-    // Allow: the browser posts the real form and follows the 303 to the agent.
     const allowed = pkce();
     const allowState = randomBytes(16).toString("base64url");
     await page.goto(authorizeUrl(allowState, allowed.challenge));
     await expect(page.getByRole("heading", { name: CONSENT_HEADING })).toBeVisible();
     await expect(page.getByText(CLIENT_NAME, { exact: true })).toBeVisible();
     expect(await consentCookieNames(context, front)).toHaveLength(1);
-    const decision = page.waitForRequest((sent) =>
-      sent.method() === "POST" && sent.url() === `${front}/oauth/authorize/decision`
+    const decision = page.waitForRequest(
+      (sent) => sent.method() === "POST" && sent.url() === `${front}/oauth/authorize/decision`,
     );
     await page.getByRole("button", { name: "Allow", exact: true }).click();
     expect(await (await decision).headerValue("origin")).toBe(front);
@@ -185,21 +192,28 @@ test("a person allows an agent from the consent page, and the agent reaches the 
       200,
     );
     expect(tokens.token_type).toBe("Bearer");
-    const listed = await listTools(request, resource, requiredText(tokens.access_token, "access_token"));
+    const listed = await listTools(
+      request,
+      resource,
+      requiredText(tokens.access_token, "access_token"),
+    );
     expect(listed.status()).toBe(200);
     const tools = (await rpcResult(listed))?.tools;
-    expect(Array.isArray(tools) ? tools.map((tool: unknown) => record(tool)?.name) : [])
-      .toEqual(expect.arrayContaining(["dohc_read_file", "dohc_share_status"]));
+    expect(Array.isArray(tools) ? tools.map((tool: unknown) => record(tool)?.name) : []).toEqual(
+      expect.arrayContaining(["dohc_read_file", "dohc_share_status"]),
+    );
 
-    // Cancel: a fresh page sends the agent access_denied, with its state.
     const cancelState = randomBytes(16).toString("base64url");
     const cancelPage = await context.newPage();
     await cancelPage.goto(authorizeUrl(cancelState, pkce().challenge));
     await expect(cancelPage.getByRole("heading", { name: CONSENT_HEADING })).toBeVisible();
     expect(await consentCookieNames(context, front)).toHaveLength(1);
     await cancelPage.getByRole("button", { name: "Cancel", exact: true }).click();
-    await cancelPage.waitForURL((url) =>
-      url.origin === callback.origin && url.pathname === "/callback" && url.searchParams.get("state") === cancelState
+    await cancelPage.waitForURL(
+      (url) =>
+        url.origin === callback.origin &&
+        url.pathname === "/callback" &&
+        url.searchParams.get("state") === cancelState,
     );
     await expect(cancelPage.getByRole("heading", { name: CALLBACK_HEADING })).toBeVisible();
     expect(callback.received).toHaveLength(2);

@@ -1,24 +1,11 @@
-// Built-in `:shortcode:` emoji table for the editor's emoji autocomplete
-// (emojiTrigger.ts + EmojiPicker.tsx). Not a dependency — a small curated
-// list (~300 entries) of common emoji with GitHub-style shortcodes plus a
-// few search keywords each, covering smileys, gestures, hearts, animals,
-// food, objects, symbols, and a handful of flags.
-//
-// Shape is intentionally not shared with PageIdentity.tsx's `EMOJI_CHOICES`:
-// that's a flat array of bare emoji strings for a browse-only grid with no
-// search, so there's nothing to share beyond "these are also emoji". If
-// PageIdentity ever grows shortcode search, this module is the place to pull
-// from.
 export type EmojiEntry = {
   emoji: string;
   /** Canonical GitHub-style shortcode, no colons (e.g. "smile"). */
   shortcode: string;
-  /** Extra search terms beyond the shortcode itself. */
   keywords: string[];
 };
 
 export const EMOJI_DATA: readonly EmojiEntry[] = [
-  // --- Smileys & emotion ---
   { emoji: "😀", shortcode: "grinning", keywords: ["smile", "happy"] },
   { emoji: "😃", shortcode: "smiley", keywords: ["happy", "joy"] },
   { emoji: "😄", shortcode: "smile", keywords: ["happy", "joy", "laugh"] },
@@ -125,7 +112,6 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "😿", shortcode: "crying_cat_face", keywords: ["cat", "sad"] },
   { emoji: "😾", shortcode: "pouting_cat", keywords: ["cat", "angry"] },
 
-  // --- Gestures & people ---
   { emoji: "👋", shortcode: "wave", keywords: ["hello", "bye", "hand"] },
   { emoji: "🤚", shortcode: "raised_back_of_hand", keywords: ["stop", "hand"] },
   { emoji: "🖐️", shortcode: "hand_splayed", keywords: ["five", "stop"] },
@@ -199,7 +185,6 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "🛀", shortcode: "bath", keywords: ["bathtub", "clean"] },
   { emoji: "😴", shortcode: "sleeping_bed", keywords: ["sleep", "bed"] },
 
-  // --- Hearts / love ---
   { emoji: "❤️", shortcode: "heart", keywords: ["love", "red"] },
   { emoji: "🧡", shortcode: "orange_heart", keywords: ["love"] },
   { emoji: "💛", shortcode: "yellow_heart", keywords: ["love"] },
@@ -220,7 +205,6 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "💝", shortcode: "gift_heart", keywords: ["love", "present"] },
   { emoji: "💟", shortcode: "heart_decoration", keywords: ["love"] },
 
-  // --- Symbols & reactions ---
   { emoji: "💯", shortcode: "100", keywords: ["perfect", "score"] },
   { emoji: "💢", shortcode: "anger", keywords: ["mad", "annoyed"] },
   { emoji: "💥", shortcode: "boom", keywords: ["explosion", "collision"] },
@@ -296,7 +280,6 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "➡️", shortcode: "arrow_right", keywords: ["right", "next"] },
   { emoji: "🔀", shortcode: "twisted_rightwards_arrows", keywords: ["shuffle", "random"] },
 
-  // --- Animals & nature ---
   { emoji: "🐶", shortcode: "dog", keywords: ["puppy", "pet"] },
   { emoji: "🐱", shortcode: "cat", keywords: ["kitten", "pet"] },
   { emoji: "🐭", shortcode: "mouse", keywords: ["rodent"] },
@@ -395,7 +378,6 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "🌊", shortcode: "ocean", keywords: ["wave", "sea"] },
   { emoji: "🔥", shortcode: "flame", keywords: ["fire", "hot"] },
 
-  // --- Food & drink ---
   { emoji: "🍎", shortcode: "apple", keywords: ["fruit"] },
   { emoji: "🍏", shortcode: "green_apple", keywords: ["fruit"] },
   { emoji: "🍊", shortcode: "orange", keywords: ["fruit", "tangerine"] },
@@ -479,7 +461,6 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "🍾", shortcode: "champagne", keywords: ["celebrate", "party"] },
   { emoji: "🧊", shortcode: "ice_cube", keywords: ["cold", "ice"] },
 
-  // --- Objects & tools ---
   { emoji: "💻", shortcode: "computer", keywords: ["laptop", "work"] },
   { emoji: "🖥️", shortcode: "desktop_computer", keywords: ["monitor", "work"] },
   { emoji: "⌨️", shortcode: "keyboard", keywords: ["type", "computer"] },
@@ -526,7 +507,11 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "📃", shortcode: "page_with_curl", keywords: ["document"] },
   { emoji: "📊", shortcode: "bar_chart", keywords: ["graph", "data", "stats"] },
   { emoji: "📈", shortcode: "chart_with_upwards_trend", keywords: ["growth", "increase", "stats"] },
-  { emoji: "📉", shortcode: "chart_with_downwards_trend", keywords: ["decline", "decrease", "stats"] },
+  {
+    emoji: "📉",
+    shortcode: "chart_with_downwards_trend",
+    keywords: ["decline", "decrease", "stats"],
+  },
   { emoji: "🗒️", shortcode: "spiral_notepad", keywords: ["notes", "todo"] },
   { emoji: "🗓️", shortcode: "spiral_calendar", keywords: ["schedule", "date"] },
   { emoji: "📅", shortcode: "calendar", keywords: ["date", "schedule"] },
@@ -585,7 +570,6 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "📥", shortcode: "inbox_tray", keywords: ["receive", "mail"] },
   { emoji: "🗑️", shortcode: "wastebasket", keywords: ["trash", "delete"] },
 
-  // --- Travel & places ---
   { emoji: "🚗", shortcode: "car", keywords: ["automobile", "drive"] },
   { emoji: "🚕", shortcode: "taxi", keywords: ["cab", "ride"] },
   { emoji: "🚌", shortcode: "bus", keywords: ["transit"] },
@@ -619,7 +603,6 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "🎒", shortcode: "school_satchel", keywords: ["backpack", "bag"] },
   { emoji: "⛺", shortcode: "tent", keywords: ["camping", "outdoors"] },
 
-  // --- Activities & sports ---
   { emoji: "⚽", shortcode: "soccer", keywords: ["football", "sport"] },
   { emoji: "🏀", shortcode: "basketball", keywords: ["sport"] },
   { emoji: "🏈", shortcode: "football", keywords: ["american football", "sport"] },
@@ -646,7 +629,6 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "🎖️", shortcode: "medal_military", keywords: ["award", "honor"] },
   { emoji: "🎗️", shortcode: "reminder_ribbon", keywords: ["awareness", "support"] },
 
-  // --- Flags (lite) ---
   { emoji: "🏳️‍🌈", shortcode: "rainbow_flag", keywords: ["pride", "lgbtq"] },
   { emoji: "🇺🇸", shortcode: "flag_us", keywords: ["usa", "america"] },
   { emoji: "🇬🇧", shortcode: "flag_gb", keywords: ["uk", "britain"] },

@@ -31,47 +31,34 @@ import {
   type CaptureVersionedTextStore,
 } from "../workspaces/workspaceEngineCaptureLiveStore";
 
-// A daemon double for the RECIPIENT side of a relay share, built so the
-// desktop share-view and share-mount suites can drive their production code
-// paths — EngineRelayClient.pullShareView and createCaptureLiveStores — with
-// no legacy TypeScript engine store anywhere in the picture.
+// A daemon double for the recipient side of a relay share. The desktop
+// share-view and share-mount suites drive their production code paths through
+// it: EngineRelayClient.pullShareView and createCaptureLiveStores.
 //
-// It lives here rather than beside the other loopbacks in
-// packages/workspace-engine-client because share.view.pull is not part of that
-// package's versioned surface: the transport has to reach an HTTP relay double
-// and it wires desktop-only modules (engineRelayClient,
-// workspaceEngineCaptureLiveStore). Putting it in the package would drag relay
-// wire concepts into a package that deliberately knows nothing about them.
-// `src/testing/` is already the desktop home for cross-suite test helpers.
+// It lives here, not in packages/workspace-engine-client, because it reaches
+// an HTTP relay double and wires desktop-only modules. That package knows
+// nothing about relay wire concepts.
 //
 // What is real here and what is not:
 //  - Real: the versioned file state. Ops replay through VersionedLoopbackEngine
 //    as ordinary `versionedText.write` / `versionedText.delete` calls, and
-//    `versionedText.list` answers with true sha256 and contentKind. That is
-//    what shared-view reconciliation compares disk against, so the repair
-//    tests exercise real state rather than a canned answer.
+//    `versionedText.list` answers with true sha256 and contentKind, which is
+//    what shared-view reconciliation compares disk against.
 //  - Real: the relay HTTP conversation. The log is paged, blobs are fetched by
 //    sha256 and hash-verified, and the bearer token comes from what
-//    `workspace.open` was told — so a wrong token or a revoked share reaches
+//    `workspace.open` was told, so a wrong token or a revoked share reaches
 //    the same 401 / 404 translation the daemon produces.
 //  - Not real: the grant. This double serves whatever the relay double put in
 //    the log; it does not re-check `grantedSelector`. Containment is the Rust
 //    share boundary's job (`crates/dohc-engine-sync/src/share.rs`) and is
 //    tested there. Do not read a passing test here as proof a scope holds.
-//    For the same reason its pull answers with NO refusals: it refuses
-//    nothing, because it checks nothing.
+//    Its pull answers with no refusals, because it checks nothing.
 //  - Not real: durability. Cursors and file state live in this object, so they
 //    survive a `workspace.close` (as the daemon's SQLite would) but not the
-//    process. Anything that must be proven ON DISK needs a real daemon.
+//    process. Anything that must be proven on disk needs a real daemon.
 
 const SHARE_LOG_PAGE_LIMIT = 500;
-const REPLAYABLE_ORIGINS = new Set([
-  "api",
-  "local-file",
-  "restore",
-  "sync",
-  "unknown",
-]);
+const REPLAYABLE_ORIGINS = new Set(["api", "local-file", "restore", "sync", "unknown"]);
 
 interface ShareLogPage {
   ops: Array<{
@@ -106,19 +93,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function stringField(
-  record: Record<string, unknown>,
-  key: string,
-): string | null {
+function stringField(record: Record<string, unknown>, key: string): string | null {
   const value = record[key];
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function requiredString(
-  params: Record<string, unknown>,
-  key: string,
-  method: string,
-): string {
+function requiredString(params: Record<string, unknown>, key: string, method: string): string {
   const value = stringField(params, key);
   if (value === null) throw new Error(`${method}.${key} must be a string.`);
   return value;
@@ -154,9 +134,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
 
   constructor(relayFetch: SyncRelayConnection["fetch"]) {
     if (relayFetch === undefined) {
-      throw new Error(
-        "ShareViewLoopbackTransport needs the share relay double's fetch.",
-      );
+      throw new Error("ShareViewLoopbackTransport needs the share relay double's fetch.");
     }
     this.relayFetch = relayFetch;
   }
@@ -199,11 +177,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
           ? null
           : {
               baseUrl: requiredString(relay, "baseUrl", "workspace.open.relay"),
-              bearerToken: requiredString(
-                relay,
-                "bearerToken",
-                "workspace.open.relay",
-              ),
+              bearerToken: requiredString(relay, "bearerToken", "workspace.open.relay"),
             },
     });
     // As the engine's open does, make `.dohc/local` private and say it is
@@ -216,15 +190,8 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
     return { workspace: workspaceId, localStateReady: true };
   }
 
-  private commitCursor(
-    request: EngineRequest,
-    params: Record<string, unknown>,
-  ): JsonValue {
-    const workspaceId = requiredString(
-      params,
-      "workspaceId",
-      "sync.commitCursor",
-    );
+  private commitCursor(request: EngineRequest, params: Record<string, unknown>): JsonValue {
+    const workspaceId = requiredString(params, "workspaceId", "sync.commitCursor");
     const cursor = asRecord(params.pendingCursor);
     if (cursor === null) {
       throw new Error("sync.commitCursor.pendingCursor must be an object.");
@@ -237,11 +204,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
         `sync.commitCursor cannot commit a ${kind} cursor here.`,
       );
     }
-    const token = requiredString(
-      cursor,
-      "token",
-      "sync.commitCursor.pendingCursor",
-    );
+    const token = requiredString(cursor, "token", "sync.commitCursor.pendingCursor");
     const next = Number(token);
     if (!Number.isSafeInteger(next) || next < 0) {
       throw new Error(`sync.commitCursor got an unusable cursor: ${token}`);
@@ -249,9 +212,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
     // Monotonic, like the daemon's row: a rewind would silently re-replay the
     // whole share instead of surfacing the bug that produced it.
     if (next < this.committedCursor(workspaceId)) {
-      throw new Error(
-        `sync.commitCursor tried to rewind ${workspaceId} to ${next}.`,
-      );
+      throw new Error(`sync.commitCursor tried to rewind ${workspaceId} to ${next}.`);
     }
     this.committedCursors.set(workspaceId, next);
     return { committed: true, sharingDeclined: [] };
@@ -265,11 +226,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
     const shareId = requiredString(params, "shareId", "share.view.pull");
     const open = this.openWorkspaces.get(workspaceId);
     if (open === undefined) {
-      throw this.refuse(
-        request,
-        "WORKSPACE_UNAVAILABLE",
-        "workspace operation failed",
-      );
+      throw this.refuse(request, "WORKSPACE_UNAVAILABLE", "workspace operation failed");
     }
     const relay = open.relay;
     if (relay === null) {
@@ -283,11 +240,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
     const page = await this.fetchLogPage(request, relay, shareId, since);
 
     const main = asRecord(
-      await this.loopbackRequest(
-        workspaceId,
-        VERSIONED_METHOD.versionsEnsureMain,
-        { workspaceId },
-      ),
+      await this.loopbackRequest(workspaceId, VERSIONED_METHOD.versionsEnsureMain, { workspaceId }),
     );
     const versionId = main === null ? "main" : (stringField(main, "id") ?? "main");
     const changed = new Map<string, ChangedPath>();
@@ -362,9 +315,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
         path,
         operation: "delete",
         contentKind:
-          (stringField(existing, "contentKind") ?? "text") === "binary"
-            ? "binary"
-            : "text",
+          (stringField(existing, "contentKind") ?? "text") === "binary" ? "binary" : "text",
       });
     };
 
@@ -381,9 +332,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
         const beforePath = stringField(payload, "payloadBeforePath");
         const afterSha = stringField(payload, "payloadAfterBlobSha256");
         const contentKind =
-          stringField(payload, "payloadAfterContentKind") === "binary"
-            ? "binary"
-            : "text";
+          stringField(payload, "payloadAfterContentKind") === "binary" ? "binary" : "text";
         if (operation === "delete" && path !== null) {
           await applyDelete(path, origin);
         } else if (
@@ -397,19 +346,13 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
           if (beforePath !== afterPath) await applyDelete(beforePath, origin);
           await applyWrite(afterPath, afterSha, contentKind, origin);
           applied = Math.min(applied, counted + 1);
-        } else if (
-          operation === "write" &&
-          afterPath !== null &&
-          afterSha !== null
-        ) {
+        } else if (operation === "write" && afterPath !== null && afterSha !== null) {
           await applyWrite(afterPath, afterSha, contentKind, origin);
         }
         continue;
       }
       if (op.opKind === "version.create") {
-        const snapshots = Array.isArray(payload.forkSnapshots)
-          ? payload.forkSnapshots
-          : [];
+        const snapshots = Array.isArray(payload.forkSnapshots) ? payload.forkSnapshots : [];
         for (const raw of snapshots) {
           const entry = asRecord(raw);
           if (entry === null) continue;
@@ -458,9 +401,7 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
     const body = asRecord(await response.json());
     const ops = body !== null && Array.isArray(body.ops) ? body.ops : [];
     const nextCursor =
-      body !== null && typeof body.nextCursor === "number"
-        ? body.nextCursor
-        : since;
+      body !== null && typeof body.nextCursor === "number" ? body.nextCursor : since;
     return {
       ops: ops.map((raw) => {
         const op = asRecord(raw) ?? {};
@@ -498,10 +439,9 @@ export class ShareViewLoopbackTransport implements EngineDaemonClient {
     relay: { baseUrl: string; bearerToken: string },
     path: string,
   ): Promise<globalThis.Response> {
-    const response = await this.relayFetch(
-      `${relay.baseUrl.replace(/\/+$/u, "")}${path}`,
-      { headers: { authorization: `Bearer ${relay.bearerToken}` } },
-    );
+    const response = await this.relayFetch(`${relay.baseUrl.replace(/\/+$/u, "")}${path}`, {
+      headers: { authorization: `Bearer ${relay.bearerToken}` },
+    });
     if (response.status === 401) {
       throw this.refuse(request, "AUTH_FAILED", "relay rejected the token");
     }
@@ -552,16 +492,9 @@ export interface ShareViewDaemonHarness {
    */
   readonly relay: SyncRelayConnection;
   /** A daemon-backed store for one workspace, through production wiring. */
-  openStore(workspace: {
-    workspaceId: string;
-    rootPath: string;
-  }): CaptureVersionedTextStore;
+  openStore(workspace: { workspaceId: string; rootPath: string }): CaptureVersionedTextStore;
   /** The production `pullShareView` for one workspace, as refresh's `pull`. */
-  pullFor(target: {
-    workspaceId: string;
-    rootPath: string;
-    shareMount?: true;
-  }): (input: {
+  pullFor(target: { workspaceId: string; rootPath: string; shareMount?: true }): (input: {
     shareId: string;
     grantedSelector: {
       paths: string[];
@@ -584,16 +517,11 @@ export interface ShareViewDaemonHarness {
  * baseUrl and token flow through `workspace.open`, so the double's
  * authorization check is genuinely exercised.
  */
-export function createShareViewDaemonHarness(
-  relay: SyncRelayConnection,
-): ShareViewDaemonHarness {
+export function createShareViewDaemonHarness(relay: SyncRelayConnection): ShareViewDaemonHarness {
   const transport = new ShareViewLoopbackTransport(relay.fetch);
   const routes = new RelayTransportRouteGuard();
   const sessions = new EngineWorkspaceSessions(
-    new RelayConfiguredDaemonClientSource(
-      { currentClient: () => transport },
-      routes,
-    ),
+    new RelayConfiguredDaemonClientSource({ currentClient: () => transport }, routes),
     { transportRebindAttempts: 1 },
   );
   const live = new EngineRelayClient({
@@ -633,12 +561,7 @@ export function createShareViewDaemonHarness(
         rootPath: target.rootPath,
         relay: bound,
       });
-      return async ({
-        shareId,
-        grantedSelector,
-        recordRefusals,
-        recordCollisions,
-      }) =>
+      return async ({ shareId, grantedSelector, recordRefusals, recordCollisions }) =>
         await client.pullShareView({
           shareId,
           grantedSelector,

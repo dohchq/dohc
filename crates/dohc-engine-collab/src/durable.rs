@@ -286,8 +286,6 @@ pub enum CloseOutcome {
     },
 }
 
-// ---- reads ------------------------------------------------------------------
-
 /// Read a doc's marker, or `None` if the object is not Y.Doc-driven.
 pub fn read_marker(store: &EngineStore, key: &DocKey) -> Result<Option<Marker>, CollabError> {
     #[cfg(test)]
@@ -383,8 +381,6 @@ pub fn load_persisted(
         up_to_seq: up_to,
     }))
 }
-
-// ---- writes -----------------------------------------------------------------
 
 /// Ensure a marker row exists for `key` (idempotent). Seeds `content_kind` and
 /// `regime` on first creation; an existing marker keeps its regime/kind. The
@@ -527,13 +523,6 @@ where
     // probe, the blob row, and the caller's post-append hook all reuse this
     // digest instead of re-walking the update bytes.
     let update_sha = crate::hex_sha256(update);
-    // The caller's idempotency key hashes over the DOC COORDINATES and the
-    // update bytes: content-addressed dedupe alone only holds while the
-    // original row survives compaction — a retry after the fold would
-    // re-append the edit (and re-journal an outbound op on a replicated
-    // lineage) instead of replaying the original result.
-    // The session guard can change when admission promotes this lineage.
-    // Validate it separately; it is not part of the immutable request.
     let request_hash = request_id.map(|_| {
         let path_identity = match path {
             Some(path) => format!("some:{}", crate::hex_sha256(path.as_bytes())),
@@ -1479,14 +1468,6 @@ fn claim_base_with_coordinate_in_tx(
     validate_update_bytes(base_bytes)?;
     let incoming_claim_id = crate::hex_sha256(base_bytes);
     (|| {
-        // Upsert the marker first (FK parent for the snapshot), stamping the
-        // replicated regime + content kind. In the INDIVIDUAL-FIRST flow the
-        // marker already exists as `local-only` (created by `ensure_marker`), so
-        // claiming a base must promote it to `replicated` — a `DO NOTHING` here
-        // would leave `regime = 'local-only'`, and the next `close_session`
-        // would take the prune branch and DELETE the just-claimed base
-        // (destroying the shared lineage). Promote-on-claim keeps "open when
-        // shared"; it also repairs a stale `content_kind`.
         tx.execute(
             "INSERT INTO ydoc_docs \
              (workspace_id, version_id, object_id, content_kind, regime, \
@@ -1509,11 +1490,6 @@ fn claim_base_with_coordinate_in_tx(
         )
         .map_err(map_sql)?;
 
-        // Atomic re-check: a base already claimed ⇒ resume the winner, emit no
-        // second base — but only when the incoming base IS the stored base.
-        // Silently resuming (and acking) a different base would drop a
-        // divergent lineage while the relay cursor advances past it, leaving
-        // that peer's later updates missing an unrecoverable dependency.
         let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
         match marker.lineage_claim_status {
             LineageClaimStatus::Unclaimed => {}
@@ -2354,7 +2330,6 @@ pub fn record_update_in_tx(
     )
 }
 
-/// The checks every ordinary local write passes before it appends.
 fn require_ordinary_local_write(tx: &Transaction<'_>, key: &DocKey) -> Result<(), CollabError> {
     crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
     crate::live_update_application::require_restore_open(tx, key)?;
@@ -2619,7 +2594,7 @@ pub(crate) fn record_authorized_update_in_tx(
 
 /// Give an unclaimed rich document the schema version it lacks, in the
 /// caller's claim transaction, so the first version it claims passes public
-/// validation (#3790). Nothing seeds a New page note, and its editor writes
+/// validation. Nothing seeds a New page note, and its editor writes
 /// the first update without the version.
 ///
 /// `false` means an owner binding or a restore holds the document, so the
@@ -2713,7 +2688,7 @@ pub fn encode_origination_base_in_tx(
 
 /// Settle: project the reconstructed Y.Doc to artifact content (with provenance),
 /// content-address the projection in `binary_blobs`, and enqueue a durable
-/// materialization job (R04's pipeline) in the same transaction.
+/// materialization job in the same transaction.
 ///
 /// **Clock-independent exactly-once.** The generation is a durable, monotone
 /// per-doc `settle_seq` (never the wall clock): a re-settle of unchanged content
@@ -2743,13 +2718,9 @@ pub fn settle(
     store.write_with(faults, |tx| {
         crate::owner_outbox::require_ordinary_settlement(tx, key)?;
         crate::live_update_application::require_restore_open(tx, key)?;
-        // Persist the content and its provenance state vector as blobs. The
-        // content digest was computed once above; the settle rows below reuse
-        // it too.
         text::put_projection(tx, &content_bytes, &content_sha)?;
         put_binary_blob(tx, &sv_bytes)?;
 
-        // Durable per-doc settle counter + last-materialized content.
         let (settle_seq, last_sha): (i64, Option<String>) = tx
             .query_row(
                 "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
@@ -2800,11 +2771,6 @@ pub fn settle(
                 workspace_id: key.workspace_id.clone(),
                 target_path: target_path.to_string(),
                 content_sha256: content_sha.clone(),
-                // The preimage the materializer revalidates before replacing: the
-                // first settle expects the target absent; a later settle expects
-                // the previous settle's content still on disk (else an external
-                // editor wrote it — preserve-both). `Absent` on every settle would
-                // wrongly conflict-flag every edited doc after the first write.
                 preimage: match &last_sha {
                     Some(sha) => Preimage::Present(sha.clone()),
                     None => Preimage::Absent,
@@ -2813,7 +2779,6 @@ pub fn settle(
                 now_ms,
             },
         )?;
-        // Advance the durable settle counter only on a real content change.
         if content_changed {
             tx.execute(
                 "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
@@ -2931,17 +2896,16 @@ pub fn local_close_is_covered(
         // discard the CRDT with the artifact never replaced — refuse until
         // the replay (retry-settle or open-time) lands the job.
         //
-        // Matched on the object's TARGET PATH rather than a job-id prefix.
+        // Matched on the object's target path rather than a job-id prefix.
         // Disk-writing jobs carry many id spellings (`ydoc-mat_`,
         // `resolve-mat_`, `merge-mat_`, `sync-resolve-mat_` from
         // `enqueue_write`; `secret-mat_` from the secrets store's own
         // enqueue; binary, version-switch, and unprefixed hash-id jobs
-        // besides) and a prefix list drifts out of sync with them (#715:
-        // three went unmatched, each a stale-disk window).
-        // Every kind sets `target_path` to the disk path it intends to
-        // write, so asking "is any pending job aimed at this object's disk
-        // artifact" via that path is the fact itself, not a proxy for it —
-        // and it needs no update when a future job kind is added.
+        // besides), and a prefix list that misses one leaves a stale-disk
+        // window. Every kind sets `target_path` to the disk path it intends
+        // to write, so the path answers whether any pending job is aimed at
+        // this object's disk artifact, and it needs no update when a job
+        // kind is added.
         let job_pending: bool = store.read_with(|conn| {
             conn.query_row(
                 concat!(
@@ -3011,7 +2975,6 @@ pub fn close_session(
     if !local_close_is_covered(store, key, &marker, authoritative_projection)? {
         return Err(CollabError::UnsettledClose);
     }
-    // Prune the CRDT cache to nothing, keep the marker.
     store.write_with(faults, |tx| {
         crate::author_coverage::clear_native_in(tx, key)?;
         let removed_updates = tx
@@ -3048,8 +3011,6 @@ pub fn close_session(
         })
     })
 }
-
-// ---- shared internals (used here and by `replication`) ----------------------
 
 pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
     if update.is_empty() {

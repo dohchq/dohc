@@ -50,8 +50,7 @@ export function liveSharedChannelHoldersByWireId(
   for (const workspace of workspaces) {
     for (const channel of workspace.sharedChannels ?? []) {
       if (channel.ended === true) continue;
-      const wireHolders =
-        holders.get(channel.channelWireId) ?? new Set<string>();
+      const wireHolders = holders.get(channel.channelWireId) ?? new Set<string>();
       wireHolders.add(workspace.workspaceId);
       holders.set(channel.channelWireId, wireHolders);
     }
@@ -69,8 +68,7 @@ function otherLiveSharedChannelHolderFromMap(input: {
   return (
     input.workspaces.find(
       (workspace) =>
-        workspace.workspaceId !== input.workspaceId &&
-        holderIds.has(workspace.workspaceId),
+        workspace.workspaceId !== input.workspaceId && holderIds.has(workspace.workspaceId),
     ) ?? null
   );
 }
@@ -83,9 +81,7 @@ export function otherLiveSharedChannelHolder(input: {
   return otherLiveSharedChannelHolderFromMap({
     workspaces: input.workspaces,
     workspaceId: input.workspaceId,
-    holderIds: liveSharedChannelHoldersByShareId(input.workspaces).get(
-      input.shareId,
-    ),
+    holderIds: liveSharedChannelHoldersByShareId(input.workspaces).get(input.shareId),
   });
 }
 
@@ -97,9 +93,7 @@ export function otherLiveSharedChannelHolderByWireId(input: {
   return otherLiveSharedChannelHolderFromMap({
     workspaces: input.workspaces,
     workspaceId: input.workspaceId,
-    holderIds: liveSharedChannelHoldersByWireId(input.workspaces).get(
-      input.channelWireId,
-    ),
+    holderIds: liveSharedChannelHoldersByWireId(input.workspaces).get(input.channelWireId),
   });
 }
 
@@ -109,9 +103,7 @@ export function isShareAcceptedInWorkspace(
 ): boolean {
   // An ended row records a reversible leave. It is not an accepted share, so
   // reaccepting must run the full reserve-and-pull path that revives the row.
-  return channels.some(
-    (channel) => channel.shareId === shareId && channel.ended !== true,
-  );
+  return channels.some((channel) => channel.shareId === shareId && channel.ended !== true);
 }
 
 function hasOtherLiveHolder(
@@ -154,11 +146,7 @@ export function withholdDmsInRequestLanes<
     if (hasOtherLiveHolder(input.holdersByShareId, dm.shareId, input.workspaceId)) {
       return false;
     }
-    return !hasOtherLiveHolder(
-      input.holdersByWireId,
-      dm.channelWireId,
-      input.workspaceId,
-    );
+    return !hasOtherLiveHolder(input.holdersByWireId, dm.channelWireId, input.workspaceId);
   });
 }
 
@@ -184,8 +172,7 @@ export async function classifyDmRequests(input: {
     received.push({
       shareId,
       channelWireId: row.selector.channelWireId,
-      granterEmail:
-        typeof row.granterEmail === "string" ? row.granterEmail : null,
+      granterEmail: typeof row.granterEmail === "string" ? row.granterEmail : null,
     });
   }
 
@@ -195,8 +182,7 @@ export async function classifyDmRequests(input: {
     shareIds: received
       .filter(
         (row) =>
-          !holdersBeforePeek.has(row.shareId) &&
-          !wireHoldersBeforePeek.has(row.channelWireId),
+          !holdersBeforePeek.has(row.shareId) && !wireHoldersBeforePeek.has(row.channelWireId),
       )
       .map((row) => row.shareId),
     cache: input.kindCache,
@@ -225,7 +211,7 @@ export interface DmRequestLanes {
   declined: DmRequestRow[];
 }
 
-// #742 P1 (rounds 3–4): the last successfully classified request lanes, per
+// The last successfully classified request lanes, per
 // workspace. Staleness contract: last-known-until-next-success OR
 // session-transition. set() is called only after a successful classify —
 // never on failure, which is what makes "last known" mean something. clear()
@@ -249,9 +235,7 @@ export function createLastKnownDmRequestLanesCache() {
     },
   };
 }
-export type LastKnownDmRequestLanesCache = ReturnType<
-  typeof createLastKnownDmRequestLanesCache
->;
+export type LastKnownDmRequestLanesCache = ReturnType<typeof createLastKnownDmRequestLanesCache>;
 
 // Resolve a workspace's request lanes, falling back to the cache on failure
 // and recording a fresh cache entry on success. classify() carries every
@@ -262,7 +246,7 @@ export type LastKnownDmRequestLanesCache = ReturnType<
 // own awaits — a session transition (account switch) can land while an old
 // account's classify is still in flight. Without a guard, that stale result
 // would repopulate the cache right after the transition just cleared it,
-// silently reopening the round-4/5 cross-account leak. credentialGeneration
+// and leak one account's rows to the next. credentialGeneration
 // is main.ts's own credentialCacheGeneration — the same stale-work guard
 // this codebase already uses elsewhere (e.g. remoteForWorkspace): captured
 // before classify() starts, compared again after it resolves. A mismatch
@@ -321,14 +305,9 @@ export async function reserveAndPullSharedChannel(input: {
   // Stores `update` applied to the channels as they stand when written.
   updateSharedChannels: (
     workspaceId: string,
-    update: (
-      channels: readonly JoinedSharedChannel[],
-    ) => readonly JoinedSharedChannel[],
+    update: (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
   ) => Promise<void>;
-  fetchInfo: (input: {
-    relay: SyncRelayConnection;
-    shareId: string;
-  }) => Promise<SharedChannelInfo>;
+  fetchInfo: (input: { relay: SyncRelayConnection; shareId: string }) => Promise<SharedChannelInfo>;
   pull: (input: {
     workspaceId: string;
     rootPath: string;
@@ -336,10 +315,7 @@ export async function reserveAndPullSharedChannel(input: {
     shareId: string;
     channelWireId: string;
   }) => Promise<{ applied: number }>;
-  serialize: (
-    workspaceId: string,
-    run: () => Promise<void>,
-  ) => Promise<void>;
+  serialize: (workspaceId: string, run: () => Promise<void>) => Promise<void>;
   afterPull?: (workspaceId: string) => Promise<void>;
   // Runs in the same step that stores the row, so a check here sees every
   // workspace as the row lands. It may run twice; throwing stores nothing.

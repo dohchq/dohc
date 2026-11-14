@@ -13,8 +13,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorErrorBoundary } from "./EditorErrorBoundary";
 import type { MarkdownEditorHandle } from "./MarkdownEditor";
 
-// The module request stays open until the test settles it, so each test
-// decides whether the editor resolves before or after the first render.
 let editorModule = {
   loads: 0,
   evaluated: false,
@@ -81,7 +79,6 @@ beforeEach(() => {
     reject: () => {},
   };
   suspenseFallbackRenders = 0;
-  // A fresh loader cache and a fresh module request for every test.
   vi.resetModules();
   vi.doMock("./MarkdownEditor", async () => {
     editorModule.loads += 1;

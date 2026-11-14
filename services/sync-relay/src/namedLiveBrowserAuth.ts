@@ -21,7 +21,10 @@ export function createNamedLiveBrowserResolver(options: {
 }) {
   // Callers supply trusted route scope and the production session resolver.
   // This result supplies identity, not authority to commit a ticket or update.
-  return async (request: Request, scope: NamedLiveBrowserScope): Promise<NamedLiveBrowserContext | null> => {
+  return async (
+    request: Request,
+    scope: NamedLiveBrowserScope,
+  ): Promise<NamedLiveBrowserContext | null> => {
     const { workspaceId, shareId, grantId } = scope;
     const headers = new Headers();
     const field = options.authentication === "bearer" ? "authorization" : "cookie";
@@ -29,7 +32,10 @@ export function createNamedLiveBrowserResolver(options: {
     if (credential !== null) headers.set(field, credential);
     let actor;
     try {
-      actor = await options.resolveActor(new Request(request.url, { headers, signal: request.signal }), workspaceId);
+      actor = await options.resolveActor(
+        new Request(request.url, { headers, signal: request.signal }),
+        workspaceId,
+      );
     } catch (error) {
       if (error instanceof UnauthorizedError) return null;
       throw error;
@@ -38,15 +44,28 @@ export function createNamedLiveBrowserResolver(options: {
     if (options.explainRemoval) {
       const grant = options.storage.getShareGrant(grantId);
       const share = grant && options.storage.getShare(grant.shareId);
-      if (grant?.principalKind === "user" && grant.principalUserId === actor.userId && grant.status === "revoked" &&
-        share?.shareId === shareId && share.workspaceId === workspaceId && options.storage.workspaceIsOwnedBy(workspaceId, share.granterUserId)) {
+      if (
+        grant?.principalKind === "user" &&
+        grant.principalUserId === actor.userId &&
+        grant.status === "revoked" &&
+        share?.shareId === shareId &&
+        share.workspaceId === workspaceId &&
+        options.storage.workspaceIsOwnedBy(workspaceId, share.granterUserId)
+      ) {
         throw relayError("share_access_removed");
       }
     }
     const current = authorizeNamedLiveEditShareGrant({
-      storage: options.storage, actorUserId: actor.userId, grantId,
+      storage: options.storage,
+      actorUserId: actor.userId,
+      grantId,
     });
-    if (!current.ok || current.share.workspaceId !== workspaceId || current.share.shareId !== shareId) return null;
+    if (
+      !current.ok ||
+      current.share.workspaceId !== workspaceId ||
+      current.share.shareId !== shareId
+    )
+      return null;
     return { kind: "named", userId: actor.userId, workspaceId, shareId, grantId };
   };
 }

@@ -88,8 +88,7 @@ function readCaptureManifest(directory, expectedCommit, expectedBuild) {
   }
   if (
     manifest.build.commit !== expectedBuild.commit ||
-    (expectedBuild.builtAt !== null &&
-      manifest.build.builtAt !== expectedBuild.builtAt)
+    (expectedBuild.builtAt !== null && manifest.build.builtAt !== expectedBuild.builtAt)
   ) {
     throw new Error(`${uiAuditCaptureManifestName} does not match the verified desktop build`);
   }

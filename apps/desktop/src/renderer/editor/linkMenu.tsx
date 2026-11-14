@@ -38,8 +38,6 @@ import {
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
 
-// ── popover state ────────────────────────────────────────────────────────
-
 export type LinkMenuState =
   | { open: false }
   | {
@@ -64,7 +62,11 @@ function isViewEditable(view: EditorView): boolean {
 }
 
 function linkHrefAt(
-  doc: { nodeAt(pos: number): { marks: ReadonlyArray<{ type: { name: string }; attrs: Record<string, unknown> }> } | null },
+  doc: {
+    nodeAt(
+      pos: number,
+    ): { marks: ReadonlyArray<{ type: { name: string }; attrs: Record<string, unknown> }> } | null;
+  },
   pos: number,
 ): string | null {
   const node = doc.nodeAt(pos);
@@ -140,11 +142,7 @@ type OpenLinkMenuState = Extract<LinkMenuState, { open: true }>;
  *  existing range, or — for a collapsed Cmd+K-with-no-selection case —
  *  inserts the URL itself as new linked text. Returns false (without
  *  mutating the doc) when the input doesn't normalize to a safe URL. */
-export function applyLinkMenu(
-  editor: Editor,
-  state: OpenLinkMenuState,
-  rawUrl: string,
-): boolean {
+export function applyLinkMenu(editor: Editor, state: OpenLinkMenuState, rawUrl: string): boolean {
   const normalized = normalizeLinkUrl(rawUrl);
   if (!normalized) return false;
 
@@ -181,8 +179,6 @@ export function removeLinkMenu(editor: Editor, state: OpenLinkMenuState): void {
     .unsetLink()
     .run();
 }
-
-// ── Cmd/Ctrl+K keyboard shortcut ────────────────────────────────────────
 
 /** Standalone extension so MarkdownEditor.tsx only needs to add it to the
  *  extensions array — no editorProps/plugin-array surgery required for the
@@ -253,8 +249,7 @@ export function makeLinkMenuPlugin({
         event.preventDefault();
         const linkType = view.state.schema.marks.link;
         if (!linkType) return false;
-        const range =
-          getMarkRange(view.state.doc.resolve(pos), linkType) ?? { from: pos, to: pos };
+        const range = getMarkRange(view.state.doc.resolve(pos), linkType) ?? { from: pos, to: pos };
         setState(computeLinkMenuState(view, range));
         return true;
       },
@@ -295,8 +290,6 @@ export function makeLinkMenuPlugin({
   });
 }
 
-// ── popover UI ───────────────────────────────────────────────────────────
-
 export function LinkMenu({
   editor,
   state,
@@ -318,7 +311,6 @@ export function LinkMenu({
     setInvalid(false);
     const frame = requestAnimationFrame(() => inputRef.current?.select());
     return () => cancelAnimationFrame(frame);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
   useEffect(() => {
@@ -415,9 +407,7 @@ export function LinkMenu({
         ) : null}
       </div>
       {invalid ? (
-        <div className="dohc-link-menu__error">
-          Enter a valid http(s) or mailto link.
-        </div>
+        <div className="dohc-link-menu__error">Enter a valid http(s) or mailto link.</div>
       ) : null}
     </div>
   );

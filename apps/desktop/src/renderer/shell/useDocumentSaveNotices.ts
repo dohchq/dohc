@@ -30,11 +30,21 @@ export interface DocumentSaveFailure {
 // States that replace a failed save: it saved, or another state with its own
 // words now describes the file.
 const REPLACES_FAILURE = new Set<EngineYDocSaveStateEvent["state"]["kind"]>([
-  "saved-here", "saved-to-host", "pending-share", "file-locked", "changed-on-disk",
+  "saved-here",
+  "saved-to-host",
+  "pending-share",
+  "file-locked",
+  "changed-on-disk",
 ]);
 
 // The reason that tells a person the most, when writers give different ones.
-const REASON_ORDER: readonly SaveFailureReason[] = ["deleted", "document-too-dense", "privacy-denied", "volume-shares-new-files", "read-only"];
+const REASON_ORDER: readonly SaveFailureReason[] = [
+  "deleted",
+  "document-too-dense",
+  "privacy-denied",
+  "volume-shares-new-files",
+  "read-only",
+];
 
 // What a person reads for each reason, and the cause Copy details carries.
 function reasonWords(reason: SaveFailureReason): { message: string; cause: string | null } {
@@ -44,9 +54,15 @@ function reasonWords(reason: SaveFailureReason): { message: string; cause: strin
     case "privacy-denied":
       return { message: PRIVACY_DENIED_WORDS, cause: "macOS blocked dohc from this folder." };
     case "volume-shares-new-files":
-      return { message: VOLUME_SHARES_NEW_FILES_WORDS, cause: "The disk adds sharing permissions to new files." };
+      return {
+        message: VOLUME_SHARES_NEW_FILES_WORDS,
+        cause: "The disk adds sharing permissions to new files.",
+      };
     case "read-only":
-      return { message: "The file is read-only. Make it writable, then try again.", cause: "The file is read-only." };
+      return {
+        message: "The file is read-only. Make it writable, then try again.",
+        cause: "The file is read-only.",
+      };
     case "document-too-dense":
       return { message: DOCUMENT_TOO_DENSE_WORDS, cause: "document-too-dense" };
     case null:
@@ -54,7 +70,10 @@ function reasonWords(reason: SaveFailureReason): { message: string; cause: strin
   }
 }
 
-export function saveFailureNotice(path: string, reason: SaveFailureReason): Pick<DocumentSaveFailure, "title" | "message" | "details"> {
+export function saveFailureNotice(
+  path: string,
+  reason: SaveFailureReason,
+): Pick<DocumentSaveFailure, "title" | "message" | "details"> {
   const { message, cause } = reasonWords(reason);
   return {
     title: `Couldn't save ${path}`,
@@ -79,15 +98,15 @@ interface TextSave {
 
 const textSaveListeners = new Set<(save: TextSave) => void>();
 
-export function reportTextSave(workspaceId: string, path: string, failure: TextSave["failure"]): void {
+export function reportTextSave(
+  workspaceId: string,
+  path: string,
+  failure: TextSave["failure"],
+): void {
   const failed = failure && !isShareReadOnlyRefusal(failure.cause) ? failure : null;
   for (const listener of [...textSaveListeners]) listener({ workspaceId, path, failure: failed });
 }
 
-// A live document's history was replaced while its editor was open.
-// `setAside` says a draft in Notices holds the editor's earlier edits.
-// `failure` is null once the new history shows; until then `retry` sets the
-// edits aside again and installs the same new history.
 interface DocumentReplacement {
   workspaceId: string;
   path: string;
@@ -95,8 +114,10 @@ interface DocumentReplacement {
   failure: { setAsideFailed: boolean; cause: unknown; retry: () => void } | null;
 }
 
-export const REPLACED_DOCUMENT_SAVED = "This document changed while you were editing. Find your earlier edits in Notices.";
-export const REPLACED_DOCUMENT_UNSAVED = "dohc could not save your earlier edits. Keep this document open and try again.";
+export const REPLACED_DOCUMENT_SAVED =
+  "This document changed while you were editing. Find your earlier edits in Notices.";
+export const REPLACED_DOCUMENT_UNSAVED =
+  "dohc could not save your earlier edits. Keep this document open and try again.";
 const REPLACED_DOCUMENT_NOT_SHOWN = "dohc could not finish replacing this document.";
 
 const replacementListeners = new Set<(replacement: DocumentReplacement) => void>();
@@ -107,7 +128,8 @@ export function reportDocumentReplacement(
   setAside: boolean,
   failure: DocumentReplacement["failure"],
 ): void {
-  for (const listener of [...replacementListeners]) listener({ workspaceId, path, setAside, failure });
+  for (const listener of [...replacementListeners])
+    listener({ workspaceId, path, setAside, failure });
 }
 
 // The engine settles a live document; the plain editor writes every other
@@ -130,9 +152,10 @@ interface FailedFile {
   writers: Map<Writer, WriterFailure>;
 }
 
-// The reason a file's row gives.
 const shownReason = (failed: FailedFile): SaveFailureReason =>
-  REASON_ORDER.find((reason) => [...failed.writers.values()].some((failure) => failure.reason === reason)) ?? null;
+  REASON_ORDER.find((reason) =>
+    [...failed.writers.values()].some((failure) => failure.reason === reason),
+  ) ?? null;
 
 // Every save in the workspace reports here, whether or not an editor still
 // shows its file: a closing settle or an unmount write can fail after its
@@ -161,7 +184,6 @@ export function useDocumentSaveNotices(input: {
   useEffect(() => {
     const owner = workspaceId;
     const current = () => latest.current.workspaceId === owner;
-    // By path.
     const files = new Map<string, FailedFile>();
     const counted = () => setFailedSaves({ workspaceId: owner, count: files.size });
     const identity = (path: string) => `document-save:${owner}:${path}`;
@@ -170,7 +192,7 @@ export function useDocumentSaveNotices(input: {
     const sessions = new Map<string, { sessionId: string; closing: boolean }>();
     const fileNotice = (path: string, failed: FailedFile, cause?: unknown): void => {
       failed.reported = true;
-      const reason = failed.shown = shownReason(failed);
+      const reason = (failed.shown = shownReason(failed));
       // Try again, or Save it again, removes the row. The failure of a save
       // it starts files the row again.
       const retry = (recreateFile: boolean) => () => {
@@ -182,25 +204,39 @@ export function useDocumentSaveNotices(input: {
         ...(cause === undefined ? {} : { cause }),
         identity: identity(path),
         target: { to: "file", path },
-        // The engine refuses every save over a deleted file until the file is
-        // back, and only the person chooses to bring it back. A note too
-        // dense to check never gets lighter, so asking again cannot save it:
-        // its row copies the note's text, read from the open editor without
-        // the engine's check, for the person to move into new notes.
         ...(reason === "deleted"
           ? { retry: null, action: { label: "Save it again", run: retry(true), ends: true } }
           : reason === "document-too-dense"
-            ? { retry: null, action: { label: "Copy as Markdown", run: () => copyNoteAsMarkdown(
-              { workspaceId: owner, path, name: path.slice(path.lastIndexOf("/") + 1), open: () => latest.current.open(path) },
-              { report: latest.current.report, clear: latest.current.clear },
-            ), reads: true } }
+            ? {
+                retry: null,
+                action: {
+                  label: "Copy as Markdown",
+                  run: () =>
+                    copyNoteAsMarkdown(
+                      {
+                        workspaceId: owner,
+                        path,
+                        name: path.slice(path.lastIndexOf("/") + 1),
+                        open: () => latest.current.open(path),
+                      },
+                      { report: latest.current.report, clear: latest.current.clear },
+                    ),
+                  reads: true,
+                },
+              }
             : { retry: retry(false) }),
         onDismiss: () => {
           failed.reported = false;
         },
       });
     };
-    const fail = (path: string, writer: Writer, reason: SaveFailureReason, retry: WriterFailure["retry"], cause?: unknown): void => {
+    const fail = (
+      path: string,
+      writer: Writer,
+      reason: SaveFailureReason,
+      retry: WriterFailure["retry"],
+      cause?: unknown,
+    ): void => {
       let failed = files.get(path);
       if (!failed) {
         failed = { reported: false, writers: new Map() };
@@ -230,34 +266,46 @@ export function useDocumentSaveNotices(input: {
     // again is clicked, and puts a deleted file back first for Save it
     // again. A settle that could not start files the row again.
     const retryDocument = (path: string) => (failure: WriterFailure, recreateFile: boolean) => {
-      void bridge().retryEngineYDocSave({ workspaceId: owner, path, ...(recreateFile ? { recreateFile } : {}) }).then(
-        (outcome) => {
-          if (outcome === "closed") reopen(path, "engine", failure);
-        },
-        (error: unknown) => {
-          const failed = files.get(path);
-          if (current() && failed?.writers.get("engine") === failure && !failed.reported) {
-            fileNotice(path, failed, error);
-          }
-        },
-      );
+      void bridge()
+        .retryEngineYDocSave({
+          workspaceId: owner,
+          path,
+          ...(recreateFile ? { recreateFile } : {}),
+        })
+        .then(
+          (outcome) => {
+            if (outcome === "closed") reopen(path, "engine", failure);
+          },
+          (error: unknown) => {
+            const failed = files.get(path);
+            if (current() && failed?.writers.get("engine") === failure && !failed.reported) {
+              fileNotice(path, failed, error);
+            }
+          },
+        );
     };
     const stopDocuments = bridge().onEngineYDocSaveState((event) => {
       if (!current()) return;
       const refusal = event.editRefusal;
       if (refusal) {
         if (refusal.workspaceId !== owner) return;
-        latest.current.report({ message: refusal.message, cause: new Error(refusal.message), kind: "live-edit-refused" });
+        latest.current.report({
+          message: refusal.message,
+          cause: new Error(refusal.message),
+          kind: "live-edit-refused",
+        });
         return;
       }
       if (event.workspaceId !== owner) return;
       const newest = sessions.get(event.path);
-      if (event.closing && newest && newest.sessionId !== event.sessionId && !newest.closing) return;
+      if (event.closing && newest && newest.sessionId !== event.sessionId && !newest.closing)
+        return;
       sessions.set(event.path, { sessionId: event.sessionId, closing: event.closing === true });
       // An author-capacity refusal has its own notice, including one a Try
       // again ran into, so this document's save notice gives way to it.
       if (event.authorCapacity) forget(event.path, "engine");
-      else if (event.saveFailure) fail(event.path, "engine", event.saveFailure.reason, retryDocument(event.path));
+      else if (event.saveFailure)
+        fail(event.path, "engine", event.saveFailure.reason, retryDocument(event.path));
       else if (event.access || REPLACES_FAILURE.has(event.state.kind)) forget(event.path, "engine");
     });
     const textSave = (save: TextSave): void => {
@@ -267,19 +315,41 @@ export function useDocumentSaveNotices(input: {
         forget(save.path, "text");
         return;
       }
-      const reason = isPrivacyDenied(failed.cause) ? "privacy-denied"
-        : isVolumeSharesNewFiles(failed.cause) ? "volume-shares-new-files" : null;
-      fail(save.path, "text", reason, (failure) => {
-        if (!failed.retry()) reopen(save.path, "text", failure);
-      }, failed.cause);
+      const reason = isPrivacyDenied(failed.cause)
+        ? "privacy-denied"
+        : isVolumeSharesNewFiles(failed.cause)
+          ? "volume-shares-new-files"
+          : null;
+      fail(
+        save.path,
+        "text",
+        reason,
+        (failure) => {
+          if (!failed.retry()) reopen(save.path, "text", failure);
+        },
+        failed.cause,
+      );
     };
     // One row per document: setting the edits aside replaces the failure.
-    const replacement = ({ workspaceId: replaced, path, setAside, failure }: DocumentReplacement): void => {
+    const replacement = ({
+      workspaceId: replaced,
+      path,
+      setAside,
+      failure,
+    }: DocumentReplacement): void => {
       if (!current() || replaced !== owner) return;
-      const notice = { title: path, details: [["File", path, path.length]] as const, identity: `document-replacement:${owner}:${path}`, target: { to: "file", path } as const };
+      const notice = {
+        title: path,
+        details: [["File", path, path.length]] as const,
+        identity: `document-replacement:${owner}:${path}`,
+        target: { to: "file", path } as const,
+      };
       if (failure) {
-        const message = failure.setAsideFailed ? REPLACED_DOCUMENT_UNSAVED
-          : setAside ? `${REPLACED_DOCUMENT_NOT_SHOWN} Find your earlier edits in Notices.` : REPLACED_DOCUMENT_NOT_SHOWN;
+        const message = failure.setAsideFailed
+          ? REPLACED_DOCUMENT_UNSAVED
+          : setAside
+            ? `${REPLACED_DOCUMENT_NOT_SHOWN} Find your earlier edits in Notices.`
+            : REPLACED_DOCUMENT_NOT_SHOWN;
         latest.current.report({ ...notice, message, cause: failure.cause, retry: failure.retry });
       } else if (setAside) {
         latest.current.report({ ...notice, tone: "success", message: REPLACED_DOCUMENT_SAVED });

@@ -24,22 +24,29 @@ export const accountWords = {
   // The phone's.
   signingInTo: (server: string) => `Signing in to ${server}`,
   forgetFailed: "dohc could not delete the sign-in saved on this phone.",
-  couldNotSignIn: (server: string) => `${server} could not sign this phone in. Try again or contact its administrator.`,
-  sessionEnded: (server: string) => `${server} ended this phone's session. Connect again to continue.`,
+  couldNotSignIn: (server: string) =>
+    `${server} could not sign this phone in. Try again or contact its administrator.`,
+  sessionEnded: (server: string) =>
+    `${server} ended this phone's session. Connect again to continue.`,
   // Scanning the QR code a computer shows under Connect a phone, in its Settings.
   scanCode: "Scan code",
   scanHint: "Scan the code under Connect a phone in your computer's Settings.",
-  notServerCode: "This code isn't a server address. Scan the code under Connect a phone in your computer's Settings.",
+  notServerCode:
+    "This code isn't a server address. Scan the code under Connect a phone in your computer's Settings.",
   insecureCode: "This code's server doesn't use HTTPS. Contact its administrator.",
   cameraOff: "dohc can't use the camera. Allow it in Settings.",
   cameraFailed: "dohc could not open the camera. Enter the server address instead.",
   openSettings: "Open Settings",
   problem: (kind: ServerProblemKind, server: string): string => {
     switch (kind) {
-      case "offline": return `dohc could not reach ${server}. Check your connection.`;
-      case "server-busy": return `${server} is busy. Try again later.`;
-      case "refused": return `${server} refused the request.`;
-      case "invalid": return `dohc could not read the answer from ${server}.`;
+      case "offline":
+        return `dohc could not reach ${server}. Check your connection.`;
+      case "server-busy":
+        return `${server} is busy. Try again later.`;
+      case "refused":
+        return `${server} refused the request.`;
+      case "invalid":
+        return `dohc could not read the answer from ${server}.`;
     }
   },
 
@@ -52,13 +59,24 @@ export const accountWords = {
    * the phone can't read its outbox, that it can't count them.
    */
   signOutBody: (counts: { readonly unsent: number; readonly maySend: number } | null): string => {
-    if (counts === null) return "dohc could not check this phone for unsent messages. Signing out deletes any it has.";
+    if (counts === null)
+      return "dohc could not check this phone for unsent messages. Signing out deletes any it has.";
     const { unsent, maySend } = counts;
     const lines = [
-      unsent === 1 ? "1 message hasn't been sent. Signing out deletes it." : unsent > 1 ? `${unsent} messages haven't been sent. Signing out deletes them.` : null,
-      maySend === 1 ? "1 message may still send." : maySend > 1 ? `${maySend} messages may still send.` : null,
-    ].filter(line => line !== null);
-    return lines.length > 0 ? lines.join(" ") : "This phone stops reading your workspaces. Your work stays where it is.";
+      unsent === 1
+        ? "1 message hasn't been sent. Signing out deletes it."
+        : unsent > 1
+          ? `${unsent} messages haven't been sent. Signing out deletes them.`
+          : null,
+      maySend === 1
+        ? "1 message may still send."
+        : maySend > 1
+          ? `${maySend} messages may still send.`
+          : null,
+    ].filter((line) => line !== null);
+    return lines.length > 0
+      ? lines.join(" ")
+      : "This phone stops reading your workspaces. Your work stays where it is.";
   },
   /** Sign out stopped because the phone couldn't delete its unsent messages safely; it stays signed in. */
   signOutFailed: "dohc could not delete the messages waiting on this phone, so it didn't sign out.",
@@ -66,7 +84,8 @@ export const accountWords = {
   showOnPhone: "Show on phone",
   showOnPhoneLabel: (workspace: string) => `Show ${workspace} on phone`,
   unnamedWorkspace: "Unnamed workspace",
-  noWorkspaces: (server: string) => `No workspaces on ${server} yet. Turn on sync for one on your computer.`,
+  noWorkspaces: (server: string) =>
+    `No workspaces on ${server} yet. Turn on sync for one on your computer.`,
   noneShown: "No workspaces show on this phone. Turn on Show on phone in Settings.",
   /** A workspace that shows on the phone, but whose computer hasn't set up its sync, so the server can't open it. */
   notSyncedYet: "Not synced yet",

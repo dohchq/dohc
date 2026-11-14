@@ -22,7 +22,11 @@ const weekdays = (at: string, timezone: string): AutomationScheduleTrigger => ({
   at,
   timezone,
 });
-const weekly = (days: AutomationWeekday[], at: string, timezone: string): AutomationScheduleTrigger => ({
+const weekly = (
+  days: AutomationWeekday[],
+  at: string,
+  timezone: string,
+): AutomationScheduleTrigger => ({
   kind: "schedule",
   every: "week",
   at,
@@ -37,7 +41,12 @@ const monthly = (days: number[], at: string, timezone: string): AutomationSchedu
   timezone,
 });
 
-function due(trigger: AutomationScheduleTrigger, after: string, until: string, limit = 100): string[] {
+function due(
+  trigger: AutomationScheduleTrigger,
+  after: string,
+  until: string,
+  limit = 100,
+): string[] {
   return dueTimes(trigger, Date.parse(after), Date.parse(until), limit).map((instant) =>
     new Date(instant).toISOString(),
   );
@@ -140,10 +149,9 @@ describe("dueTimes in Kolkata, 5 hours 30 minutes ahead of UTC", () => {
   });
 
   it("runs an hourly schedule at the local minute", () => {
-    expect(due(hourly(":00", "Asia/Kolkata"), "2026-09-25T00:00:00Z", "2026-09-25T02:00:00Z")).toEqual([
-      "2026-09-25T00:30:00.000Z",
-      "2026-09-25T01:30:00.000Z",
-    ]);
+    expect(
+      due(hourly(":00", "Asia/Kolkata"), "2026-09-25T00:00:00Z", "2026-09-25T02:00:00Z"),
+    ).toEqual(["2026-09-25T00:30:00.000Z", "2026-09-25T01:30:00.000Z"]);
   });
 });
 
@@ -213,11 +221,9 @@ describe("dueTimes in Chatham, 12 hours 45 minutes ahead of UTC", () => {
 
 describe("dueTimes in São Paulo, where clocks went back to the previous day", () => {
   it("runs the repeated late evening once, at the first occurrence", () => {
-    expect(due(daily("23:30", "America/Sao_Paulo"), "2019-02-15T12:00:00Z", "2019-02-18T12:00:00Z")).toEqual([
-      "2019-02-16T01:30:00.000Z",
-      "2019-02-17T01:30:00.000Z",
-      "2019-02-18T02:30:00.000Z",
-    ]);
+    expect(
+      due(daily("23:30", "America/Sao_Paulo"), "2019-02-15T12:00:00Z", "2019-02-18T12:00:00Z"),
+    ).toEqual(["2019-02-16T01:30:00.000Z", "2019-02-17T01:30:00.000Z", "2019-02-18T02:30:00.000Z"]);
   });
 });
 
@@ -232,27 +238,31 @@ describe("dueTimes in Casablanca, whose clocks go back for Ramadan", () => {
 
 describe("monthly days past the end of a month", () => {
   it("runs the 29th on 28 February outside a leap year and on 29 February in one", () => {
-    expect(due(monthly([29], "09:00", "UTC"), "2026-01-01T00:00:00Z", "2026-04-01T00:00:00Z")).toEqual([
-      "2026-01-29T09:00:00.000Z",
-      "2026-02-28T09:00:00.000Z",
-      "2026-03-29T09:00:00.000Z",
-    ]);
-    expect(next(monthly([29], "09:00", "UTC"), "2028-02-01T00:00:00Z")).toBe("2028-02-29T09:00:00.000Z");
+    expect(
+      due(monthly([29], "09:00", "UTC"), "2026-01-01T00:00:00Z", "2026-04-01T00:00:00Z"),
+    ).toEqual(["2026-01-29T09:00:00.000Z", "2026-02-28T09:00:00.000Z", "2026-03-29T09:00:00.000Z"]);
+    expect(next(monthly([29], "09:00", "UTC"), "2028-02-01T00:00:00Z")).toBe(
+      "2028-02-29T09:00:00.000Z",
+    );
   });
 
   it("runs once when several days fall on a month's last day", () => {
     expect(
       due(monthly([29, 30, 31], "09:00", "UTC"), "2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z"),
     ).toEqual(["2026-02-28T09:00:00.000Z"]);
-    expect(due(monthly([31], "09:00", "UTC"), "2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z")).toEqual([
-      "2026-04-30T09:00:00.000Z",
-    ]);
+    expect(
+      due(monthly([31], "09:00", "UTC"), "2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z"),
+    ).toEqual(["2026-04-30T09:00:00.000Z"]);
   });
 
   it("follows the clock-change rules on a month day", () => {
     const newYork = "America/New_York";
-    expect(next(monthly([8], "02:30", newYork), "2026-03-01T00:00:00Z")).toBe("2026-03-08T07:30:00.000Z");
-    expect(next(monthly([1], "01:30", newYork), "2026-10-15T00:00:00Z")).toBe("2026-11-01T05:30:00.000Z");
+    expect(next(monthly([8], "02:30", newYork), "2026-03-01T00:00:00Z")).toBe(
+      "2026-03-08T07:30:00.000Z",
+    );
+    expect(next(monthly([1], "01:30", newYork), "2026-10-15T00:00:00Z")).toBe(
+      "2026-11-01T05:30:00.000Z",
+    );
   });
 });
 
@@ -271,11 +281,9 @@ describe("dueTimes bounds", () => {
   });
 
   it("stops at the limit inside a clock change's batch of runs", () => {
-    expect(due(hourly(":30", "America/Sao_Paulo"), "2019-02-17T00:00:00Z", "2019-02-17T06:00:00Z", 3)).toEqual([
-      "2019-02-17T00:30:00.000Z",
-      "2019-02-17T01:30:00.000Z",
-      "2019-02-17T02:30:00.000Z",
-    ]);
+    expect(
+      due(hourly(":30", "America/Sao_Paulo"), "2019-02-17T00:00:00Z", "2019-02-17T06:00:00Z", 3),
+    ).toEqual(["2019-02-17T00:30:00.000Z", "2019-02-17T01:30:00.000Z", "2019-02-17T02:30:00.000Z"]);
   });
 
   it("refuses bounds outside the years 1970 to 9999", () => {
@@ -308,7 +316,9 @@ describe("nextDue", () => {
     expect(next(daily("09:00", "UTC"), after)).toBe("2026-09-26T09:00:00.000Z");
     expect(next(weekdays("09:00", "UTC"), after)).toBe("2026-09-28T09:00:00.000Z");
     expect(next(weekly(["wed", "sun"], "18:00", "UTC"), after)).toBe("2026-09-27T18:00:00.000Z");
-    expect(next(monthly([1], "00:00", "UTC"), "2026-01-01T00:00:00Z")).toBe("2026-02-01T00:00:00.000Z");
+    expect(next(monthly([1], "00:00", "UTC"), "2026-01-01T00:00:00Z")).toBe(
+      "2026-02-01T00:00:00.000Z",
+    );
   });
 
   it("returns nothing for a schedule with no days, without walking the window", () => {

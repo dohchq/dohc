@@ -17,17 +17,17 @@ Use the same environment file and Compose overrides as your running deployment.
 | `salvage` | Exports settled tracked file contents from an old snapshot | Creates ordinary files; does not restore a running deployment |
 | `move.mjs` | Starts the deployment on a new host from its attached data disk | Requires the data-disk layout; accounts move separately unless they are in an external database |
 
-The relay keeps an independent continuity record outside its database volume.
-Every accepted mutation advances that record, including permission changes and schema migrations.
-A database older than the confirmed continuity stamp cannot start.
-This prevents a restored backup from resurrecting revoked access.
+The server refuses an older database because it could restore access that was revoked later.
+To detect one, the relay keeps a continuity record outside its database volume.
+Every accepted change advances that record, including permission changes and schema migrations.
 
 Never replace current continuity with an older archived copy.
 An archive does not prove that its server accepted no later work.
 Losing the original continuity prevents supported deployment restoration.
 You can still salvage available file contents from a completed relay snapshot.
+
 After an interrupted write, start the relay normally.
-Startup makes the committed database state durable, then settles its continuity record.
+It checks the committed database and updates its continuity record.
 An unacknowledged write that committed may be kept.
 The relay confirms continuity before returning a write or serving its result.
 An older database still refuses startup, including a backup from before the last acknowledged write.
@@ -49,13 +49,11 @@ The server loses this work with the host data:
 
 - Run history, and Undo for runs on the server.
 - Changes from automation runs that the server may not have sent to the relay.
-  The relay records each run before the run changes the server's copy.
-  It keeps that record until a sync that began after the run ended succeeds and the server has delivered every shared file update it queued.
-  After the rebuild, each run that still has a record shows as failed in its automation's run history for 30 days.
+  After the rebuild, each such run shows as failed in its automation's run history for 30 days.
+  The owner also gets one Notice for each automation with such runs, with how many runs it has.
+  Some of these changes may have reached the relay, so check the records those runs changed before you run the automation again.
   Try again does not run these runs.
   If the rebuilt server already ran one of them again, run history shows how that run went.
-  The owner also gets one Notice for each automation with such runs, with how many runs it has.
-  Some of these changes may have reached the relay, so check the records those runs changed.
 - Button presses that the server accepted but had not finished.
   Each of these presses ends instead of running again.
   A press may have made some of its changes, so check them before pressing again.
@@ -174,7 +172,7 @@ Each disk needs twice the relay database's size, plus headroom for the relay's o
 The headroom is the database's size, capped at a tenth of the disk and never less than 1 GiB.
 With less, the job takes no snapshot and sends the failure email, so a snapshot never takes the relay's space.
 Only one snapshot runs at a time.
-If a `snapshot` command is running when the hourly snapshot starts, that hour's snapshot fails like any other.
+If a manual `snapshot` command is running when the hourly snapshot starts, the hourly snapshot fails and sends the usual failure email.
 
 The job cannot email you when it stops.
 A setting it refuses also stops it before the first snapshot, and Docker restarts it again and again without an email.
@@ -207,6 +205,7 @@ node scripts/self-host/recovery.mjs snapshot /srv/dohc-backups/offsite
 ```
 
 The command writes the same encrypted package that the hourly job uploads.
+It worked when it prints `Relay snapshot saved:` and the new file's path.
 The services keep running.
 It makes the same free-space check as the hourly job.
 If the hourly job is taking a snapshot, the command refuses. Run it again after that snapshot finishes.
@@ -261,9 +260,11 @@ Then stop it cleanly.
 If the relay database is missing or corrupt, the relay can't start, so restore without this step.
 The check requires the snapshot stamp and nonce to equal the current continuity record.
 Newer accepted work makes that snapshot unsuitable for repair.
+The check passed when it prints `Relay snapshot matches current independent continuity.`
 The restore command checks the copied candidate before replacing any existing relay files.
 It preserves replaced database and SQLite side files under `/data/recovery-<id>`.
 It leaves the services stopped and reports that directory.
+The repair worked when it prints `Relay snapshot restored. Previous files:` and that directory.
 Start the deployment through its normal launcher after inspecting the result.
 
 If the operation is interrupted, preserve the reported recovery directory and all volumes.
@@ -336,7 +337,7 @@ An absent `recovery.json` means the export did not complete.
 ## Upgrade without rolling back authority
 
 Save a relay snapshot and complete private archive before upgrading.
-Preserve existing volumes, environment values and server secrets during the upgrade.
+Then follow [Upgrade the server](self-host.md#upgrade-the-server).
 If the new version changes the schema, its migration advances continuity.
 The pre-upgrade snapshot can then be used for offline salvage, but not in-place rollback.
 If an upgrade fails, keep its volumes and diagnose or install a corrected version.
@@ -461,38 +462,3 @@ Devices that signed in after the backup must sign in again.
 If the database is lost and you have no backup, the server has no accounts.
 Every start after the first refuses an empty database, so the deployment does not create new accounts by mistake.
 Never start it with `--first-start` to get past this check: nobody could open the workspaces on the disk as their owner.
-
-## Verify the recovery tooling
-
-Run focused source checks after changing this procedure's commands:
-
-```sh
-pnpm --filter @dohc/sync-relay exec vitest run src/relayDeployment.test.ts src/relayDeploymentRecovery.test.ts src/relayContentSalvage.test.ts src/relaySnapshot.test.ts src/relaySnapshotJob.test.ts
-node --test scripts/self-host/recovery.test.mjs scripts/self-host/move.test.mjs scripts/self-host-compose.test.mjs
-pnpm --filter @dohc/app-backend-runtime build
-pnpm --filter @dohc/sync-relay build
-DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/recovery.docker.test.mjs
-DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/drill.docker.test.mjs
-DOHC_SNAPSHOT_DOCKER_TEST=1 node --test scripts/self-host/snapshot.docker.test.mjs
-```
-
-The Docker tests use isolated volumes and folders and remove them afterward.
-Build the image from the same checkout.
-The recovery test proves cold snapshot repair after corruption, production reopen, salvage and private volume archival.
-It does not prove arbitrary old-archive restoration.
-
-The drill needs a Linux Docker host.
-It hard-kills a deployment that keeps its data in a folder, then starts a fresh Compose project on that folder.
-It checks that the relay reopens the same deployment without moving continuity back.
-It checks that documents, blobs, shares and accounts survive, and that the relay refuses an older copy of its database.
-It also checks that a missing folder fails to start and that the move command refuses an empty folder.
-It checks that the move command refuses existing volumes stored elsewhere and leaves them unchanged.
-It carries the accounts volume over by name, so it does not prove the accounts volume copy commands.
-A killed container does not lose the host's write cache, so the drill does not prove survival of a power loss.
-
-The snapshot test runs on any Docker host with Linux containers and needs no dohc image.
-It uses the bundles that `pnpm --filter @dohc/app-backend-runtime build` and `pnpm --filter @dohc/sync-relay build` write.
-It takes online snapshots through a read-only relay mount while another container keeps writing.
-It checks that each snapshot holds one complete transaction and passes `check-backup`'s check.
-It checks that a snapshot refuses while another container holds the snapshot lock, and runs once that container is killed.
-It checks that verification without network access or deployment volumes refuses a wrong key and a changed byte, and leaves no output.

@@ -6,8 +6,10 @@ import { allTabs, parseUiState } from "../workbench/workbenchState";
 
 export const SAVED_TABS_TITLE = "dohc opened this workspace without your saved tabs";
 const TOOK_LONG = "Your saved tabs didn't load within 4 minutes.";
-const COME_BACK = "They come back the next time the workspace opens. Until then, tab changes aren't saved.";
-export const SAVED_TABS_RESTORE = "Restore tabs brings them back. Until you pick it, tab changes aren't saved.";
+const COME_BACK =
+  "They come back the next time the workspace opens. Until then, tab changes aren't saved.";
+export const SAVED_TABS_RESTORE =
+  "Restore tabs brings them back. Until you pick it, tab changes aren't saved.";
 export const SAVED_TABS_WAITED = `${TOOK_LONG} ${COME_BACK}`;
 export const SAVED_TABS_RESTORE_AFTER_WAIT = `${SAVED_TABS_RESTORE} ${TOOK_LONG}`;
 
@@ -59,39 +61,44 @@ export function useSavedTabsReread(input: {
         return;
       }
       reading = true;
-      bridge().getWorkspaceUiState({ workspaceId }).then((stored) => {
-        if (done) return;
-        done = true;
-        clearTimeout(waiting);
-        stop();
-        const { tabsOpen, apply, show } = latest.current;
-        if (stored === null || !tabsOpen() || allTabs(parseUiState(stored)).length === 0) {
-          apply(stored);
-          show(null);
-          return;
-        }
-        show({
-          message: waitedOut ? SAVED_TABS_RESTORE_AFTER_WAIT : SAVED_TABS_RESTORE,
-          restore: () => apply(stored),
-          toast: false,
-        });
-      }, (error: unknown) => {
-        if (done) return;
-        // The window's stop message says why. Nothing reads the tabs again
-        // until the workspace opens again, so nothing waits for them either.
-        if (isStoppedWorkspaceRead(error)) {
-          done = true;
-          clearTimeout(waiting);
-          stop();
-          latest.current.show(null);
-          return;
-        }
-        reading = false;
-        if (again) {
-          again = false;
-          read();
-        }
-      });
+      bridge()
+        .getWorkspaceUiState({ workspaceId })
+        .then(
+          (stored) => {
+            if (done) return;
+            done = true;
+            clearTimeout(waiting);
+            stop();
+            const { tabsOpen, apply, show } = latest.current;
+            if (stored === null || !tabsOpen() || allTabs(parseUiState(stored)).length === 0) {
+              apply(stored);
+              show(null);
+              return;
+            }
+            show({
+              message: waitedOut ? SAVED_TABS_RESTORE_AFTER_WAIT : SAVED_TABS_RESTORE,
+              restore: () => apply(stored),
+              toast: false,
+            });
+          },
+          (error: unknown) => {
+            if (done) return;
+            // The window's stop message says why. Nothing reads the tabs again
+            // until the workspace opens again, so nothing waits for them either.
+            if (isStoppedWorkspaceRead(error)) {
+              done = true;
+              clearTimeout(waiting);
+              stop();
+              latest.current.show(null);
+              return;
+            }
+            reading = false;
+            if (again) {
+              again = false;
+              read();
+            }
+          },
+        );
     };
     const stop = bridge().onWorkspaceActivity((event) => {
       if (!done && (event.workspaceId === undefined || event.workspaceId === workspaceId)) read();

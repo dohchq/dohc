@@ -1,330 +1,338 @@
-import { createRequire } from 'node:module'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { createRequire } from "node:module";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export type DatabaseColumn = {
-  name: string
-  type: string
-  primaryKey?: boolean
-  nullable?: boolean
-}
+  name: string;
+  type: string;
+  primaryKey?: boolean;
+  nullable?: boolean;
+};
 
 export type DatabaseTable = {
-  columns: DatabaseColumn[]
-  rows: Array<Record<string, unknown>>
-}
+  columns: DatabaseColumn[];
+  rows: Array<Record<string, unknown>>;
+};
 
-export type DatabaseSnapshot = Record<string, DatabaseTable>
+export type DatabaseSnapshot = Record<string, DatabaseTable>;
 
 export type ImportDataInput = {
-  name: string
-  mediaType: string
-  body: string
-  tableName: string
-}
+  name: string;
+  mediaType: string;
+  body: string;
+  tableName: string;
+};
 
 type SQLiteDatabase = {
-  exec(sql: string): void
+  exec(sql: string): void;
   prepare(sql: string): {
-    run(...params: unknown[]): unknown
-  }
-  close(): void
-}
+    run(...params: unknown[]): unknown;
+  };
+  close(): void;
+};
 
 type SQLiteModule = {
-  DatabaseSync: new (location: string) => SQLiteDatabase
-}
+  DatabaseSync: new (location: string) => SQLiteDatabase;
+};
 
-const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 // Named requireModule (not `require`): bundlers that emit an ESM chunk with a
 // CommonJS shim inject their own top-level `const require`, and a second
 // declaration is a SyntaxError at load time.
-const requireModule = createRequire(import.meta.url)
-let sqliteModulePromise: Promise<SQLiteModule> | null = null
+const requireModule = createRequire(import.meta.url);
+let sqliteModulePromise: Promise<SQLiteModule> | null = null;
 
 function sqliteModule() {
-  sqliteModulePromise ??= Promise.resolve(requireModule('node:sqlite') as SQLiteModule)
-  return sqliteModulePromise
+  sqliteModulePromise ??= Promise.resolve(requireModule("node:sqlite") as SQLiteModule);
+  return sqliteModulePromise;
 }
 
 function error(code: string, message: string) {
-  return { ok: false as const, code, message }
+  return { ok: false as const, code, message };
 }
 
 function quoteIdent(name: string): string {
-  if (!IDENT_RE.test(name)) throw new Error(`Invalid SQLite identifier: ${name}`)
-  return `"${name}"`
+  if (!IDENT_RE.test(name)) throw new Error(`Invalid SQLite identifier: ${name}`);
+  return `"${name}"`;
 }
 
 function sqliteType(type: string): string {
-  const clean = type.trim().toUpperCase()
-  if (clean === 'INTEGER' || clean === 'REAL' || clean === 'TEXT' || clean === 'BLOB') {
-    return clean
+  const clean = type.trim().toUpperCase();
+  if (clean === "INTEGER" || clean === "REAL" || clean === "TEXT" || clean === "BLOB") {
+    return clean;
   }
-  if (clean.includes('INT')) return 'INTEGER'
-  if (clean.includes('REAL') || clean.includes('FLOA') || clean.includes('DOUB')) return 'REAL'
-  return 'TEXT'
+  if (clean.includes("INT")) return "INTEGER";
+  if (clean.includes("REAL") || clean.includes("FLOA") || clean.includes("DOUB")) return "REAL";
+  return "TEXT";
 }
 
 function bindValue(value: unknown): unknown {
-  if (value === null || value === undefined) return null
-  if (typeof value === 'string' || typeof value === 'number') return value
-  if (typeof value === 'boolean') return value ? 1 : 0
-  return JSON.stringify(value ?? null)
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" || typeof value === "number") return value;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  return JSON.stringify(value ?? null);
 }
 
 function assertSnapshot(snapshot: DatabaseSnapshot) {
   for (const [tableName, table] of Object.entries(snapshot)) {
-    quoteIdent(tableName)
+    quoteIdent(tableName);
     if (!Array.isArray(table.columns) || !Array.isArray(table.rows)) {
-      throw new Error('Invalid database snapshot.')
+      throw new Error("Invalid database snapshot.");
     }
-    const seen = new Set<string>()
+    const seen = new Set<string>();
     for (const column of table.columns) {
-      quoteIdent(column.name)
-      if (seen.has(column.name)) throw new Error(`Duplicate column: ${column.name}`)
-      seen.add(column.name)
+      quoteIdent(column.name);
+      if (seen.has(column.name)) throw new Error(`Duplicate column: ${column.name}`);
+      seen.add(column.name);
     }
   }
 }
 
 function createTables(db: SQLiteDatabase, snapshot: DatabaseSnapshot) {
-  assertSnapshot(snapshot)
+  assertSnapshot(snapshot);
   // One transaction for the whole load: without it every INSERT autocommits
   // (its own fsync on file-backed databases), which turned a 10,000-row CSV
   // import into minutes of frozen main process. Batched, it is sub-second.
-  db.exec('BEGIN')
+  db.exec("BEGIN");
   try {
     for (const [tableName, table] of Object.entries(snapshot)) {
       const columns = table.columns.map((column) => {
-        const parts = [quoteIdent(column.name), sqliteType(column.type)]
-        if (column.primaryKey) parts.push('PRIMARY KEY')
-        if (column.nullable !== true && column.primaryKey) parts.push('NOT NULL')
-        return parts.join(' ')
-      })
-      db.exec(`CREATE TABLE ${quoteIdent(tableName)} (${columns.join(', ')})`)
-      if (table.rows.length === 0) continue
-      const columnNames = table.columns.map((column) => column.name)
-      const columnTypes = table.columns.map((column) => sqliteType(column.type))
-      const placeholders = columnNames.map(() => '?').join(', ')
+        const parts = [quoteIdent(column.name), sqliteType(column.type)];
+        if (column.primaryKey) parts.push("PRIMARY KEY");
+        if (column.nullable !== true && column.primaryKey) parts.push("NOT NULL");
+        return parts.join(" ");
+      });
+      db.exec(`CREATE TABLE ${quoteIdent(tableName)} (${columns.join(", ")})`);
+      if (table.rows.length === 0) continue;
+      const columnNames = table.columns.map((column) => column.name);
+      const columnTypes = table.columns.map((column) => sqliteType(column.type));
+      const placeholders = columnNames.map(() => "?").join(", ");
       const statement = db.prepare(
-        `INSERT INTO ${quoteIdent(tableName)} (${columnNames.map(quoteIdent).join(', ')}) VALUES (${placeholders})`,
-      )
+        `INSERT INTO ${quoteIdent(tableName)} (${columnNames.map(quoteIdent).join(", ")}) VALUES (${placeholders})`,
+      );
       for (const row of table.rows) {
-        statement.run(...columnNames.map((column, index) => {
-          const value = bindValue(row[column])
-          // Node binds numbers as doubles; SQLite's TEXT conversion can round them.
-          return columnTypes[index] === 'TEXT' && typeof value === 'number' ? String(value) : value
-        }))
+        statement.run(
+          ...columnNames.map((column, index) => {
+            const value = bindValue(row[column]);
+            // Node binds numbers as doubles; SQLite's TEXT conversion can round them.
+            return columnTypes[index] === "TEXT" && typeof value === "number"
+              ? String(value)
+              : value;
+          }),
+        );
       }
     }
-    db.exec('COMMIT')
+    db.exec("COMMIT");
   } catch (cause) {
-    db.exec('ROLLBACK')
-    throw cause
+    db.exec("ROLLBACK");
+    throw cause;
   }
 }
 
 async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), prefix))
+  const dir = await mkdtemp(join(tmpdir(), prefix));
   try {
-    return await fn(dir)
+    return await fn(dir);
   } finally {
-    await rm(dir, { recursive: true, force: true })
+    await rm(dir, { recursive: true, force: true });
   }
 }
 
 async function materializeSnapshotToBytes(
-  DatabaseSync: SQLiteModule['DatabaseSync'],
+  DatabaseSync: SQLiteModule["DatabaseSync"],
   snapshot: DatabaseSnapshot,
 ) {
-  return await withTempDir('dohc-sqlite-materialize-', async (dir) => {
-    const file = join(dir, 'database.sqlite')
-    const db = new DatabaseSync(file)
+  return await withTempDir("dohc-sqlite-materialize-", async (dir) => {
+    const file = join(dir, "database.sqlite");
+    const db = new DatabaseSync(file);
     try {
       // This scratch database becomes bytes immediately; it does not need crash recovery.
-      db.exec('PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF')
-      createTables(db, snapshot)
-      db.close()
-      const bytes = await readFile(file)
+      db.exec("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF");
+      createTables(db, snapshot);
+      db.close();
+      const bytes = await readFile(file);
       return {
         ok: true as const,
         bytes,
-      }
+      };
     } catch (cause) {
       try {
-        db.close()
+        db.close();
       } catch {}
-      return error('sqlite-materialize-failed', cause instanceof Error ? cause.message : 'Could not materialize SQLite database.')
+      return error(
+        "sqlite-materialize-failed",
+        cause instanceof Error ? cause.message : "Could not materialize SQLite database.",
+      );
     }
-  })
+  });
 }
 
 function columnNamesForRows(rows: Array<Record<string, unknown>>): string[] {
-  const columns = new Set<string>(['id'])
+  const columns = new Set<string>(["id"]);
   for (const row of rows) {
     for (const key of Object.keys(row)) {
-      quoteIdent(key)
-      columns.add(key)
+      quoteIdent(key);
+      columns.add(key);
     }
   }
-  return Array.from(columns)
+  return Array.from(columns);
 }
 
 function inferColumnType(rows: Array<Record<string, unknown>>, column: string): string {
-  let type = 'INTEGER'
-  let present = false
+  let type = "INTEGER";
+  let present = false;
   for (const row of rows) {
-    const value = row[column]
-    if (value === null || value === undefined) continue
-    present = true
-    if (typeof value === 'number') {
-      if (!Number.isInteger(value)) type = 'REAL'
-    } else if (typeof value !== 'boolean') return 'TEXT'
+    const value = row[column];
+    if (value === null || value === undefined) continue;
+    present = true;
+    if (typeof value === "number") {
+      if (!Number.isInteger(value)) type = "REAL";
+    } else if (typeof value !== "boolean") return "TEXT";
   }
-  return present ? type : 'TEXT'
+  return present ? type : "TEXT";
 }
 
 function safeIdentifier(raw: string, fallback: string): string {
   const normalized = raw
     .trim()
-    .replace(/^[`"']+|[`"']+$/g, '')
-    .replace(/[^A-Za-z0-9_]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-  const candidate = normalized || fallback
-  return /^[A-Za-z_]/.test(candidate) ? candidate : `_${candidate}`
+    .replace(/^[`"']+|[`"']+$/g, "")
+    .replace(/[^A-Za-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const candidate = normalized || fallback;
+  return /^[A-Za-z_]/.test(candidate) ? candidate : `_${candidate}`;
 }
 
 function uniqueIdentifiers(values: string[]): string[] {
-  const bases = values.map((value, index) => safeIdentifier(value, `column_${index + 1}`))
-  const reserved = new Set(['id', ...bases.map(base => base.toLowerCase())])
-  const used = new Set<string>()
-  const suffixes = new Map<string, number>()
-  return bases.map(base => {
-    const key = base.toLowerCase()
-    let name = base
-    if (used.has(key) || (key === 'id' && base !== 'id')) {
-      let suffix = suffixes.get(key) ?? 2
-      do { name = `${base}_${suffix++}` } while (reserved.has(name.toLowerCase()) || used.has(name.toLowerCase()))
-      suffixes.set(key, suffix)
+  const bases = values.map((value, index) => safeIdentifier(value, `column_${index + 1}`));
+  const reserved = new Set(["id", ...bases.map((base) => base.toLowerCase())]);
+  const used = new Set<string>();
+  const suffixes = new Map<string, number>();
+  return bases.map((base) => {
+    const key = base.toLowerCase();
+    let name = base;
+    if (used.has(key) || (key === "id" && base !== "id")) {
+      let suffix = suffixes.get(key) ?? 2;
+      do {
+        name = `${base}_${suffix++}`;
+      } while (reserved.has(name.toLowerCase()) || used.has(name.toLowerCase()));
+      suffixes.set(key, suffix);
     }
-    used.add(name.toLowerCase())
-    return name
-  })
+    used.add(name.toLowerCase());
+    return name;
+  });
 }
 
-const NUMERIC_TEXT = /^-?(?:\d+|\d+\.\d+|\d+e[+-]?\d+|\d+\.\d+e[+-]?\d+)$/i
+const NUMERIC_TEXT = /^-?(?:\d+|\d+\.\d+|\d+e[+-]?\d+|\d+\.\d+e[+-]?\d+)$/i;
 
 function unsafeNumericText(value: unknown): boolean {
-  if (typeof value !== 'string' || !NUMERIC_TEXT.test(value)) return false
-  const number = Number(value)
-  return !Number.isFinite(number) || (Number.isInteger(number) && !Number.isSafeInteger(number))
+  if (typeof value !== "string" || !NUMERIC_TEXT.test(value)) return false;
+  const number = Number(value);
+  return !Number.isFinite(number) || (Number.isInteger(number) && !Number.isSafeInteger(number));
 }
 
 function parseScalar(value: unknown, columnName?: string): unknown {
-  if (typeof value !== 'string') return value
-  const trimmed = value.trim()
-  if (columnName === 'id') return value
-  if (trimmed === '') return null
-  if (/^(true|false)$/i.test(trimmed)) return /^true$/i.test(trimmed)
-  // Text formats infer scalars, but leading zeros and unsafe numbers stay text.
-  if (NUMERIC_TEXT.test(trimmed) && !/^-?0\d/.test(trimmed) && !unsafeNumericText(trimmed)) return Number(trimmed)
-  return value
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (columnName === "id") return value;
+  if (trimmed === "") return null;
+  if (/^(true|false)$/i.test(trimmed)) return /^true$/i.test(trimmed);
+  if (NUMERIC_TEXT.test(trimmed) && !/^-?0\d/.test(trimmed) && !unsafeNumericText(trimmed))
+    return Number(trimmed);
+  return value;
 }
 
 function parseCsvRecords(body: string): string[][] {
-  const records: string[][] = []
-  let record: string[] = []
-  let field = ''
-  let inQuotes = false
-  let quoteClosed = false
+  const records: string[][] = [];
+  let record: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  let quoteClosed = false;
 
   for (let index = 0; index < body.length; index += 1) {
-    const char = body[index]
-    const next = body[index + 1]
+    const char = body[index];
+    const next = body[index + 1];
     if (char === '"') {
       if (inQuotes && next === '"') {
-        field += '"'
-        index += 1
+        field += '"';
+        index += 1;
       } else {
-        if (!inQuotes && (field !== '' || quoteClosed)) throw new Error('CSV quotes must surround the whole field.')
-        if (inQuotes) quoteClosed = true
-        inQuotes = !inQuotes
+        if (!inQuotes && (field !== "" || quoteClosed))
+          throw new Error("CSV quotes must surround the whole field.");
+        if (inQuotes) quoteClosed = true;
+        inQuotes = !inQuotes;
       }
-    } else if (char === ',' && !inQuotes) {
-      record.push(field)
-      field = ''
-      quoteClosed = false
-    } else if ((char === '\n' || char === '\r') && !inQuotes) {
-      if (char === '\r' && next === '\n') index += 1
-      record.push(field)
-      records.push(record)
-      record = []
-      field = ''
-      quoteClosed = false
+    } else if (char === "," && !inQuotes) {
+      record.push(field);
+      field = "";
+      quoteClosed = false;
+    } else if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") index += 1;
+      record.push(field);
+      records.push(record);
+      record = [];
+      field = "";
+      quoteClosed = false;
     } else {
-      if (quoteClosed) throw new Error('CSV field contains text after its closing quote.')
-      field += char
+      if (quoteClosed) throw new Error("CSV field contains text after its closing quote.");
+      field += char;
     }
   }
-  if (inQuotes) throw new Error('CSV field has an unfinished quote.')
-  record.push(field)
-  records.push(record)
+  if (inQuotes) throw new Error("CSV field has an unfinished quote.");
+  record.push(field);
+  records.push(record);
 
-  return records.filter((row, index) =>
-    index < records.length - 1 || row.some((cell) => cell.trim() !== ''),
-  )
+  return records.filter(
+    (row, index) => index < records.length - 1 || row.some((cell) => cell.trim() !== ""),
+  );
 }
 
 function rowsFromDelimitedRecords(records: string[][]): Array<Record<string, unknown>> {
-  if (records.length < 1) return []
-  const headers = uniqueIdentifiers(records[0].map((cell) => cell.trim()))
-  if (records.slice(1).some(row => row.length > headers.length)) {
-    throw new Error('Import row contains more cells than its header.')
+  if (records.length < 1) return [];
+  const headers = uniqueIdentifiers(records[0].map((cell) => cell.trim()));
+  if (records.slice(1).some((row) => row.length > headers.length)) {
+    throw new Error("Import row contains more cells than its header.");
   }
-  // Missing trailing cells are empty; completely blank records are ignored.
-  const dataRecords = records.slice(1).filter((row) => row.some((cell) => cell.trim() !== ''))
+  const dataRecords = records.slice(1).filter((row) => row.some((cell) => cell.trim() !== ""));
   const rows = dataRecords.map((row, rowIndex) => {
-    const out: Record<string, unknown> = {}
+    const out: Record<string, unknown> = {};
     for (let index = 0; index < headers.length; index += 1) {
-      const column = headers[index]
-      out[column] = parseScalar(row[index] ?? '', column)
+      const column = headers[index];
+      out[column] = parseScalar(row[index] ?? "", column);
     }
-    if (out.id === undefined || out.id === null || String(out.id).trim() === '') {
-      out.id = `row_${rowIndex + 1}`
+    if (out.id === undefined || out.id === null || String(out.id).trim() === "") {
+      out.id = `row_${rowIndex + 1}`;
     }
-    return out
-  })
-  // Only uniform numeric or boolean columns infer scalars; mixed kinds keep text.
+    return out;
+  });
   headers.forEach((column, columnIndex) => {
-    if (column === 'id') return
-    const kinds = new Set<string>()
+    if (column === "id") return;
+    const kinds = new Set<string>();
     for (const row of rows) {
-      const value = row[column]
-      if (value !== null && value !== undefined) kinds.add(typeof value)
+      const value = row[column];
+      if (value !== null && value !== undefined) kinds.add(typeof value);
     }
-    if (kinds.size === 1 && !kinds.has('string')) return
+    if (kinds.size === 1 && !kinds.has("string")) return;
     rows.forEach((row, rowIndex) => {
-      const cell = dataRecords[rowIndex][columnIndex]
-      if (cell !== undefined && cell !== '') row[column] = cell
-    })
-  })
-  return rows
+      const cell = dataRecords[rowIndex][columnIndex];
+      if (cell !== undefined && cell !== "") row[column] = cell;
+    });
+  });
+  return rows;
 }
 
 function parseCsv(body: string): Array<Record<string, unknown>> {
-  return rowsFromDelimitedRecords(parseCsvRecords(body))
+  return rowsFromDelimitedRecords(parseCsvRecords(body));
 }
 
 function parseJsonArray(body: string): Array<Record<string, unknown>> | null {
   try {
-    const value = parseImportJson(body)
-    if (!Array.isArray(value)) return null
-    return normalizeImportedRows(value)
+    const value = parseImportJson(body);
+    if (!Array.isArray(value)) return null;
+    return normalizeImportedRows(value);
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -336,161 +344,178 @@ function parseJsonl(body: string): Array<Record<string, unknown>> | null {
         .map((line) => line.trim())
         .filter(Boolean)
         .map((line) => parseImportJson(line)),
-    )
+    );
   } catch {
-    return null
+    return null;
   }
 }
 
 function parseImportJson(body: string): unknown {
   // The reviver's source token survives precision lost before the callback runs.
   return JSON.parse(body, (_key: string, value: unknown, context?: { source?: string }) =>
-    typeof value === 'number' && context?.source && unsafeNumericText(context.source) ? context.source : value)
+    typeof value === "number" && context?.source && unsafeNumericText(context.source)
+      ? context.source
+      : value,
+  );
 }
 
 function splitMarkdownRow(line: string): string[] {
-  const text = line.trim()
-  const cells: string[] = []
-  let cell = ''
+  const text = line.trim();
+  const cells: string[] = [];
+  let cell = "";
   for (let index = 0; index < text.length; index += 1) {
-    const char = text[index]
-    if (char === '\\' && (text[index + 1] === '|' || text[index + 1] === '\\')) {
-      cell += text[++index]
-    } else if (char === '|') {
-      cells.push(cell.trim())
-      cell = ''
-    } else cell += char
+    const char = text[index];
+    if (char === "\\" && (text[index + 1] === "|" || text[index + 1] === "\\")) {
+      cell += text[++index];
+    } else if (char === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else cell += char;
   }
-  cells.push(cell.trim())
-  if (text.startsWith('|')) cells.shift()
-  if (cells[cells.length - 1] === '' && cell === '') cells.pop()
-  return cells
+  cells.push(cell.trim());
+  if (text.startsWith("|")) cells.shift();
+  if (cells[cells.length - 1] === "" && cell === "") cells.pop();
+  return cells;
 }
 
 function isMarkdownSeparator(cells: string[]) {
-  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()))
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
 }
 
 function parseMarkdownTable(body: string): Array<Record<string, unknown>> | null {
-  const lines = body
-    .split(/\r?\n/)
-    .map((line) => line.trim())
+  const lines = body.split(/\r?\n/).map((line) => line.trim());
   for (let index = 0; index < lines.length - 1; index += 1) {
-    const headers = splitMarkdownRow(lines[index])
-    const separator = splitMarkdownRow(lines[index + 1])
-    if (!lines[index].includes('|') || headers.length !== separator.length || !isMarkdownSeparator(separator)) continue
-    const records: string[][] = [headers]
+    const headers = splitMarkdownRow(lines[index]);
+    const separator = splitMarkdownRow(lines[index + 1]);
+    if (
+      !lines[index].includes("|") ||
+      headers.length !== separator.length ||
+      !isMarkdownSeparator(separator)
+    )
+      continue;
+    const records: string[][] = [headers];
     for (const line of lines.slice(index + 2)) {
-      if (!line.includes('|') || line === '') break
-      const cells = splitMarkdownRow(line)
-      records.push(cells)
+      if (!line.includes("|") || line === "") break;
+      const cells = splitMarkdownRow(line);
+      records.push(cells);
     }
-    return rowsFromDelimitedRecords(records)
+    return rowsFromDelimitedRecords(records);
   }
-  return null
+  return null;
 }
 
 function normalizeImportedRows(values: unknown[]): Array<Record<string, unknown>> {
-  const sources = values.map(value => value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown> : { value })
-  const keys = [...new Set(sources.flatMap(source => Object.keys(source)))]
-  const names = uniqueIdentifiers(keys)
-  const columns = new Map(keys.map((key, index) => [key, names[index]]))
+  const sources = values.map((value) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : { value },
+  );
+  const keys = [...new Set(sources.flatMap((source) => Object.keys(source)))];
+  const names = uniqueIdentifiers(keys);
+  const columns = new Map(keys.map((key, index) => [key, names[index]]));
   return sources.map((source, index) => {
-    const row: Record<string, unknown> = {}
+    const row: Record<string, unknown> = {};
     Object.entries(source).forEach(([key, item]) => {
-      const column = columns.get(key)!
-      row[column] = item
-    })
-    if (row.id === undefined || row.id === null || String(row.id).trim() === '') {
-      row.id = `row_${index + 1}`
+      const column = columns.get(key)!;
+      row[column] = item;
+    });
+    if (row.id === undefined || row.id === null || String(row.id).trim() === "") {
+      row.id = `row_${index + 1}`;
     } else {
-      row.id = String(row.id)
+      row.id = String(row.id);
     }
-    return row
-  })
+    return row;
+  });
 }
 
 function rowsForImport(input: ImportDataInput) {
-  const mediaType = input.mediaType.split(';', 1)[0].trim().toLowerCase()
-  const name = input.name.toLowerCase()
-  const body = input.body.charCodeAt(0) === 0xFEFF ? input.body.slice(1) : input.body
-  if (mediaType === 'application/pdf' || name.endsWith('.pdf')) return null
-  if (mediaType.includes('jsonl') || mediaType.includes('ndjson') || name.endsWith('.jsonl')) {
-    return parseJsonl(body)
+  const mediaType = input.mediaType.split(";", 1)[0].trim().toLowerCase();
+  const name = input.name.toLowerCase();
+  const body = input.body.charCodeAt(0) === 0xfeff ? input.body.slice(1) : input.body;
+  if (mediaType === "application/pdf" || name.endsWith(".pdf")) return null;
+  if (mediaType.includes("jsonl") || mediaType.includes("ndjson") || name.endsWith(".jsonl")) {
+    return parseJsonl(body);
   }
-  if (mediaType.includes('json') || name.endsWith('.json')) {
-    return parseJsonArray(body)
+  if (mediaType.includes("json") || name.endsWith(".json")) {
+    return parseJsonArray(body);
   }
-  if (
-    mediaType.includes('markdown') ||
-    name.endsWith('.md') ||
-    name.endsWith('.markdown')
-  ) {
-    return parseMarkdownTable(body)
+  if (mediaType.includes("markdown") || name.endsWith(".md") || name.endsWith(".markdown")) {
+    return parseMarkdownTable(body);
   }
-  if (mediaType.includes('csv') || name.endsWith('.csv') || mediaType.startsWith('text/')) {
-    return parseCsv(body)
+  if (mediaType.includes("csv") || name.endsWith(".csv") || mediaType.startsWith("text/")) {
+    return parseCsv(body);
   }
-  return null
+  return null;
 }
 
-function snapshotForImport(input: ImportDataInput, rows: Array<Record<string, unknown>>): DatabaseSnapshot {
-  const tableName = safeIdentifier(input.tableName, 'rows')
-  quoteIdent(tableName)
-  const columns = columnNamesForRows(rows)
+function snapshotForImport(
+  input: ImportDataInput,
+  rows: Array<Record<string, unknown>>,
+): DatabaseSnapshot {
+  const tableName = safeIdentifier(input.tableName, "rows");
+  quoteIdent(tableName);
+  const columns = columnNamesForRows(rows);
   return {
     [tableName]: {
       columns: columns.map((name) => ({
         name,
         type: inferColumnType(rows, name),
-        ...(name === 'id' ? { primaryKey: true } : {}),
+        ...(name === "id" ? { primaryKey: true } : {}),
       })),
       rows,
     },
-  }
+  };
 }
 
 export async function createSqliteEngine() {
-  const { DatabaseSync } = await sqliteModule()
+  const { DatabaseSync } = await sqliteModule();
 
   async function materializeImport(input: ImportDataInput) {
-    const tableName = safeIdentifier(input.tableName, 'rows')
+    const tableName = safeIdentifier(input.tableName, "rows");
     try {
-      quoteIdent(tableName)
+      quoteIdent(tableName);
     } catch (cause) {
-      return error('invalid-table-name', cause instanceof Error ? cause.message : 'Invalid table name.')
+      return error(
+        "invalid-table-name",
+        cause instanceof Error ? cause.message : "Invalid table name.",
+      );
     }
-    let rows: Array<Record<string, unknown>> | null
+    let rows: Array<Record<string, unknown>> | null;
     try {
-      rows = rowsForImport(input)
+      rows = rowsForImport(input);
     } catch (cause) {
-      return error('invalid-import-source', cause instanceof Error ? cause.message : 'Import source is invalid.')
+      return error(
+        "invalid-import-source",
+        cause instanceof Error ? cause.message : "Import source is invalid.",
+      );
     }
     if (!rows) {
-      return error('unsupported-import-source', 'Could not parse this import source.')
+      return error("unsupported-import-source", "Could not parse this import source.");
     }
     if (rows.length === 0) {
-      return error('empty-import-source', 'Import source did not contain any rows.')
+      return error("empty-import-source", "Import source did not contain any rows.");
     }
-    let snapshot: DatabaseSnapshot
+    let snapshot: DatabaseSnapshot;
     try {
-      snapshot = snapshotForImport({ ...input, tableName }, rows)
-      assertSnapshot(snapshot)
+      snapshot = snapshotForImport({ ...input, tableName }, rows);
+      assertSnapshot(snapshot);
     } catch (cause) {
-      return error('invalid-import-schema', cause instanceof Error ? cause.message : 'Import schema is invalid.')
+      return error(
+        "invalid-import-schema",
+        cause instanceof Error ? cause.message : "Import schema is invalid.",
+      );
     }
-    const materialized = await materializeSnapshotToBytes(DatabaseSync, snapshot)
-    if (!materialized.ok) return materialized
+    const materialized = await materializeSnapshotToBytes(DatabaseSync, snapshot);
+    if (!materialized.ok) return materialized;
     return {
       ok: true as const,
       tableName,
       rowCount: rows.length,
       bytes: materialized.bytes,
-    }
+    };
   }
 
-  return { materializeImport }
+  return { materializeImport };
 }
 
-export type SqliteEngine = Awaited<ReturnType<typeof createSqliteEngine>>
+export type SqliteEngine = Awaited<ReturnType<typeof createSqliteEngine>>;

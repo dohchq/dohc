@@ -20,13 +20,14 @@ const unusedSessions = new Proxy({} as EngineWorkspaceSessions, {
 const hooks: WorkspaceCaptureHooks = {
   onCaptureOutcome: () => undefined,
   onAtomicPlacementUnavailable: () => undefined,
-  onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined, onRetainedCopies: () => undefined, onHeldFiles: () => undefined,
+  onRecoveryUnavailable: () => undefined,
+  onKeptFiles: () => undefined,
+  onRetainedCopies: () => undefined,
+  onHeldFiles: () => undefined,
 };
 const ATTACHMENT_ID = Symbol("engine-capture-gate-test");
 
 describe("captureForWorkspace", () => {
-  // The gate owns the shared-view rule. The decision carries the cause,
-  // and the workspace folder is never touched.
   it("gives a shared view a null capture with the share cause", () => {
     const decision = captureForWorkspace(
       {

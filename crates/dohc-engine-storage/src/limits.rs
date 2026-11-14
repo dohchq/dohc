@@ -30,7 +30,7 @@ pub const MAX_LIVE_ACCEPTED_HEADER_BYTES: usize = 643_576;
 
 /// The schema fingerprint this build owns. Persisted in `PRAGMA user_version`
 /// and re-validated on every open: a store stamped with any other value is
-/// rejected by the v1-vs-v2 fence (`plan §Day-one Rust schema`), never
+/// rejected by the v1-vs-v2 fence, never
 /// auto-migrated.
 pub const ENGINE_SCHEMA_VERSION: i64 = 2;
 
@@ -47,7 +47,7 @@ pub const SQLITE_DATABASE_HEADER_BYTES: u64 = 100;
 pub const ENGINE_SQLITE_BUSY_TIMEOUT_MS: u32 = 5000;
 
 /// The storage/protocol compatibility version recorded in every migration
-/// ledger row (`plan §Day-one Rust schema`: "engine build/protocol version").
+/// ledger row.
 /// Distinct from [`ENGINE_SCHEMA_VERSION`] (the on-file fingerprint fence):
 /// this tracks the *contract* the migration was written against, so a ledger is
 /// legible to a later build even before it re-derives the schema.
@@ -66,8 +66,8 @@ pub const MAX_BLOB_BYTES: usize = 64 * 1024 * 1024;
 /// and leaving the job pending for startup replay. Windows AV/indexer sharing
 /// violations are retried up to this many times; two engines that retry a
 /// different number of times cannot both pass the differential
-/// (`TEST_ORACLE.md` §3.10 `env.sharing-violation-transient`: "normative
-/// maximum of 5 attempts"). Shared by `dohc-engine-files::materialize`.
+/// (`env.sharing-violation-transient`: a normative maximum of 5 attempts).
+/// Shared by `dohc-engine-files::materialize`.
 pub const MAX_REPLACE_ATTEMPTS: u32 = 5;
 
 /// Maximum size of a materialization target the pipeline will write in one job,

@@ -1,10 +1,9 @@
 use super::*;
 use dohc_engine_collab::{ContentKind, Ydoc};
 use dohc_engine_domain::{
-    CollectionQuery, CollectionQueryResult, CollectionRecordDetails, MAX_TEXT_BYTES,
-    RECORD_ID_FRONTMATTER_KEY, SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore,
-    decline_oversized_collection_adoption_in_tx, get_collection_record, is_record_id,
-    query_collection_records,
+    CollectionQuery, CollectionQueryResult, CollectionRecordDetails, RECORD_ID_FRONTMATTER_KEY,
+    SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore, get_collection_record,
+    is_record_id, query_collection_records,
 };
 use dohc_engine_files::{
     CancellationToken, CaptureOp, ReconcilePlan, ScanGeneration, apply_reconcile_plan,
@@ -136,7 +135,6 @@ fn snapshot_from_store(
         .expect("read captured text")
 }
 
-/// The current binary head's sha256 for `path`, if the head is binary.
 fn binary_head(db: &Path, path: &str) -> Option<String> {
     use rusqlite::OptionalExtension;
     let store = EngineStore::open(db, 100).expect("reopen store");
@@ -157,8 +155,6 @@ fn binary_head(db: &Path, path: &str) -> Option<String> {
         .flatten()
 }
 
-/// The encrypted tip's plaintext byte length for a secret path (metadata
-/// only — the test never decrypts).
 fn secret_tip_len(db: &Path, path: &str) -> Option<i64> {
     use rusqlite::OptionalExtension;
     let store = EngineStore::open(db, 100).expect("reopen store");

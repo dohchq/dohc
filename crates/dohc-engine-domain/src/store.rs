@@ -156,8 +156,6 @@ impl<'a> VersionedTextStore<'a> {
         VersionedTextStore { store }
     }
 
-    // ----------------------------------------------------------------- bootstrap
-
     /// Ensure the workspace's `main` version exists, returning it. Idempotent:
     /// a repeat call returns the existing main version (`ensureWorkspaceRow`
     /// posture — `versions-ensure-main-version`).
@@ -209,8 +207,6 @@ impl<'a> VersionedTextStore<'a> {
             row.transpose()
         })
     }
-
-    // -------------------------------------------------------------------- reads
 
     /// Resolve the stable object currently bound to a version-local path.
     pub fn object_id_for_path(
@@ -968,8 +964,6 @@ impl<'a> VersionedTextStore<'a> {
             .read_with(|conn| get_active_version_in(conn, workspace_id))
     }
 
-    // -------------------------------------------------------------- named version
-
     /// Validate a named-version request without mutating the store.
     ///
     /// Returns the existing version for an exact idempotent replay. Callers
@@ -1159,8 +1153,6 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)
     }
 
-    // ---------------------------------------------------------------- restore
-
     /// Set the workspace's active version (the restore primitive). Both the
     /// restored version and the previously-active one keep all their rows — the
     /// conflict invariant that restore preserves both sides (`versions-set-active-version`).
@@ -1187,8 +1179,6 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)?;
         Ok(record)
     }
-
-    // --------------------------------------------------------------- internals
 
     fn require_version(
         &self,
@@ -1543,7 +1533,6 @@ pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
             reason: "path must not contain traversal segments",
         });
     }
-    // The engine's own directory is reserved; a file must never alias into it.
     if path.split('/').any(|segment| {
         dohc_engine_files::floor::segment_is_ignored(&dohc_engine_files::floor::reserved_key(
             segment,
@@ -1769,14 +1758,6 @@ fn latest_moment_order(
         .map_err(DomainError::sql_corrupt)
 }
 
-/// The fork point: the latest materialized moment **belonging to the source
-/// version** (`versionedTextStore.ts:4877-4884` — "it never touched this
-/// version's snapshots, so it must never become the fork point"). Scoping to
-/// `version_id` is load-bearing: the global-latest moment can belong to a
-/// sibling fork, and using it would record a merge base that never described
-/// this version's state. `sync_record_only` marker rows (a peer-divergence
-/// record) are excluded — a materialized moment is NULL or `0` (the `= 0`
-/// arm is latent until sync writes 0).
 fn latest_materialized_moment_id(
     conn: &Connection,
     workspace_id: &str,
@@ -2311,7 +2292,7 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentRow,
 }
 
 /// Content-addressed sha256 (lowercase hex) of a text blob. Public so the
-/// differential harness can derive the expected content hashes (N8).
+/// differential harness can derive the expected content hashes.
 pub fn text_blob_sha256(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());

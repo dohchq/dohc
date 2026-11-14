@@ -1,6 +1,5 @@
-// A minimal relay client for e2e specs that need a second machine. The legacy
-// engine's client used to play that role and is being deleted; the daemon cannot
-// take it over for file content.
+// A minimal relay client for e2e specs that need a second machine. The daemon
+// cannot play that role for file content.
 
 import type { RelayWorkspaceIdentity } from "./syncRelay";
 

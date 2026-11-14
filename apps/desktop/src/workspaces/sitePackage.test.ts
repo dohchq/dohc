@@ -30,9 +30,11 @@ async function getSitePackage(
 ): Promise<SitePackageInfo | null> {
   if (knownSites) return selectListedSitePackage(anyPath, knownSites);
   const reads = createOwnedWorkspaceReadPort({
-    hasShareState: false, searchSources: [], repairProjection: async () => new Set<string>(),
-    listFiles: scope => listFiles(rootPath, scope),
-    lookupFiles: paths => listFiles(rootPath, { paths }),
+    hasShareState: false,
+    searchSources: [],
+    repairProjection: async () => new Set<string>(),
+    listFiles: (scope) => listFiles(rootPath, scope),
+    lookupFiles: (paths) => listFiles(rootPath, { paths }),
   });
   return createOwnedSiteCatalog({ reads: () => reads }).get({ rootPath }, anyPath, effectiveMode);
 }
@@ -53,18 +55,14 @@ afterEach(async () => {
 
 describe("shareMountRootForSite", () => {
   it("identifies the containing collaboration mount without narrowing to the site", () => {
-    expect(shareMountRootForSite("shared-with-me/alex/portal")).toBe(
-      "shared-with-me/alex",
-    );
+    expect(shareMountRootForSite("shared-with-me/alex/portal")).toBe("shared-with-me/alex");
     expect(shareMountRootForSite("shared-with-me/alex")).toBe("shared-with-me/alex");
     // isSharedWithMePath recognizes "Shared-With-Me." as the same reserved
     // segment (a case/Windows-alias variant), but the returned mount root
     // must stay a literal PREFIX of the original root string — a canonical
     // lowercase reconstruction would no longer prefix it, and downstream
     // authority validation checks root.startsWith(mountRoot).
-    expect(shareMountRootForSite("Shared-With-Me./alex/portal")).toBe(
-      "Shared-With-Me./alex",
-    );
+    expect(shareMountRootForSite("Shared-With-Me./alex/portal")).toBe("Shared-With-Me./alex");
     expect(shareMountRootForSite("sites/shared-with-me/alex")).toBeNull();
     expect(shareMountRootForSite("shared-with-me")).toBeNull();
     expect(shareMountRootForSite(".")).toBeNull();
@@ -155,12 +153,13 @@ describe("shareMountRootForSite", () => {
     expect(ownerFiles.has("index.html")).toBe(true);
     expect(ownerFiles.has("recipient-only.js")).toBe(false);
     const preview = await startStaticSitePreview(root, target.root, {
-        authority: site!.authority,
-        entry: target.entry ?? undefined,
+      authority: site!.authority,
+      entry: target.entry ?? undefined,
     });
     try {
-      await expect(fetch(preview.url).then((response) => response.text()))
-        .resolves.toContain("/assets/main.js");
+      await expect(fetch(preview.url).then((response) => response.text())).resolves.toContain(
+        "/assets/main.js",
+      );
     } finally {
       await preview.stop();
     }
@@ -209,9 +208,7 @@ describe("listSitePackages", () => {
       JSON.stringify({ scripts: { dev: "vite" } }),
     );
 
-    expect(await listKnownSitePackages(root, { files: [] })).toEqual(
-      [],
-    );
+    expect(await listKnownSitePackages(root, { files: [] })).toEqual([]);
   });
 
   it("serves a configured subdirectory entry from its containing directory", async () => {
@@ -223,17 +220,9 @@ describe("listSitePackages", () => {
         preview: { mode: "static", entry: "public/index.html" },
       }),
     );
-    await writeFile(
-      join(root, "public", "index.html"),
-      '<script src="./assets/app.js"></script>',
-    );
-    await writeFile(
-      join(root, "public", "assets", "app.js"),
-      "window.ready = true;",
-    );
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === ".",
-    );
+    await writeFile(join(root, "public", "index.html"), '<script src="./assets/app.js"></script>');
+    await writeFile(join(root, "public", "assets", "app.js"), "window.ready = true;");
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === ".");
     if (!site) throw new Error("Expected the configured root site.");
     const target = staticPreviewTargetForSite(site);
     const preview = await startStaticSitePreview(root, target.root, {
@@ -242,9 +231,9 @@ describe("listSitePackages", () => {
     });
     let assetStatus = 0;
     try {
-      assetStatus = await fetch(
-        new URL("/assets/app.js", preview.url),
-      ).then((response) => response.status);
+      assetStatus = await fetch(new URL("/assets/app.js", preview.url)).then(
+        (response) => response.status,
+      );
     } finally {
       await preview.stop();
     }
@@ -262,23 +251,15 @@ describe("listSitePackages", () => {
         preview: { mode: "static", entry: "public/index.html" },
       }),
     );
-    await writeFile(
-      join(root, "public", "index.html"),
-      '<script src="/assets/app.js"></script>',
-    );
-    await writeFile(
-      join(root, "public", "assets", "app.js"),
-      "window.ready = true;",
-    );
+    await writeFile(join(root, "public", "index.html"), '<script src="/assets/app.js"></script>');
+    await writeFile(join(root, "public", "assets", "app.js"), "window.ready = true;");
     // A same-named sibling outside public/ — the file the manifest would
     // incorrectly select if artifactRoot stayed at the site root instead of
     // shifting to public/, the same directory the preview server serves.
     await mkdir(join(root, "assets"), { recursive: true });
     await writeFile(join(root, "assets", "app.js"), "wrong file");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === ".",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === ".");
 
     expect(manifestOf(site)?.assets).toContain("public/assets/app.js");
     expect(manifestOf(site)?.assets).not.toContain("assets/app.js");
@@ -286,10 +267,7 @@ describe("listSitePackages", () => {
 
   it("keeps a root-level static entry at the site root", async () => {
     await mkdir(join(root, "root-entry"), { recursive: true });
-    await writeFile(
-      join(root, "root-entry", "index.html"),
-      "<h1>Root entry</h1>",
-    );
+    await writeFile(join(root, "root-entry", "index.html"), "<h1>Root entry</h1>");
 
     const site = (await listSitePackages(root)).find(
       (candidate) => candidate.root === "root-entry",
@@ -339,10 +317,7 @@ describe("listSitePackages", () => {
 
   it("includes referenced browser files without filtering by extension", async () => {
     await mkdir(join(root, "media"), { recursive: true });
-    await writeFile(
-      join(root, "media", "index.html"),
-      '<video src="./intro.mp4"></video>',
-    );
+    await writeFile(join(root, "media", "index.html"), '<video src="./intro.mp4"></video>');
     await writeFile(join(root, "media", "intro.mp4"), "video");
 
     const site = (await listSitePackages(root)).find((candidate) => candidate.root === "media");
@@ -436,9 +411,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "commented", "never-closed.txt"), "private");
     await writeFile(join(root, "commented", "real.png"), "real");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "commented",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "commented");
 
     expect(manifestOf(site)?.assets).toEqual(["commented/real.png"]);
   });
@@ -466,7 +439,7 @@ describe("listSitePackages", () => {
       [
         '<script type="module">',
         'import "./real.js";',
-        'const html = \'<img src="fake.png">\';',
+        "const html = '<img src=\"fake.png\">';",
         "</script>",
         '<style>@import "real.css";</style>',
         '<img src="real.png">',
@@ -490,10 +463,7 @@ describe("listSitePackages", () => {
 
   it("resolves a fetch-like reference from an external script against the document, not the script", async () => {
     await mkdir(join(root, "fetch-base", "js"), { recursive: true });
-    await writeFile(
-      join(root, "fetch-base", "index.html"),
-      '<script src="js/app.js"></script>',
-    );
+    await writeFile(join(root, "fetch-base", "index.html"), '<script src="js/app.js"></script>');
     await writeFile(join(root, "fetch-base", "js", "app.js"), 'fetch("data.json");');
     // The real, document-relative file the browser actually requests.
     await writeFile(join(root, "fetch-base", "data.json"), "{}");
@@ -555,30 +525,22 @@ describe("listSitePackages", () => {
       ].join(""),
     );
     await writeFile(join(root, "external-base", "app.js"), "window.localSecret = true;");
-    await writeFile(
-      join(root, "external-base", "private.js"),
-      "window.private = true;",
-    );
+    await writeFile(join(root, "external-base", "private.js"), "window.private = true;");
     await mkdir(join(root, "no-base"), { recursive: true });
-    await writeFile(
-      join(root, "no-base", "index.html"),
-      '<script src="app.js"></script>',
-    );
+    await writeFile(join(root, "no-base", "index.html"), '<script src="app.js"></script>');
     await writeFile(join(root, "no-base", "app.js"), "window.local = true;");
 
     const sites = await listSitePackages(root);
 
     expect(
-      manifestOf(sites.find((candidate) => candidate.root === "external-base"))
-        ?.assets,
+      manifestOf(sites.find((candidate) => candidate.root === "external-base"))?.assets,
     ).not.toContain("external-base/app.js");
     expect(
-      manifestOf(sites.find((candidate) => candidate.root === "external-base"))
-        ?.assets,
+      manifestOf(sites.find((candidate) => candidate.root === "external-base"))?.assets,
     ).not.toContain("external-base/private.js");
-    expect(
-      manifestOf(sites.find((candidate) => candidate.root === "no-base"))?.assets,
-    ).toContain("no-base/app.js");
+    expect(manifestOf(sites.find((candidate) => candidate.root === "no-base"))?.assets).toContain(
+      "no-base/app.js",
+    );
   });
 
   it("resolves an external script's fetch-like reference against its referring document's base href, not the artifact root", async () => {
@@ -591,9 +553,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "doc-base", "docs", "data.json"), "{}");
     await writeFile(join(root, "doc-base", "data.json"), "wrong file");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "doc-base",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "doc-base");
 
     expect(manifestOf(site)?.assets).toContain("doc-base/docs/data.json");
     expect(manifestOf(site)?.assets).not.toContain("doc-base/data.json");
@@ -625,7 +585,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "prose", "index.html"),
       [
-        "<pre>import \"./private.js\";</pre>",
+        '<pre>import "./private.js";</pre>',
         "<p>Try url(private.css) in your stylesheet.</p>",
         '<script type="module" src="app.js"></script>',
       ].join(""),
@@ -635,9 +595,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "prose", "private.js"), "window.secret = true;");
     await writeFile(join(root, "prose", "private.css"), "body{color:red}");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "prose",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "prose");
 
     expect(manifestOf(site)?.assets).toContain("prose/real.js");
     expect(manifestOf(site)?.assets).not.toContain("prose/private.js");
@@ -687,13 +645,11 @@ describe("listSitePackages", () => {
     await mkdir(join(root, "handler"), { recursive: true });
     await writeFile(
       join(root, "handler", "index.html"),
-      '<button onclick="fetch(\'data.json\')"></button>',
+      "<button onclick=\"fetch('data.json')\"></button>",
     );
     await writeFile(join(root, "handler", "data.json"), "{}");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "handler",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "handler");
 
     expect(manifestOf(site)?.assets).toContain("handler/data.json");
   });
@@ -711,9 +667,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "dedupe", "a", "data.json"), "{}");
     await writeFile(join(root, "dedupe", "b", "data.json"), "{}");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "dedupe",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "dedupe");
 
     expect(manifestOf(site)?.assets).toContain("dedupe/a/data.json");
     expect(manifestOf(site)?.assets).toContain("dedupe/b/data.json");
@@ -756,10 +710,7 @@ describe("listSitePackages", () => {
 
   it("decodes an HTML character reference in an attribute value before resolving it", async () => {
     await mkdir(join(root, "entity-ref", "assets"), { recursive: true });
-    await writeFile(
-      join(root, "entity-ref", "index.html"),
-      '<img src="assets&#x2f;hero.png">',
-    );
+    await writeFile(join(root, "entity-ref", "index.html"), '<img src="assets&#x2f;hero.png">');
     await writeFile(join(root, "entity-ref", "assets", "hero.png"), "image");
 
     const site = (await listSitePackages(root)).find(
@@ -861,19 +812,13 @@ describe("listSitePackages", () => {
 
   it("only trusts a proven consumption shape (property assignment, setAttribute) for a provably DOM-producing receiver of a matching tag", async () => {
     await mkdir(join(root, "prop-assign"), { recursive: true });
-    await writeFile(
-      join(root, "prop-assign", "index.html"),
-      '<script src="app.js"></script>',
-    );
+    await writeFile(join(root, "prop-assign", "index.html"), '<script src="app.js"></script>');
     await writeFile(
       join(root, "prop-assign", "app.js"),
       [
-        // Provable, matching (tag, property), and actually inserted: img.src.
         'const img = document.createElement("img");',
         "document.body.appendChild(img);",
         'img.src = "img.png";',
-        // Provable, matching (tag, property), and actually inserted: a.href
-        // via setAttribute.
         'const link = document.createElement("a");',
         "document.body.appendChild(link);",
         'link.setAttribute("href", "linked.html");',
@@ -887,7 +832,7 @@ describe("listSitePackages", () => {
         'const queried = document.querySelector("a");',
         'queried.setAttribute("href", "queried.html");',
         // Not provable: no traceable DOM-producing origin at all.
-        'const el = getElementFromSomewhere();',
+        "const el = getElementFromSomewhere();",
         'el.src = "unproven.png";',
         // Not provable: a bare src/href-named variable is just a name.
         'const href = "private.html";',
@@ -922,13 +867,8 @@ describe("listSitePackages", () => {
         build: { output: "dist" },
       }),
     );
-    await writeFile(
-      join(root, "static-share", "index.html"),
-      '<script src="./app.js"></script>',
-    );
+    await writeFile(join(root, "static-share", "index.html"), '<script src="./app.js"></script>');
     await writeFile(join(root, "static-share", "app.js"), "window.ready = true;");
-    // A leftover build output from an earlier build — must not be what gets
-    // shared while preview is pinned to the configured static entry.
     await writeFile(
       join(root, "static-share", "dist", "index.html"),
       '<script src="./bundle.js"></script>',
@@ -955,10 +895,7 @@ describe("listSitePackages", () => {
         build: { output: "dist" },
       }),
     );
-    await writeFile(
-      join(root, "build-share", "index.html"),
-      '<script src="./app.js"></script>',
-    );
+    await writeFile(join(root, "build-share", "index.html"), '<script src="./app.js"></script>');
     await writeFile(join(root, "build-share", "app.js"), "window.ready = true;");
     await writeFile(
       join(root, "build-share", "dist", "index.html"),
@@ -992,9 +929,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "link-rel", "preload-with-as.js"), "window.b = true;");
     await writeFile(join(root, "link-rel", "feed.xml"), "<rss></rss>");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "link-rel",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "link-rel");
 
     expect(manifestOf(site)?.assets).toContain("link-rel/style.css");
     expect(manifestOf(site)?.assets).toContain("link-rel/preload-with-as.js");
@@ -1004,14 +939,8 @@ describe("listSitePackages", () => {
 
   it("does not scan an importScripts() call outside a worker's own context", async () => {
     await mkdir(join(root, "not-a-worker"), { recursive: true });
-    await writeFile(
-      join(root, "not-a-worker", "index.html"),
-      '<script src="app.js"></script>',
-    );
-    await writeFile(
-      join(root, "not-a-worker", "app.js"),
-      'importScripts("helper.js");',
-    );
+    await writeFile(join(root, "not-a-worker", "index.html"), '<script src="app.js"></script>');
+    await writeFile(join(root, "not-a-worker", "app.js"), 'importScripts("helper.js");');
     await writeFile(join(root, "not-a-worker", "helper.js"), "window.ready = true;");
 
     const site = (await listSitePackages(root)).find(
@@ -1043,10 +972,7 @@ describe("listSitePackages", () => {
 
   it("does not trust a locally shadowed fetch identifier", async () => {
     await mkdir(join(root, "shadowed-fetch"), { recursive: true });
-    await writeFile(
-      join(root, "shadowed-fetch", "index.html"),
-      '<script src="app.js"></script>',
-    );
+    await writeFile(join(root, "shadowed-fetch", "index.html"), '<script src="app.js"></script>');
     await writeFile(
       join(root, "shadowed-fetch", "app.js"),
       'function fetch(path) { console.log(path); }\nfetch("private.txt");',
@@ -1151,10 +1077,7 @@ describe("listSitePackages", () => {
     // Real bytes a browser only ever fetches with this file — never runs as
     // a script — so the fetch("private.txt") text inside it is just data,
     // not a reference a real browser would ever follow.
-    await writeFile(
-      join(root, "fetched-bytes", "payload.js"),
-      'fetch("private.txt");',
-    );
+    await writeFile(join(root, "fetched-bytes", "payload.js"), 'fetch("private.txt");');
     await writeFile(join(root, "fetched-bytes", "private.txt"), "private");
 
     const site = (await listSitePackages(root)).find(
@@ -1182,10 +1105,7 @@ describe("listSitePackages", () => {
       join(root, "dual-executability", "worker.js"),
       'fetch("shared.js");\nimportScripts("shared.js");',
     );
-    await writeFile(
-      join(root, "dual-executability", "shared.js"),
-      'fetch("real-target.txt");',
-    );
+    await writeFile(join(root, "dual-executability", "shared.js"), 'fetch("real-target.txt");');
     await writeFile(join(root, "dual-executability", "real-target.txt"), "data");
 
     const site = (await listSitePackages(root)).find(
@@ -1243,15 +1163,10 @@ describe("listSitePackages", () => {
 
   it("still fetches an iframe's src when srcdoc is absent", async () => {
     await mkdir(join(root, "src-alone"), { recursive: true });
-    await writeFile(
-      join(root, "src-alone", "index.html"),
-      '<iframe src="framed.html"></iframe>',
-    );
+    await writeFile(join(root, "src-alone", "index.html"), '<iframe src="framed.html"></iframe>');
     await writeFile(join(root, "src-alone", "framed.html"), "<h1>Framed</h1>");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "src-alone",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "src-alone");
 
     expect(manifestOf(site)?.assets).toContain("src-alone/framed.html");
   });
@@ -1352,18 +1267,18 @@ describe("listSitePackages", () => {
       ].join(""),
     );
     await writeFile(join(root, "import-map-merge", "from-first.js"), "export {};");
-    await writeFile(join(root, "import-map-merge", "from-second.js"), "private file literally named from-second.js");
+    await writeFile(
+      join(root, "import-map-merge", "from-second.js"),
+      "private file literally named from-second.js",
+    );
     await writeFile(join(root, "import-map-merge", "from-second-b.js"), "export {};");
 
     const site = (await listSitePackages(root)).find(
       (candidate) => candidate.root === "import-map-merge",
     );
 
-    // "a" still resolves to the first map's own value...
     expect(manifestOf(site)?.assets).toContain("import-map-merge/from-first.js");
     expect(manifestOf(site)?.assets).not.toContain("import-map-merge/from-second.js");
-    // ...while "b", which only the second map declares, is still merged in
-    // and resolves — not lost because a first map already existed.
     expect(manifestOf(site)?.assets).toContain("import-map-merge/from-second-b.js");
   });
 
@@ -1437,7 +1352,7 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("import-map-prefix/lib/widget.js");
   });
 
-  it("carries module grammar into the queue for new Worker(lit, { type: \"module\" })", async () => {
+  it('carries module grammar into the queue for new Worker(lit, { type: "module" })', async () => {
     await mkdir(join(root, "worker-module-type"), { recursive: true });
     await writeFile(
       join(root, "worker-module-type", "index.html"),
@@ -1482,7 +1397,7 @@ describe("listSitePackages", () => {
     // identical between the two references to shared.js. Only the active
     // import map differs, isolating that dimension of the dedupe key: with
     // separate subdirectories, documentBase alone would already force two
-    // scans and this test would pass without exercising the fix at all.
+    // scans and this test would pass without exercising the import map at all.
     await mkdir(join(root, "import-map-identity"), { recursive: true });
     await writeFile(
       join(root, "import-map-identity", "page-a.html"),
@@ -1503,10 +1418,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "import-map-identity", "from-b.js"), "export {};");
     await writeFile(
       join(root, "import-map-identity", "index.html"),
-      [
-        '<iframe src="page-a.html"></iframe>',
-        '<iframe src="page-b.html"></iframe>',
-      ].join(""),
+      ['<iframe src="page-a.html"></iframe>', '<iframe src="page-b.html"></iframe>'].join(""),
     );
 
     const site = (await listSitePackages(root)).find(
@@ -1534,10 +1446,7 @@ describe("listSitePackages", () => {
 
   it("does not let an unrelated scope's non-DOM binding of the same name grant DOM provenance", async () => {
     await mkdir(join(root, "dom-scope"), { recursive: true });
-    await writeFile(
-      join(root, "dom-scope", "index.html"),
-      '<script src="app.js"></script>',
-    );
+    await writeFile(join(root, "dom-scope", "index.html"), '<script src="app.js"></script>');
     await writeFile(
       join(root, "dom-scope", "app.js"),
       [
@@ -1554,9 +1463,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "dom-scope", "real.png"), "image");
     await writeFile(join(root, "dom-scope", "private.png"), "image");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "dom-scope",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "dom-scope");
 
     expect(manifestOf(site)?.assets).not.toContain("dom-scope/real.png");
     expect(manifestOf(site)?.assets).not.toContain("dom-scope/private.png");
@@ -1581,10 +1488,7 @@ describe("listSitePackages", () => {
     await mkdir(join(root, "network-base"), { recursive: true });
     await writeFile(
       join(root, "network-base", "index.html"),
-      [
-        '<base href="\\\\host\\dir\\">',
-        '<script src="app.js"></script>',
-      ].join(""),
+      ['<base href="\\\\host\\dir\\">', '<script src="app.js"></script>'].join(""),
     );
     // A decoy at the LOCAL path the old (unnormalized) check would have
     // resolved "app.js" against — a browser never requests this file, it
@@ -1599,7 +1503,7 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("network-base/host/dir/app.js");
   });
 
-  it("does not treat type=\"module;foo\" as executable — it is neither the exact module keyword nor a JS mime essence", async () => {
+  it('does not treat type="module;foo" as executable — it is neither the exact module keyword nor a JS mime essence', async () => {
     await mkdir(join(root, "module-param"), { recursive: true });
     await writeFile(
       join(root, "module-param", "index.html"),
@@ -1616,10 +1520,7 @@ describe("listSitePackages", () => {
 
   it("invalidates DOM provenance for a function parameter bound to the same name as a proven DOM variable", async () => {
     await mkdir(join(root, "dom-parameter"), { recursive: true });
-    await writeFile(
-      join(root, "dom-parameter", "index.html"),
-      '<script src="app.js"></script>',
-    );
+    await writeFile(join(root, "dom-parameter", "index.html"), '<script src="app.js"></script>');
     await writeFile(
       join(root, "dom-parameter", "app.js"),
       [
@@ -1641,7 +1542,7 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("dom-parameter/private.png");
   });
 
-  it("recognizes a quoted worker option key (new Worker(lit, { \"type\": \"module\" }))", async () => {
+  it('recognizes a quoted worker option key (new Worker(lit, { "type": "module" }))', async () => {
     await mkdir(join(root, "worker-quoted-key"), { recursive: true });
     await writeFile(
       join(root, "worker-quoted-key", "index.html"),
@@ -1700,9 +1601,6 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "import-map-fingerprint",
     );
 
-    // The two-entries page's "c" -> "./d" mapping must survive its own
-    // scan even though the one-entry page's map fingerprinted identically
-    // under the old scheme.
     expect(manifestOf(site)?.assets).toContain("import-map-fingerprint/d");
   });
 
@@ -1846,16 +1744,13 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("import-map-scope/lib");
   });
 
-  it("carries module grammar into a service worker registered with { type: \"module\" }", async () => {
+  it('carries module grammar into a service worker registered with { type: "module" }', async () => {
     await mkdir(join(root, "sw-module-type"), { recursive: true });
     await writeFile(
       join(root, "sw-module-type", "index.html"),
       '<script>navigator.serviceWorker.register("sw.js", { type: "module" });</script>',
     );
-    await writeFile(
-      join(root, "sw-module-type", "sw.js"),
-      'export {};\nfetch("target.txt");',
-    );
+    await writeFile(join(root, "sw-module-type", "sw.js"), 'export {};\nfetch("target.txt");');
     await writeFile(join(root, "sw-module-type", "target.txt"), "data");
 
     const site = (await listSitePackages(root)).find(
@@ -1944,9 +1839,7 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "xhr-open", "data.json"), "{}");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "xhr-open",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "xhr-open");
 
     expect(manifestOf(site)?.assets).toContain("xhr-open/data.json");
   });
@@ -1959,9 +1852,7 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "srcdoc", "frame.png"), "image");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "srcdoc",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "srcdoc");
 
     expect(manifestOf(site)?.assets).toContain("srcdoc/frame.png");
   });
@@ -1976,10 +1867,7 @@ describe("listSitePackages", () => {
         "<iframe srcdoc=\"<base href='nested/'><img src='inner.png'>\"></iframe>",
       ].join(""),
     );
-    await writeFile(
-      join(root, "srcdoc-base", "elsewhere", "nested", "inner.png"),
-      "image",
-    );
+    await writeFile(join(root, "srcdoc-base", "elsewhere", "nested", "inner.png"), "image");
     // Decoy at the path a nested relative <base> would resolve to if it
     // ignored the embedding document's own <base href="/elsewhere/"> and
     // fell back to the embedding document's plain directory instead.
@@ -2022,14 +1910,11 @@ describe("listSitePackages", () => {
 
   it("does not trust document.createElement through a receiver that only happens to be named document", async () => {
     await mkdir(join(root, "fake-document"), { recursive: true });
-    await writeFile(
-      join(root, "fake-document", "index.html"),
-      '<script src="app.js"></script>',
-    );
+    await writeFile(join(root, "fake-document", "index.html"), '<script src="app.js"></script>');
     await writeFile(
       join(root, "fake-document", "app.js"),
       [
-        'const fake = { document: { createElement: () => ({}) } };',
+        "const fake = { document: { createElement: () => ({}) } };",
         'const img = fake.document.createElement("img");',
         'img.src = "private.png";',
       ].join("\n"),
@@ -2045,22 +1930,17 @@ describe("listSitePackages", () => {
 
   it("does not trust serviceWorker.register through a receiver that only happens to be named serviceWorker", async () => {
     await mkdir(join(root, "fake-sw"), { recursive: true });
-    await writeFile(
-      join(root, "fake-sw", "index.html"),
-      '<script src="app.js"></script>',
-    );
+    await writeFile(join(root, "fake-sw", "index.html"), '<script src="app.js"></script>');
     await writeFile(
       join(root, "fake-sw", "app.js"),
       [
-        'const app = { serviceWorker: { register: (url) => url } };',
+        "const app = { serviceWorker: { register: (url) => url } };",
         'app.serviceWorker.register("private-sw.js");',
       ].join("\n"),
     );
     await writeFile(join(root, "fake-sw", "private-sw.js"), "self.ready = true;");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "fake-sw",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "fake-sw");
 
     expect(manifestOf(site)?.assets).not.toContain("fake-sw/private-sw.js");
   });
@@ -2082,10 +1962,7 @@ describe("listSitePackages", () => {
 
   it("parses a classic script with its own grammar rather than falling back to module grammar", async () => {
     await mkdir(join(root, "classic-only"), { recursive: true });
-    await writeFile(
-      join(root, "classic-only", "index.html"),
-      '<script src="classic.js"></script>',
-    );
+    await writeFile(join(root, "classic-only", "index.html"), '<script src="classic.js"></script>');
     // `import` is only legal in module grammar — a real browser throws a
     // syntax error for this classic script and runs nothing in it,
     // including the otherwise-valid fetch call below.
@@ -2108,19 +1985,15 @@ describe("listSitePackages", () => {
     await mkdir(join(root, "dual-context"), { recursive: true });
     await writeFile(
       join(root, "dual-context", "index.html"),
-      [
-        '<script src="shared.js"></script>',
-        '<script type="module" src="shared.js"></script>',
-      ].join(""),
+      ['<script src="shared.js"></script>', '<script type="module" src="shared.js"></script>'].join(
+        "",
+      ),
     );
     // Invalid as a classic script (export is module-only syntax), so the
     // classic reference to shared.js contributes nothing; a scan keyed only
     // by path would let that failed classic parse "use up" shared.js and
     // silently skip the later module reference that does parse.
-    await writeFile(
-      join(root, "dual-context", "shared.js"),
-      'export {};\nfetch("target.txt");',
-    );
+    await writeFile(join(root, "dual-context", "shared.js"), 'export {};\nfetch("target.txt");');
     await writeFile(join(root, "dual-context", "target.txt"), "data");
 
     const site = (await listSitePackages(root)).find(
@@ -2142,7 +2015,7 @@ describe("listSitePackages", () => {
         'new URL("unconsumed.txt", import.meta.url);',
         'new Worker(new URL("inline-worker.js", import.meta.url));',
         'const target = new URL("one-hop.json", import.meta.url);',
-        'fetch(target);',
+        "fetch(target);",
       ].join("\n"),
     );
     await writeFile(join(root, "url-consumption", "unconsumed.txt"), "data");
@@ -2170,9 +2043,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "svg-href", "diagram.png"), "image");
     await writeFile(join(root, "svg-href", "icons.svg"), "<svg></svg>");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "svg-href",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "svg-href");
 
     expect(manifestOf(site)?.assets).toContain("svg-href/diagram.png");
     expect(manifestOf(site)?.assets).toContain("svg-href/icons.svg");
@@ -2213,9 +2084,7 @@ describe("listSitePackages", () => {
       }),
     );
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "huge-meta",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "huge-meta");
 
     expect(site?.diagnostics).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "metadata-too-large" })]),
@@ -2229,7 +2098,9 @@ describe("listSitePackages", () => {
     if (process.platform === "darwin") {
       // macOS limits a whole path to 1024 bytes, so no file a site can read
       // lies past the bound there.
-      await expect(mkdir(nestedDir, { recursive: true })).rejects.toMatchObject({ code: "ENAMETOOLONG" });
+      await expect(mkdir(nestedDir, { recursive: true })).rejects.toMatchObject({
+        code: "ENAMETOOLONG",
+      });
       return;
     }
     await mkdir(nestedDir, { recursive: true });
@@ -2239,9 +2110,7 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(nestedDir, "x.js"), "window.ready = true;");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === "long-path",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "long-path");
 
     expect(site?.shareManifest).toMatchObject({
       ok: false,
@@ -2262,7 +2131,7 @@ describe("listSitePackages", () => {
         '<link rel="manifest" href="./site.webmanifest">',
         '<img src="./assets/hero.avif">',
         '<script src="./vendor/chart-lib/index.js"></script>',
-        '<script src=./app.js></script>',
+        "<script src=./app.js></script>",
       ].join(""),
     );
     await writeFile(
@@ -2280,16 +2149,11 @@ describe("listSitePackages", () => {
         start_url: "./start.html",
         icons: [{ src: "./assets/icon-192.png" }],
         screenshots: [{ src: "./assets/screenshot.png" }],
-        shortcuts: [
-          { url: "./shortcut.html", icons: [{ src: "./assets/shortcut.png" }] },
-        ],
+        shortcuts: [{ url: "./shortcut.html", icons: [{ src: "./assets/shortcut.png" }] }],
       }),
     );
     await writeFile(join(root, "report", "shortcut.html"), "<h1>Shortcut</h1>");
-    await writeFile(
-      join(root, "report", "start.html"),
-      '<script src="./start.js"></script>',
-    );
+    await writeFile(join(root, "report", "start.html"), '<script src="./start.js"></script>');
     await writeFile(join(root, "report", "start.js"), "window.started = true;");
     await writeFile(join(root, "report", "data", "customers.json"), "[]");
     await writeFile(join(root, "report", "vendor", "chart-lib", "index.js"), "library");
@@ -2369,18 +2233,16 @@ describe("listSitePackages", () => {
     await mkdir(join(root, "owned"), { recursive: true });
     await writeFile(join(root, "owned", "index.html"), "owned");
     await mkdir(join(root, "shared-with-me", "alex", "portal"), { recursive: true });
-    await writeFile(
-      join(root, "shared-with-me", "alex", "portal", "index.html"),
-      "shared",
-    );
+    await writeFile(join(root, "shared-with-me", "alex", "portal", "index.html"), "shared");
 
     const sites = await listSitePackages(root);
     expect(sites.find((site) => site.root === "owned")?.authority).toEqual({
       kind: "workspace",
     });
-    expect(
-      sites.find((site) => site.root === "shared-with-me/alex/portal")?.authority,
-    ).toEqual({ kind: "share", mountRoot: "shared-with-me/alex" });
+    expect(sites.find((site) => site.root === "shared-with-me/alex/portal")?.authority).toEqual({
+      kind: "share",
+      mountRoot: "shared-with-me/alex",
+    });
   });
 
   it("uses dohc.json title and surfaces invalid config diagnostics", async () => {
@@ -2483,9 +2345,7 @@ describe("listSitePackages", () => {
 
     const sites = await listSitePackages(root);
     for (const folder of ["dev-site", "default-site"]) {
-      expect(
-        sites.find((entry) => entry.root === folder)?.configuredScripts,
-      ).toEqual({
+      expect(sites.find((entry) => entry.root === folder)?.configuredScripts).toEqual({
         dev: `node /tmp/${folder}.js --host 127.0.0.1`,
       });
     }
@@ -2511,9 +2371,7 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "index.html"), "<h1>Configured</h1>");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === ".",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === ".");
 
     expect(site).toMatchObject({
       scripts: {
@@ -2540,17 +2398,11 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "index.html"), "<h1>Scripts</h1>");
 
-    const site = (await listSitePackages(root)).find(
-      (candidate) => candidate.root === ".",
-    );
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === ".");
 
     expect(site?.scripts).toEqual({ dev: "vite" });
-    expect(site?.diagnostics).toContainEqual(
-      expect.objectContaining({ code: "script-too-large" }),
-    );
-    expect(
-      site?.diagnostics.filter((d) => d.code === "script-too-large"),
-    ).toHaveLength(2);
+    expect(site?.diagnostics).toContainEqual(expect.objectContaining({ code: "script-too-large" }));
+    expect(site?.diagnostics.filter((d) => d.code === "script-too-large")).toHaveLength(2);
   });
 
   it("drops configured preview commands that explicitly bind outside loopback", async () => {
@@ -2636,8 +2488,6 @@ describe("listSitePackages", () => {
     expect(site?.root).toBe("clients/acme/site");
   });
 
-  // ---- round-17 review pins ----
-
   it("does not fire a <source srcset> outside a <picture> parent", async () => {
     await mkdir(join(root, "source-srcset-guard"), { recursive: true });
     await writeFile(
@@ -2687,10 +2537,7 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "import-map-scope", "from-top.js"), "export {};");
     await writeFile(join(root, "import-map-scope", "from-scope.js"), "export {};");
-    await writeFile(
-      join(root, "import-map-scope", "feature", "mod.js"),
-      'import "lib";',
-    );
+    await writeFile(join(root, "import-map-scope", "feature", "mod.js"), 'import "lib";');
 
     const site = (await listSitePackages(root)).find(
       (candidate) => candidate.root === "import-map-scope",
@@ -2725,7 +2572,10 @@ describe("listSitePackages", () => {
         '<script type="module">import "./shared/loader.js";</script>',
       ].join(""),
     );
-    await writeFile(join(root, "import-map-scope-fingerprint", "shared", "loader.js"), 'import "lib";');
+    await writeFile(
+      join(root, "import-map-scope-fingerprint", "shared", "loader.js"),
+      'import "lib";',
+    );
     await writeFile(join(root, "import-map-scope-fingerprint", "from-a.js"), "export {};");
     await writeFile(join(root, "import-map-scope-fingerprint", "from-b.js"), "export {};");
 
@@ -2882,8 +2732,6 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("css-applied-stylesheet/applied.png");
   });
 
-  // ---- round-18 review pins ----
-
   it("does not treat an image-set() type() mime string as a URL candidate", async () => {
     await mkdir(join(root, "image-set-type-hint"), { recursive: true });
     await writeFile(
@@ -2892,7 +2740,10 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "image-set-type-hint", "hero.avif"), "public");
     await mkdir(join(root, "image-set-type-hint", "image"), { recursive: true });
-    await writeFile(join(root, "image-set-type-hint", "image", "avif"), "private, coincidentally shaped like the type string");
+    await writeFile(
+      join(root, "image-set-type-hint", "image", "avif"),
+      "private, coincidentally shaped like the type string",
+    );
 
     const site = (await listSitePackages(root)).find(
       (candidate) => candidate.root === "image-set-type-hint",
@@ -2945,10 +2796,7 @@ describe("listSitePackages", () => {
 
   it("leaves an SVG loaded only as an image (<img src>) unexpanded", async () => {
     await mkdir(join(root, "svg-img-only"), { recursive: true });
-    await writeFile(
-      join(root, "svg-img-only", "index.html"),
-      '<img src="icon.svg">',
-    );
+    await writeFile(join(root, "svg-img-only", "index.html"), '<img src="icon.svg">');
     await writeFile(
       join(root, "svg-img-only", "icon.svg"),
       '<svg xmlns="http://www.w3.org/2000/svg"><image href="hidden.png"/></svg>',
@@ -3012,8 +2860,6 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("no-csp/a.js");
   });
 
-  // ---- round-19 review pins ----
-
   it("keeps only the most recently opened XHR target when a receiver re-opens before it sends", async () => {
     await mkdir(join(root, "xhr-reopen"), { recursive: true });
     await writeFile(
@@ -3030,7 +2876,9 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "xhr-reopen", "private.json"), "secret");
     await writeFile(join(root, "xhr-reopen", "public.json"), "public");
 
-    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "xhr-reopen");
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "xhr-reopen",
+    );
 
     expect(manifestOf(site)?.assets).toContain("xhr-reopen/public.json");
     expect(manifestOf(site)?.assets).not.toContain("xhr-reopen/private.json");
@@ -3051,7 +2899,9 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "xhr-shadowed", "private.json"), "secret");
 
-    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "xhr-shadowed");
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "xhr-shadowed",
+    );
 
     expect(manifestOf(site)?.assets).not.toContain("xhr-shadowed/private.json");
   });
@@ -3061,13 +2911,15 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "css-font-face", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="img-src \'none\'; font-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"img-src 'none'; font-src 'self'\">",
         '<style>@font-face { font-family: "Body"; src: url("font.woff2"); }</style>',
       ].join(""),
     );
     await writeFile(join(root, "css-font-face", "font.woff2"), "font");
 
-    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "css-font-face");
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "css-font-face",
+    );
 
     expect(manifestOf(site)?.assets).toContain("css-font-face/font.woff2");
   });
@@ -3088,7 +2940,9 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "image-set-type-in-candidate",
     );
 
-    expect(manifestOf(site)?.assets).toContain("image-set-type-in-candidate/icons/type('dark').png");
+    expect(manifestOf(site)?.assets).toContain(
+      "image-set-type-in-candidate/icons/type('dark').png",
+    );
   });
 
   it("does not parse fetch-only HTML as an active document", async () => {
@@ -3097,13 +2951,12 @@ describe("listSitePackages", () => {
       join(root, "fetch-only-html", "index.html"),
       '<script>fetch("template.html");</script>',
     );
-    await writeFile(
-      join(root, "fetch-only-html", "template.html"),
-      '<img src="private.png">',
-    );
+    await writeFile(join(root, "fetch-only-html", "template.html"), '<img src="private.png">');
     await writeFile(join(root, "fetch-only-html", "private.png"), "secret");
 
-    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "fetch-only-html");
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "fetch-only-html",
+    );
 
     expect(manifestOf(site)?.assets).toContain("fetch-only-html/template.html");
     expect(manifestOf(site)?.assets).not.toContain("fetch-only-html/private.png");
@@ -3111,17 +2964,13 @@ describe("listSitePackages", () => {
 
   it("still expands an HTML page reached via <a href> navigation", async () => {
     await mkdir(join(root, "anchor-navigation"), { recursive: true });
-    await writeFile(
-      join(root, "anchor-navigation", "index.html"),
-      '<a href="page.html">Go</a>',
-    );
-    await writeFile(
-      join(root, "anchor-navigation", "page.html"),
-      '<img src="asset.png">',
-    );
+    await writeFile(join(root, "anchor-navigation", "index.html"), '<a href="page.html">Go</a>');
+    await writeFile(join(root, "anchor-navigation", "page.html"), '<img src="asset.png">');
     await writeFile(join(root, "anchor-navigation", "asset.png"), "public");
 
-    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "anchor-navigation");
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "anchor-navigation",
+    );
 
     expect(manifestOf(site)?.assets).toContain("anchor-navigation/asset.png");
   });
@@ -3161,10 +3010,7 @@ describe("listSitePackages", () => {
 
   it("does not approve a detached script's src before it is inserted into the document", async () => {
     await mkdir(join(root, "detached-script"), { recursive: true });
-    await writeFile(
-      join(root, "detached-script", "index.html"),
-      '<script src="app.js"></script>',
-    );
+    await writeFile(join(root, "detached-script", "index.html"), '<script src="app.js"></script>');
     await writeFile(
       join(root, "detached-script", "app.js"),
       [
@@ -3185,10 +3031,7 @@ describe("listSitePackages", () => {
 
   it("approves a script's src once it is proven inserted into the document", async () => {
     await mkdir(join(root, "inserted-script"), { recursive: true });
-    await writeFile(
-      join(root, "inserted-script", "index.html"),
-      '<script src="app.js"></script>',
-    );
+    await writeFile(join(root, "inserted-script", "index.html"), '<script src="app.js"></script>');
     await writeFile(
       join(root, "inserted-script", "app.js"),
       [
@@ -3237,7 +3080,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-external-stylesheet", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="img-src \'none\'; style-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"img-src 'none'; style-src 'self'\">",
         '<link rel="stylesheet" href="style.css">',
       ].join(""),
     );
@@ -3278,14 +3121,12 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("csp-document-order/late.js");
   });
 
-  // ---- round-20 review pins ----
-
   it("does not scan an inline script's own dependencies when script-src blocks it entirely", async () => {
     await mkdir(join(root, "csp-inline-script-blocked"), { recursive: true });
     await writeFile(
       join(root, "csp-inline-script-blocked", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'; connect-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'; connect-src 'self'\">",
         '<script>fetch("private.json");</script>',
       ].join(""),
     );
@@ -3303,7 +3144,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-inline-style-blocked", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="style-src \'none\'; img-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"style-src 'none'; img-src 'self'\">",
         '<style>div { background: url("private.png"); }</style>',
       ].join(""),
     );
@@ -3385,14 +3226,11 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-worker-reset", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="connect-src \'none\'; worker-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"connect-src 'none'; worker-src 'self'\">",
         '<script>new Worker("worker.js");</script>',
       ].join(""),
     );
-    await writeFile(
-      join(root, "csp-worker-reset", "worker.js"),
-      'fetch("data.json");',
-    );
+    await writeFile(join(root, "csp-worker-reset", "worker.js"), 'fetch("data.json");');
     await writeFile(join(root, "csp-worker-reset", "data.json"), "public");
 
     const site = (await listSitePackages(root)).find(
@@ -3480,9 +3318,6 @@ describe("listSitePackages", () => {
   it("shares the source entry for a static site with a leftover build-output directory, when previewed as static", async () => {
     await mkdir(join(root, "stale-dist", "dist"), { recursive: true });
     await writeFile(join(root, "stale-dist", "index.html"), "<h1>Source</h1>");
-    // A leftover build from an earlier session — buildOutputs still
-    // detects it, but the site is genuinely static and IS being
-    // previewed as static right now.
     await writeFile(join(root, "stale-dist", "dist", "index.html"), "<h1>Stale build</h1>");
 
     const noOverride = await getSitePackage(root, "stale-dist");
@@ -3520,8 +3355,6 @@ describe("listSitePackages", () => {
     }
   });
 
-  // ---- round-21 review pins ----
-
   it("declines an XHR send when its receiver opens two distinct targets and walk order can't disambiguate it", async () => {
     await mkdir(join(root, "xhr-ambiguous-open"), { recursive: true });
     await writeFile(
@@ -3556,7 +3389,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-inline-script-not-unsafe-inline", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="script-src \'self\'; connect-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'self'; connect-src 'self'\">",
         '<script>fetch("private.json");</script>',
       ].join(""),
     );
@@ -3579,7 +3412,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-nonce-mismatch", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="script-src \'nonce-approved\'; connect-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'nonce-approved'; connect-src 'self'\">",
         '<script>fetch("private.json");</script>',
       ].join(""),
     );
@@ -3601,7 +3434,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-nonce-match", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="script-src \'nonce-approved\'; connect-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'nonce-approved'; connect-src 'self'\">",
         '<script nonce="approved">fetch("public.json");</script>',
       ].join(""),
     );
@@ -3685,8 +3518,8 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-unsafe-inline-ignored", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\' \'nonce-approved\'; connect-src \'self\'">',
-        '<button onclick=\'fetch("private.json")\'>go</button>',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline' 'nonce-approved'; connect-src 'self'\">",
+        "<button onclick='fetch(\"private.json\")'>go</button>",
       ].join(""),
     );
     await writeFile(join(root, "csp-unsafe-inline-ignored", "private.json"), "secret");
@@ -3699,9 +3532,7 @@ describe("listSitePackages", () => {
     // hash-source is also present — even for an on* handler, which neither
     // a nonce (attributes have none) nor this list's hash-less nonce
     // source can ever cover.
-    expect(manifestOf(site)?.assets).not.toContain(
-      "csp-unsafe-inline-ignored/private.json",
-    );
+    expect(manifestOf(site)?.assets).not.toContain("csp-unsafe-inline-ignored/private.json");
   });
 
   it("keeps a reference an inline script already requested before a later meta CSP blocks its class", async () => {
@@ -3748,14 +3579,11 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "css-import-unquoted", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="img-src \'none\'; style-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"img-src 'none'; style-src 'self'\">",
         '<link rel="stylesheet" href="style.css">',
       ].join(""),
     );
-    await writeFile(
-      join(root, "css-import-unquoted", "style.css"),
-      "@import url(theme.css);",
-    );
+    await writeFile(join(root, "css-import-unquoted", "style.css"), "@import url(theme.css);");
     await writeFile(join(root, "css-import-unquoted", "theme.css"), "body {}");
 
     const site = (await listSitePackages(root)).find(
@@ -3780,7 +3608,7 @@ describe("listSitePackages", () => {
         // document's FINAL policy (style-src 'none', img-src 'self') —
         // exactly the ordering a link-then-restrict document produces.
         '<link rel="stylesheet" href="style.css">',
-        '<meta http-equiv="Content-Security-Policy" content="img-src \'self\'; style-src \'none\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"img-src 'self'; style-src 'none'\">",
       ].join(""),
     );
     await writeFile(
@@ -3800,9 +3628,7 @@ describe("listSitePackages", () => {
     // duplicate would silently survive filtering even though a real
     // browser's style-src 'none' blocks the whole @import.
     expect(manifestOf(site)?.assets).toContain("css-import-not-double-matched/style.css");
-    expect(manifestOf(site)?.assets).not.toContain(
-      "css-import-not-double-matched/theme.css",
-    );
+    expect(manifestOf(site)?.assets).not.toContain("css-import-not-double-matched/theme.css");
   });
 
   it("locks a specifier to its first resolution across the document, so a later import map cannot remap it", async () => {
@@ -3838,7 +3664,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-nonce-invalid", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="script-src \'nonce-!!!\'; connect-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'nonce-!!!'; connect-src 'self'\">",
         '<script nonce="!!!">fetch("private.json");</script>',
       ].join(""),
     );
@@ -3877,7 +3703,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-attr-directive", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'; script-src-attr \'none\'; connect-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline'; script-src-attr 'none'; connect-src 'self'\">",
         "<button onclick='fetch(\"private.json\")'>go</button>",
       ].join(""),
     );
@@ -3898,7 +3724,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "csp-elem-fallback", "index.html"),
       [
-        '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'; connect-src \'self\'">',
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline'; connect-src 'self'\">",
         '<script>fetch("public.json");</script>',
       ].join(""),
     );
@@ -3926,7 +3752,6 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "srcdoc-own-csp",
     );
 
-    // app.js itself is a real, permitted reference from the srcdoc...
     expect(manifestOf(site)?.assets).toContain("srcdoc-own-csp/app.js");
     // ...but its own fetch() is filtered by the srcdoc's connect-src
     // 'none', not the (unrestricted) outer document's policy.
@@ -3941,10 +3766,9 @@ describe("listSitePackages", () => {
     );
     await writeFile(
       join(root, "setattribute-case", "app.js"),
-      [
-        'const img = document.createElement("img");',
-        'img.setAttribute("SRC", "asset.png");',
-      ].join("\n"),
+      ['const img = document.createElement("img");', 'img.setAttribute("SRC", "asset.png");'].join(
+        "\n",
+      ),
     );
     await writeFile(join(root, "setattribute-case", "asset.png"), "image");
 
@@ -4054,7 +3878,7 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("img-src-without-insertion/public.png");
   });
 
-  it("declines a fresh, unbound document.createElement(\"script\") chain's src assignment as unprovable", async () => {
+  it('declines a fresh, unbound document.createElement("script") chain\'s src assignment as unprovable', async () => {
     await mkdir(join(root, "unbound-script-chain"), { recursive: true });
     await writeFile(
       join(root, "unbound-script-chain", "index.html"),
@@ -4086,10 +3910,7 @@ describe("listSitePackages", () => {
     await mkdir(join(root, "base-trim-external", " ", "evil.example"), { recursive: true });
     await writeFile(
       join(root, "base-trim-external", "index.html"),
-      [
-        '<base href=" //evil.example/">',
-        '<script src="app.js"></script>',
-      ].join(""),
+      ['<base href=" //evil.example/">', '<script src="app.js"></script>'].join(""),
     );
     await writeFile(
       join(root, "base-trim-external", " ", "evil.example", "app.js"),
@@ -4102,9 +3923,7 @@ describe("listSitePackages", () => {
 
     // A correctly trimmed, correctly external base resolves NO relative
     // reference locally at all — the bogus path is never even considered.
-    expect(manifestOf(site)?.assets).not.toContain(
-      "base-trim-external/ /evil.example/app.js",
-    );
+    expect(manifestOf(site)?.assets).not.toContain("base-trim-external/ /evil.example/app.js");
   });
 });
 
@@ -4130,8 +3949,6 @@ describe("requireExactSiteRoot", () => {
   });
 
   it("uses the requested root in the missing-site error", () => {
-    expect(() => requireExactSiteRoot(null, "gone")).toThrow(
-      "Not a detected app: gone",
-    );
+    expect(() => requireExactSiteRoot(null, "gone")).toThrow("Not a detected app: gone");
   });
 });

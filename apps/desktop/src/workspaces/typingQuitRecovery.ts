@@ -4,12 +4,12 @@ export function createTypingQuitRecovery(dependencies: {
   flush: () => Promise<void>;
   confirmLoss: () => Promise<boolean>;
   quit: () => void;
-  beforeQuit: (event: {preventDefault(): void}) => void;
+  beforeQuit: (event: { preventDefault(): void }) => void;
 }) {
   let approved = false;
   let pending = false;
   return {
-    beforeQuit(event: {preventDefault(): void}): void {
+    beforeQuit(event: { preventDefault(): void }): void {
       if (approved) {
         approved = false;
         dependencies.beforeQuit(event);
@@ -22,10 +22,14 @@ export function createTypingQuitRecovery(dependencies: {
       event.preventDefault();
       if (pending) return;
       pending = true;
-      void dependencies.flush()
-        .then(() => true, () => dependencies.confirmLoss())
+      void dependencies
+        .flush()
+        .then(
+          () => true,
+          () => dependencies.confirmLoss(),
+        )
         .catch(() => false)
-        .then(continueQuit => {
+        .then((continueQuit) => {
           // The downstream quit guard can request another quit synchronously.
           pending = false;
           if (continueQuit) {

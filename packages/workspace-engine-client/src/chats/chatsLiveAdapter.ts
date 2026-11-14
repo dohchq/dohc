@@ -1,10 +1,13 @@
-import type { ChatLinksEngineInput, ChatLinksEnginePage } from "@dohc/workspace-contracts/chat-links";
-import type { ChatFileMentionsPage, ChatFileMentionsEngineInput } from "@dohc/workspace-contracts/chat-file-mentions";
+import type {
+  ChatLinksEngineInput,
+  ChatLinksEnginePage,
+} from "@dohc/workspace-contracts/chat-links";
+import type {
+  ChatFileMentionsPage,
+  ChatFileMentionsEngineInput,
+} from "@dohc/workspace-contracts/chat-file-mentions";
 import { randomUUID } from "node:crypto";
-import {
-  WorkspaceDaemonRequester,
-  type MinimalDaemonClient,
-} from "../live/daemonLiveAdapter";
+import { WorkspaceDaemonRequester, type MinimalDaemonClient } from "../live/daemonLiveAdapter";
 import type { WorkspaceHandle } from "../protocol";
 import type {
   LinkedChatStore,
@@ -51,10 +54,7 @@ import {
   type ChatThreadReadState,
   type ChatThreadWireRecord,
 } from "./chatsWireContract";
-import {
-  WORKSPACE_METHOD,
-  decodeWorkspaceResult,
-} from "../workspace/workspaceWireContract";
+import { WORKSPACE_METHOD, decodeWorkspaceResult } from "../workspace/workspaceWireContract";
 
 export class ChatsAdapterCapabilityError extends Error {
   constructor(message: string) {
@@ -65,9 +65,7 @@ export class ChatsAdapterCapabilityError extends Error {
 
 export interface ChatsLiveAdapterOptions {
   workspaceId: string;
-  createId?: (
-    kind: "channel" | "message" | "run" | "thread",
-  ) => string;
+  createId?: (kind: "channel" | "message" | "run" | "thread") => string;
 }
 
 export class ChatsLiveAdapter {
@@ -82,15 +80,12 @@ export class ChatsLiveAdapter {
     options: ChatsLiveAdapterOptions,
   ) {
     if (typeof options?.workspaceId !== "string") {
-      throw new ChatsAdapterCapabilityError(
-        "ChatsLiveAdapter requires a workspaceId binding.",
-      );
+      throw new ChatsAdapterCapabilityError("ChatsLiveAdapter requires a workspaceId binding.");
     }
     this.requester = new WorkspaceDaemonRequester(client);
     this.workspace = workspace;
     this.workspaceId = options.workspaceId;
-    this.createId =
-      options.createId ?? ((kind) => `${kind}-${randomUUID()}`);
+    this.createId = options.createId ?? ((kind) => `${kind}-${randomUUID()}`);
   }
 
   async request<M extends ChatsMethod>(
@@ -139,9 +134,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async ensureGeneralChannel(input: {
-    workspaceId: string;
-  }): Promise<ChatChannel> {
+  async ensureGeneralChannel(input: { workspaceId: string }): Promise<ChatChannel> {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.channelEnsureGeneral, {
       channelId: this.createId("channel"),
@@ -161,9 +154,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listChannels(input: {
-    workspaceId: string;
-  }): Promise<ChatChannelSummary[]> {
+  async listChannels(input: { workspaceId: string }): Promise<ChatChannelSummary[]> {
     this.assertWorkspace(input.workspaceId);
     return this.collectCursorPages(
       async (cursor) =>
@@ -227,10 +218,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async getThreadRevision(input: {
-    workspaceId: string;
-    threadId: string;
-  }): Promise<number> {
+  async getThreadRevision(input: { workspaceId: string; threadId: string }): Promise<number> {
     this.assertWorkspace(input.workspaceId);
     return (
       await this.request(CHATS_METHOD.threadRevision, {
@@ -281,21 +269,20 @@ export class ChatsLiveAdapter {
         ...(input.author.kind !== "human" && input.authorOwnerDisplayName !== undefined
           ? { authorOwnerDisplayName: input.authorOwnerDisplayName }
           : {}),
-        ...(input.authorUserId !== undefined
-          ? { authorUserId: input.authorUserId }
-          : {}),
+        ...(input.authorUserId !== undefined ? { authorUserId: input.authorUserId } : {}),
         ...(input.authorActorKey !== null ? { authorActorKey: input.authorActorKey } : {}),
         ...(input.origin !== undefined ? { origin: input.origin } : {}),
         body: input.body,
-        ...(input.needsDecision !== undefined
-          ? { needsDecision: input.needsDecision }
-          : {}),
+        ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
         ...(input.options !== undefined ? { options: input.options } : {}),
-        ...(input.attachments !== undefined
-          ? { attachments: input.attachments }
-          : {}),
+        ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
         ...(input.automation !== undefined
-          ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
+          ? {
+              automation: {
+                automationId: input.automation.automationId,
+                chainDepth: input.automation.chainDepth,
+              },
+            }
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
         ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
@@ -341,9 +328,7 @@ export class ChatsLiveAdapter {
     return this.request(CHATS_METHOD.readStateMarkThreadRead, {
       threadId: input.threadId,
       upToSequence: input.upToSequence,
-      ...(input.expectedRevision !== undefined
-        ? { expectedRevision: input.expectedRevision }
-        : {}),
+      ...(input.expectedRevision !== undefined ? { expectedRevision: input.expectedRevision } : {}),
       ...(input.replicationOwnerUserId !== undefined
         ? { replicationOwnerUserId: input.replicationOwnerUserId }
         : {}),
@@ -458,24 +443,21 @@ export class ChatsLiveAdapter {
         ...(input.author.kind !== "human" && input.authorOwnerDisplayName !== undefined
           ? { authorOwnerDisplayName: input.authorOwnerDisplayName }
           : {}),
-        ...(input.authorUserId !== undefined
-          ? { authorUserId: input.authorUserId }
-          : {}),
-        ...(input.parentMessageId !== undefined
-          ? { parentMessageId: input.parentMessageId }
-          : {}),
+        ...(input.authorUserId !== undefined ? { authorUserId: input.authorUserId } : {}),
+        ...(input.parentMessageId !== undefined ? { parentMessageId: input.parentMessageId } : {}),
         ...(input.authorActorKey !== null ? { authorActorKey: input.authorActorKey } : {}),
         ...(input.origin !== undefined ? { origin: input.origin } : {}),
         body: input.body,
-        ...(input.needsDecision !== undefined
-          ? { needsDecision: input.needsDecision }
-          : {}),
+        ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
         ...(input.options !== undefined ? { options: input.options } : {}),
-        ...(input.attachments !== undefined
-          ? { attachments: input.attachments }
-          : {}),
+        ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
         ...(input.automation !== undefined
-          ? { automation: { automationId: input.automation.automationId, chainDepth: input.automation.chainDepth } }
+          ? {
+              automation: {
+                automationId: input.automation.automationId,
+                chainDepth: input.automation.chainDepth,
+              },
+            }
           : {}),
         ...(input.authorAgentId !== undefined ? { authorAgentId: input.authorAgentId } : {}),
         ...(input.authorReported !== undefined ? { authorReported: input.authorReported } : {}),
@@ -489,10 +471,7 @@ export class ChatsLiveAdapter {
     );
   }
 
-  async listMessages(input: {
-    workspaceId: string;
-    threadId: string;
-  }): Promise<ChatMessage[]> {
+  async listMessages(input: { workspaceId: string; threadId: string }): Promise<ChatMessage[]> {
     this.assertWorkspace(input.workspaceId);
     const rows: ChatMessage[] = [];
     let afterMessageOrder: number | undefined;
@@ -519,7 +498,9 @@ export class ChatsLiveAdapter {
     return this.request(CHATS_METHOD.messagesList, {
       threadId: input.threadId,
       limit: input.limit,
-      ...(input.afterMessageOrder !== undefined ? { afterMessageOrder: input.afterMessageOrder } : {}),
+      ...(input.afterMessageOrder !== undefined
+        ? { afterMessageOrder: input.afterMessageOrder }
+        : {}),
     });
   }
 
@@ -568,18 +549,13 @@ export class ChatsLiveAdapter {
         pageLimit: 500,
         ...(cursor !== undefined ? { cursor } : {}),
       });
-      rows.push(
-        ...page.decisions.map((decision) => ({ ...decision, workspaceId })),
-      );
+      rows.push(...page.decisions.map((decision) => ({ ...decision, workspaceId })));
       cursor = page.nextCursor ?? undefined;
     } while (cursor !== undefined);
     return rows;
   }
 
-  async listThreadAttachments(
-    workspaceId: string,
-    threadId: string,
-  ): Promise<ChatAttachment[]> {
+  async listThreadAttachments(workspaceId: string, threadId: string): Promise<ChatAttachment[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatAttachment[] = [];
     let cursor: string | undefined;
@@ -619,32 +595,33 @@ export class ChatsLiveAdapter {
       reader: input.reader,
       threadId: input.threadId,
       upTo: input.upTo,
-      ...(input.expectedRevision !== undefined
-        ? { expectedRevision: input.expectedRevision }
-        : {}),
+      ...(input.expectedRevision !== undefined ? { expectedRevision: input.expectedRevision } : {}),
     });
   }
 
-  async listAgentUnreadThreads(workspaceId: string, reader: ChatAgentReader): ReturnType<LinkedChatStore["listAgentUnreadThreads"]> {
+  async listAgentUnreadThreads(
+    workspaceId: string,
+    reader: ChatAgentReader,
+  ): ReturnType<LinkedChatStore["listAgentUnreadThreads"]> {
     this.assertWorkspace(workspaceId);
     const rows: Awaited<ReturnType<LinkedChatStore["listAgentUnreadThreads"]>> = [];
     let cursor: string | undefined;
     do {
-      const page = await this.request(
-        CHATS_METHOD.agentReadListUnreadThreads,
-        {
-          reader,
-          pageLimit: 500,
-          ...(cursor !== undefined ? { cursor } : {}),
-        },
-      );
+      const page = await this.request(CHATS_METHOD.agentReadListUnreadThreads, {
+        reader,
+        pageLimit: 500,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
       rows.push(...page.threads);
       cursor = page.nextCursor ?? undefined;
     } while (cursor !== undefined);
     return rows;
   }
 
-  async listAgentUnreadRequests(workspaceId: string, reader: ChatAgentReader): Promise<ChatAgentRequest[]> {
+  async listAgentUnreadRequests(
+    workspaceId: string,
+    reader: ChatAgentReader,
+  ): Promise<ChatAgentRequest[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatAgentRequest[] = [];
     let cursor: string | undefined;
@@ -678,10 +655,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listMentionsForHandle(
-    workspaceId: string,
-    handle: string,
-  ): Promise<ChatMention[]> {
+  async listMentionsForHandle(workspaceId: string, handle: string): Promise<ChatMention[]> {
     this.assertWorkspace(workspaceId);
     const rows: ChatMention[] = [];
     let cursor: string | undefined;
@@ -728,10 +702,7 @@ export class ChatsLiveAdapter {
     );
   }
 
-  async listReactions(input: {
-    workspaceId: string;
-    threadId: string;
-  }): Promise<ChatReaction[]> {
+  async listReactions(input: { workspaceId: string; threadId: string }): Promise<ChatReaction[]> {
     this.assertWorkspace(input.workspaceId);
     const rows: ChatReaction[] = [];
     let cursor: string | undefined;
@@ -938,15 +909,11 @@ export class ChatsLiveAdapter {
       ownerUserId: input.ownerUserId,
       bookmarkId: input.bookmarkId,
       generation: input.generation,
-      ...(input.projectedAtMs !== undefined
-        ? { projectedAtMs: input.projectedAtMs }
-        : {}),
+      ...(input.projectedAtMs !== undefined ? { projectedAtMs: input.projectedAtMs } : {}),
       ...(input.projectionObjectId !== undefined
         ? { projectionObjectId: input.projectionObjectId }
         : {}),
-      ...(input.projectionPath !== undefined
-        ? { projectionPath: input.projectionPath }
-        : {}),
+      ...(input.projectionPath !== undefined ? { projectionPath: input.projectionPath } : {}),
     });
   }
 
@@ -992,9 +959,7 @@ export class ChatsLiveAdapter {
       ownerUserId: input.ownerUserId,
       bookmarkId: input.bookmarkId,
       generation: input.generation,
-      ...(input.failureReason !== undefined
-        ? { failureReason: input.failureReason }
-        : {}),
+      ...(input.failureReason !== undefined ? { failureReason: input.failureReason } : {}),
     });
   }
 
@@ -1006,9 +971,7 @@ export class ChatsLiveAdapter {
     this.assertWorkspace(input.workspaceId);
     return this.request(CHATS_METHOD.threadGetProjection, {
       threadId: input.threadId,
-      ...(input.linkedFileAccess !== undefined
-        ? { linkedFileAccess: input.linkedFileAccess }
-        : {}),
+      ...(input.linkedFileAccess !== undefined ? { linkedFileAccess: input.linkedFileAccess } : {}),
     });
   }
 
@@ -1067,10 +1030,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async completeRun(input: {
-    runId: string;
-    exitCode: number;
-  }): Promise<ChatRun> {
+  async completeRun(input: { runId: string; exitCode: number }): Promise<ChatRun> {
     await this.request(CHATS_METHOD.dispatchComplete, input);
     const run = await this.getRunRecord(input.runId);
     if (run === null) {
@@ -1081,11 +1041,7 @@ export class ChatsLiveAdapter {
     return run;
   }
 
-  async failRun(input: {
-    runId: string;
-    exitCode?: number;
-    reason: string;
-  }): Promise<ChatRun> {
+  async failRun(input: { runId: string; exitCode?: number; reason: string }): Promise<ChatRun> {
     await this.request(CHATS_METHOD.dispatchFail, input);
     const run = await this.getRunRecord(input.runId);
     if (run === null) {
@@ -1148,10 +1104,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async listRunMessages(
-    workspaceId: string,
-    runId: string,
-  ): Promise<string[]> {
+  async listRunMessages(workspaceId: string, runId: string): Promise<string[]> {
     this.assertWorkspace(workspaceId);
     return this.collectCursorPages(
       (cursor) =>
@@ -1164,10 +1117,7 @@ export class ChatsLiveAdapter {
     );
   }
 
-  async runIdForMessage(
-    workspaceId: string,
-    messageId: string,
-  ): Promise<string | null> {
+  async runIdForMessage(workspaceId: string, messageId: string): Promise<string | null> {
     this.assertWorkspace(workspaceId);
     return this.request(CHATS_METHOD.dispatchRunIdForMessage, { messageId });
   }
@@ -1193,7 +1143,11 @@ export class ChatsLiveAdapter {
     return result;
   }
 
-  async latestRunForThread(workspaceId: string, threadId: string, agentId?: string): Promise<ChatRun | null> {
+  async latestRunForThread(
+    workspaceId: string,
+    threadId: string,
+    agentId?: string,
+  ): Promise<ChatRun | null> {
     this.assertWorkspace(workspaceId);
     return this.request(CHATS_METHOD.dispatchLatestRunForThread, {
       threadId,
@@ -1219,10 +1173,7 @@ export class ChatsLiveAdapter {
     });
   }
 
-  async threadDispatchPaused(
-    workspaceId: string,
-    threadId: string,
-  ): Promise<boolean> {
+  async threadDispatchPaused(workspaceId: string, threadId: string): Promise<boolean> {
     this.assertWorkspace(workspaceId);
     return this.request(CHATS_METHOD.dispatchIsThreadPaused, { threadId });
   }

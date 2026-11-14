@@ -13,7 +13,6 @@ describe("a chat's labels", () => {
     expect(chatTitle("agent", "")).toBe("Agent");
   });
 
-  // Only dohc's own fact about a connected agent goes in the header, never a reported claim.
   it("says Connected agent under a connected agent's chat, and counts members only where there are several", () => {
     expect(chatSubtitle({ kind: "agent", connected: true }, 6)).toBe("Connected agent");
     expect(chatSubtitle({ kind: "agent" }, 6)).toBeUndefined();

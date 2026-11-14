@@ -4,7 +4,6 @@ import { windowFocused } from "../windowFocus";
 // can already see is skipped.
 const shown = new Map<string, Set<Element>>();
 
-// Marks an element as showing a chat until the returned function runs.
 export function showChat(threadId: string, element: Element): () => void {
   const elements = shown.get(threadId) ?? new Set<Element>();
   elements.add(element);
@@ -20,5 +19,7 @@ export function showChat(threadId: string, element: Element): () => void {
 // another window isn't looking at this one.
 export function chatOnScreen(threadId: string): boolean {
   if (document.visibilityState !== "visible" || !windowFocused()) return false;
-  return [...(shown.get(threadId) ?? [])].some((element) => element.isConnected && (element.checkVisibility?.() ?? true));
+  return [...(shown.get(threadId) ?? [])].some(
+    (element) => element.isConnected && (element.checkVisibility?.() ?? true),
+  );
 }

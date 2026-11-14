@@ -13,15 +13,18 @@ import { useRequestSequence } from "../useRequestSequence";
 export const SENT_NOTICE_TOAST_MS = 2 * 60_000;
 
 export const sentNoticeRef = ({ store, noticeId, refusalCoordinates }: NoticeRef): NoticeRef => ({
-  store, noticeId, ...(refusalCoordinates === undefined ? {} : { refusalCoordinates }),
+  store,
+  noticeId,
+  ...(refusalCoordinates === undefined ? {} : { refusalCoordinates }),
 });
 
 // A notice as the list of one account showed it. Another account's notice
 // with the same id has another key, so a mark or a toast never carries over.
-const noticeKey = (account: string | null, { store, noticeId, refusalCoordinates }: NoticeRef): string =>
-  JSON.stringify([account, store, noticeId, refusalCoordinates]);
+const noticeKey = (
+  account: string | null,
+  { store, noticeId, refusalCoordinates }: NoticeRef,
+): string => JSON.stringify([account, store, noticeId, refusalCoordinates]);
 
-// One list from main: the signed-in account it shows, and its rows.
 interface Listed {
   account: string | null;
   notices: readonly NoticeRow[];
@@ -57,7 +60,6 @@ function without(held: HeldMarks, keys: readonly string[]): HeldMarks {
 }
 
 export interface SentNotices {
-  // The signed-in account the notices belong to.
   account: string | null;
   // Newest first, as main lists them.
   notices: readonly NoticeRow[];
@@ -67,8 +69,6 @@ export interface SentNotices {
   // answers.
   listFailure: { error: unknown } | null;
   relist: () => void;
-  // The newest notice that arrived while this window was open, until its
-  // toast closes or it is read.
   toast: NoticeRow | null;
   hideToast: () => void;
   // Both mark notices from the list on screen, for the account it shows.
@@ -107,12 +107,15 @@ export function useSentNotices(enabled: boolean): SentNotices {
     if (!requests.isCurrent(request)) return;
     const nowMs = Date.now();
     const seen = known.current?.account === list.account ? known.current.keys : null;
-    const arrived = seen === null
-      ? undefined
-      : list.notices.find((notice) =>
-          !seen.has(noticeKey(list.account, notice)) &&
-          notice.readAtMs === null &&
-          nowMs - notice.createdAtMs < SENT_NOTICE_TOAST_MS);
+    const arrived =
+      seen === null
+        ? undefined
+        : list.notices.find(
+            (notice) =>
+              !seen.has(noticeKey(list.account, notice)) &&
+              notice.readAtMs === null &&
+              nowMs - notice.createdAtMs < SENT_NOTICE_TOAST_MS,
+          );
     const keys = seen ?? new Set<string>();
     for (const notice of list.notices) keys.add(noticeKey(list.account, notice));
     known.current = { account: list.account, keys };
@@ -199,17 +202,19 @@ export function useSentNotices(enabled: boolean): SentNotices {
             const key = noticeKey(listed.account, notice);
             if (held.dismissed.has(key)) return [];
             const readAtMs = held.read.get(key);
-            return readAtMs !== undefined && notice.readAtMs === null ? [{ ...notice, readAtMs }] : [notice];
+            return readAtMs !== undefined && notice.readAtMs === null
+              ? [{ ...notice, readAtMs }]
+              : [notice];
           }),
     [listed, held],
   );
-  // Read on another computer, dismissed, or listed for another account ends
-  // the toast too.
   const toast = useMemo(
     () =>
       toastKey === null
         ? null
-        : notices.find((notice) => notice.readAtMs === null && noticeKey(listed.account, notice) === toastKey) ?? null,
+        : (notices.find(
+            (notice) => notice.readAtMs === null && noticeKey(listed.account, notice) === toastKey,
+          ) ?? null),
     [listed.account, notices, toastKey],
   );
   const hideToast = useCallback(() => setToastKey(null), []);

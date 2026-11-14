@@ -14,9 +14,12 @@ export function generateDatasetOperations(value: DatasetDefinition): string {
   return `const definition = ${JSON.stringify(definition)};\n${operationsSource}`;
 }
 
-export function hasGeneratedDatasetOperations(source: string, definition: DatasetDefinition): boolean {
+export function hasGeneratedDatasetOperations(
+  source: string,
+  definition: DatasetDefinition,
+): boolean {
   // dohc generates no actions, so rules with one are someone's own.
-  if (definition.operations.some(operation => operation.kind === "action")) return false;
+  if (definition.operations.some((operation) => operation.kind === "action")) return false;
   return source === generateDatasetOperations(definition);
 }
 

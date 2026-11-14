@@ -21,7 +21,12 @@ export interface AutomationFormulaEvaluator {
     spent?: AutomationTimeSpent,
   ): Promise<AutomationOutcome<JsonValue>[] | "busy">;
   /** Runs one code step. It says what to change; nothing is written. */
-  runCode(automationId: string, scope: AutomationScope, source: string, spent?: AutomationTimeSpent): Promise<AutomationOutcome<CodeStepReturn> | "busy">;
+  runCode(
+    automationId: string,
+    scope: AutomationScope,
+    source: string,
+    spent?: AutomationTimeSpent,
+  ): Promise<AutomationOutcome<CodeStepReturn> | "busy">;
 }
 
 /**
@@ -45,7 +50,11 @@ export function createAutomationFormulaEvaluator(
   let evaluator: AutomationEvaluator | null = null;
   const waiting = new Set<string>();
   const isBusy = (result: AutomationOutcome<unknown>) => !result.ok && result.error.code === "busy";
-  const alone = async <T>(workspaceId: string, automationId: string, work: (evaluator: AutomationEvaluator) => Promise<T>): Promise<T | "busy"> => {
+  const alone = async <T>(
+    workspaceId: string,
+    automationId: string,
+    work: (evaluator: AutomationEvaluator) => Promise<T>,
+  ): Promise<T | "busy"> => {
     const key = JSON.stringify([workspaceId, automationId]);
     if (waiting.has(key)) return "busy";
     waiting.add(key);
@@ -59,11 +68,15 @@ export function createAutomationFormulaEvaluator(
   return {
     forWorkspace: (workspaceId) => ({
       async evaluate(automationId, scope, formulas, spent) {
-        const results = await alone(workspaceId, automationId, (shared) => shared.evaluate(scope, formulas, spent));
+        const results = await alone(workspaceId, automationId, (shared) =>
+          shared.evaluate(scope, formulas, spent),
+        );
         return results === "busy" || results.some(isBusy) ? "busy" : results;
       },
       async runCode(automationId, scope, source, spent) {
-        const result = await alone(workspaceId, automationId, (shared) => shared.runCode(scope, source, spent));
+        const result = await alone(workspaceId, automationId, (shared) =>
+          shared.runCode(scope, source, spent),
+        );
         return result === "busy" || isBusy(result) ? "busy" : result;
       },
     }),

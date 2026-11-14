@@ -1,52 +1,130 @@
-import {expect, it, vi} from "vitest";
-import {OwnerYDocOutbox} from "@dohc/workspace-engine-client";
-import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
-import {OwnerKnownRefusals, OwnerYDocOutboxDrainer, type OwnerYDocDelivery} from "./ownerYDocOutbox";
+import { expect, it, vi } from "vitest";
+import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
+import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import {
+  OwnerKnownRefusals,
+  OwnerYDocOutboxDrainer,
+  type OwnerYDocDelivery,
+} from "./ownerYDocOutbox";
 
-function fixture(state: "active" | "sealed" | "quarantined", retryDeliveryId: string | null = null) {
+function fixture(
+  state: "active" | "sealed" | "quarantined",
+  retryDeliveryId: string | null = null,
+) {
   const pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>> = {
-    outboxId: "outbox",binding: {workspaceId: "workspace",mainVersionId: "main",objectId: "object",
-      lineageClaimId: "a".repeat(64),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1},
-    baseUpdate: new Uint8Array([0,0]),baseUpdateDigest: "a".repeat(64),state,
-    pendingBytes: 20_000_000,oldestEntryAtMs: 0,quarantineReason: state === "quarantined" ? "invalid-update" : null,observedBinding: null,retryDeliveryId,
-    entry: {sequence: 7,appendKey: "append",deliveryId: "delivery",update: new Uint8Array([1,2]),updateDigest: "b".repeat(64),byteLength: 2,createdAtMs: 0},
+    outboxId: "outbox",
+    binding: {
+      workspaceId: "workspace",
+      mainVersionId: "main",
+      objectId: "object",
+      lineageClaimId: "a".repeat(64),
+      currentPath: "a.md",
+      selectorPaths: ["a.md"],
+      restoreFenceGeneration: 1,
+    },
+    baseUpdate: new Uint8Array([0, 0]),
+    baseUpdateDigest: "a".repeat(64),
+    state,
+    pendingBytes: 20_000_000,
+    oldestEntryAtMs: 0,
+    quarantineReason: state === "quarantined" ? "invalid-update" : null,
+    observedBinding: null,
+    retryDeliveryId,
+    entry: {
+      sequence: 7,
+      appendKey: "append",
+      deliveryId: "delivery",
+      update: new Uint8Array([1, 2]),
+      updateDigest: "b".repeat(64),
+      byteLength: 2,
+      createdAtMs: 0,
+    },
   };
-  const receipt = {deliveryId: "delivery",updateDigest: "b".repeat(64),journalCursor: 9,acceptingHostEpoch: parseHostEpoch(1)};
+  const receipt = {
+    deliveryId: "delivery",
+    updateDigest: "b".repeat(64),
+    journalCursor: 9,
+    acceptingHostEpoch: parseHostEpoch(1),
+  };
   class TestOutbox extends OwnerYDocOutbox {
     override readHead = vi.fn(async () => pending);
-    override acknowledge = vi.fn(async () => ({acknowledged: 1,pendingBytes: 0,oldestEntryAtMs: null}));
+    override acknowledge = vi.fn(async () => ({
+      acknowledged: 1,
+      pendingBytes: 0,
+      oldestEntryAtMs: null,
+    }));
     override quarantine = vi.fn(async () => {});
   }
-  const outbox = new TestOutbox({sendRequest: async () => {throw new Error("unexpected request");}},"handle");
+  const outbox = new TestOutbox(
+    {
+      sendRequest: async () => {
+        throw new Error("unexpected request");
+      },
+    },
+    "handle",
+  );
   const delivery = {
-    freshOwnerAuthority: vi.fn<OwnerYDocDelivery["freshOwnerAuthority"]>(async () => ({kind: "authority",authority: {value: {},hostEpoch: parseHostEpoch(2)}})),
-    deliver: vi.fn<OwnerYDocDelivery["deliver"]>(async () => ({kind: "receipt",receipt})),
+    freshOwnerAuthority: vi.fn<OwnerYDocDelivery["freshOwnerAuthority"]>(async () => ({
+      kind: "authority",
+      authority: { value: {}, hostEpoch: parseHostEpoch(2) },
+    })),
+    deliver: vi.fn<OwnerYDocDelivery["deliver"]>(async () => ({ kind: "receipt", receipt })),
   };
-  const drainer = new OwnerYDocOutboxDrainer(outbox,"outbox",delivery,new OwnerKnownRefusals());
-  return {pending,receipt,outbox,delivery,drainer,close: () => {drainer.dispose(); outbox.dispose();}};
+  const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox", delivery, new OwnerKnownRefusals());
+  return {
+    pending,
+    receipt,
+    outbox,
+    delivery,
+    drainer,
+    close: () => {
+      drainer.dispose();
+      outbox.dispose();
+    },
+  };
 }
 
-it.each(["active","sealed"] as const)("drains an old, large %s queue after fresh authority without changing bytes or identity", async state => {
-  const f = fixture(state);
-  try {
-    expect(await f.drainer.drainOnce()).toBe("acknowledged");
-    expect(f.delivery.freshOwnerAuthority).toHaveBeenCalledWith(f.pending.binding);
-    expect(f.delivery.deliver).toHaveBeenCalledWith({value: {},hostEpoch: 2}, {
-      outboxId: f.pending.outboxId,binding: f.pending.binding,baseUpdate: f.pending.baseUpdate,baseUpdateDigest: f.pending.baseUpdateDigest,
-      sequence: 7,appendKey: "append",deliveryId: "delivery",update: f.pending.entry!.update,updateDigest: "b".repeat(64),
-    });
-    expect(f.outbox.acknowledge).toHaveBeenCalledWith("outbox",[f.receipt]);
-  } finally {f.close();}
-});
+it.each(["active", "sealed"] as const)(
+  "drains an old, large %s queue after fresh authority without changing bytes or identity",
+  async (state) => {
+    const f = fixture(state);
+    try {
+      expect(await f.drainer.drainOnce()).toBe("acknowledged");
+      expect(f.delivery.freshOwnerAuthority).toHaveBeenCalledWith(f.pending.binding);
+      expect(f.delivery.deliver).toHaveBeenCalledWith(
+        { value: {}, hostEpoch: 2 },
+        {
+          outboxId: f.pending.outboxId,
+          binding: f.pending.binding,
+          baseUpdate: f.pending.baseUpdate,
+          baseUpdateDigest: f.pending.baseUpdateDigest,
+          sequence: 7,
+          appendKey: "append",
+          deliveryId: "delivery",
+          update: f.pending.entry!.update,
+          updateDigest: "b".repeat(64),
+        },
+      );
+      expect(f.outbox.acknowledge).toHaveBeenCalledWith("outbox", [f.receipt]);
+    } finally {
+      f.close();
+    }
+  },
+);
 
 it("delivers the agent the queued edit declared with its entry", async () => {
   const f = fixture("active");
   try {
-    const agentDeclaration = {agentId: "trip-agent", onBehalfOf: null, depth: 0};
-    Object.assign(f.pending.entry!, {agentDeclaration});
+    const agentDeclaration = { agentId: "trip-agent", onBehalfOf: null, depth: 0 };
+    Object.assign(f.pending.entry!, { agentDeclaration });
     expect(await f.drainer.drainOnce()).toBe("acknowledged");
-    expect(f.delivery.deliver.mock.calls[0]![1]).toMatchObject({deliveryId: "delivery", agentDeclaration});
-  } finally {f.close();}
+    expect(f.delivery.deliver.mock.calls[0]![1]).toMatchObject({
+      deliveryId: "delivery",
+      agentDeclaration,
+    });
+  } finally {
+    f.close();
+  }
 });
 
 it("keeps quarantine frozen without requesting fresh authority or delivering", async () => {
@@ -56,7 +134,9 @@ it("keeps quarantine frozen without requesting fresh authority or delivering", a
     expect(f.delivery.freshOwnerAuthority).not.toHaveBeenCalled();
     expect(f.delivery.deliver).not.toHaveBeenCalled();
     expect(f.outbox.acknowledge).not.toHaveBeenCalled();
-  } finally {f.close();}
+  } finally {
+    f.close();
+  }
 });
 
 it("delivers the head its owner asked to try again once, under its own delivery, and acknowledges acceptance", async () => {
@@ -65,21 +145,32 @@ it("delivers the head its owner asked to try again once, under its own delivery,
     expect(await f.drainer.drainOnce()).toBe("acknowledged");
     expect(f.delivery.freshOwnerAuthority).toHaveBeenCalledOnce();
     expect(f.delivery.deliver).toHaveBeenCalledOnce();
-    expect(f.delivery.deliver.mock.calls[0]![1]).toMatchObject({deliveryId: "delivery", sequence: 7, updateDigest: "b".repeat(64)});
-    expect(f.outbox.acknowledge).toHaveBeenCalledWith("outbox",[f.receipt]);
+    expect(f.delivery.deliver.mock.calls[0]![1]).toMatchObject({
+      deliveryId: "delivery",
+      sequence: 7,
+      updateDigest: "b".repeat(64),
+    });
+    expect(f.outbox.acknowledge).toHaveBeenCalledWith("outbox", [f.receipt]);
     expect(f.outbox.quarantine).not.toHaveBeenCalled();
-  } finally {f.close();}
+  } finally {
+    f.close();
+  }
 });
 
 it("re-quarantines a Try again the session host refuses again, with its reason", async () => {
   const f = fixture("quarantined", "delivery");
   try {
-    f.delivery.deliver.mockResolvedValueOnce({kind: "quarantine", reason: "invalid-update"});
+    f.delivery.deliver.mockResolvedValueOnce({ kind: "quarantine", reason: "invalid-update" });
     expect(await f.drainer.drainOnce()).toBe("frozen");
-    expect(f.outbox.quarantine).toHaveBeenCalledWith({outboxId: "outbox", reason: "invalid-update",
-      refusal: {deliveryId: "delivery", key: expect.any(String)}});
+    expect(f.outbox.quarantine).toHaveBeenCalledWith({
+      outboxId: "outbox",
+      reason: "invalid-update",
+      refusal: { deliveryId: "delivery", key: expect.any(String) },
+    });
     expect(f.outbox.acknowledge).not.toHaveBeenCalled();
-  } finally {f.close();}
+  } finally {
+    f.close();
+  }
 });
 
 it("keeps a queue frozen when its Try again names another delivery than the head", async () => {
@@ -88,18 +179,28 @@ it("keeps a queue frozen when its Try again names another delivery than the head
     expect(await f.drainer.drainOnce()).toBe("frozen");
     expect(f.delivery.freshOwnerAuthority).not.toHaveBeenCalled();
     expect(f.delivery.deliver).not.toHaveBeenCalled();
-  } finally {f.close();}
+  } finally {
+    f.close();
+  }
 });
 
 it("retains a sealed head on retry and quarantines it if fresh standing changes", async () => {
   const f = fixture("sealed");
   try {
-    f.delivery.freshOwnerAuthority.mockResolvedValueOnce({kind: "retry"});
+    f.delivery.freshOwnerAuthority.mockResolvedValueOnce({ kind: "retry" });
     expect(await f.drainer.drainOnce()).toBe("retry");
-    f.delivery.freshOwnerAuthority.mockResolvedValueOnce({kind: "quarantine",reason: "binding changed"});
+    f.delivery.freshOwnerAuthority.mockResolvedValueOnce({
+      kind: "quarantine",
+      reason: "binding changed",
+    });
     expect(await f.drainer.drainOnce()).toBe("frozen");
-    expect(f.outbox.quarantine).toHaveBeenCalledWith({outboxId: "outbox",reason: "binding changed"});
+    expect(f.outbox.quarantine).toHaveBeenCalledWith({
+      outboxId: "outbox",
+      reason: "binding changed",
+    });
     expect(f.delivery.deliver).not.toHaveBeenCalled();
     expect(f.outbox.acknowledge).not.toHaveBeenCalled();
-  } finally {f.close();}
+  } finally {
+    f.close();
+  }
 });

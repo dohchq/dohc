@@ -23,7 +23,8 @@ export function SettingsNav(props: {
   // Beside the title, such as whether the last change saved.
   status?: ReactNode;
 }) {
-  const group = (name: Section["group"]) => props.sections.filter((section) => section.group === name);
+  const group = (name: Section["group"]) =>
+    props.sections.filter((section) => section.group === name);
   const yours = group("you");
   const workspace = group("workspace");
   const advanced = group("advanced");
@@ -95,7 +96,9 @@ export function SettingsNav(props: {
             className="mt-4 flex h-6 shrink-0 items-center gap-2 px-2 text-[12px] font-medium text-subtle first:mt-0"
           >
             <Folder size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
-            <span className="min-w-0 truncate">{props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })}</span>
+            <span className="min-w-0 truncate">
+              {props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })}
+            </span>
           </div>
         ) : null}
         {workspace.map(item)}

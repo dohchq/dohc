@@ -1,25 +1,11 @@
-import {
-  lstat,
-  mkdtemp,
-  mkdir,
-  readdir,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  DaemonRefusalError,
-  type DaemonErrorCode,
-} from "../live/daemonLiveAdapter";
+import { DaemonRefusalError, type DaemonErrorCode } from "../live/daemonLiveAdapter";
 import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
 import { EngineClientError } from "./engineClient";
-import {
-  EngineDaemonUnavailableError,
-  type EngineDaemonClient,
-} from "./engineDaemonLifecycle";
+import { EngineDaemonUnavailableError, type EngineDaemonClient } from "./engineDaemonLifecycle";
 import { keepEngineRunScope } from "./engineRunScope";
 import {
   EngineWorkspaceRebindError,
@@ -44,9 +30,7 @@ const roots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    roots.splice(0).map(
-      async (root) => await rm(root, { recursive: true, force: true }),
-    ),
+    roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })),
   );
 });
 
@@ -70,13 +54,17 @@ it("runs only on an existing current binding and never reconnects", async () => 
   const second = new MockClient("second");
   let client = first;
   const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
-  const operation = vi.fn(async binding => binding.workspace);
+  const operation = vi.fn(async (binding) => binding.workspace);
   expect(await sessions.runIfOpen(workspace, operation)).toBeNull();
   expect(first.requests).toEqual([]);
   await sessions.run(workspace, async () => undefined);
   expect(await sessions.runIfOpen(workspace, operation)).toBe("first");
-  await expect(sessions.runIfOpen(workspace, async () => { throw transportFailure(); })).rejects.toThrow();
-  expect(first.requests.filter(request => request.method === "workspace.open")).toHaveLength(1);
+  await expect(
+    sessions.runIfOpen(workspace, async () => {
+      throw transportFailure();
+    }),
+  ).rejects.toThrow();
+  expect(first.requests.filter((request) => request.method === "workspace.open")).toHaveLength(1);
   client = second;
   expect(await sessions.runIfOpen(workspace, operation)).toBeNull();
   expect(second.requests).toEqual([]);
@@ -92,11 +80,14 @@ it("drains an existing-binding operation before close and refuses new work while
   const reading = sessions.runIfOpen(workspace, () => pending.promise);
   const closing = sessions.closeWorkspace(workspace);
   expect(await sessions.runIfOpen(workspace, async () => "unexpected")).toBeNull();
-  expect(client.requests.map(request => request.method)).toEqual(["workspace.open"]);
+  expect(client.requests.map((request) => request.method)).toEqual(["workspace.open"]);
   pending.resolve();
   await reading;
   await closing;
-  expect(client.requests.map(request => request.method)).toEqual(["workspace.open", "workspace.close"]);
+  expect(client.requests.map((request) => request.method)).toEqual([
+    "workspace.open",
+    "workspace.close",
+  ]);
   expect(await sessions.runIfOpen(workspace, async () => "unexpected")).toBeNull();
   await sessions.closeAll();
 });
@@ -104,7 +95,10 @@ it("drains an existing-binding operation before close and refuses new work while
 it("gives the open under way to wait on, without a run", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("ready", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    { sleep: async () => undefined },
+  );
   expect(sessions.openInProgress(workspace)).toBeNull();
   const held = deferred<void>();
   client.holdOpen = held.promise;
@@ -122,20 +116,32 @@ it("gives the open under way to wait on, without a run", async () => {
 it("waits through a close that waits for a run, except inside that run", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("held", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
-  });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: async () => undefined,
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   await sessions.run(workspace, async () => undefined);
   const waits = () => sessions.openInProgress(workspace) !== null;
-  const inRun = deferred<void>(), resume = deferred<void>();
-  const inHandler = deferred<boolean>(), inTimer = deferred<{ closing: boolean; waits: boolean }>();
+  const inRun = deferred<void>(),
+    resume = deferred<void>();
+  const inHandler = deferred<boolean>(),
+    inTimer = deferred<{ closing: boolean; waits: boolean }>();
   let outsideHandler: boolean | undefined;
-  client.onEvent(() => { outsideHandler = waits(); });
+  client.onEvent(() => {
+    outsideHandler = waits();
+  });
   const running = sessions.run(workspace, async (binding) => {
     binding.client.onEvent?.(() => inHandler.resolve(waits()));
     // Fires after the close below starts, which the test starts before
     // any timer can run.
-    setTimeout(() => inTimer.resolve({ closing: sessions.currentBinding(workspace) === null, waits: waits() }), 0);
+    setTimeout(
+      () =>
+        inTimer.resolve({ closing: sessions.currentBinding(workspace) === null, waits: waits() }),
+      0,
+    );
     inRun.resolve();
     await resume.promise;
     return waits();
@@ -145,7 +151,9 @@ it("waits through a close that waits for a run, except inside that run", async (
   const outside = sessions.openInProgress(workspace);
   expect(outside).not.toBeNull();
   let over = false;
-  void outside!.then(() => { over = true; });
+  void outside!.then(() => {
+    over = true;
+  });
   client.emit({ seq: 1, sessionGeneration: 1, name: "workspace.filesChanged", payload: null });
   expect(await inHandler.promise).toBe(false);
   expect(outsideHandler).toBe(true);
@@ -161,9 +169,12 @@ it("waits through a close that waits for a run, except inside that run", async (
 });
 
 it("gives nothing to wait on while the workspace rebuilds, and ends a wait when a rebuild starts", async () => {
-  const workspace = { ...await tempWorkspace(), attachmentId: Symbol("rebuild") };
+  const workspace = { ...(await tempWorkspace()), attachmentId: Symbol("rebuild") };
   const client = new MockClient("rebuild", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000 });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    { sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000 },
+  );
   const held = deferred<void>();
   client.holdOpen = held.promise;
   const opening = sessions.run(workspace, async () => undefined);
@@ -182,10 +193,15 @@ it("gives nothing to wait on while the workspace rebuilds, and ends a wait when 
 it("ends the wait for an open under way when its preparation outlasts the open deadline", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("stalled", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 },
+  );
   // The workspace's own preparation, which runs before the daemon deadline starts.
-  vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace")
-    .mockReturnValue(new Promise<void>(() => {}));
+  vi.spyOn(
+    sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> },
+    "prepareWorkspace",
+  ).mockReturnValue(new Promise<void>(() => {}));
   vi.useFakeTimers();
   try {
     void sessions.run(workspace, async () => undefined).catch(() => undefined);
@@ -193,44 +209,61 @@ it("ends the wait for an open under way when its preparation outlasts the open d
     const waited = sessions.openInProgress(workspace);
     expect(waited).not.toBeNull();
     let over = false;
-    void waited!.then(() => { over = true; });
+    void waited!.then(() => {
+      over = true;
+    });
     await vi.advanceTimersByTimeAsync(49);
     expect(over).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(over).toBe(true);
     expect(sessions.currentBinding(workspace)).toBeNull();
-  } finally { vi.useRealTimers(); }
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("waits out an open whose daemon request starts late but finishes within its own deadline", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("cold", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 },
+  );
   vi.useFakeTimers();
   try {
     // Preparation takes 40 of its 50 ms; the daemon then answers 45 ms after its request starts.
-    vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace")
-      .mockImplementation(() => new Promise<void>((resolve) => setTimeout(() => {
-        client.holdOpen = new Promise<void>((answer) => setTimeout(answer, 45));
-        resolve();
-      }, 40)));
+    vi.spyOn(
+      sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> },
+      "prepareWorkspace",
+    ).mockImplementation(
+      () =>
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            client.holdOpen = new Promise<void>((answer) => setTimeout(answer, 45));
+            resolve();
+          }, 40),
+        ),
+    );
     const opening = sessions.run(workspace, async () => undefined);
     await vi.advanceTimersByTimeAsync(0);
     const waited = sessions.openInProgress(workspace);
     expect(waited).not.toBeNull();
     let over = false;
-    void waited!.then(() => { over = true; });
+    void waited!.then(() => {
+      over = true;
+    });
     await vi.advanceTimersByTimeAsync(84);
     expect(over).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(over).toBe(true);
     expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
     await opening;
-  } finally { vi.useRealTimers(); }
+  } finally {
+    vi.useRealTimers();
+  }
   await sessions.closeAll();
 });
 
-// Opens whose first attempts are refused: a busy store, then a dropped transport.
 function refuseOpens(client: MockClient, refusals: unknown[]): void {
   const request = client.sendRequest.bind(client);
   vi.spyOn(client, "sendRequest").mockImplementation(async (input) => {
@@ -243,16 +276,28 @@ it("counts a busy store's wait and a retry's pause as the open under way", async
   const workspace = await tempWorkspace();
   const client = new MockClient("retried", { localStateReady: true });
   const pauses: (() => void)[] = [];
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: () => new Promise<void>((resolve) => { pauses.push(resolve); }), workspaceOpenDeadlineMs: 60_000,
-  });
-  refuseOpens(client, [daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff"), transportFailure()]);
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: () =>
+        new Promise<void>((resolve) => {
+          pauses.push(resolve);
+        }),
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
+  refuseOpens(client, [
+    daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff"),
+    transportFailure(),
+  ]);
   const opening = sessions.run(workspace, async () => undefined);
   await vi.waitFor(() => expect(pauses).toHaveLength(1));
   const waited = sessions.openInProgress(workspace);
   expect(waited).not.toBeNull();
   let over = false;
-  void waited!.then(() => { over = true; });
+  void waited!.then(() => {
+    over = true;
+  });
   pauses[0]!();
   await vi.waitFor(() => expect(pauses).toHaveLength(2));
   expect(over).toBe(false);
@@ -267,7 +312,10 @@ it("counts a busy store's wait and a retry's pause as the open under way", async
 it("ends the wait for an open under way at once when its last attempt fails", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("refused");
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000 });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    { sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000 },
+  );
   const held = deferred<void>();
   client.holdOpen = held.promise;
   client.failOpen = true;
@@ -284,10 +332,18 @@ it("ends the wait for an open under way at once when its last attempt fails", as
 it("ends the wait for an open under way at once when the workspace starts closing between attempts", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("closed");
-  const paused = deferred<void>(), resume = deferred<void>();
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: async () => { paused.resolve(); await resume.promise; }, workspaceOpenDeadlineMs: 60_000,
-  });
+  const paused = deferred<void>(),
+    resume = deferred<void>();
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: async () => {
+        paused.resolve();
+        await resume.promise;
+      },
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   refuseOpens(client, [daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff")]);
   const opening = sessions.run(workspace, async () => undefined).catch(() => undefined);
   await paused.promise;
@@ -306,9 +362,16 @@ it("ends the wait for an open under way when a pause between attempts outlasts t
   const workspace = await tempWorkspace();
   const client = new MockClient("paused");
   const paused = deferred<void>();
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: () => { paused.resolve(); return new Promise<void>(() => {}); }, workspaceOpenDeadlineMs: 50,
-  });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: () => {
+        paused.resolve();
+        return new Promise<void>(() => {});
+      },
+      workspaceOpenDeadlineMs: 50,
+    },
+  );
   refuseOpens(client, [daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff")]);
   void sessions.run(workspace, async () => undefined).catch(() => undefined);
   await paused.promise;
@@ -317,26 +380,46 @@ it("ends the wait for an open under way when a pause between attempts outlasts t
     const waited = sessions.openInProgress(workspace);
     expect(waited).not.toBeNull();
     let over = false;
-    void waited!.then(() => { over = true; });
+    void waited!.then(() => {
+      over = true;
+    });
     await vi.advanceTimersByTimeAsync(49);
     expect(over).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(over).toBe(true);
-  } finally { vi.useRealTimers(); }
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("ends the wait for an open under way after two open deadlines in all, however many attempts start", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("crowded");
-  let nowMs = 0, pauses = 0;
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    now: () => nowMs, sleep: () => { pauses += 1; return new Promise<void>(() => {}); }, workspaceOpenDeadlineMs: 50,
-  });
-  vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace").mockResolvedValue(undefined);
-  refuseOpens(client, Array.from({ length: 3 }, () => daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff")));
+  let nowMs = 0,
+    pauses = 0;
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      now: () => nowMs,
+      sleep: () => {
+        pauses += 1;
+        return new Promise<void>(() => {});
+      },
+      workspaceOpenDeadlineMs: 50,
+    },
+  );
+  vi.spyOn(
+    sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> },
+    "prepareWorkspace",
+  ).mockResolvedValue(undefined);
+  refuseOpens(
+    client,
+    Array.from({ length: 3 }, () =>
+      daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff"),
+    ),
+  );
   vi.useFakeTimers();
   try {
-    // Each run's attempt is refused at once and its run pauses for good.
     const startAttempt = async () => {
       void sessions.run(workspace, async () => undefined).catch(() => undefined);
       await vi.advanceTimersByTimeAsync(0);
@@ -345,7 +428,9 @@ it("ends the wait for an open under way after two open deadlines in all, however
     const waited = sessions.openInProgress(workspace);
     expect(waited).not.toBeNull();
     let over = false;
-    void waited!.then(() => { over = true; });
+    void waited!.then(() => {
+      over = true;
+    });
     for (const at of [40, 80]) {
       nowMs = at;
       await vi.advanceTimersByTimeAsync(40);
@@ -358,16 +443,25 @@ it("ends the wait for an open under way after two open deadlines in all, however
     nowMs = 100;
     await vi.advanceTimersByTimeAsync(1);
     expect(over).toBe(true);
-  } finally { vi.useRealTimers(); }
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("gives nothing to wait on once another run has opened the workspace", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("opened", { localStateReady: true });
   const paused = deferred<void>();
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: () => { paused.resolve(); return new Promise<void>(() => {}); }, workspaceOpenDeadlineMs: 60_000,
-  });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: () => {
+        paused.resolve();
+        return new Promise<void>(() => {});
+      },
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   refuseOpens(client, [daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff")]);
   void sessions.run(workspace, async () => undefined).catch(() => undefined);
   await paused.promise;
@@ -382,13 +476,23 @@ it("waits for an open under way while the daemon relaunches", async () => {
   const workspace = await tempWorkspace();
   const relaunched = new MockClient("relaunched", { localStateReady: true });
   let client: MockClient | null = new MockClient("first", { localStateReady: true });
-  const paused = deferred<void>(), resume = deferred<void>();
-  const sessions = new EngineWorkspaceSessions({
-    currentClient: () => {
-      if (client === null) throw new EngineDaemonUnavailableError("Daemon is relaunching.");
-      return client;
+  const paused = deferred<void>(),
+    resume = deferred<void>();
+  const sessions = new EngineWorkspaceSessions(
+    {
+      currentClient: () => {
+        if (client === null) throw new EngineDaemonUnavailableError("Daemon is relaunching.");
+        return client;
+      },
     },
-  }, { sleep: async () => { paused.resolve(); await resume.promise; }, workspaceOpenDeadlineMs: 60_000 });
+    {
+      sleep: async () => {
+        paused.resolve();
+        await resume.promise;
+      },
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   await sessions.run(workspace, async () => undefined);
   client = null;
   const reopening = sessions.run(workspace, async () => undefined);
@@ -406,21 +510,31 @@ it("waits for an open under way while the daemon relaunches", async () => {
 it("counts a close that keeps the workspace as an open under way until its reopen", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("rebind", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
-  });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: async () => undefined,
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   await sessions.run(workspace, async () => undefined);
   // As the sync client rebinds: it closes the binding, then runs at once.
   const closing = sessions.closeWorkspaceBinding(workspace);
   const waited = sessions.openInProgress(workspace);
   expect(waited).not.toBeNull();
   let over = false;
-  void waited!.then(() => { over = true; });
+  void waited!.then(() => {
+    over = true;
+  });
   await closing;
   const held = deferred<void>();
   client.holdOpen = held.promise;
   const reopening = sessions.run(workspace, async () => undefined);
-  await vi.waitFor(() => expect(client.requests.filter((request) => request.method === "workspace.open")).toHaveLength(2));
+  await vi.waitFor(() =>
+    expect(client.requests.filter((request) => request.method === "workspace.open")).toHaveLength(
+      2,
+    ),
+  );
   expect(over).toBe(false);
   held.resolve();
   await waited;
@@ -430,11 +544,15 @@ it("counts a close that keeps the workspace as an open under way until its reope
 });
 
 it("gives nothing to wait on after a rebuild ends a close that kept the workspace", async () => {
-  const workspace = { ...await tempWorkspace(), attachmentId: Symbol("rebind") };
+  const workspace = { ...(await tempWorkspace()), attachmentId: Symbol("rebind") };
   const client = new MockClient("rebind", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
-  });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: async () => undefined,
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   await sessions.run(workspace, async () => undefined);
   await sessions.closeWorkspaceBinding(workspace);
   const waited = sessions.openInProgress(workspace);
@@ -447,11 +565,15 @@ it("gives nothing to wait on after a rebuild ends a close that kept the workspac
 });
 
 it("gives nothing to wait on after a rebuild during which a close kept the workspace", async () => {
-  const workspace = { ...await tempWorkspace(), attachmentId: Symbol("rebind") };
+  const workspace = { ...(await tempWorkspace()), attachmentId: Symbol("rebind") };
   const client = new MockClient("rebind", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
-  });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: async () => undefined,
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   await sessions.run(workspace, async () => undefined);
   sessions.beginRebuild(workspace);
   await sessions.closeWorkspaceBinding(workspace);
@@ -463,9 +585,13 @@ it("gives nothing to wait on after a rebuild during which a close kept the works
 it("ends a wait on a close that keeps the workspace once a close for good starts", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("rebind", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
-  });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: async () => undefined,
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   await sessions.run(workspace, async () => undefined);
   const held = deferred<void>();
   client.holdClose = held.promise;
@@ -473,7 +599,6 @@ it("ends a wait on a close that keeps the workspace once a close for good starts
   const waited = sessions.openInProgress(workspace);
   expect(waited).not.toBeNull();
   const retiring = sessions.closeWorkspace(workspace);
-  // Before the first close settles.
   await waited;
   held.resolve();
   await closing;
@@ -485,9 +610,13 @@ it("ends a wait on a close that keeps the workspace once a close for good starts
 it("ends a wait at once when a close for good starts while a close that keeps the workspace waits for an open", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("retire-opening", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
-  });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: async () => undefined,
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   const held = deferred<void>();
   client.holdOpen = held.promise;
   const opening = sessions.run(workspace, async () => undefined);
@@ -509,9 +638,13 @@ it("ends a wait at once when a close for good starts while a close that keeps th
 it("removes the workspace on a close for good when the close it waited for fails", async () => {
   const workspace = await tempWorkspace();
   const client = new MockClient("retire-after-failed-close", { localStateReady: true });
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-    sleep: async () => undefined, workspaceOpenDeadlineMs: 60_000,
-  });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    {
+      sleep: async () => undefined,
+      workspaceOpenDeadlineMs: 60_000,
+    },
+  );
   await sessions.run(workspace, async () => undefined);
   const held = deferred<void>();
   client.holdClose = held.promise;
@@ -521,7 +654,6 @@ it("removes the workspace on a close for good when the close it waited for fails
   await expect(closing).rejects.toThrow("close failed");
   await retiring;
   client.holdClose = null;
-  // A later run opens the workspace again instead of finding it retiring.
   await sessions.run(workspace, async () => undefined);
   expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
   await sessions.closeAll();
@@ -533,12 +665,14 @@ it("reports the current binding's .dohc/local readiness only while that open sta
   const unmarked = new MockClient("unmarked", { localStateReady: false });
   const silent = new MockClient("silent");
   let client = ready;
-  const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep: async () => undefined });
+  const sessions = new EngineWorkspaceSessions(
+    { currentClient: () => client },
+    { sleep: async () => undefined },
+  );
   const readiness = () => sessions.currentBinding(workspace)?.localStateReady ?? null;
   expect(readiness()).toBeNull();
   await sessions.run(workspace, async () => undefined);
   expect(readiness()).toBe(true);
-  // A new client makes the old binding stale before any reopen starts.
   client = unmarked;
   expect(readiness()).toBeNull();
   await sessions.run(workspace, async () => undefined);
@@ -562,7 +696,6 @@ it("reports the current binding's .dohc/local readiness only while that open sta
   await reopening;
   expect(readiness()).toBe(true);
 
-  // A reopen that fails leaves nothing current.
   await sessions.closeWorkspaceBinding(workspace);
   ready.failOpen = true;
   await expect(sessions.run(workspace, async () => undefined)).rejects.toThrow("open refused");
@@ -628,35 +761,59 @@ function daemonRefusal(
 
 describe("EngineWorkspaceSessions", () => {
   it("preserves recovery already spent across a healthy capture wait and subsequent region calls", async () => {
-    const workspace = await tempWorkspace(), client = new MockClient("capture-budget");
+    const workspace = await tempWorkspace(),
+      client = new MockClient("capture-budget");
     let now = 0;
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { now: () => now });
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      { now: () => now },
+    );
     const failure = new Error("Earlier recovery failure.");
-    const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "Workspace is still updating. Try again.",
+      "afterBackoff",
+    );
     await sessions.run(workspace, async () => undefined);
     vi.useFakeTimers();
     try {
       const run = sessions.withRetryBudget(1_000, async () => {
         now = 100;
-        await sessions.run(workspace, async () => { throw failure; }).catch(() => {});
+        await sessions
+          .run(workspace, async () => {
+            throw failure;
+          })
+          .catch(() => {});
         now = 300;
         let attempts = 0;
-        await sessions.run(workspace, async () => {
-          if (++attempts === 1) throw refusal;
-        }, { retryInitialCapture: true });
+        await sessions.run(
+          workspace,
+          async () => {
+            if (++attempts === 1) throw refusal;
+          },
+          { retryInitialCapture: true },
+        );
         now = 100_999;
         await sessions.run(workspace, async () => "still inside recovery budget");
         now = 101_100;
         await sessions.run(workspace, async () => "must not start");
       });
       const rejected = expect(run).rejects.toMatchObject({
-        name: "EngineWorkspaceRetryDeadlineError", measuredMs: 1_000,
-        totalWaitedMs: 101_100, failedAttempts: 1, cause: failure,
+        name: "EngineWorkspaceRetryDeadlineError",
+        measuredMs: 1_000,
+        totalWaitedMs: 101_100,
+        failedAttempts: 1,
+        cause: failure,
       });
       await vi.advanceTimersByTimeAsync(0);
       expect(vi.getTimerCount()).toBe(1);
       now = 100_300;
-      client.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+      client.emit({
+        seq: 1,
+        sessionGeneration: 1,
+        name: "capture.initialSettled",
+        payload: { workspaceId: workspace.workspaceId },
+      });
       await rejected;
       expect(vi.getTimerCount()).toBe(0);
       expect(client.eventSubscriberCount).toBe(0);
@@ -667,29 +824,51 @@ describe("EngineWorkspaceSessions", () => {
   });
 
   it("aborts one capture wait without cancelling another and drains its subscriptions and timer", async () => {
-    const workspace = await tempWorkspace(), client = new MockClient("capture-abort");
+    const workspace = await tempWorkspace(),
+      client = new MockClient("capture-abort");
     const changed = new Set<() => void>();
     const sessions = new EngineWorkspaceSessions({
       currentClient: () => client,
-      onClientChanged: handler => {
+      onClientChanged: (handler) => {
         changed.add(handler);
-        return () => { changed.delete(handler); };
+        return () => {
+          changed.delete(handler);
+        };
       },
     });
     const controller = new AbortController();
-    const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "Workspace is still updating. Try again.",
+      "afterBackoff",
+    );
     await sessions.run(workspace, async () => undefined);
     vi.useFakeTimers();
     try {
-      const cancelled = sessions.withRetryBudget(6_000, () => sessions.run(workspace,
-        async () => { throw refusal; }, { retryInitialCapture: true }), controller.signal);
+      const cancelled = sessions.withRetryBudget(
+        6_000,
+        () =>
+          sessions.run(
+            workspace,
+            async () => {
+              throw refusal;
+            },
+            { retryInitialCapture: true },
+          ),
+        controller.signal,
+      );
       const rejected = expect(cancelled).rejects.toBe(refusal);
       let attempts = 0;
-      const surviving = sessions.withRetryBudget(6_000, () => sessions.run(workspace,
-        async () => {
-          if (++attempts === 1) throw refusal;
-          return "ready";
-        }, { retryInitialCapture: true }));
+      const surviving = sessions.withRetryBudget(6_000, () =>
+        sessions.run(
+          workspace,
+          async () => {
+            if (++attempts === 1) throw refusal;
+            return "ready";
+          },
+          { retryInitialCapture: true },
+        ),
+      );
       await vi.advanceTimersByTimeAsync(0);
       expect(vi.getTimerCount()).toBe(2);
       expect(client.eventSubscriberCount).toBe(2);
@@ -698,7 +877,12 @@ describe("EngineWorkspaceSessions", () => {
       expect(vi.getTimerCount()).toBe(1);
       expect(client.eventSubscriberCount).toBe(1);
       expect(changed.size).toBe(1);
-      client.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+      client.emit({
+        seq: 1,
+        sessionGeneration: 1,
+        name: "capture.initialSettled",
+        payload: { workspaceId: workspace.workspaceId },
+      });
       await expect(surviving).resolves.toBe("ready");
       expect(vi.getTimerCount()).toBe(0);
       expect(client.eventSubscriberCount).toBe(0);
@@ -720,7 +904,8 @@ describe("EngineWorkspaceSessions", () => {
     "rebinds during initial capture after %s and finishes on the original %s",
     async (change, finish) => {
       const workspace = await tempWorkspace();
-      const first = new MockClient("first"), replacement = new MockClient("replacement");
+      const first = new MockClient("first"),
+        replacement = new MockClient("replacement");
       let current: MockClient | null = first;
       const changed = new Set<() => void>();
       const source = {
@@ -730,24 +915,37 @@ describe("EngineWorkspaceSessions", () => {
         },
         onClientChanged: (handler: () => void) => {
           changed.add(handler);
-          return () => { changed.delete(handler); };
+          return () => {
+            changed.delete(handler);
+          };
         },
       };
       const sessions = new EngineWorkspaceSessions(source);
       await sessions.run(workspace, async () => undefined);
-      const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
+      const refusal = daemonRefusal(
+        "OVERLOADED",
+        "Workspace is still updating. Try again.",
+        "afterBackoff",
+      );
       const bindings: EngineDaemonClient[] = [];
       let settled = false;
       vi.useFakeTimers();
       const started = performance.now();
-      const run = sessions.withRetryBudget(6_000, () => sessions.run(workspace, async (binding) => {
-        bindings.push(binding.client);
-        if (settled) return "ready";
-        throw refusal;
-      }, { retryInitialCapture: true }));
-      const finished = finish === "deadline"
-        ? expect(run).rejects.toBe(refusal)
-        : expect(run).resolves.toBe("ready");
+      const run = sessions.withRetryBudget(6_000, () =>
+        sessions.run(
+          workspace,
+          async (binding) => {
+            bindings.push(binding.client);
+            if (settled) return "ready";
+            throw refusal;
+          },
+          { retryInitialCapture: true },
+        ),
+      );
+      const finished =
+        finish === "deadline"
+          ? expect(run).rejects.toBe(refusal)
+          : expect(run).resolves.toBe("ready");
       void finished.catch(() => undefined);
       let closing: Promise<void> | undefined;
       try {
@@ -773,8 +971,10 @@ describe("EngineWorkspaceSessions", () => {
         expect(current.eventSubscriberCount).toBe(1);
         if (change !== "binding close") expect(first.eventSubscriberCount).toBe(0);
         if (change === "binding close") {
-          expect(first.requests.map(request => request.method)).toEqual([
-            "workspace.open", "workspace.close", "workspace.open",
+          expect(first.requests.map((request) => request.method)).toEqual([
+            "workspace.open",
+            "workspace.close",
+            "workspace.open",
           ]);
         }
         if (finish === "deadline") {
@@ -784,7 +984,12 @@ describe("EngineWorkspaceSessions", () => {
           await vi.advanceTimersByTimeAsync(1);
         } else {
           settled = true;
-          current.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+          current.emit({
+            seq: 1,
+            sessionGeneration: 1,
+            name: "capture.initialSettled",
+            payload: { workspaceId: workspace.workspaceId },
+          });
         }
         await finished;
         expect(performance.now() - started).toBeLessThanOrEqual(120_000);
@@ -803,20 +1008,36 @@ describe("EngineWorkspaceSessions", () => {
   );
 
   it("waits beyond transport recovery for initial capture without polling", async () => {
-    const workspace = await tempWorkspace(), client = new MockClient("initial-capture");
+    const workspace = await tempWorkspace(),
+      client = new MockClient("initial-capture");
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
     await sessions.run(workspace, async () => undefined);
     vi.useFakeTimers();
     let attempts = 0;
-    const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
-    const run = sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
-      if (++attempts === 1) throw refusal;
-      return "ready";
-    }, { retryInitialCapture: true }));
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "Workspace is still updating. Try again.",
+      "afterBackoff",
+    );
+    const run = sessions.withRetryBudget(6_000, () =>
+      sessions.run(
+        workspace,
+        async () => {
+          if (++attempts === 1) throw refusal;
+          return "ready";
+        },
+        { retryInitialCapture: true },
+      ),
+    );
     try {
       await vi.advanceTimersByTimeAsync(42_000);
       expect(attempts).toBe(1);
-      client.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+      client.emit({
+        seq: 1,
+        sessionGeneration: 1,
+        name: "capture.initialSettled",
+        payload: { workspaceId: workspace.workspaceId },
+      });
       await expect(run).resolves.toBe("ready");
       expect(attempts).toBe(2);
       expect(vi.getTimerCount()).toBe(0);
@@ -829,83 +1050,130 @@ describe("EngineWorkspaceSessions", () => {
     }
   });
 
-  it.each(["other workspace", "other event", "malformed payload", "retired client", "retired binding", "unavailable client"] as const)(
-    "does not wake initial capture from an %s notification",
-    async (scenario) => {
-      const workspace = await tempWorkspace();
-      const client = new MockClient("initial-capture"), replacement = new MockClient("replacement");
-      const entered = deferred<void>();
-      let current: EngineDaemonClient = client, unavailable = false, attempts = 0;
-      const sessions = new EngineWorkspaceSessions({
-        currentClient: () => {
-          if (unavailable) throw new Error("daemon unavailable");
-          return current;
+  it.each([
+    "other workspace",
+    "other event",
+    "malformed payload",
+    "retired client",
+    "retired binding",
+    "unavailable client",
+  ] as const)("does not wake initial capture from an %s notification", async (scenario) => {
+    const workspace = await tempWorkspace();
+    const client = new MockClient("initial-capture"),
+      replacement = new MockClient("replacement");
+    const entered = deferred<void>();
+    let current: EngineDaemonClient = client,
+      unavailable = false,
+      attempts = 0;
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => {
+        if (unavailable) throw new Error("daemon unavailable");
+        return current;
+      },
+    });
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "Workspace is still updating. Try again.",
+      "afterBackoff",
+    );
+    const run = sessions.withRetryBudget(6_000, () =>
+      sessions.run(
+        workspace,
+        async () => {
+          if (++attempts === 1) {
+            entered.resolve();
+            throw refusal;
+          }
+          return "ready";
         },
-      });
-      const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
-      const run = sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
-        if (++attempts === 1) { entered.resolve(); throw refusal; }
-        return "ready";
-      }, { retryInitialCapture: true }));
-      try {
-        await entered.promise;
-        // Let the refusal arm its wait before changing the event's authority.
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        if (scenario === "retired client") current = replacement;
-        if (scenario === "unavailable client") unavailable = true;
-        if (scenario === "retired binding") {
-          await expect(sessions.run(workspace, async () => { throw transportFailure(); }))
-            .rejects.toMatchObject({ code: "transport-error" });
-        }
-        client.emit({
-          seq: 1, sessionGeneration: 1,
-          name: scenario === "other event" ? "capture.momentRecorded" : "capture.initialSettled",
-          payload: scenario === "malformed payload" ? null : {
-            workspaceId: scenario === "other workspace" ? "foreign" : workspace.workspaceId,
-          },
-        });
-        // Drain this event-loop turn: the notification's promise continuations
-        // would have started a retry if the notification were accepted.
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        expect(attempts).toBe(1);
-        current = client;
-        unavailable = false;
-        sessions.beginShutdown();
-        await expect(run).rejects.toBe(refusal);
-        expect(client.eventSubscriberCount).toBe(0);
-      } finally {
-        current = client;
-        unavailable = false;
-        sessions.beginShutdown();
-        await run.catch(() => undefined);
-        await sessions.closeAll();
+        { retryInitialCapture: true },
+      ),
+    );
+    try {
+      await entered.promise;
+      // Let the refusal arm its wait before changing the event's authority.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (scenario === "retired client") current = replacement;
+      if (scenario === "unavailable client") unavailable = true;
+      if (scenario === "retired binding") {
+        await expect(
+          sessions.run(workspace, async () => {
+            throw transportFailure();
+          }),
+        ).rejects.toMatchObject({ code: "transport-error" });
       }
-    },
-  );
+      client.emit({
+        seq: 1,
+        sessionGeneration: 1,
+        name: scenario === "other event" ? "capture.momentRecorded" : "capture.initialSettled",
+        payload:
+          scenario === "malformed payload"
+            ? null
+            : {
+                workspaceId: scenario === "other workspace" ? "foreign" : workspace.workspaceId,
+              },
+      });
+      // Drain this event-loop turn: the notification's promise continuations
+      // would have started a retry if the notification were accepted.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(attempts).toBe(1);
+      current = client;
+      unavailable = false;
+      sessions.beginShutdown();
+      await expect(run).rejects.toBe(refusal);
+      expect(client.eventSubscriberCount).toBe(0);
+    } finally {
+      current = client;
+      unavailable = false;
+      sessions.beginShutdown();
+      await run.catch(() => undefined);
+      await sessions.closeAll();
+    }
+  });
 
   it.each(["deadline", "shutdown", "workspace close"] as const)(
     "preserves the %s gate after a capture notification wakes the wait",
     async (outcome) => {
-      const workspace = await tempWorkspace(), client = new MockClient("initial-capture");
-      let now = 0, attempts = 0;
-      const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
-      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-        now: () => now,
-      });
+      const workspace = await tempWorkspace(),
+        client = new MockClient("initial-capture");
+      let now = 0,
+        attempts = 0;
+      const refusal = daemonRefusal(
+        "OVERLOADED",
+        "Workspace is still updating. Try again.",
+        "afterBackoff",
+      );
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          now: () => now,
+        },
+      );
       await sessions.run(workspace, async () => undefined);
       vi.useFakeTimers();
       let closing: Promise<void> | undefined;
       try {
-        const result = sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
-          attempts += 1;
-          throw refusal;
-        }, { retryInitialCapture: true }));
+        const result = sessions.withRetryBudget(6_000, () =>
+          sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              throw refusal;
+            },
+            { retryInitialCapture: true },
+          ),
+        );
         const rejected = expect(result).rejects.toBe(refusal);
         await vi.advanceTimersByTimeAsync(0);
         if (outcome === "deadline") now = 120_000;
         else if (outcome === "shutdown") sessions.beginShutdown();
         else closing = sessions.closeWorkspace(workspace);
-        client.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+        client.emit({
+          seq: 1,
+          sessionGeneration: 1,
+          name: "capture.initialSettled",
+          payload: { workspaceId: workspace.workspaceId },
+        });
         await rejected;
         await closing;
         expect(attempts).toBe(1);
@@ -917,99 +1185,128 @@ describe("EngineWorkspaceSessions", () => {
     },
   );
 
-  it.each([false, true])("cancels the capture deadline after settlement while a binding close waits: %s", async (closeBinding) => {
-    const workspace = await tempWorkspace(), client = new MockClient("initial-capture");
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
-    let attempts = 0;
-    await sessions.run(workspace, async () => undefined);
-    vi.useFakeTimers();
-    try {
-      const run = sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
-        if (++attempts === 1) throw daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
-        return "ready";
-      }, { retryInitialCapture: true }));
-      await vi.advanceTimersByTimeAsync(0);
-      expect(vi.getTimerCount()).toBe(1);
-      const closing = closeBinding ? sessions.closeWorkspaceBinding(workspace) : undefined;
-      client.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
-      await expect(run).resolves.toBe("ready");
-      await closing;
-      expect(vi.getTimerCount()).toBe(0);
-      expect(client.eventSubscriberCount).toBe(0);
-    } finally {
-      vi.useRealTimers();
-      await sessions.closeAll();
-    }
-  });
+  it.each([false, true])(
+    "cancels the capture deadline after settlement while a binding close waits: %s",
+    async (closeBinding) => {
+      const workspace = await tempWorkspace(),
+        client = new MockClient("initial-capture");
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+      let attempts = 0;
+      await sessions.run(workspace, async () => undefined);
+      vi.useFakeTimers();
+      try {
+        const run = sessions.withRetryBudget(6_000, () =>
+          sessions.run(
+            workspace,
+            async () => {
+              if (++attempts === 1)
+                throw daemonRefusal(
+                  "OVERLOADED",
+                  "Workspace is still updating. Try again.",
+                  "afterBackoff",
+                );
+              return "ready";
+            },
+            { retryInitialCapture: true },
+          ),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        expect(vi.getTimerCount()).toBe(1);
+        const closing = closeBinding ? sessions.closeWorkspaceBinding(workspace) : undefined;
+        client.emit({
+          seq: 1,
+          sessionGeneration: 1,
+          name: "capture.initialSettled",
+          payload: { workspaceId: workspace.workspaceId },
+        });
+        await expect(run).resolves.toBe("ready");
+        await closing;
+        expect(vi.getTimerCount()).toBe(0);
+        expect(client.eventSubscriberCount).toBe(0);
+      } finally {
+        vi.useRealTimers();
+        await sessions.closeAll();
+      }
+    },
+  );
 
-  it.each(["capture.initialSettled", "capture.importProgress"])("wakes an initial-capture retry on the scoped %s event", async (name) => {
-    const workspace = await tempWorkspace("workspace-initial-settled-wake");
-    const client = new MockClient("initial-settled-wake");
-    let attempts = 0;
-    const sleeps: number[] = [];
-    const sessions = new EngineWorkspaceSessions(
-      { currentClient: () => client },
-      {
-        sleep: async (delayMs) => {
-          sleeps.push(delayMs);
-          await new Promise<void>(() => undefined);
-        },
-      },
-    );
-    const refusal = daemonRefusal(
-      "OVERLOADED",
-      "Workspace is still updating. Try again.",
-      "afterBackoff",
-    );
-    try {
-      const result = await sessions.withRetryBudget(6_000, () =>
-        sessions.run(
-          workspace,
-          async () => {
-            attempts += 1;
-            if (attempts === 1) {
-              queueMicrotask(() =>
-                client.emit({
-                  seq: 1,
-                  sessionGeneration: 1,
-                  name,
-                  payload: { workspaceId: workspace.workspaceId },
-                }),
-              );
-              throw refusal;
-            }
-            return "ready";
+  it.each(["capture.initialSettled", "capture.importProgress"])(
+    "wakes an initial-capture retry on the scoped %s event",
+    async (name) => {
+      const workspace = await tempWorkspace("workspace-initial-settled-wake");
+      const client = new MockClient("initial-settled-wake");
+      let attempts = 0;
+      const sleeps: number[] = [];
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          sleep: async (delayMs) => {
+            sleeps.push(delayMs);
+            await new Promise<void>(() => undefined);
           },
-          { retryInitialCapture: true },
-        ),
+        },
       );
-      expect(result).toBe("ready");
-      expect(attempts).toBe(2);
-      expect(sleeps).toEqual([]);
-      expect(client.eventSubscriberCount).toBe(0);
-    } finally {
-      await sessions.closeAll();
-    }
-  });
+      const refusal = daemonRefusal(
+        "OVERLOADED",
+        "Workspace is still updating. Try again.",
+        "afterBackoff",
+      );
+      try {
+        const result = await sessions.withRetryBudget(6_000, () =>
+          sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              if (attempts === 1) {
+                queueMicrotask(() =>
+                  client.emit({
+                    seq: 1,
+                    sessionGeneration: 1,
+                    name,
+                    payload: { workspaceId: workspace.workspaceId },
+                  }),
+                );
+                throw refusal;
+              }
+              return "ready";
+            },
+            { retryInitialCapture: true },
+          ),
+        );
+        expect(result).toBe("ready");
+        expect(attempts).toBe(2);
+        expect(sleeps).toEqual([]);
+        expect(client.eventSubscriberCount).toBe(0);
+      } finally {
+        await sessions.closeAll();
+      }
+    },
+  );
 
-  it.each([false, true])("checks capture once at the deadline when its event is missing (settled: %s)", async (settled) => {
-    const workspace = await tempWorkspace("workspace-initial-settled-fallback");
-    const client = new MockClient("initial-settled-fallback");
-    let attempts = 0;
-    const sleeps: number[] = [];
-    const sessions = new EngineWorkspaceSessions(
-      { currentClient: () => client },
-      { sleep: async (delayMs) => { sleeps.push(delayMs); } },
-    );
-    const refusal = daemonRefusal(
-      "OVERLOADED",
-      "Workspace is still updating. Try again.",
-      "afterBackoff",
-    );
-    await sessions.run(workspace, async () => undefined);
-    vi.useFakeTimers();
-    try {
-      const result = sessions.withRetryBudget(6_000, () =>
+  it.each([false, true])(
+    "checks capture once at the deadline when its event is missing (settled: %s)",
+    async (settled) => {
+      const workspace = await tempWorkspace("workspace-initial-settled-fallback");
+      const client = new MockClient("initial-settled-fallback");
+      let attempts = 0;
+      const sleeps: number[] = [];
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          sleep: async (delayMs) => {
+            sleeps.push(delayMs);
+          },
+        },
+      );
+      const refusal = daemonRefusal(
+        "OVERLOADED",
+        "Workspace is still updating. Try again.",
+        "afterBackoff",
+      );
+      await sessions.run(workspace, async () => undefined);
+      vi.useFakeTimers();
+      try {
+        const result = sessions.withRetryBudget(6_000, () =>
           sessions.run(
             workspace,
             async () => {
@@ -1020,20 +1317,21 @@ describe("EngineWorkspaceSessions", () => {
             { retryInitialCapture: true },
           ),
         );
-      const finished = settled
-        ? expect(result).resolves.toBe("ready")
-        : expect(result).rejects.toBe(refusal);
-      await vi.advanceTimersByTimeAsync(120_000);
-      await finished;
-      expect(attempts).toBe(2);
-      expect(sleeps).toEqual([]);
-      expect(vi.getTimerCount()).toBe(0);
-      expect(client.eventSubscriberCount).toBe(0);
-    } finally {
-      vi.useRealTimers();
-      await sessions.closeAll();
-    }
-  });
+        const finished = settled
+          ? expect(result).resolves.toBe("ready")
+          : expect(result).rejects.toBe(refusal);
+        await vi.advanceTimersByTimeAsync(120_000);
+        await finished;
+        expect(attempts).toBe(2);
+        expect(sleeps).toEqual([]);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(client.eventSubscriberCount).toBe(0);
+      } finally {
+        vi.useRealTimers();
+        await sessions.closeAll();
+      }
+    },
+  );
 
   it.each(["no opt-in", "no budget", "deadline", "terminal", "other overload"] as const)(
     "does not replay an operation for initial capture without safe admission: %s",
@@ -1042,19 +1340,29 @@ describe("EngineWorkspaceSessions", () => {
       const client = new MockClient("initial-capture");
       const sleep = vi.fn(async () => undefined);
       const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
-      const refusal = new DaemonRefusalError({
-        code: scenario === "deadline" ? "DEADLINE_EXCEEDED" : "OVERLOADED",
-        message: scenario === "other overload" ? "Engine queue is full." : "Workspace is still updating. Try again.",
-        retry: scenario === "terminal" ? "no" : "afterBackoff",
-      }, undefined);
-      const operation = vi.fn(async () => { throw refusal; });
-      const run = () => sessions.run(workspace, operation, {
-        retryTransportErrors: true,
-        retryInitialCapture: scenario !== "no opt-in",
+      const refusal = new DaemonRefusalError(
+        {
+          code: scenario === "deadline" ? "DEADLINE_EXCEEDED" : "OVERLOADED",
+          message:
+            scenario === "other overload"
+              ? "Engine queue is full."
+              : "Workspace is still updating. Try again.",
+          retry: scenario === "terminal" ? "no" : "afterBackoff",
+        },
+        undefined,
+      );
+      const operation = vi.fn(async () => {
+        throw refusal;
       });
+      const run = () =>
+        sessions.run(workspace, operation, {
+          retryTransportErrors: true,
+          retryInitialCapture: scenario !== "no opt-in",
+        });
       try {
-        await expect(scenario === "no budget" ? run() : sessions.withRetryBudget(6_000, run))
-          .rejects.toBe(refusal);
+        await expect(
+          scenario === "no budget" ? run() : sessions.withRetryBudget(6_000, run),
+        ).rejects.toBe(refusal);
         expect(operation).toHaveBeenCalledTimes(1);
         expect(sleep).not.toHaveBeenCalled();
         expect(client.eventSubscriberCount).toBe(0);
@@ -1065,13 +1373,14 @@ describe("EngineWorkspaceSessions", () => {
   );
 
   it("retires retained binding checks across a same-client retry even if the native handle is reused", async () => {
-    const workspace = await tempWorkspace(), client = new MockClient("same-handle");
+    const workspace = await tempWorkspace(),
+      client = new MockClient("same-handle");
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
     try {
-      const retained = await sessions.run(workspace, async binding => binding);
+      const retained = await sessions.run(workspace, async (binding) => binding);
       expect(() => sessions.assertCurrentBinding(workspace, retained)).not.toThrow();
       let calls = 0;
-      const rebound = await sessions.run(workspace, async binding => {
+      const rebound = await sessions.run(workspace, async (binding) => {
         if (++calls === 1) throw daemonRefusal("CONFLICT", "workspace moved", "afterReconnect");
         return binding;
       });
@@ -1079,24 +1388,38 @@ describe("EngineWorkspaceSessions", () => {
       expect(rebound.client).toBe(retained.client);
       expect(() => sessions.assertCurrentBinding(workspace, retained)).toThrow("binding retired");
       expect(() => sessions.assertCurrentBinding(workspace, rebound)).not.toThrow();
-    } finally { await sessions.closeAll(); }
+    } finally {
+      await sessions.closeAll();
+    }
   });
 
   it("retires retained binding checks while a close waits for an active run", async () => {
-    const workspace = await tempWorkspace(), client = new MockClient("held-handle");
+    const workspace = await tempWorkspace(),
+      client = new MockClient("held-handle");
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
-    const entered = deferred<void>(), release = deferred<void>();
-    const retained = await sessions.run(workspace, async binding => binding);
-    const active = sessions.run(workspace, async () => { entered.resolve(); await release.promise; });
+    const entered = deferred<void>(),
+      release = deferred<void>();
+    const retained = await sessions.run(workspace, async (binding) => binding);
+    const active = sessions.run(workspace, async () => {
+      entered.resolve();
+      await release.promise;
+    });
     let closing: Promise<void> | undefined;
     try {
       await entered.promise;
       closing = sessions.closeWorkspaceBinding(workspace);
       expect(() => sessions.assertCurrentBinding(workspace, retained)).toThrow("binding retired");
-      expect(client.requests.filter(row => row.method === "workspace.close")).toHaveLength(0);
-      release.resolve(); await active; await closing;
+      expect(client.requests.filter((row) => row.method === "workspace.close")).toHaveLength(0);
+      release.resolve();
+      await active;
+      await closing;
       expect(() => sessions.assertCurrentBinding(workspace, retained)).toThrow("binding retired");
-    } finally { release.resolve(); await active; await closing; await sessions.closeAll(); }
+    } finally {
+      release.resolve();
+      await active;
+      await closing;
+      await sessions.closeAll();
+    }
   });
 
   it("keeps a committed scene read-only while asset materialization is pending", () => {
@@ -1108,16 +1431,12 @@ describe("EngineWorkspaceSessions", () => {
     expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
     expect(
       isEngineWorkspaceOpenRefusedError(
-        daemonRefusal(
-          "OVERLOADED",
-          "ydoc-artifact-assets-pending",
-          "afterBackoff",
-        ),
+        daemonRefusal("OVERLOADED", "ydoc-artifact-assets-pending", "afterBackoff"),
       ),
     ).toBe(true);
-    expect(
-      isEngineWorkspaceOpenRefusedError(new Error("ydoc-artifact-assets-pending")),
-    ).toBe(false);
+    expect(isEngineWorkspaceOpenRefusedError(new Error("ydoc-artifact-assets-pending"))).toBe(
+      false,
+    );
   });
 
   it("recognizes the initial-capture workspace-updating refusal", () => {
@@ -1130,20 +1449,32 @@ describe("EngineWorkspaceSessions", () => {
   });
 
   it("keeps a file a degraded capture has not read read-only without waiting for a wake", async () => {
-    const refusal = new DaemonRefusalError({
-      code: "OVERLOADED",
-      message: "dohc has not read this file yet. Open it again once dohc has read it.",
-      retry: "no",
-    }, undefined);
+    const refusal = new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "dohc has not read this file yet. Open it again once dohc has read it.",
+        retry: "no",
+      },
+      undefined,
+    );
     expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
-    const workspace = await tempWorkspace(), client = new MockClient("file-not-read");
+    const workspace = await tempWorkspace(),
+      client = new MockClient("file-not-read");
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
     let attempts = 0;
     try {
-      await expect(sessions.withRetryBudget(6_000, () => sessions.run(workspace, async () => {
-        attempts += 1;
-        throw refusal;
-      }, { retryInitialCapture: true }))).rejects.toBe(refusal);
+      await expect(
+        sessions.withRetryBudget(6_000, () =>
+          sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              throw refusal;
+            },
+            { retryInitialCapture: true },
+          ),
+        ),
+      ).rejects.toBe(refusal);
       expect(attempts).toBe(1);
       expect(client.eventSubscriberCount).toBe(0);
     } finally {
@@ -1163,16 +1494,13 @@ describe("EngineWorkspaceSessions", () => {
     expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
   });
 
-  it.each([
-    "ydoc-open-storage-failed",
-    "ydoc-open-operation-crashed",
-  ])("keeps a canonical document read-only after %s", (message) => {
-    const refusal = new DaemonRefusalError(
-      { code: "INTERNAL", message, retry: "no" },
-      undefined,
-    );
-    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
-  });
+  it.each(["ydoc-open-storage-failed", "ydoc-open-operation-crashed"])(
+    "keeps a canonical document read-only after %s",
+    (message) => {
+      const refusal = new DaemonRefusalError({ code: "INTERNAL", message, retry: "no" }, undefined);
+      expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+    },
+  );
 
   it("requires the exact scene asset refusal detail delimiter", () => {
     for (const message of [
@@ -1181,9 +1509,7 @@ describe("EngineWorkspaceSessions", () => {
       "ydoc-artifact-assets-pending: ",
     ]) {
       expect(
-        isEngineWorkspaceOpenRefusedError(
-          daemonRefusal("OVERLOADED", message, "afterBackoff"),
-        ),
+        isEngineWorkspaceOpenRefusedError(daemonRefusal("OVERLOADED", message, "afterBackoff")),
       ).toBe(false);
     }
   });
@@ -1209,7 +1535,9 @@ describe("EngineWorkspaceSessions", () => {
       async sendRequest(request) {
         expect((await lstat(join(rootPath, ".dohc"))).isDirectory()).toBe(true);
         // The daemon creates it, so on a Mac it inherits no ACL entries.
-        await expect(lstat(join(rootPath, ".dohc", "engine"))).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(lstat(join(rootPath, ".dohc", "engine"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
         opened = true;
         return {
           id: request.id,
@@ -1222,10 +1550,7 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     await expect(
-      sessions.run(
-        { workspaceId: "workspace", rootPath },
-        async (binding) => binding.workspace,
-      ),
+      sessions.run({ workspaceId: "workspace", rootPath }, async (binding) => binding.workspace),
     ).resolves.toBe("workspace-handle");
     expect(opened).toBe(true);
   });
@@ -1249,21 +1574,15 @@ describe("EngineWorkspaceSessions", () => {
     let mutationAttempts = 0;
 
     await expect(
-      sessions.run(
-        { workspaceId: "workspace", rootPath },
-        async () => {
-          mutationAttempts += 1;
-          throw transportFailure();
-        },
-      ),
+      sessions.run({ workspaceId: "workspace", rootPath }, async () => {
+        mutationAttempts += 1;
+        throw transportFailure();
+      }),
     ).rejects.toMatchObject({ code: "transport-error" });
     expect(mutationAttempts).toBe(1);
 
     await expect(
-      sessions.run(
-        { workspaceId: "workspace", rootPath },
-        async (binding) => binding.workspace,
-      ),
+      sessions.run({ workspaceId: "workspace", rootPath }, async (binding) => binding.workspace),
     ).resolves.toBe("workspace-handle-2");
     expect(opens).toBe(2);
   });
@@ -1300,14 +1619,15 @@ describe("EngineWorkspaceSessions", () => {
     );
 
     const outcome = await sessions
-      .run(
-        { workspaceId: "workspace", rootPath },
-        async (binding) => binding.workspace,
-        { retryTransportErrors: true },
-      )
+      .run({ workspaceId: "workspace", rootPath }, async (binding) => binding.workspace, {
+        retryTransportErrors: true,
+      })
       .catch((error: unknown) => error);
 
-    expect(outcome, "require rebindStarted in the open-error retry branch. The first currentClient() failure is returned here instead of the handle.").toBe("workspace-after-restart");
+    expect(
+      outcome,
+      "require rebindStarted in the open-error retry branch. The first currentClient() failure is returned here instead of the handle.",
+    ).toBe("workspace-after-restart");
     expect(sleeps).toEqual([100]);
   });
 
@@ -1341,10 +1661,7 @@ describe("EngineWorkspaceSessions", () => {
       });
 
       await expect(
-        sessions.run(
-          { workspaceId: "workspace", rootPath },
-          async (binding) => binding.workspace,
-        ),
+        sessions.run({ workspaceId: "workspace", rootPath }, async (binding) => binding.workspace),
       ).rejects.toThrow(
         relativeLink === ".dohc"
           ? "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry."
@@ -1355,11 +1672,6 @@ describe("EngineWorkspaceSessions", () => {
     },
   );
 
-  // The squat shapes an errno allowlist gets wrong. mkdir raises EEXIST for a
-  // file and ENOENT for a dangling link, so the old `isAlreadyExists` check
-  // rethrew the dangling case as a bare errno and answered the file case with
-  // "must not be a symlink" -- about a plain file. Presence decides now, and
-  // both name what is actually there.
   it.each([
     [
       "a file",
@@ -1390,42 +1702,33 @@ describe("EngineWorkspaceSessions", () => {
       },
       "dohc could not start the engine for this workspace. A file is at .dohc/engine, which must be a real folder. Remove or rename that file. Then retry.",
     ],
-  ])(
-    "names %s squatting %s, never a raw errno",
-    async (_shape, _path, squat, refusal) => {
-      const rootPath = await tempRoot();
-      await squat(rootPath);
-      let requests = 0;
-      const client: EngineDaemonClient = {
-        close: () => undefined,
-        async sendRequest(request) {
-          requests += 1;
-          return { id: request.id, result: { workspace: "workspace-handle" } };
-        },
-      };
-      const sessions = new EngineWorkspaceSessions({
-        currentClient: () => client,
-      });
+  ])("names %s squatting %s, never a raw errno", async (_shape, _path, squat, refusal) => {
+    const rootPath = await tempRoot();
+    await squat(rootPath);
+    let requests = 0;
+    const client: EngineDaemonClient = {
+      close: () => undefined,
+      async sendRequest(request) {
+        requests += 1;
+        return { id: request.id, result: { workspace: "workspace-handle" } };
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
 
-      await expect(
-        sessions.run(
-          { workspaceId: "workspace", rootPath },
-          async (binding) => binding.workspace,
-        ),
-      ).rejects.toThrow(refusal);
-      // Nothing opened, and the refusal never printed the absolute host path.
-      expect(requests).toBe(0);
-    },
-  );
+    await expect(
+      sessions.run({ workspaceId: "workspace", rootPath }, async (binding) => binding.workspace),
+    ).rejects.toThrow(refusal);
+    expect(requests).toBe(0);
+  });
 
   it("revalidates prepared directories before a daemon-generation reopen", async () => {
     const rootPath = await tempRoot();
     const outside = await tempRoot();
     let generation = 1;
     let opens = 0;
-    const clientForGeneration = (
-      clientGeneration: number,
-    ): EngineDaemonClient => ({
+    const clientForGeneration = (clientGeneration: number): EngineDaemonClient => ({
       close: () => undefined,
       async sendRequest(request) {
         if (request.method === "workspace.close") {
@@ -1457,10 +1760,7 @@ describe("EngineWorkspaceSessions", () => {
     client = clientForGeneration(generation);
 
     await expect(
-      sessions.run(
-        { workspaceId: "workspace", rootPath },
-        async (binding) => binding.workspace,
-      ),
+      sessions.run({ workspaceId: "workspace", rootPath }, async (binding) => binding.workspace),
     ).rejects.toThrow(
       "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
     );
@@ -1469,22 +1769,18 @@ describe("EngineWorkspaceSessions", () => {
 
   it("mutation proof: restores capture authorship in every generation's open", async () => {
     const rootPath = await tempRoot();
-    const requestsByGeneration: Array<
-      Array<{ method: string; params: unknown }>
-    > = [[], []];
+    const requestsByGeneration: Array<Array<{ method: string; params: unknown }>> = [[], []];
     let generation = 0;
-    const clients = requestsByGeneration.map(
-      (requests, index): EngineDaemonClient => ({
-        close: () => undefined,
-        async sendRequest(request) {
-          requests.push({ method: request.method, params: request.params });
-          return {
-            id: request.id,
-            result: { workspace: `workspace-handle-${index + 1}` },
-          };
-        },
-      }),
-    );
+    const clients = requestsByGeneration.map((requests, index): EngineDaemonClient => ({
+      close: () => undefined,
+      async sendRequest(request) {
+        requests.push({ method: request.method, params: request.params });
+        return {
+          id: request.id,
+          result: { workspace: `workspace-handle-${index + 1}` },
+        };
+      },
+    }));
     const sessions = new EngineWorkspaceSessions({
       currentClient: () => clients[generation]!,
     });
@@ -1501,15 +1797,9 @@ describe("EngineWorkspaceSessions", () => {
     };
     sessions.rememberCaptureAuthor(workspace, author);
 
-    await sessions.run(
-      workspace,
-      async (binding) => binding.workspace,
-    );
+    await sessions.run(workspace, async (binding) => binding.workspace);
     generation = 1;
-    await sessions.run(
-      workspace,
-      async (binding) => binding.workspace,
-    );
+    await sessions.run(workspace, async (binding) => binding.workspace);
 
     expect(requestsByGeneration).toEqual([
       [
@@ -1574,16 +1864,12 @@ describe("EngineWorkspaceSessions", () => {
 
     const closing = sessions.closeWorkspace(workspace.workspaceId);
     await Promise.resolve();
-    expect(
-      requests.filter((request) => request.method === "workspace.close"),
-    ).toHaveLength(0);
+    expect(requests.filter((request) => request.method === "workspace.close")).toHaveLength(0);
 
     operationGate.resolve();
     await expect(firstRun).resolves.toBe("first");
     await vi.waitFor(() => {
-      expect(
-        requests.filter((request) => request.method === "workspace.close"),
-      ).toHaveLength(1);
+      expect(requests.filter((request) => request.method === "workspace.close")).toHaveLength(1);
     });
 
     const secondOperation = vi.fn(
@@ -1663,9 +1949,7 @@ describe("EngineWorkspaceSessions", () => {
     expect(order).toEqual(["run-finished", "close-started"]);
 
     await sessions.run(workspace, async () => undefined);
-    const firstTwoOpens = requests.filter(
-      (request) => request.method === "workspace.open",
-    );
+    const firstTwoOpens = requests.filter((request) => request.method === "workspace.open");
     expect(firstTwoOpens).toHaveLength(2);
     expect(firstTwoOpens.map((request) => request.params)).toEqual([
       expect.objectContaining({ captureAuthor: author }),
@@ -1674,9 +1958,7 @@ describe("EngineWorkspaceSessions", () => {
 
     await sessions.closeWorkspace(workspace);
     await sessions.run(workspace, async () => undefined);
-    const finalOpen = requests.filter(
-      (request) => request.method === "workspace.open",
-    ).at(-1);
+    const finalOpen = requests.filter((request) => request.method === "workspace.open").at(-1);
     expect(finalOpen?.params).not.toHaveProperty("captureAuthor");
     await sessions.closeAll();
   });
@@ -1738,9 +2020,7 @@ describe("EngineWorkspaceSessions", () => {
 
     await expect(activeRun).resolves.toBe("finished");
     await retiring;
-    const opens = requests.filter(
-      (request) => request.method === "workspace.open",
-    );
+    const opens = requests.filter((request) => request.method === "workspace.open");
     expect(opens).toHaveLength(2);
     expect(opens.map((request) => request.params)).toEqual([
       expect.objectContaining({ captureAuthor: author }),
@@ -1762,9 +2042,7 @@ describe("EngineWorkspaceSessions", () => {
     await sessions.run(workspace, async () => undefined);
     await sessions.closeWorkspaceBinding(workspace);
     await sessions.run(workspace, async () => undefined);
-    const firstTwoOpens = client.requests.filter(
-      (request) => request.method === "workspace.open",
-    );
+    const firstTwoOpens = client.requests.filter((request) => request.method === "workspace.open");
     expect(firstTwoOpens).toHaveLength(2);
     expect(firstTwoOpens.map((request) => request.params)).toEqual([
       expect.objectContaining({ captureMode: "none", projectCollections: true }),
@@ -1773,9 +2051,9 @@ describe("EngineWorkspaceSessions", () => {
 
     await sessions.closeWorkspace(workspace);
     await sessions.run(workspace, async () => undefined);
-    const finalOpen = client.requests.filter(
-      (request) => request.method === "workspace.open",
-    ).at(-1);
+    const finalOpen = client.requests
+      .filter((request) => request.method === "workspace.open")
+      .at(-1);
     expect(finalOpen?.params).not.toHaveProperty("captureMode");
     await sessions.closeAll();
   });
@@ -1805,12 +2083,12 @@ describe("EngineWorkspaceSessions", () => {
     sessions.rememberShareMount({ ...workspaceA, shareMount: true });
     sessions.beginRebuild(workspaceA);
 
-    await expect(
-      sessions.run(workspaceA, async () => "unexpected"),
-    ).rejects.toEqual(new EngineWorkspaceRebuildingError(base.workspaceId));
-    await expect(
-      sessions.run(workspaceB, async () => "attachment-b"),
-    ).resolves.toBe("attachment-b");
+    await expect(sessions.run(workspaceA, async () => "unexpected")).rejects.toEqual(
+      new EngineWorkspaceRebuildingError(base.workspaceId),
+    );
+    await expect(sessions.run(workspaceB, async () => "attachment-b")).resolves.toBe(
+      "attachment-b",
+    );
     expect(client.requests.at(-1)?.params).toEqual(
       expect.objectContaining({ captureAuthor: authorB }),
     );
@@ -1858,9 +2136,9 @@ describe("EngineWorkspaceSessions", () => {
       currentClient: () => client,
     });
 
-    await expect(
-      sessions.run(workspace, async ({ workspace: handle }) => handle),
-    ).resolves.toBe("attachment-handle");
+    await expect(sessions.run(workspace, async ({ workspace: handle }) => handle)).resolves.toBe(
+      "attachment-handle",
+    );
     const bareOperation = vi.fn(async () => "bare");
     await expect(
       sessions.run(
@@ -1868,17 +2146,17 @@ describe("EngineWorkspaceSessions", () => {
         bareOperation,
       ),
     ).rejects.toThrow("different session key");
-    await expect(
-      sessions.run(workspace, async ({ workspace: handle }) => handle),
-    ).resolves.toBe("attachment-handle");
+    await expect(sessions.run(workspace, async ({ workspace: handle }) => handle)).resolves.toBe(
+      "attachment-handle",
+    );
 
     expect(bareOperation).not.toHaveBeenCalled();
-    expect(
-      client.requests.filter((request) => request.method === "workspace.open"),
-    ).toHaveLength(1);
-    expect(
-      client.requests.filter((request) => request.method === "workspace.close"),
-    ).toHaveLength(0);
+    expect(client.requests.filter((request) => request.method === "workspace.open")).toHaveLength(
+      1,
+    );
+    expect(client.requests.filter((request) => request.method === "workspace.close")).toHaveLength(
+      0,
+    );
   });
 
   it("rejects an attachment session after a bare key claims the workspace", async () => {
@@ -1896,20 +2174,20 @@ describe("EngineWorkspaceSessions", () => {
       sessions.run(bareWorkspace, async ({ workspace: handle }) => handle),
     ).resolves.toBe("bare-handle");
     const attachmentOperation = vi.fn(async () => "attachment");
-    await expect(
-      sessions.run(attachmentWorkspace, attachmentOperation),
-    ).rejects.toThrow("different session key");
+    await expect(sessions.run(attachmentWorkspace, attachmentOperation)).rejects.toThrow(
+      "different session key",
+    );
     await expect(
       sessions.run(bareWorkspace, async ({ workspace: handle }) => handle),
     ).resolves.toBe("bare-handle");
 
     expect(attachmentOperation).not.toHaveBeenCalled();
-    expect(
-      client.requests.filter((request) => request.method === "workspace.open"),
-    ).toHaveLength(1);
-    expect(
-      client.requests.filter((request) => request.method === "workspace.close"),
-    ).toHaveLength(0);
+    expect(client.requests.filter((request) => request.method === "workspace.open")).toHaveLength(
+      1,
+    );
+    expect(client.requests.filter((request) => request.method === "workspace.close")).toHaveLength(
+      0,
+    );
   });
 
   it("keeps the attachment claim while an active run and its close drain", async () => {
@@ -1972,13 +2250,9 @@ describe("EngineWorkspaceSessions", () => {
     expect(whileActive).toEqual(expect.any(Error));
     expect((whileActive as Error).message).toContain("different session key");
     expect(whileDaemonClose).toEqual(expect.any(Error));
-    expect((whileDaemonClose as Error).message).toContain(
-      "different session key",
-    );
+    expect((whileDaemonClose as Error).message).toContain("different session key");
     expect(openCount).toBe(1);
-    expect(
-      requests.filter((request) => request.method === "workspace.close"),
-    ).toHaveLength(1);
+    expect(requests.filter((request) => request.method === "workspace.close")).toHaveLength(1);
   });
 
   it("hands the workspace to a bare key after the attachment closes", async () => {
@@ -2007,9 +2281,9 @@ describe("EngineWorkspaceSessions", () => {
       currentClient: () => client,
     });
 
-    await expect(
-      sessions.run(workspace, async ({ workspace: handle }) => handle),
-    ).resolves.toBe("handle-1");
+    await expect(sessions.run(workspace, async ({ workspace: handle }) => handle)).resolves.toBe(
+      "handle-1",
+    );
     await sessions.closeWorkspace(workspace);
     await expect(
       sessions.run(
@@ -2038,9 +2312,9 @@ describe("EngineWorkspaceSessions", () => {
         sessions.run(bareWorkspace, async () => "bare"),
       ]),
     ).resolves.toEqual(["attachment", "bare"]);
-    expect(
-      client.requests.filter((request) => request.method === "workspace.open"),
-    ).toHaveLength(2);
+    expect(client.requests.filter((request) => request.method === "workspace.open")).toHaveLength(
+      2,
+    );
   });
 
   it("does not let a workspace-id close discover a token-bound attachment", async () => {
@@ -2053,20 +2327,20 @@ describe("EngineWorkspaceSessions", () => {
       currentClient: () => client,
     });
 
-    await expect(
-      sessions.run(workspace, async ({ workspace: handle }) => handle),
-    ).resolves.toBe("exact-handle");
+    await expect(sessions.run(workspace, async ({ workspace: handle }) => handle)).resolves.toBe(
+      "exact-handle",
+    );
     await sessions.closeWorkspace(workspace.workspaceId);
-    await expect(
-      sessions.run(workspace, async ({ workspace: handle }) => handle),
-    ).resolves.toBe("exact-handle");
+    await expect(sessions.run(workspace, async ({ workspace: handle }) => handle)).resolves.toBe(
+      "exact-handle",
+    );
 
-    expect(
-      client.requests.filter((request) => request.method === "workspace.open"),
-    ).toHaveLength(1);
-    expect(
-      client.requests.filter((request) => request.method === "workspace.close"),
-    ).toHaveLength(0);
+    expect(client.requests.filter((request) => request.method === "workspace.open")).toHaveLength(
+      1,
+    );
+    expect(client.requests.filter((request) => request.method === "workspace.close")).toHaveLength(
+      0,
+    );
   });
 
   it("rejects a changed root presented with the same attachment token", async () => {
@@ -2081,14 +2355,13 @@ describe("EngineWorkspaceSessions", () => {
     await sessions.run(workspace, async () => undefined);
 
     await expect(
-      sessions.run(
-        { ...workspace, rootPath: await tempRoot() },
-        async () => undefined,
-      ),
-    ).rejects.toThrow("This workspace no longer matches the open session. Open the workspace again.");
-    expect(
-      client.requests.filter((request) => request.method === "workspace.open"),
-    ).toHaveLength(1);
+      sessions.run({ ...workspace, rootPath: await tempRoot() }, async () => undefined),
+    ).rejects.toThrow(
+      "This workspace no longer matches the open session. Open the workspace again.",
+    );
+    expect(client.requests.filter((request) => request.method === "workspace.open")).toHaveLength(
+      1,
+    );
   });
 
   it("makes closeAll terminal so teardown cannot be repopulated", async () => {
@@ -2121,17 +2394,13 @@ describe("EngineWorkspaceSessions", () => {
 
     const closing = sessions.closeAll();
     await vi.waitFor(() => {
-      expect(
-        requests.filter((request) => request.method === "workspace.close"),
-      ).toHaveLength(1);
+      expect(requests.filter((request) => request.method === "workspace.close")).toHaveLength(1);
     });
     const lateRun = sessions.run(workspace, async () => "unexpected");
     closeGate.resolve();
     await closing;
 
-    await expect(lateRun).rejects.toThrow(
-      "Rust engine workspace sessions are closed.",
-    );
+    await expect(lateRun).rejects.toThrow("Rust engine workspace sessions are closed.");
     expect(openCount).toBe(1);
   });
 
@@ -2168,17 +2437,15 @@ describe("EngineWorkspaceSessions", () => {
       );
       expect(operation).not.toHaveBeenCalled();
       expect(requests).toHaveLength(1);
-      await expect(
-        sessions.run(otherWorkspace, async () => "other-opened"),
-      ).resolves.toBe("other-opened");
+      await expect(sessions.run(otherWorkspace, async () => "other-opened")).resolves.toBe(
+        "other-opened",
+      );
       expect(requests).toHaveLength(2);
     } finally {
       sessions.endRebuild(workspace);
     }
 
-    await expect(
-      sessions.run(workspace, async () => "opened"),
-    ).resolves.toBe("opened");
+    await expect(sessions.run(workspace, async () => "opened")).resolves.toBe("opened");
     expect(requests).toHaveLength(2);
   });
 
@@ -2231,9 +2498,7 @@ describe("EngineWorkspaceSessions", () => {
       sessions.endRebuild(workspace);
     }
 
-    await expect(
-      sessions.run(workspace, async () => "opened"),
-    ).resolves.toBe("opened");
+    await expect(sessions.run(workspace, async () => "opened")).resolves.toBe("opened");
     expect(openCount).toBe(2);
   });
 
@@ -2357,9 +2622,7 @@ describe("EngineWorkspaceSessions", () => {
         currentClient: () => {
           clientLookups += 1;
           if (!daemonAvailable) {
-            throw new EngineDaemonUnavailableError(
-              "Rust engine is relaunching.",
-            );
+            throw new EngineDaemonUnavailableError("Rust engine is relaunching.");
           }
           return client;
         },
@@ -2373,20 +2636,14 @@ describe("EngineWorkspaceSessions", () => {
     );
 
     await expect(
-      sessions.run(
-        workspace,
-        async ({ workspace: handle }) => handle,
-        { retryTransportErrors: true },
-      ),
+      sessions.run(workspace, async ({ workspace: handle }) => handle, {
+        retryTransportErrors: true,
+      }),
     ).resolves.toBe("handle-relaunched");
     expect(delays).toEqual([100]);
     expect(clientLookups).toBeGreaterThanOrEqual(3);
   });
 
-  // The pacing tests above pin the growth of the transport backoff; nothing
-  // pinned its ceiling, so the delay could double without limit and the whole
-  // suite stayed green. Three capped delays distinguish a ceiling from
-  // a slower uncapped curve, and eight attempts is what it takes to see them.
   it("stops doubling the transport backoff at its ceiling", async () => {
     const workspace = await tempWorkspace("workspace-backoff-ceiling");
     const client = new MockClient("handle-backoff-ceiling");
@@ -2413,12 +2670,12 @@ describe("EngineWorkspaceSessions", () => {
 
     // Literals, not the exported constant: an expectation that reads the value
     // it pins moves with it, and ships green for any ceiling at all.
-    expect(delays, "raise the clamp -> the tail reads 1600, 3200, 6400 and this fails. Nothing else in the suite notices.").toEqual([100, 200, 400, 800, 1_000, 1_000, 1_000]);
+    expect(
+      delays,
+      "raise the clamp -> the tail reads 1600, 3200, 6400 and this fails. Nothing else in the suite notices.",
+    ).toEqual([100, 200, 400, 800, 1_000, 1_000, 1_000]);
   });
 
-  // The retry deadline bounds how long one run may keep waiting on
-  // transport recovery. It gates retries only — a healthy first attempt is
-  // never rejected, however small the deadline.
   describe("retryDeadlineMs", () => {
     it("never rejects a healthy open, however small the deadline", async () => {
       const workspace = await tempWorkspace("workspace-healthy-deadline");
@@ -2428,10 +2685,12 @@ describe("EngineWorkspaceSessions", () => {
       });
 
       await expect(
-        sessions.withRetryBudget(1, async () =>
-          await sessions.run(workspace, async (binding) => binding.workspace, {
-            retryTransportErrors: true,
-          }),
+        sessions.withRetryBudget(
+          1,
+          async () =>
+            await sessions.run(workspace, async (binding) => binding.workspace, {
+              retryTransportErrors: true,
+            }),
         ),
       ).resolves.toBe("handle-healthy");
     });
@@ -2451,21 +2710,26 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(6_000, async () =>
-          await sessions.run(
-            workspace,
-            async () => {
-              attempts += 1;
-              nowMs += 2_500;
-              throw transportFailure();
-            },
-            { retryTransportErrors: true },
-          ),
+        .withRetryBudget(
+          6_000,
+          async () =>
+            await sessions.run(
+              workspace,
+              async () => {
+                attempts += 1;
+                nowMs += 2_500;
+                throw transportFailure();
+              },
+              { retryTransportErrors: true },
+            ),
         )
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      expect(attempts, "drop the deadline check -> all six attempts run and the rejection is EngineWorkspaceRebindError instead.").toBe(4);
+      expect(
+        attempts,
+        "drop the deadline check -> all six attempts run and the rejection is EngineWorkspaceRebindError instead.",
+      ).toBe(4);
       const message = (outcome as Error).message;
       // The rejection names the constraint, the configured limit with its
       // unit, and the observed wait (AGENTS.md: show agents the limits they
@@ -2496,10 +2760,12 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(6_000, async () =>
-          await sessions.run(workspace, async () => "unreachable", {
-            retryTransportErrors: true,
-          }),
+        .withRetryBudget(
+          6_000,
+          async () =>
+            await sessions.run(workspace, async () => "unreachable", {
+              retryTransportErrors: true,
+            }),
         )
         .catch((error: unknown) => error);
 
@@ -2510,10 +2776,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("does not start attempt N+1 on a budget the backoff spent", async () => {
-      // The deadline was checked only before the backoff. An
-      // attempt ending just inside it could ride the backoff over the line
-      // and still start a fresh 2 s open on a spent budget (~8 s observed on
-      // a 6 s contract). The clock is re-checked after the backoff.
       const workspace = await tempWorkspace("workspace-overshoot");
       const client = new MockClient("handle-overshoot");
       let nowMs = 0;
@@ -2534,26 +2796,29 @@ describe("EngineWorkspaceSessions", () => {
       // recovery (inside 2,600) and the 200 ms backoff after it ends at
       // 2,750 ms (outside).
       const outcome = await sessions
-        .withRetryBudget(2_600, async () =>
-          await sessions.run(
-            workspace,
-            async () => {
-              attempts += 1;
-              nowMs += 2_450;
-              throw transportFailure();
-            },
-            { retryTransportErrors: true },
-          ),
+        .withRetryBudget(
+          2_600,
+          async () =>
+            await sessions.run(
+              workspace,
+              async () => {
+                attempts += 1;
+                nowMs += 2_450;
+                throw transportFailure();
+              },
+              { retryTransportErrors: true },
+            ),
         )
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      expect(attempts, "drop the post-backoff re-check -> a third attempt starts on a budget the backoff had already spent.").toBe(2);
+      expect(
+        attempts,
+        "drop the post-backoff re-check -> a third attempt starts on a budget the backoff had already spent.",
+      ).toBe(2);
     });
 
     it("bounds the client-churn open ladder the same way", async () => {
-      // Churning client generations held a caller through six
-      // full opens — the ladder consulted neither the deadline nor shutdown.
       const workspace = await tempWorkspace("workspace-churn-deadline");
       const first = new MockClient("handle-churn-a");
       const second = new MockClient("handle-churn-b");
@@ -2571,12 +2836,16 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(6_000, async () =>
-          await sessions.run(workspace, async () => "unreachable"),
+        .withRetryBudget(
+          6_000,
+          async () => await sessions.run(workspace, async () => "unreachable"),
         )
         .catch((error: unknown) => error);
 
-      expect(outcome, "drop the deadline from the churn ladder -> the full six-open churn runs (12 reads) and rejects with EngineWorkspaceRebindError.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "drop the deadline from the churn ladder -> the full six-open churn runs (12 reads) and rejects with EngineWorkspaceRebindError.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(reads).toBe(6);
     });
 
@@ -2598,29 +2867,33 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(5_000, async () =>
-          await sessions.run(
-            workspace,
-            async () => {
-              attempts += 1;
-              nowMs += 2_000;
-              throw daemonRefusal("CONFLICT", "workspace moved", "afterReconnect");
-            },
-            { retryTransportErrors: true },
-          ),
+        .withRetryBudget(
+          5_000,
+          async () =>
+            await sessions.run(
+              workspace,
+              async () => {
+                attempts += 1;
+                nowMs += 2_000;
+                throw daemonRefusal("CONFLICT", "workspace moved", "afterReconnect");
+              },
+              { retryTransportErrors: true },
+            ),
         )
         .catch((error: unknown) => error);
 
-      expect(outcome, "gate only the transport branch -> six attempts and a DaemonRefusalError instead.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "gate only the transport branch -> six attempts and a DaemonRefusalError instead.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(attempts).toBe(4);
-      expect(sleep, "make `settleAttempt` back off unconditionally -> an afterReconnect retry waits, which this test's name says it never does.").not.toHaveBeenCalled();
+      expect(
+        sleep,
+        "make `settleAttempt` back off unconditionally -> an afterReconnect retry waits, which this test's name says it never does.",
+      ).not.toHaveBeenCalled();
     });
 
     it("bounds an open that keeps refusing with afterReconnect", async () => {
-      // The open ladder's gate only recognised transport and
-      // daemon-unavailable errors, so a `workspace.open` refusing with the
-      // afterReconnect disposition — which the shipping daemon does — ran
-      // six full opens past a spent budget.
       const workspace = await tempWorkspace("workspace-open-reconnect");
       let nowMs = 0;
       let opens = 0;
@@ -2638,24 +2911,23 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(5_000, async () =>
-          await sessions.run(workspace, async () => "unreachable", {
-            retryTransportErrors: true,
-          }),
+        .withRetryBudget(
+          5_000,
+          async () =>
+            await sessions.run(workspace, async () => "unreachable", {
+              retryTransportErrors: true,
+            }),
         )
         .catch((error: unknown) => error);
 
-      expect(outcome, "drop requiresReconnect from daemonMayBeRelaunching -> the ladder runs every attempt and rejects with the refusal instead.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "drop requiresReconnect from daemonMayBeRelaunching -> the ladder runs every attempt and rejects with the refusal instead.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(opens).toBe(4);
     });
 
     it("calls an exhausted ladder past its budget a deadline, not a transport failure", async () => {
-      // The last allowed attempt can start inside the budget
-      // and finish outside it. That branch threw the transport error, and
-      // main maps only EngineWorkspaceRetryDeadlineError to `engineMayHoldDocument` —
-      // so an exhausted ladder downgraded an engine-owned document to the
-      // writable plain editor. Same failure as the unbounded-task blocker,
-      // through a different door.
       const workspace = await tempWorkspace("workspace-exhausted");
       const client = new MockClient("handle-exhausted");
       let nowMs = 0;
@@ -2665,30 +2937,34 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(3_000, async () =>
-          await sessions.run(
-            workspace,
-            async () => {
-              // The last allowed attempt starts inside the budget (0 ms of
-              // recovery spent) and ends outside it, which is the case this
-              // pins.
-              nowMs += 3_000;
-              throw transportFailure();
-            },
-            { retryTransportErrors: true },
-          ),
+        .withRetryBudget(
+          3_000,
+          async () =>
+            await sessions.run(
+              workspace,
+              async () => {
+                // The last allowed attempt starts inside the budget (0 ms of
+                // recovery spent) and ends outside it, which is the case this
+                // pins.
+                nowMs += 3_000;
+                throw transportFailure();
+              },
+              { retryTransportErrors: true },
+            ),
         )
         .catch((error: unknown) => error);
 
-      expect(outcome, "throw the transport error at the terminal attempt -> this is `{ code: 'transport-error' }` and the document downgrades.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "throw the transport error at the terminal attempt -> this is `{ code: 'transport-error' }` and the document downgrades.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     });
 
     it("retries any method the daemon refuses with afterBackoff, once, after waiting", async () => {
-      // The engine answers `afterBackoff` for a busy store on every
-      // method, but only the open ladder and the Y.Doc surfaces collected on
-      // it — so a version or chat call reported the kebab-case wire message
-      // to the user for a condition that clears by itself. That is exactly
-      // the contract #595 round 14 refused to ship: a retry nobody performs.
+      // The engine answers `afterBackoff` for a busy store on every method,
+      // so the generic wrapper retries it for every method. Without that, a
+      // version or chat call reports the kebab-case wire message to the user
+      // for a condition that clears by itself.
       //
       // Safe for non-idempotent methods too, which is why it can live in the
       // generic wrapper: a busy store is raised by `BEGIN IMMEDIATE` or by
@@ -2698,10 +2974,7 @@ describe("EngineWorkspaceSessions", () => {
       const workspace = await tempWorkspace("workspace-run-backoff");
       const sleep = vi.fn(async () => undefined);
       const client = new MockClient("handle-run-backoff");
-      const sessions = new EngineWorkspaceSessions(
-        { currentClient: () => client },
-        { sleep },
-      );
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
 
       let attempts = 0;
       const result = await sessions.run(workspace, async () => {
@@ -2714,7 +2987,10 @@ describe("EngineWorkspaceSessions", () => {
 
       expect(result).toBe("landed");
       expect(attempts).toBe(2);
-      expect(sleep, "pass only `retryAfterTransport` as `backoff` -> the retry is immediate, which is not what `afterBackoff` asks for.").toHaveBeenCalled();
+      expect(
+        sleep,
+        "pass only `retryAfterTransport` as `backoff` -> the retry is immediate, which is not what `afterBackoff` asks for.",
+      ).toHaveBeenCalled();
     });
 
     it("does not retry a deadline, which shares the afterBackoff disposition", async () => {
@@ -2731,10 +3007,7 @@ describe("EngineWorkspaceSessions", () => {
       const workspace = await tempWorkspace("workspace-run-deadline");
       const sleep = vi.fn(async () => undefined);
       const client = new MockClient("handle-run-deadline");
-      const sessions = new EngineWorkspaceSessions(
-        { currentClient: () => client },
-        { sleep },
-      );
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
 
       let attempts = 0;
       const outcome = await sessions
@@ -2755,14 +3028,12 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("bounds an open the daemon keeps refusing with afterBackoff", async () => {
-      // Review round 8: `afterBackoff` is the daemon's own "retry, but wait" —
-      // it raises it for DeadlineExceeded and Overloaded on any method,
-      // including the `workspace.open` this file deadlines at 2 s. The gate
-      // recognised only transport, daemon-unavailable and afterReconnect, so
-      // the refusal took a bare `continue`: six immediate opens over ~12 s
-      // against a 5 s deadline, rejecting with the refusal (which main does
-      // not map to engineMayHoldDocument) and applying no backoff at all to an
-      // overload the daemon had just declared.
+      // `afterBackoff` is the daemon's own "retry, but wait". It raises it for
+      // DeadlineExceeded and Overloaded on any method, including the
+      // `workspace.open` this file deadlines at 2 s. An ungated refusal means
+      // six immediate opens over ~12 s against a 5 s deadline, a rejection
+      // with the refusal (which main does not map to engineMayHoldDocument),
+      // and no backoff against an overload the daemon had just declared.
       const workspace = await tempWorkspace("workspace-open-backoff");
       let nowMs = 0;
       let opens = 0;
@@ -2772,7 +3043,11 @@ describe("EngineWorkspaceSessions", () => {
         async sendRequest() {
           opens += 1;
           nowMs += 2_000;
-          throw daemonRefusal("DEADLINE_EXCEEDED", "workspace open exceeded its deadline", "afterBackoff");
+          throw daemonRefusal(
+            "DEADLINE_EXCEEDED",
+            "workspace open exceeded its deadline",
+            "afterBackoff",
+          );
         },
       };
       const sessions = new EngineWorkspaceSessions(
@@ -2786,25 +3061,31 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(4_000, async () =>
-          await sessions.run(workspace, async () => "unreachable", {
-            retryTransportErrors: true,
-          }),
+        .withRetryBudget(
+          4_000,
+          async () =>
+            await sessions.run(workspace, async () => "unreachable", {
+              retryTransportErrors: true,
+            }),
         )
         .catch((error: unknown) => error);
 
-      expect(outcome, "restore the bare `continue` for errors outside daemonMayBeRelaunching -> six opens and a DaemonRefusalError, so the surface downgrades to the writable plain editor.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "restore the bare `continue` for errors outside daemonMayBeRelaunching -> six opens and a DaemonRefusalError, so the surface downgrades to the writable plain editor.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(opens).toBe(3);
-      expect(delays, "drop requiresBackoff from the backoff decision -> the ladder re-opens immediately and amplifies the overload the daemon declared.").toEqual([100, 200]);
+      expect(
+        delays,
+        "drop requiresBackoff from the backoff decision -> the ladder re-opens immediately and amplifies the overload the daemon declared.",
+      ).toEqual([100, 200]);
     });
 
     it("gates an open that keeps failing with an ordinary error, without waiting", async () => {
-      // Delta review D1: a partial revert — restoring the bare `continue` only
-      // for errors that are neither `daemonMayBeRelaunching` nor
-      // `requiresBackoff` — passed the whole suite, so this half of the fix
-      // was unpinned. Reachable producers are ordinary: `prepareWorkspace`
-      // guard and fs errno failures, `DaemonProtocolError`, and
-      // `EngineClientError` with connect-timeout/closed/handshake-incomplete.
+      // The gate also covers errors that are neither `daemonMayBeRelaunching`
+      // nor `requiresBackoff`. Reachable producers are ordinary:
+      // `prepareWorkspace` guard and fs errno failures, `DaemonProtocolError`,
+      // and `EngineClientError` with connect-timeout/closed/handshake-incomplete.
       // None is a transport error or a refusal, so all of them land here.
       const workspace = await tempWorkspace("workspace-open-plain-error");
       let nowMs = 0;
@@ -2829,14 +3110,19 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(4_000, async () =>
-          await sessions.run(workspace, async () => "unreachable", {
-            retryTransportErrors: true,
-          }),
+        .withRetryBudget(
+          4_000,
+          async () =>
+            await sessions.run(workspace, async () => "unreachable", {
+              retryTransportErrors: true,
+            }),
         )
         .catch((error: unknown) => error);
 
-      expect(outcome, "restore the bare `continue` for errors outside daemonMayBeRelaunching -> six opens over 12,000 ms on a 4,000 ms budget, rejecting with the plain Error.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "restore the bare `continue` for errors outside daemonMayBeRelaunching -> six opens over 12,000 ms on a 4,000 ms budget, rejecting with the plain Error.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(opens).toBe(3);
       // Gated, but still immediate: the error class decides only whether to
       // wait, and an ordinary failure has no reason to.
@@ -2844,9 +3130,9 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("gates an open refused with the immediate disposition", async () => {
-      // Delta review D1: `immediate` is the fourth Retryability value and had
-      // no test at all. It must be gated like every other retry decision, and
-      // must not wait — the daemon said retry now.
+      // `immediate` is the fourth Retryability value. It must be gated like
+      // every other retry decision, and must not wait: the daemon said retry
+      // now.
       const workspace = await tempWorkspace("workspace-open-immediate");
       let nowMs = 0;
       let opens = 0;
@@ -2870,10 +3156,12 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(4_000, async () =>
-          await sessions.run(workspace, async () => "unreachable", {
-            retryTransportErrors: true,
-          }),
+        .withRetryBudget(
+          4_000,
+          async () =>
+            await sessions.run(workspace, async () => "unreachable", {
+              retryTransportErrors: true,
+            }),
         )
         .catch((error: unknown) => error);
 
@@ -2883,11 +3171,10 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("prefers the deadline to the terminal error when quit races the last attempt", async () => {
-      // Review round 8: `settleAttempt` checks the deadline before it consults
-      // `shuttingDown`, and the ordering was unpinned — swapping the two
-      // passed every test. At quit, on the last allowed attempt with a spent
-      // budget, the swap returns the ladder's own transport error, which main
-      // does not map to engineMayHoldDocument: the plain-editor downgrade, at quit.
+      // `settleAttempt` checks the deadline before it consults `shuttingDown`.
+      // At quit, on the last allowed attempt with a spent budget, the other
+      // order returns the ladder's own transport error, which main does not
+      // map to engineMayHoldDocument: the plain-editor downgrade, at quit.
       const workspace = await tempWorkspace("workspace-quit-vs-deadline");
       const client = new MockClient("handle-quit-deadline");
       let nowMs = 0;
@@ -2897,21 +3184,25 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(3_000, async () =>
-          await sessions.run(
-            workspace,
-            async () => {
-              nowMs += 3_000;
-              // Quit arrives while the last allowed attempt is in flight.
-              if (nowMs >= 6_000) sessions.beginShutdown();
-              throw transportFailure();
-            },
-            { retryTransportErrors: true },
-          ),
+        .withRetryBudget(
+          3_000,
+          async () =>
+            await sessions.run(
+              workspace,
+              async () => {
+                nowMs += 3_000;
+                if (nowMs >= 6_000) sessions.beginShutdown();
+                throw transportFailure();
+              },
+              { retryTransportErrors: true },
+            ),
         )
         .catch((error: unknown) => error);
 
-      expect(outcome, "check `shuttingDown` before the lastAttempt deadline branch -> `{ code: 'transport-error' }`, and the document downgrades.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "check `shuttingDown` before the lastAttempt deadline branch -> `{ code: 'transport-error' }`, and the document downgrades.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     });
 
     it("calls an exhausted CHURN ladder past its budget a deadline too", async () => {
@@ -2952,15 +3243,17 @@ describe("EngineWorkspaceSessions", () => {
         })
         .catch((error: unknown) => error);
 
-      expect(outcome, "throw the rebind error before the terminal deadline check -> EngineWorkspaceRebindError, and the document downgrades.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      expect((outcome as Error).message, "stop counting churned opens on the budget -> 'across 0 attempts' for a wait this ladder is the whole explanation for.").toContain("across 2 failed attempts");
+      expect(
+        outcome,
+        "throw the rebind error before the terminal deadline check -> EngineWorkspaceRebindError, and the document downgrades.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        (outcome as Error).message,
+        "stop counting churned opens on the budget -> 'across 0 attempts' for a wait this ladder is the whole explanation for.",
+      ).toContain("across 2 failed attempts");
     });
 
     it("counts attempts across the whole budget, not one ladder's share", async () => {
-      // The refusal reported the LOCAL ladder's counter, which
-      // each `run` resets — so a wait covering several daemon attempts could
-      // say "across 1 attempts". False diagnostic data in an error whose job
-      // is to tell an agent what happened.
       const workspace = await tempWorkspace("workspace-cumulative");
       const client = new MockClient("handle-cumulative");
       let nowMs = 0;
@@ -2971,10 +3264,6 @@ describe("EngineWorkspaceSessions", () => {
 
       const outcome = await sessions
         .withRetryBudget(4_000, async () => {
-          // Two runs inside one budget. The first is not a retry ladder, so
-          // it spends one attempt and rejects on its own; the second retries
-          // and trips the budget on its second attempt. Three attempts have
-          // happened by then — one ladder can only see two.
           await sessions
             .run(workspace, async () => {
               nowMs += 2_000;
@@ -2993,11 +3282,11 @@ describe("EngineWorkspaceSessions", () => {
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      expect((outcome as Error).message, "report the local `attempt` -> 'across 1 attempts', a number the reader would take for the whole wait.").toContain("across 3 failed attempts");
-      // The constraint named is the one the caller set.
-      expect((outcome as Error).message).toContain(
-        "withRetryBudget budgetMs limit of 4000ms",
-      );
+      expect(
+        (outcome as Error).message,
+        "report the local `attempt` -> 'across 1 attempts', a number the reader would take for the whole wait.",
+      ).toContain("across 3 failed attempts");
+      expect((outcome as Error).message).toContain("withRetryBudget budgetMs limit of 4000ms");
       // The budget's clock starts at the first failure (t=2,000) and the
       // region started at t=0, so the two durations differ by that first
       // attempt: 4,000ms of budget spent, 6,000ms of chain actually held.
@@ -3007,11 +3296,10 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("reports the recovery window and the total wait as different numbers", async () => {
-      // codex on the round-10 head: the budget's clock starts at the first
-      // FAILURE, but the message reported that interval as the time waited
-      // "across" an attempt count that includes the first failure. One number
-      // was being asked to mean two things, and an agent diagnosing a capture
-      // chain held for 8s read 6s and looked in the wrong place.
+      // The budget's clock starts at the first failure, so the recovery
+      // window is shorter than the total wait. The message reports both, so
+      // that an agent diagnosing a capture chain held for 8 s does not read
+      // 6 s and look in the wrong place.
       const workspace = await tempWorkspace("workspace-two-durations");
       const client = new MockClient("handle-two-durations");
       // A clock that does not start at zero. `performance.now()` never does in
@@ -3025,24 +3313,22 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(6_000, async () =>
-          await sessions.run(
-            workspace,
-            async () => {
-              // A slow first attempt (2s) the budget must not charge, then
-              // failures that spend it.
-              nowMs += 2_000;
-              throw transportFailure();
-            },
-            { retryTransportErrors: true },
-          ),
+        .withRetryBudget(
+          6_000,
+          async () =>
+            await sessions.run(
+              workspace,
+              async () => {
+                nowMs += 2_000;
+                throw transportFailure();
+              },
+              { retryTransportErrors: true },
+            ),
         )
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       const deadline = outcome as EngineWorkspaceRetryDeadlineError;
-      // The chain was held for 8s; the recovery window that the limit bounds
-      // opened 2s in.
       expect(deadline.measuredMs).toBe(6_000);
       expect(deadline.totalWaitedMs).toBe(8_000);
       expect(deadline.message).toContain("6000ms since the first failure");
@@ -3050,13 +3336,10 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("does not spend the budget on a slow attempt that was succeeding", async () => {
-      // Anchored at region entry, this budget rejected work it had
-      // never measured. A legitimately slow open — a large document's lineage
-      // resurrection, the slow case #514 fought — spent the whole budget while
-      // succeeding, and the first blip after it was then refused a retry that
-      // would have bound. The measurement on record uses an instant provider
-      // stub, so it covers none of that. The clock starts at the first
-      // FAILURE instead: what stays bounded is recovery, which is what the
+      // A slow healthy open, such as a large document's lineage resurrection,
+      // must not spend the budget while it succeeds and leave the first
+      // transport failure after it with no retry. The clock starts at the
+      // first failure: what stays bounded is recovery, which is what the
       // constant is derived from.
       const workspace = await tempWorkspace("workspace-slow-but-healthy");
       const client = new MockClient("handle-slow-healthy");
@@ -3067,34 +3350,36 @@ describe("EngineWorkspaceSessions", () => {
         { now: () => nowMs, sleep: async () => {} },
       );
 
-      const outcome = await sessions.withRetryBudget(2_000, async () =>
-        await sessions.run(
-          workspace,
-          async () => {
-            attempts += 1;
-            // Attempt 1 works for 10 s — five times the budget — and then
-            // hits one transport blip. Attempt 2 binds immediately.
-            if (attempts === 1) {
-              nowMs += 10_000;
-              throw transportFailure();
-            }
-            return "bound";
-          },
-          { retryTransportErrors: true },
-        ),
+      const outcome = await sessions.withRetryBudget(
+        2_000,
+        async () =>
+          await sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              if (attempts === 1) {
+                nowMs += 10_000;
+                throw transportFailure();
+              }
+              return "bound";
+            },
+            { retryTransportErrors: true },
+          ),
       );
 
-      expect(outcome, "anchor the budget at region entry -> the retry is refused with EngineWorkspaceRetryDeadlineError and the document is downgraded, for an open that was healthy and simply slow.").toBe("bound");
+      expect(
+        outcome,
+        "anchor the budget at region entry -> the retry is refused with EngineWorkspaceRetryDeadlineError and the document is downgraded, for an open that was healthy and simply slow.",
+      ).toBe("bound");
       expect(attempts).toBe(2);
     });
 
     it("refuses the next call when an earlier one recovered past the window", async () => {
-      // codex r15, and it is the bound's own hole. The gates lived on the
-      // failure path, so a call that failed, recovered and returned left the
-      // budget spent with nothing to notice: the next call started unbounded.
-      // In the document open that is the version read recovering and then
-      // admitting the provider open past the window — the capture chain held
-      // with no deadline left to stop it, which is the hold #564 removes.
+      // The gates also run at the start of a call. A call that failed,
+      // recovered and returned leaves the budget spent, and the next call
+      // must not start unbounded. In the document open that is the version
+      // read recovering and then admitting the provider open past the window,
+      // with the capture chain held and no deadline left to stop it.
       const workspace = await tempWorkspace("workspace-spent-then-next");
       const client = new MockClient("handle-spent-then-next");
       let nowMs = 5_000;
@@ -3107,8 +3392,6 @@ describe("EngineWorkspaceSessions", () => {
       const outcome = await sessions
         .withRetryBudget(2_000, async () => {
           let attempts = 0;
-          // Call 1 fails once — starting the clock — waits out the whole
-          // budget, and then SUCCEEDS. Nothing on this path throws.
           await sessions.run(
             workspace,
             async () => {
@@ -3126,20 +3409,18 @@ describe("EngineWorkspaceSessions", () => {
         })
         .catch((error: unknown) => error);
 
-      expect(outcome, "check the budget only at region entry and after a failure -> this call runs, and everything it opens is unbounded.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "check the budget only at region entry and after a failure -> this call runs, and everything it opens is unbounded.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(secondCall).toBe(0);
       const deadline = outcome as EngineWorkspaceRetryDeadlineError;
       expect(deadline.constraint).toBe("withRetryBudget budgetMs");
       expect(deadline.limitMs).toBe(2_000);
-      // The failure that started the clock rides along, so the refusal says
-      // what the region was recovering from.
       expect(deadline.cause).toMatchObject({ code: "transport-error" });
     });
 
     it("refuses the next call when quit arrives between two calls", async () => {
-      // The same gap, reached the other way: `withRetryBudget` checks
-      // `shuttingDown` at region entry, so a flag that flips between two calls
-      // was never consulted and the region went on holding the chain.
       const workspace = await tempWorkspace("workspace-quit-between");
       const client = new MockClient("handle-quit-between");
       let secondCall = 0;
@@ -3158,17 +3439,19 @@ describe("EngineWorkspaceSessions", () => {
         })
         .catch((error: unknown) => error);
 
-      expect(outcome, "consult `shuttingDown` only at region entry -> the quit teardown waits behind a call this region had not started yet.").toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(
+        outcome,
+        "consult `shuttingDown` only at region entry -> the quit teardown waits behind a call this region had not started yet.",
+      ).toBeInstanceOf(EngineWorkspaceShuttingDownError);
       expect(secondCall).toBe(0);
     });
 
     it("refuses the operation when the rebind spent the window", async () => {
-      // codex r17. The start-of-run gate answered before `openForRun`, and
-      // that call has a ladder of its own: it can wait, retry, recover, and
-      // return with the whole window behind it. The operation it admits is the
-      // document open itself — so the region ended up holding the capture
-      // chain on a budget it had already spent, which is the hold this whole
-      // bound exists to remove.
+      // `openForRun` has a ladder of its own: it can wait, retry, recover,
+      // and return with the whole window behind it. The operation it admits
+      // is the document open itself, so a gate that answers only before
+      // `openForRun` leaves the region holding the capture chain on a budget
+      // it has already spent.
       const workspace = await tempWorkspace("workspace-rebind-spends");
       let nowMs = 5_000;
       let opens = 0;
@@ -3177,8 +3460,6 @@ describe("EngineWorkspaceSessions", () => {
         close: () => undefined,
         async sendRequest(request) {
           opens += 1;
-          // The first open fails, which starts the clock, and the retry
-          // succeeds — after the whole window has gone by.
           if (opens === 1) {
             nowMs += 100;
             throw transportFailure();
@@ -3193,32 +3474,27 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(2_000, async () =>
-          await sessions.run(
-            workspace,
-            async () => {
-              operations += 1;
-              return "held the chain";
-            },
-            { retryTransportErrors: true },
-          ),
+        .withRetryBudget(
+          2_000,
+          async () =>
+            await sessions.run(
+              workspace,
+              async () => {
+                operations += 1;
+                return "held the chain";
+              },
+              { retryTransportErrors: true },
+            ),
         )
         .catch((error: unknown) => error);
 
-      expect(outcome, "check the region only before `openForRun` -> the operation runs on a spent budget, unbounded.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "check the region only before `openForRun` -> the operation runs on a spent budget, unbounded.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(operations).toBe(0);
     });
 
-    // The third await found holding this hole, which is why the check moved to
-    // the doors instead of gaining a third caller. A run that arrives while the
-    // entry is closing waits for that close — and a `workspace.close` is a
-    // daemon round trip, so the window can go by inside it. The run then walked
-    // on into a 2 s `workspace.open` with nothing left to stop it.
-    //
-    // What it costs is the open, not the answer: the gate after the rebind
-    // still refuses the operation, so the run fails either way. It fails after
-    // holding the capture chain through a 2 s `workspace.open` that had no
-    // business starting — which is the hold, and the thing to count.
     function closingEntryHarness(options: {
       onClose: (advance: () => void) => void;
       nowRef: { ms: number };
@@ -3250,7 +3526,6 @@ describe("EngineWorkspaceSessions", () => {
       const client = closingEntryHarness({
         nowRef,
         opensAfterClose,
-        // The close IS the wait: the budget goes by inside it.
         onClose: (advance) => advance(),
       });
       const sessions = new EngineWorkspaceSessions(
@@ -3260,8 +3535,6 @@ describe("EngineWorkspaceSessions", () => {
 
       const outcome = await sessions
         .withRetryBudget(2_000, async () => {
-          // One failure starts the clock, and the retry succeeds well inside
-          // the window — so the gate at the top of `run` has nothing to refuse.
           let attempts = 0;
           await sessions.run(
             workspace,
@@ -3272,7 +3545,6 @@ describe("EngineWorkspaceSessions", () => {
             },
             { retryTransportErrors: true },
           );
-          // Now the entry starts closing, and this run queues behind it.
           const closing = sessions.closeWorkspace(workspace.workspaceId);
           const queued = sessions.run(workspace, async () => {
             operations += 1;
@@ -3285,7 +3557,10 @@ describe("EngineWorkspaceSessions", () => {
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(operations).toBe(0);
-      expect(opensAfterClose.count, "check the region only at `run` entry and after the rebind -> a `workspace.open` is issued on a budget the closing wait had already spent, and the capture chain waits out its 2 s deadline for nothing.").toBe(0);
+      expect(
+        opensAfterClose.count,
+        "check the region only at `run` entry and after the rebind -> a `workspace.open` is issued on a budget the closing wait had already spent, and the capture chain waits out its 2 s deadline for nothing.",
+      ).toBe(0);
     });
 
     it("refuses an open that waited out a quit on a closing entry", async () => {
@@ -3297,8 +3572,6 @@ describe("EngineWorkspaceSessions", () => {
       const client = closingEntryHarness({
         nowRef,
         opensAfterClose,
-        // Quit arrives while the close is in flight, so nothing this run has
-        // already checked knows about it.
         onClose: () => sessions.beginShutdown(),
       });
       sessions = new EngineWorkspaceSessions(
@@ -3321,18 +3594,16 @@ describe("EngineWorkspaceSessions", () => {
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceShuttingDownError);
       expect(operations).toBe(0);
-      // Nothing new starts during teardown, whatever it waited on.
       expect(opensAfterClose.count).toBe(0);
     });
 
     it("refuses on time when a stale client never answers its cleanup close", async () => {
-      // codex r19, and the r18 class in one more flavor: the doors bound what
-      // starts, and this await sat between two of them. When the client churns
-      // mid-open the loser's binding is closed — and a `workspace.close` on a
-      // client that is connected but unresponsive never answers, so the region
-      // waited there past its budget and past quit with the gate one line
-      // away. Cleanup for a generation nobody will use again does not get to
-      // hold the capture chain.
+      // The doors bound what starts, and nothing may block the region between
+      // two of them. When the client churns mid-open the loser's binding is
+      // closed, and a `workspace.close` on a client that is connected but
+      // unresponsive never answers. Cleanup for a generation nobody will use
+      // again does not get to hold the capture chain past its budget or past
+      // quit.
       //
       // Under the defect this test does not fail, it hangs: the first cleanup
       // close never settles, so the run never returns and the case becomes the
@@ -3341,8 +3612,6 @@ describe("EngineWorkspaceSessions", () => {
       let nowMs = 5_000;
       let reads = 0;
       let closeStarted = 0;
-      // Every open answers and then finds the client changed under it, so the
-      // ladder churns — and every loser's cleanup close hangs.
       const churning = (): EngineDaemonClient => ({
         close: () => undefined,
         async sendRequest(request) {
@@ -3350,7 +3619,6 @@ describe("EngineWorkspaceSessions", () => {
             closeStarted += 1;
             return await new Promise<never>(() => {});
           }
-          // Each open costs 4,000 ms against a 2,000 ms window.
           nowMs += 4_000;
           return { id: request.id, result: { workspace: "churning" } };
         },
@@ -3368,27 +3636,24 @@ describe("EngineWorkspaceSessions", () => {
       );
 
       const outcome = await sessions
-        .withRetryBudget(2_000, async () =>
-          await sessions.run(workspace, async () => "unreachable", {
-            retryTransportErrors: true,
-          }),
+        .withRetryBudget(
+          2_000,
+          async () =>
+            await sessions.run(workspace, async () => "unreachable", {
+              retryTransportErrors: true,
+            }),
         )
         .catch((error: unknown) => error);
 
-      expect(outcome, "await the cleanup close -> this never resolves and the region is held by a daemon request nothing bounds.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        outcome,
+        "await the cleanup close -> this never resolves and the region is held by a daemon request nothing bounds.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       // The cleanup was still issued — it is best-effort, not skipped.
       expect(closeStarted).toBeGreaterThan(0);
     });
 
     it("lets a settle armed during the open run after the region ends", async () => {
-      // codex r22, and the round-9 asymmetry wearing an async-context coat.
-      // A document open installs things that outlive it — the settle debounce
-      // timer, the remote-update subscription, the save-state reporter — and a
-      // Node timer keeps the async context it was created in. So the session's
-      // later work kept reading as work inside the abandonable open region,
-      // for the whole life of the session: a settle for an edit the engine had
-      // already accepted would be refused by a budget spent during the open.
-      // That is the one thing this class must never do to an accepted write.
       const workspace = await tempWorkspace("workspace-settle-after-region");
       const client = new MockClient("handle-settle-after");
       let nowMs = 5_000;
@@ -3407,7 +3672,6 @@ describe("EngineWorkspaceSessions", () => {
           workspace,
           async () => {
             attempts += 1;
-            // One failure starts the budget's clock, and the retry binds.
             if (attempts === 1) throw transportFailure();
             return "bound";
           },
@@ -3415,13 +3679,9 @@ describe("EngineWorkspaceSessions", () => {
         );
         settle = new Promise((resolve, reject) => {
           setTimeout(() => {
-            // The accepted edit's settle, on the live session.
-            sessions
-              .run(workspace, async () => "settled")
-              .then(resolve, reject);
+            sessions.run(workspace, async () => "settled").then(resolve, reject);
           }, 0);
         });
-        // The open spends the rest of its window before returning.
         nowMs += 5_000;
       });
 
@@ -3429,9 +3689,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("lets a settle armed during the open survive quit", async () => {
-      // The same leak, reached through `beginShutdown` instead of the clock:
-      // an abandonable region stops retrying at quit, and a live document's
-      // settle is not abandonable.
       const workspace = await tempWorkspace("workspace-settle-after-quit");
       const client = new MockClient("handle-settle-quit");
       const sessions = new EngineWorkspaceSessions({
@@ -3449,8 +3706,6 @@ describe("EngineWorkspaceSessions", () => {
                 workspace,
                 async () => {
                   attempts += 1;
-                  // The daemon blips once; an accepted write retries through
-                  // it even at quit.
                   if (attempts === 1) throw transportFailure();
                   return "settled";
                 },
@@ -3466,9 +3721,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("keeps running a region whose budget clock never started", async () => {
-      // The invariant the gate must not break: a healthy attempt costs the
-      // budget nothing, however long it takes, so a region that has not
-      // failed yet is never refused for time alone.
       const workspace = await tempWorkspace("workspace-healthy-region");
       const client = new MockClient("handle-healthy-region");
       let nowMs = 5_000;
@@ -3494,15 +3746,12 @@ describe("EngineWorkspaceSessions", () => {
         currentClient: () => client,
       });
 
-      await expect(
-        sessions.withRetryBudget(0, async () => "unreachable"),
-      ).rejects.toThrow(TypeError);
+      await expect(sessions.withRetryBudget(0, async () => "unreachable")).rejects.toThrow(
+        TypeError,
+      );
     });
   });
 
-  // App quit. Retry waiting ends now — an armed backoff resolves, the
-  // failure that caused it surfaces, and the capture chain behind the run is
-  // free within one attempt instead of the full ladder.
   describe("beginShutdown", () => {
     // Quit ends retry waiting for a bounded region, and only for one. Every
     // test below therefore runs its ladder inside `withRetryBudget`, because
@@ -3521,30 +3770,52 @@ describe("EngineWorkspaceSessions", () => {
     const ABANDONABLE = 60_000;
 
     it("observes shutdown raised synchronously while a backoff starts", async () => {
-      const workspace = await tempWorkspace(), client = new MockClient("shutdown-start");
+      const workspace = await tempWorkspace(),
+        client = new MockClient("shutdown-start");
       const failure = transportFailure();
-      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-        sleep: () => {
-          sessions.beginShutdown();
-          return new Promise<void>(() => {});
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          sleep: () => {
+            sessions.beginShutdown();
+            return new Promise<void>(() => {});
+          },
         },
-      });
+      );
       let attempts = 0;
-      await expect(sessions.withRetryBudget(ABANDONABLE, () => sessions.run(workspace,
-        async () => { attempts += 1; throw failure; }, { retryTransportErrors: true }))).rejects.toBe(failure);
+      await expect(
+        sessions.withRetryBudget(ABANDONABLE, () =>
+          sessions.run(
+            workspace,
+            async () => {
+              attempts += 1;
+              throw failure;
+            },
+            { retryTransportErrors: true },
+          ),
+        ),
+      ).rejects.toBe(failure);
       expect(attempts).toBe(1);
       await sessions.closeAll();
     });
 
     it("clears a real bounded backoff timer at shutdown", async () => {
-      const workspace = await tempWorkspace(), client = new MockClient("shutdown-timer");
+      const workspace = await tempWorkspace(),
+        client = new MockClient("shutdown-timer");
       const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
       const failure = transportFailure();
       await sessions.run(workspace, async () => undefined);
       vi.useFakeTimers();
       try {
-        const run = sessions.withRetryBudget(ABANDONABLE, () => sessions.run(workspace,
-          async () => { throw failure; }, { retryTransportErrors: true }));
+        const run = sessions.withRetryBudget(ABANDONABLE, () =>
+          sessions.run(
+            workspace,
+            async () => {
+              throw failure;
+            },
+            { retryTransportErrors: true },
+          ),
+        );
         const rejected = expect(run).rejects.toBe(failure);
         await vi.advanceTimersByTimeAsync(0);
         expect(vi.getTimerCount()).toBe(1);
@@ -3558,13 +3829,28 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("preserves an injected sleep rejection without wrapping it", async () => {
-      const workspace = await tempWorkspace(), client = new MockClient("sleep-refusal");
+      const workspace = await tempWorkspace(),
+        client = new MockClient("sleep-refusal");
       const sleepFailure = new Error("Injected sleep failed.");
-      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-        sleep: async () => { throw sleepFailure; },
-      });
-      await expect(sessions.withRetryBudget(ABANDONABLE, () => sessions.run(workspace,
-        async () => { throw transportFailure(); }, { retryTransportErrors: true }))).rejects.toBe(sleepFailure);
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          sleep: async () => {
+            throw sleepFailure;
+          },
+        },
+      );
+      await expect(
+        sessions.withRetryBudget(ABANDONABLE, () =>
+          sessions.run(
+            workspace,
+            async () => {
+              throw transportFailure();
+            },
+            { retryTransportErrors: true },
+          ),
+        ),
+      ).rejects.toBe(sleepFailure);
       await sessions.closeAll();
     });
 
@@ -3596,17 +3882,17 @@ describe("EngineWorkspaceSessions", () => {
           ),
       );
       // The failed open first prepares the real workspace folder on disk.
-      await vi.waitFor(() => {
-        expect(sleeping).not.toBeNull();
-      }, { timeout: 10_000 });
+      await vi.waitFor(
+        () => {
+          expect(sleeping).not.toBeNull();
+        },
+        { timeout: 10_000 },
+      );
       sessions.beginShutdown();
       await expect(run).rejects.toMatchObject({ code: "transport-error" });
     });
 
     it("exits the client-churn open ladder", async () => {
-      // beginShutdown resolved the churn ladder's sleep, but
-      // the loop continued without checking — churning generations could
-      // hold the chain into the forced-exit timer.
       const workspace = await tempWorkspace("workspace-churn-shutdown");
       const first = new MockClient("handle-churn-c");
       const second = new MockClient("handle-churn-d");
@@ -3643,10 +3929,7 @@ describe("EngineWorkspaceSessions", () => {
       const sleep = vi.fn(async () => {});
       // A reopen on a relaunched daemon: quit abandons a first open outright.
       let client: EngineDaemonClient = new MockClient("before-relaunch");
-      const sessions = new EngineWorkspaceSessions(
-        { currentClient: () => client },
-        { sleep },
-      );
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
       await sessions.run(workspace, async () => undefined);
       client = {
         close: () => undefined,
@@ -3667,23 +3950,23 @@ describe("EngineWorkspaceSessions", () => {
             }),
         ),
       ).rejects.toBeInstanceOf(DaemonRefusalError);
-      expect(opens, "drop requiresReconnect from the gate -> six opens while the quit teardown waits on the chain behind them.").toBe(1);
+      expect(
+        opens,
+        "drop requiresReconnect from the gate -> six opens while the quit teardown waits on the chain behind them.",
+      ).toBe(1);
       expect(sleep).not.toHaveBeenCalled();
     });
 
     it("stops an open the daemon keeps refusing with afterBackoff", async () => {
-      // Review round 8, the quit half of the same gap: an `afterBackoff`
-      // refusal took a bare `continue`, so beginShutdown() could not end the
-      // ladder and the quit teardown waited on the chain behind six opens.
+      // The quit half of the same gate: beginShutdown() must end the ladder
+      // for an `afterBackoff` refusal, or the quit teardown waits on the
+      // chain behind six opens.
       const workspace = await tempWorkspace("workspace-open-backoff-quit");
       let opens = 0;
       const sleep = vi.fn(async () => {});
       // A reopen on a relaunched daemon: quit abandons a first open outright.
       let client: EngineDaemonClient = new MockClient("before-relaunch");
-      const sessions = new EngineWorkspaceSessions(
-        { currentClient: () => client },
-        { sleep },
-      );
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
       await sessions.run(workspace, async () => undefined);
       client = {
         close: () => undefined,
@@ -3704,14 +3987,14 @@ describe("EngineWorkspaceSessions", () => {
             }),
         ),
       ).rejects.toBeInstanceOf(DaemonRefusalError);
-      expect(opens, "restore the bare `continue` -> six opens while the quit teardown waits on the capture chain behind them.").toBe(1);
+      expect(
+        opens,
+        "restore the bare `continue` -> six opens while the quit teardown waits on the capture chain behind them.",
+      ).toBe(1);
       expect(sleep).not.toHaveBeenCalled();
     });
 
     it("makes a later afterReconnect refusal final too", async () => {
-      // Same gap from the shutdown side: an afterReconnect storm at quit
-      // never consulted `shuttingDown`, so it kept reopening the workspace
-      // while the teardown waited on the chain behind it.
       const workspace = await tempWorkspace("workspace-reconnect-shutdown");
       const client = new MockClient("handle-reconnect-quit");
       let attempts = 0;
@@ -3723,15 +4006,22 @@ describe("EngineWorkspaceSessions", () => {
         sessions.withRetryBudget(
           ABANDONABLE,
           async () =>
-            await sessions.run(workspace, async () => {
-              attempts += 1;
-              // Quit lands while the first attempt is in flight.
-              if (attempts === 1) sessions.beginShutdown();
-              throw daemonRefusal("CONFLICT", "workspace moved", "afterReconnect");
-            }, { retryTransportErrors: true }),
+            await sessions.run(
+              workspace,
+              async () => {
+                attempts += 1;
+                // Quit lands while the first attempt is in flight.
+                if (attempts === 1) sessions.beginShutdown();
+                throw daemonRefusal("CONFLICT", "workspace moved", "afterReconnect");
+              },
+              { retryTransportErrors: true },
+            ),
         ),
       ).rejects.toBeInstanceOf(DaemonRefusalError);
-      expect(attempts, "gate only the transport branch -> the full six-attempt ladder runs while the quit teardown waits behind it.").toBe(1);
+      expect(
+        attempts,
+        "gate only the transport branch -> the full six-attempt ladder runs while the quit teardown waits behind it.",
+      ).toBe(1);
     });
 
     it("makes a later transport failure final instead of retried", async () => {
@@ -3739,10 +4029,7 @@ describe("EngineWorkspaceSessions", () => {
       const client = new MockClient("handle-shutdown-final");
       let attempts = 0;
       const sleep = vi.fn(async () => {});
-      const sessions = new EngineWorkspaceSessions(
-        { currentClient: () => client },
-        { sleep },
-      );
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
 
       await expect(
         sessions.withRetryBudget(
@@ -3765,12 +4052,12 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("refuses a bounded region that tries to start after shutdown began", async () => {
-      // codex on the round-9 head, and the other half of the backoff finding:
-      // `shuttingDown` was consulted on the FAILURE path only, so a task that
-      // never fails never checks it. A document open still queued on the
-      // capture chain when `will-quit` fires would enter the region
-      // afterwards, succeed at its first workspace call, and proceed into a
-      // `ydoc.open` whose own bound outlasts the 3 s forced-exit timer.
+      // `shuttingDown` is consulted at region entry as well as on the failure
+      // path, because a task that never fails never reaches the failure path.
+      // Otherwise a document open still queued on the capture chain when
+      // `will-quit` fires would enter the region afterwards, succeed at its
+      // first workspace call, and proceed into a `ydoc.open` whose own bound
+      // outlasts the 3 s forced-exit timer.
       const workspace = await tempWorkspace("workspace-region-after-quit");
       const client = new MockClient("handle-region-after-quit");
       let ran = 0;
@@ -3786,7 +4073,10 @@ describe("EngineWorkspaceSessions", () => {
         })
         .catch((error: unknown) => error);
 
-      expect(outcome, "start the task unconditionally -> the region runs, the open succeeds, and the chain is held into the forced-exit timer.").toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(
+        outcome,
+        "start the task unconditionally -> the region runs, the open succeeds, and the chain is held into the forced-exit timer.",
+      ).toBeInstanceOf(EngineWorkspaceShuttingDownError);
       expect(ran).toBe(0);
       // It must keep the document READ-ONLY, never downgrade it to the
       // writable plain editor: main answers both open refusals with
@@ -3797,7 +4087,7 @@ describe("EngineWorkspaceSessions", () => {
     it("stops waiting on a workspace's first open when quit begins", async () => {
       // Nothing was accepted through a session that never opened, and the
       // daemon finishes the open on its own after the app exits. Waiting on
-      // it ran quit past its budget on a busy disk (#2187).
+      // it runs quit past its budget on a busy disk.
       const workspace = await tempWorkspace("workspace-first-open-quit");
       const opened = deferred<Response>();
       const requests: Request[] = [];
@@ -3818,31 +4108,28 @@ describe("EngineWorkspaceSessions", () => {
       await expect(starter).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
       await expect(waiter).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
       await sessions.closeWorkspace(workspace);
-      await expect(sessions.run(workspace, async () => "unreachable")).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
-      expect(requests.map(request => request.method), "a fresh session at quit must not start another open").toEqual(["workspace.open"]);
+      await expect(sessions.run(workspace, async () => "unreachable")).rejects.toBeInstanceOf(
+        EngineWorkspaceShuttingDownError,
+      );
+      expect(
+        requests.map((request) => request.method),
+        "a fresh session at quit must not start another open",
+      ).toEqual(["workspace.open"]);
 
       opened.resolve({ id: requests[0]!.id, result: { workspace: "late" } });
       await sessions.closeAll();
-      expect(requests.map(request => request.method), "the daemon closes an abandoned open itself").toEqual(["workspace.open"]);
+      expect(
+        requests.map((request) => request.method),
+        "the daemon closes an abandoned open itself",
+      ).toEqual(["workspace.open"]);
     });
 
     it("keeps retrying work outside a bounded region at quit", async () => {
-      // `beginShutdown` is a global flag doing a scoped job. It must
-      // abandon a pending document open — which holds no edit — and it
-      // must not abandon an already-open document retrying a write the engine
-      // already accepted. That update lives only in the canonical in-memory
-      // Y.Doc, `closeAllEngineYDocSessions` swallows the failure, and
-      // `app.exit(0)` then discards it: silent data loss at exit, and the
-      // opposite obligation from the one the bound was aimed at.
       const workspace = await tempWorkspace("workspace-accepted-write-quit");
       const client = new MockClient("handle-accepted-write");
       let attempts = 0;
       const sleep = vi.fn(async () => {});
-      const sessions = new EngineWorkspaceSessions(
-        { currentClient: () => client },
-        { sleep },
-      );
-      // An accepted write implies an open workspace.
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
       await sessions.run(workspace, async () => undefined);
       sessions.beginShutdown();
 
@@ -3858,9 +4145,10 @@ describe("EngineWorkspaceSessions", () => {
           { retryTransportErrors: true },
         ),
       ).resolves.toBe("landed");
-      expect(attempts, "consult `shuttingDown` for every run, not just a bounded region -> one attempt, the write is abandoned, and the edit is gone.").toBe(3);
-      // It keeps its pacing. Quit ends the waiting of abandonable work only,
-      // and the test below is why.
+      expect(
+        attempts,
+        "consult `shuttingDown` for every run, not just a bounded region -> one attempt, the write is abandoned, and the edit is gone.",
+      ).toBe(3);
       expect(sleep).toHaveBeenCalled();
     });
 
@@ -3870,27 +4158,32 @@ describe("EngineWorkspaceSessions", () => {
       const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
       const started = deferred<void>();
       const answer = deferred<string>();
-      const run = sessions.run(workspace, async () => {
-        started.resolve();
-        return await answer.promise;
-      }, { abandonAtQuit: true });
+      const run = sessions.run(
+        workspace,
+        async () => {
+          started.resolve();
+          return await answer.promise;
+        },
+        { abandonAtQuit: true },
+      );
       await started.promise;
       sessions.beginShutdown();
       await expect(run).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
       await sessions.closeWorkspace(workspace);
-      expect(client.requests.map((request) => request.method)).toEqual(["workspace.open", "workspace.close"]);
+      expect(client.requests.map((request) => request.method)).toEqual([
+        "workspace.open",
+        "workspace.close",
+      ]);
       answer.resolve("late");
     });
 
     it("paces a live document's retry at quit, so a relaunching daemon can answer", async () => {
-      // codex r17 P1. Quit used to make every non-region retry immediate, on
-      // the reasoning that it is racing the quit timer. But the daemon it is
-      // racing is relaunching, and a burst of synchronous attempts all land
-      // inside that window: six failures in zero elapsed time, a close that
+      // A non-region retry keeps its backoff at quit. The daemon it is racing
+      // is relaunching, and a burst of immediate attempts all land inside
+      // that window: six failures in zero elapsed time, a close that
       // `closeAllEngineYDocSessions` swallows, and `app.exit(0)` discarding an
-      // edit that lived only in the canonical Y.Doc. Fast-failing a retry is
-      // not racing the timer, it is losing to it. Only waiting is abandoned at
-      // quit, and only for work that may be abandoned.
+      // edit that lived only in the canonical Y.Doc. Only waiting is abandoned
+      // at quit, and only for work that may be abandoned.
       const workspace = await tempWorkspace("workspace-quit-pacing");
       const client = new MockClient("handle-quit-pacing");
       let nowMs = 0;
@@ -3941,16 +4234,16 @@ describe("EngineWorkspaceSessions", () => {
       { transportRebindAttempts: 2, sleep },
     );
 
-    await expect(
-      sessions.run(workspace, async () => "unreachable"),
-    ).rejects.toBeInstanceOf(EngineWorkspaceRebindError);
+    await expect(sessions.run(workspace, async () => "unreachable")).rejects.toBeInstanceOf(
+      EngineWorkspaceRebindError,
+    );
     expect(
       first.requests.filter((request) => request.method === "workspace.open"),
       "an unbounded open loop keeps issuing opens forever",
     ).toHaveLength(2);
-    expect(
-      first.requests.filter((request) => request.method === "workspace.close"),
-    ).toHaveLength(2);
+    expect(first.requests.filter((request) => request.method === "workspace.close")).toHaveLength(
+      2,
+    );
     expect(sleep).toHaveBeenCalledTimes(1);
   });
 });
@@ -3958,10 +4251,12 @@ describe("EngineWorkspaceSessions", () => {
 it("checks client publication during shutdown without sending a daemon request", () => {
   const client = new MockClient("published");
   let published = false;
-  const sessions = new EngineWorkspaceSessions({currentClient: () => {
-    if (!published) throw new EngineDaemonUnavailableError("Engine unavailable.");
-    return client;
-  }});
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => {
+      if (!published) throw new EngineDaemonUnavailableError("Engine unavailable.");
+      return client;
+    },
+  });
   expect(sessions.hasAvailableClient()).toBe(false);
   published = true;
   sessions.beginShutdown();
@@ -3969,13 +4264,21 @@ it("checks client publication during shutdown without sending a daemon request",
   expect(client.requests).toEqual([]);
 });
 
-
 describe("store busy total budget", () => {
   it("waits through catch-up beyond the old two attempts without surfacing failure", async () => {
     const workspace = await tempWorkspace("busy-catch-up");
     const client = new MockClient("busy-catch-up");
-    let now = 0, attempts = 0;
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { now: () => now, sleep: async ms => { now += ms; } });
+    let now = 0,
+      attempts = 0;
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      {
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms;
+        },
+      },
+    );
     const result = await sessions.run(workspace, async () => {
       attempts++;
       if (now < 5000) throw daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff");
@@ -3990,25 +4293,46 @@ describe("store busy total budget", () => {
     let now = 0;
     const attemptedAt: number[] = [];
     const refusal = daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff");
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { now: () => now, sleep: async ms => { now += ms; } });
-    await expect(sessions.run(workspace, async () => { attemptedAt.push(now); throw refusal; })).rejects.toBe(refusal);
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      {
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms;
+        },
+      },
+    );
+    await expect(
+      sessions.run(workspace, async () => {
+        attemptedAt.push(now);
+        throw refusal;
+      }),
+    ).rejects.toBe(refusal);
     expect(now).toBe(10_000);
-    expect(attemptedAt.every(at => at < 10_000)).toBe(true);
+    expect(attemptedAt.every((at) => at < 10_000)).toBe(true);
   });
   it.each(["clears", "pinned after open", "pinned during open"] as const)(
-    "shares one busy budget across workspace binding and the action: %s", async (scenario) => {
+    "shares one busy budget across workspace binding and the action: %s",
+    async (scenario) => {
       const workspace = await tempWorkspace("busy-binding");
       const client = new MockClient("busy-binding");
       let now = 0;
       const refusal = daemonRefusal("OVERLOADED", "engine-store-busy", "afterBackoff");
       const request = client.sendRequest.bind(client);
-      vi.spyOn(client, "sendRequest").mockImplementation(async input => {
-        if (input.method === "workspace.open" && (now < 5000 || scenario === "pinned during open")) throw refusal;
+      vi.spyOn(client, "sendRequest").mockImplementation(async (input) => {
+        if (input.method === "workspace.open" && (now < 5000 || scenario === "pinned during open"))
+          throw refusal;
         return request(input);
       });
-      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-        now: () => now, sleep: async ms => { now += ms; },
-      });
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          now: () => now,
+          sleep: async (ms) => {
+            now += ms;
+          },
+        },
+      );
       const operation = vi.fn(async () => {
         if (now < 8_000 || scenario !== "clears") throw refusal;
         return "saved";
@@ -4021,29 +4345,43 @@ describe("store busy total budget", () => {
       }
     },
   );
-
 });
 
-// Issue 3027: the engine refuses a live open at once while other live work
+// The engine refuses a live open at once while other live work
 // holds its settlement capacity, and says to try again after a backoff.
 describe("live settlement capacity", () => {
-  const capacityRefusal = () => daemonRefusal("OVERLOADED", "live-settlement-capacity", "afterBackoff");
+  const capacityRefusal = () =>
+    daemonRefusal("OVERLOADED", "live-settlement-capacity", "afterBackoff");
   // The desktop opens a document inside a bounded region of this size.
   const OPEN_BUDGET_MS = 6_000;
 
   it("opens live once the capacity clears, on the store-busy schedule", async () => {
     const workspace = await tempWorkspace("live-capacity-clears");
     const client = new MockClient("live-capacity-clears");
-    let now = 0, attempts = 0;
+    let now = 0,
+      attempts = 0;
     const delays: number[] = [];
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-      now: () => now, sleep: async ms => { delays.push(ms); now += ms; },
-    });
-    const opened = await sessions.withRetryBudget(OPEN_BUDGET_MS, () => sessions.run(workspace, async () => {
-      attempts++;
-      if (now < 1_500) throw capacityRefusal();
-      return "live";
-    }, { retryTransportErrors: true, retryInitialCapture: true }));
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      {
+        now: () => now,
+        sleep: async (ms) => {
+          delays.push(ms);
+          now += ms;
+        },
+      },
+    );
+    const opened = await sessions.withRetryBudget(OPEN_BUDGET_MS, () =>
+      sessions.run(
+        workspace,
+        async () => {
+          attempts++;
+          if (now < 1_500) throw capacityRefusal();
+          return "live";
+        },
+        { retryTransportErrors: true, retryInitialCapture: true },
+      ),
+    );
     expect(opened).toBe("live");
     expect(attempts).toBe(5);
     expect(delays).toEqual([100, 200, 400, 800]);
@@ -4052,43 +4390,79 @@ describe("live settlement capacity", () => {
   it.each([
     ["the capacity budget", 60_000, 10_000],
     ["the open's budget", OPEN_BUDGET_MS, 6_500],
-  ] as const)("answers with the refusal itself once %s is spent", async (_budget, regionMs, spentAt) => {
-    const workspace = await tempWorkspace("live-capacity-spent");
-    const client = new MockClient("live-capacity-spent");
-    let now = 0;
-    const attemptedAt: number[] = [];
-    const refusal = capacityRefusal();
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-      now: () => now, sleep: async ms => { now += ms; },
-    });
-    await expect(sessions.withRetryBudget(regionMs, () => sessions.run(workspace, async () => {
-      attemptedAt.push(now);
-      throw refusal;
-    }, { retryTransportErrors: true }))).rejects.toBe(refusal);
-    expect(now).toBe(spentAt);
-    expect(attemptedAt.length).toBeGreaterThan(1);
-    expect(attemptedAt.every(at => at < spentAt)).toBe(true);
-  });
+  ] as const)(
+    "answers with the refusal itself once %s is spent",
+    async (_budget, regionMs, spentAt) => {
+      const workspace = await tempWorkspace("live-capacity-spent");
+      const client = new MockClient("live-capacity-spent");
+      let now = 0;
+      const attemptedAt: number[] = [];
+      const refusal = capacityRefusal();
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          now: () => now,
+          sleep: async (ms) => {
+            now += ms;
+          },
+        },
+      );
+      await expect(
+        sessions.withRetryBudget(regionMs, () =>
+          sessions.run(
+            workspace,
+            async () => {
+              attemptedAt.push(now);
+              throw refusal;
+            },
+            { retryTransportErrors: true },
+          ),
+        ),
+      ).rejects.toBe(refusal);
+      expect(now).toBe(spentAt);
+      expect(attemptedAt.length).toBeGreaterThan(1);
+      expect(attemptedAt.every((at) => at < spentAt)).toBe(true);
+    },
+  );
 
-  it.each(["aborted", "closed"] as const)("stops waiting for capacity at once when the open is %s", async ending => {
-    const workspace = await tempWorkspace(`live-capacity-${ending}`);
-    const client = new MockClient(`live-capacity-${ending}`);
-    const sleeping = deferred<number>();
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
-      sleep: ms => { sleeping.resolve(ms); return new Promise<void>(() => {}); },
-    });
-    const controller = new AbortController();
-    const refusal = capacityRefusal();
-    const operation = vi.fn(async () => { throw refusal; });
-    const settled = sessions.withRetryBudget(OPEN_BUDGET_MS, () => sessions.run(workspace, operation), controller.signal)
-      .then(() => "opened", (error: unknown) => error);
-    expect(await Promise.race([settled, sleeping.promise.then(() => "waiting")])).toBe("waiting");
-    if (ending === "aborted") controller.abort();
-    const closed = ending === "closed" ? sessions.closeWorkspace(workspace) : Promise.resolve();
-    expect(await settled).toBe(refusal);
-    await closed;
-    expect(operation).toHaveBeenCalledTimes(1);
-  });
+  it.each(["aborted", "closed"] as const)(
+    "stops waiting for capacity at once when the open is %s",
+    async (ending) => {
+      const workspace = await tempWorkspace(`live-capacity-${ending}`);
+      const client = new MockClient(`live-capacity-${ending}`);
+      const sleeping = deferred<number>();
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => client },
+        {
+          sleep: (ms) => {
+            sleeping.resolve(ms);
+            return new Promise<void>(() => {});
+          },
+        },
+      );
+      const controller = new AbortController();
+      const refusal = capacityRefusal();
+      const operation = vi.fn(async () => {
+        throw refusal;
+      });
+      const settled = sessions
+        .withRetryBudget(
+          OPEN_BUDGET_MS,
+          () => sessions.run(workspace, operation),
+          controller.signal,
+        )
+        .then(
+          () => "opened",
+          (error: unknown) => error,
+        );
+      expect(await Promise.race([settled, sleeping.promise.then(() => "waiting")])).toBe("waiting");
+      if (ending === "aborted") controller.abort();
+      const closed = ending === "closed" ? sessions.closeWorkspace(workspace) : Promise.resolve();
+      expect(await settled).toBe(refusal);
+      await closed;
+      expect(operation).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("retries no other refusal that asks for a backoff", async () => {
     const workspace = await tempWorkspace("live-capacity-other");
@@ -4096,8 +4470,12 @@ describe("live settlement capacity", () => {
     const sleep = vi.fn(async () => undefined);
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
     const refusal = daemonRefusal("OVERLOADED", "blob-egress-capacity", "afterBackoff");
-    const operation = vi.fn(async () => { throw refusal; });
-    await expect(sessions.withRetryBudget(OPEN_BUDGET_MS, () => sessions.run(workspace, operation))).rejects.toBe(refusal);
+    const operation = vi.fn(async () => {
+      throw refusal;
+    });
+    await expect(
+      sessions.withRetryBudget(OPEN_BUDGET_MS, () => sessions.run(workspace, operation)),
+    ).rejects.toBe(refusal);
     expect(operation).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
   });
@@ -4108,7 +4486,9 @@ describe("live settlement capacity", () => {
     const sleep = vi.fn(async () => undefined);
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
     const refusal = capacityRefusal();
-    const operation = vi.fn(async () => { throw refusal; });
+    const operation = vi.fn(async () => {
+      throw refusal;
+    });
     await expect(sessions.run(workspace, operation)).rejects.toBe(refusal);
     expect(operation).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();

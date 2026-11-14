@@ -14,17 +14,11 @@ export function modeLabel(mode: SitePreviewMode): string {
   return "Static";
 }
 
-/** The modes this app can preview in, in the order the preview menu lists them. */
-export function availableModes(
-  site: SitePackageInfo,
-  sharedView = false,
-): SitePreviewMode[] {
+export function availableModes(site: SitePackageInfo, sharedView = false): SitePreviewMode[] {
   const modes: SitePreviewMode[] = [];
   if (sharedView || site.authority.kind === "share") {
-    const sharedStaticEntry = presentBuildOutput(site) ??
-      (!needsBuiltArtifact(site)
-        ? site.entryPath
-        : null);
+    const sharedStaticEntry =
+      presentBuildOutput(site) ?? (!needsBuiltArtifact(site) ? site.entryPath : null);
     return sharedStaticEntry ? ["static"] : [];
   }
   if (site.entryPath) modes.push("static");
@@ -33,13 +27,15 @@ export function availableModes(
     site.scripts.dev ||
     site.configuredScripts.start ||
     site.scripts.start
-  ) modes.push("dev");
+  )
+    modes.push("dev");
   if (
     site.configuredScripts.build ||
     site.scripts.build ||
     site.buildOutputs.length > 0 ||
     presentBuildOutput(site)
-  ) modes.push("build");
+  )
+    modes.push("build");
   return modes;
 }
 
@@ -103,12 +99,15 @@ export function startingMode(
   if (defaultPreviewMode !== "auto" && modes.includes(defaultPreviewMode)) {
     return { mode: defaultPreviewMode, source: "workspace" };
   }
-  const automatic: SitePreviewMode | null =
-    modes.includes("dev") ? "dev"
-    : site.kind !== "static" && modes.includes("build") ? "build"
-    : modes.includes("static") ? "static"
-    : modes.includes("build") ? "build"
-    : null;
+  const automatic: SitePreviewMode | null = modes.includes("dev")
+    ? "dev"
+    : site.kind !== "static" && modes.includes("build")
+      ? "build"
+      : modes.includes("static")
+        ? "static"
+        : modes.includes("build")
+          ? "build"
+          : null;
   return automatic ? { mode: automatic, source: "automatic" } : null;
 }
 
@@ -119,11 +118,13 @@ export function preferredMode(
   defaultPreviewMode: WorkspacePreviewMode,
   sharedView = false,
 ): SitePreviewMode | null {
-  return startingMode(
-    site,
-    modes,
-    readStoredMode(workspaceId, site.root, modes),
-    defaultPreviewMode,
-    sharedView,
-  )?.mode ?? null;
+  return (
+    startingMode(
+      site,
+      modes,
+      readStoredMode(workspaceId, site.root, modes),
+      defaultPreviewMode,
+      sharedView,
+    )?.mode ?? null
+  );
 }

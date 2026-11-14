@@ -5,61 +5,161 @@ import { testCertificate } from "./testCertificate";
 import { createAppLaunchHandler } from "../src/appLaunch";
 
 test("real HTTPS top-level handoff keeps app authority outside its opaque child", async () => {
-  const viewer = "https://viewer.example.com", publicationId = "a".repeat(64);
+  const viewer = "https://viewer.example.com",
+    publicationId = "a".repeat(64);
   let active = true;
-  const events: Array<{path: string; status: number; origin: string | null; cookie: boolean}> = [];
-  const bytes = Buffer.from(`document.getElementById('root').textContent='App loaded';document.body.insertAdjacentHTML('beforeend','<a id="out" href="https://external.example.org/page">Outside</a><button id="own">Own window</button>');document.getElementById('own').addEventListener('click',()=>{window.ownOpen=window.open('https://external.example.org/page')});fetch('https://external.example.org/allowed',{method:'POST',body:'permitted'}).then(r=>r.text()).then(t=>document.body.dataset.external=t);`);
-  const file = {path:"bundle.js",sha256:createHash("sha256").update(bytes).digest("hex"),byteLength:bytes.length,contentType:"text/javascript; charset=utf-8"};
-  const app = createAppLaunchHandler({config:{viewerOrigin:viewer,appDomain:"example.net"},relayUrl:"https://relay.example.org",
-    resolveMaterial:async (_d,cookie)=>cookie?.includes("viewer=session")?{ok:true,capabilityToken:"private-server-capability",profileSecret:"private-profile",setCookie:null,currentCapability:async()=>"private-server-capability"}:{ok:false,status:404},
-    fetchRelay:async request=>{
-      if(!active)return new Response(null,{status:404});
-      return new URL(request.url).pathname.includes("/blobs/")?new Response(bytes,{headers:{"content-type":file.contentType}}):Response.json({publicationId,authorityRevision:1,files:[file]});
-    }});
-  const {tls, spki} = testCertificate("dohc-app-test", ["viewer.example.com", "*.example.net", "external.example.org"]);
-  const server = https.createServer(tls,async(req,res)=>{
-    const host=req.headers.host!,path=req.url!;
-    if(host==="external.example.org"){res.writeHead(200,{"access-control-allow-origin":"*"});res.end(path==="/page"?"<title>Outside</title>":"received");return;}
-    if(host==="viewer.example.com"&&path==="/"){
-      res.writeHead(200,{"content-type":"text/html","set-cookie":"viewer=session; Secure; HttpOnly; SameSite=Strict; Path=/"});
-      res.end(`<!doctype html><button id="open">Open app</button><script>document.getElementById('open').onclick=async()=>{const r=await fetch('/api/apps/launch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({discriminator:'abcdefghijkl',publicationId:'${publicationId}'})});const launch=await r.json();const f=document.createElement('form');f.method='POST';f.action=launch.action;const i=document.createElement('input');i.type='hidden';i.name='handoff';i.value=launch.handoff;f.append(i);document.body.append(f);f.submit();};</script>`);return;
-    }
-    const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));
-    const headers=new Headers();for(const [name,value]of Object.entries(req.headers))if(value!==undefined)headers.set(name,Array.isArray(value)?value.join(","):value);
-    const request=new Request(`https://${host}${path}`,{method:req.method!,headers,...(req.method==="POST"?{body:Buffer.concat(chunks)}:{})});
-    const response=await app.handle(request);events.push({path,status:response.status,origin:headers.get("origin"),cookie:headers.has("cookie")});
-    res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));
+  const events: Array<{ path: string; status: number; origin: string | null; cookie: boolean }> =
+    [];
+  const bytes = Buffer.from(
+    `document.getElementById('root').textContent='App loaded';document.body.insertAdjacentHTML('beforeend','<a id="out" href="https://external.example.org/page">Outside</a><button id="own">Own window</button>');document.getElementById('own').addEventListener('click',()=>{window.ownOpen=window.open('https://external.example.org/page')});fetch('https://external.example.org/allowed',{method:'POST',body:'permitted'}).then(r=>r.text()).then(t=>document.body.dataset.external=t);`,
+  );
+  const file = {
+    path: "bundle.js",
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    byteLength: bytes.length,
+    contentType: "text/javascript; charset=utf-8",
+  };
+  const app = createAppLaunchHandler({
+    config: { viewerOrigin: viewer, appDomain: "example.net" },
+    relayUrl: "https://relay.example.org",
+    resolveMaterial: async (_d, cookie) =>
+      cookie?.includes("viewer=session")
+        ? {
+            ok: true,
+            capabilityToken: "private-server-capability",
+            profileSecret: "private-profile",
+            setCookie: null,
+            currentCapability: async () => "private-server-capability",
+          }
+        : { ok: false, status: 404 },
+    fetchRelay: async (request) => {
+      if (!active) return new Response(null, { status: 404 });
+      return new URL(request.url).pathname.includes("/blobs/")
+        ? new Response(bytes, { headers: { "content-type": file.contentType } })
+        : Response.json({ publicationId, authorityRevision: 1, files: [file] });
+    },
   });
-  await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
-  const address=server.address();if(!address||typeof address==="string")throw Error("No address");
-  const browser=await chromium.launch({headless:true,ignoreDefaultArgs:["--disable-features=ThirdPartyStoragePartitioning"],args:[`--ignore-certificate-errors-spki-list=${spki}`,`--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port},MAP external.example.org 127.0.0.1:${address.port}`,"--no-proxy-server"]});
-  try{
-    const context=await browser.newContext(),page=await context.newPage();await page.goto(viewer);await page.getByRole("button",{name:"Open app"}).click();
+  const { tls, spki } = testCertificate("dohc-app-test", [
+    "viewer.example.com",
+    "*.example.net",
+    "external.example.org",
+  ]);
+  const server = https.createServer(tls, async (req, res) => {
+    const host = req.headers.host!,
+      path = req.url!;
+    if (host === "external.example.org") {
+      res.writeHead(200, { "access-control-allow-origin": "*" });
+      res.end(path === "/page" ? "<title>Outside</title>" : "received");
+      return;
+    }
+    if (host === "viewer.example.com" && path === "/") {
+      res.writeHead(200, {
+        "content-type": "text/html",
+        "set-cookie": "viewer=session; Secure; HttpOnly; SameSite=Strict; Path=/",
+      });
+      res.end(
+        `<!doctype html><button id="open">Open app</button><script>document.getElementById('open').onclick=async()=>{const r=await fetch('/api/apps/launch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({discriminator:'abcdefghijkl',publicationId:'${publicationId}'})});const launch=await r.json();const f=document.createElement('form');f.method='POST';f.action=launch.action;const i=document.createElement('input');i.type='hidden';i.name='handoff';i.value=launch.handoff;f.append(i);document.body.append(f);f.submit();};</script>`,
+      );
+      return;
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(req.headers))
+      if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(",") : value);
+    const request = new Request(`https://${host}${path}`, {
+      method: req.method!,
+      headers,
+      ...(req.method === "POST" ? { body: Buffer.concat(chunks) } : {}),
+    });
+    const response = await app.handle(request);
+    events.push({
+      path,
+      status: response.status,
+      origin: headers.get("origin"),
+      cookie: headers.has("cookie"),
+    });
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(Buffer.from(await response.arrayBuffer()));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw Error("No address");
+  const browser = await chromium.launch({
+    headless: true,
+    ignoreDefaultArgs: ["--disable-features=ThirdPartyStoragePartitioning"],
+    args: [
+      `--ignore-certificate-errors-spki-list=${spki}`,
+      `--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port},MAP external.example.org 127.0.0.1:${address.port}`,
+      "--no-proxy-server",
+    ],
+  });
+  try {
+    const context = await browser.newContext(),
+      page = await context.newPage();
+    await page.goto(viewer);
+    await page.getByRole("button", { name: "Open app" }).click();
     await expect(page).toHaveURL(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/);
-    const child=page.frameLocator("iframe");await expect(child.locator("#root")).toHaveText("App loaded");await expect(child.locator("body")).toHaveAttribute("data-external","received");
-    expect(await page.evaluate(()=>document.cookie)).toBe("");
-    const frame=page.frames().find(f=>f.url()==="about:srcdoc")!;
-    const checks=await frame.evaluate(async origin=>{
-      const blocked:Record<string,boolean>={};for(const[name,fn]of Object.entries({parent:()=>parent.document,cookie:()=>document.cookie,storage:()=>localStorage.length})){try{fn();blocked[name]=false;}catch{blocked[name]=true;}}
-      try{await fetch(origin+"/document",{method:"POST",credentials:"include"});}catch{}
+    const child = page.frameLocator("iframe");
+    await expect(child.locator("#root")).toHaveText("App loaded");
+    await expect(child.locator("body")).toHaveAttribute("data-external", "received");
+    expect(await page.evaluate(() => document.cookie)).toBe("");
+    const frame = page.frames().find((f) => f.url() === "about:srcdoc")!;
+    const checks = await frame.evaluate(async (origin) => {
+      const blocked: Record<string, boolean> = {};
+      for (const [name, fn] of Object.entries({
+        parent: () => parent.document,
+        cookie: () => document.cookie,
+        storage: () => localStorage.length,
+      })) {
+        try {
+          fn();
+          blocked[name] = false;
+        } catch {
+          blocked[name] = true;
+        }
+      }
+      try {
+        await fetch(origin + "/document", { method: "POST", credentials: "include" });
+      } catch {}
       return blocked;
-    },new URL(page.url()).origin);
-    expect(checks).toEqual({parent:true,cookie:true,storage:true});
-    await expect.poll(()=>events.some(e=>e.path==="/document"&&e.origin==="null"&&e.status===404)).toBe(true);
-    expect(events.some(e=>e.path==="/document"&&e.status===200&&e.cookie)).toBe(true);
-    // A plain link to another site opens it in a new tab, and the app stays.
-    const [opened]=await Promise.all([context.waitForEvent("page"),child.locator("#out").click()]);
-    await expect(opened).toHaveURL("https://external.example.org/page");await expect(opened).toHaveTitle("Outside");
-    expect(await opened.evaluate(()=>window.opener===null)).toBe(true);await opened.close();
+    }, new URL(page.url()).origin);
+    expect(checks).toEqual({ parent: true, cookie: true, storage: true });
+    await expect
+      .poll(() =>
+        events.some((e) => e.path === "/document" && e.origin === "null" && e.status === 404),
+      )
+      .toBe(true);
+    expect(events.some((e) => e.path === "/document" && e.status === 200 && e.cookie)).toBe(true);
+    const [opened] = await Promise.all([
+      context.waitForEvent("page"),
+      child.locator("#out").click(),
+    ]);
+    await expect(opened).toHaveURL("https://external.example.org/page");
+    await expect(opened).toHaveTitle("Outside");
+    expect(await opened.evaluate(() => window.opener === null)).toBe(true);
+    await opened.close();
     // The launch page's COOP cuts the opener even when the app's own code asks to keep it.
-    const [own]=await Promise.all([context.waitForEvent("page"),child.locator("#own").click()]);
+    const [own] = await Promise.all([context.waitForEvent("page"), child.locator("#own").click()]);
     await expect(own).toHaveURL("https://external.example.org/page");
-    expect(await own.evaluate(()=>window.opener===null)).toBe(true);
-    expect(await frame.evaluate(()=>(window as Window&{ownOpen?:Window|null}).ownOpen===null)).toBe(true);await own.close();
+    expect(await own.evaluate(() => window.opener === null)).toBe(true);
+    expect(
+      await frame.evaluate(() => (window as Window & { ownOpen?: Window | null }).ownOpen === null),
+    ).toBe(true);
+    await own.close();
     await expect(child.locator("#root")).toHaveText("App loaded");
     await page.reload();
     await expect(page.frameLocator("iframe").locator("#root")).toHaveText("App loaded");
-    expect(events.filter(e=>e.path==="/bootstrap"&&e.status===200)).toHaveLength(2);
-    active=false;await expect(page.getByRole("status")).toHaveText("This app session ended. Reopen the share link.",{timeout:20000});await expect(page.locator("iframe")).toHaveCount(0);
-  } finally {await browser.close();server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+    expect(events.filter((e) => e.path === "/bootstrap" && e.status === 200)).toHaveLength(2);
+    active = false;
+    await expect(page.getByRole("status")).toHaveText(
+      "This app session ended. Reopen the share link.",
+      { timeout: 20000 },
+    );
+    await expect(page.locator("iframe")).toHaveCount(0);
+  } finally {
+    await browser.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

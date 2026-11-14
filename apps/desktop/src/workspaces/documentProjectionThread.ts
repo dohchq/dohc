@@ -1,5 +1,9 @@
 import { parentPort } from "node:worker_threads";
-import { runDocumentProjection, transferList, type DocumentProjectionRequest } from "./documentProjection";
+import {
+  runDocumentProjection,
+  transferList,
+  type DocumentProjectionRequest,
+} from "./documentProjection";
 
 const port = parentPort;
 if (!port) {

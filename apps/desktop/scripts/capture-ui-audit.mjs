@@ -30,7 +30,6 @@ function run(command, args, env = process.env) {
   }
 }
 
-
 if (!process.env.UI_AUDIT_SHOT_DIR?.trim()) {
   throw new Error("set UI_AUDIT_SHOT_DIR to an empty output directory");
 }

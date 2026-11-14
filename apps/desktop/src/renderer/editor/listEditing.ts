@@ -12,7 +12,7 @@ export const ListConversions = Extension.create({
   name: "listConversions",
   addCommands() {
     return {
-      toggleList: (listName, itemName, keepMarks, attributes) => props => {
+      toggleList: (listName, itemName, keepMarks, attributes) => (props) => {
         const { state, tr, dispatch } = props;
         const listType = getNodeType(listName, state.schema);
         const itemType = getNodeType(itemName, state.schema);
@@ -22,15 +22,25 @@ export const ListConversions = Extension.create({
           const list = selection.$from.node(depth);
           if (!listTypes.has(list.type.name)) continue;
           const parent = selection.$from.node(depth - 1);
-          if (!range || range.depth - depth > 1
-            || !["listItem", "taskItem"].includes(parent.type.name)) break;
+          if (
+            !range ||
+            range.depth - depth > 1 ||
+            !["listItem", "taskItem"].includes(parent.type.name)
+          )
+            break;
           const pos = selection.$from.before(depth);
-          if (selection.to >= pos + list.nodeSize || list.type === listType
-            || list.firstChild?.type === itemType) break;
-          const items = Fragment.fromArray(Array.from({ length: list.childCount }, (_, i) => {
-            const item = list.child(i);
-            return itemType.create(null, item.content, item.marks);
-          }));
+          if (
+            selection.to >= pos + list.nodeSize ||
+            list.type === listType ||
+            list.firstChild?.type === itemType
+          )
+            break;
+          const items = Fragment.fromArray(
+            Array.from({ length: list.childCount }, (_, i) => {
+              const item = list.child(i);
+              return itemType.create(null, item.content, item.marks);
+            }),
+          );
           if (!listType.validContent(items)) return false;
           if (dispatch) {
             tr.replaceWith(pos, pos + list.nodeSize, listType.create(attributes, items));
@@ -42,10 +52,15 @@ export const ListConversions = Extension.create({
               const $boundary = tr.doc.resolve(boundary);
               const before = $boundary.nodeBefore;
               const after = $boundary.nodeAfter;
-              const normalize = (type: string | null | undefined) => !type || type === "1" ? null : type;
-              if (before?.type === listType && after?.type === listType
-                && normalize(before.attrs.type) === normalize(after.attrs.type)
-                && canJoin(tr.doc, boundary)) tr.join(boundary);
+              const normalize = (type: string | null | undefined) =>
+                !type || type === "1" ? null : type;
+              if (
+                before?.type === listType &&
+                after?.type === listType &&
+                normalize(before.attrs.type) === normalize(after.attrs.type) &&
+                canJoin(tr.doc, boundary)
+              )
+                tr.join(boundary);
             }
           }
           return true;
@@ -59,11 +74,17 @@ export const ListConversions = Extension.create({
 type ClipboardParser = NonNullable<EditorProps["clipboardTextParser"]>;
 
 // ProseMirror accepts null to use its default parser, but its type omits null.
-export const parseMarkdownListClipboard =
-  ((text, context, plainText, view) => {
-    if (plainText || !text.includes("\n") || context.parentOffset !== 0
-      || context.parent.type.name !== "paragraph" || !/^\s*(?:[-+*]|\d+[.)])\s/.test(text)) return null;
-    const doc = parseRichdocMarkdown(text);
-    if (!doc.content?.length || !doc.content.every(node => listTypes.has(node.type ?? ""))) return null;
-    return new Slice(view.state.schema.nodeFromJSON(doc).content, 0, 0);
-  }) as ClipboardParser;
+export const parseMarkdownListClipboard = ((text, context, plainText, view) => {
+  if (
+    plainText ||
+    !text.includes("\n") ||
+    context.parentOffset !== 0 ||
+    context.parent.type.name !== "paragraph" ||
+    !/^\s*(?:[-+*]|\d+[.)])\s/.test(text)
+  )
+    return null;
+  const doc = parseRichdocMarkdown(text);
+  if (!doc.content?.length || !doc.content.every((node) => listTypes.has(node.type ?? "")))
+    return null;
+  return new Slice(view.state.schema.nodeFromJSON(doc).content, 0, 0);
+}) as ClipboardParser;

@@ -3,12 +3,6 @@ import { clampEditorGroupPairLeftSize } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 
 const KEYBOARD_RESIZE_STEP = 0.05;
-// The group takes focus when its last tab closes. The global halo would
-// paint outside the group, where the window edge and its neighbours cut off
-// all but its top edge, and an inset outline would sit under the tab strip.
-// So the keyboard's focus draws a row's 1px accent line inside the group, on
-// a layer above its contents. Forced colors give every other focus mark the
-// system Highlight color, and this one takes it too.
 const GROUP_FOCUS_RING =
   "focus-visible:outline-none keyboard:focus-visible:after:pointer-events-none keyboard:focus-visible:after:absolute keyboard:focus-visible:after:inset-0 keyboard:focus-visible:after:z-20 keyboard:focus-visible:after:outline-1 keyboard:focus-visible:after:-outline-offset-1 keyboard:focus-visible:after:outline-accent forced-colors:keyboard:focus-visible:after:outline-[Highlight]";
 
@@ -29,11 +23,7 @@ export function EditorGroupLayout(props: {
   groups: EditorGroupLayoutItem[];
   activeGroupId: string;
   onFocusGroup: (groupId: string) => void;
-  onResizeGroups: (
-    leftGroupId: string,
-    rightGroupId: string,
-    leftSize: number,
-  ) => void;
+  onResizeGroups: (leftGroupId: string, rightGroupId: string, leftSize: number) => void;
 }) {
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const resize = useRef<{
@@ -61,12 +51,8 @@ export function EditorGroupLayout(props: {
   const resizeFromPointer = (event: PointerEvent<HTMLDivElement>) => {
     const state = resize.current;
     if (!state || !resizeCommit.isActive(event.pointerId)) return;
-    const delta =
-      ((event.clientX - state.startX) / state.width) * state.totalSize;
-    const leftSize = clampEditorGroupPairLeftSize(
-      state.pairSize,
-      state.leftSize + delta,
-    );
+    const delta = ((event.clientX - state.startX) / state.width) * state.totalSize;
+    const leftSize = clampEditorGroupPairLeftSize(state.pairSize, state.leftSize + delta);
     resizeCommit.update(
       event.pointerId,
       {
@@ -102,7 +88,9 @@ export function EditorGroupLayout(props: {
               aria-label={`Editor group ${index + 1}`}
               // Says which group takes opened files to a screen reader, as
               // the strip's accent line does on screen.
-              aria-current={groups.length > 1 && group.id === props.activeGroupId ? "true" : undefined}
+              aria-current={
+                groups.length > 1 && group.id === props.activeGroupId ? "true" : undefined
+              }
               style={{ flexGrow: group.size, flexBasis: 0 }}
               onPointerDownCapture={() => props.onFocusGroup(group.id)}
               onFocusCapture={() => props.onFocusGroup(group.id)}
@@ -120,9 +108,7 @@ export function EditorGroupLayout(props: {
                 aria-label="Resize editor groups"
                 aria-valuemin={5}
                 aria-valuemax={95}
-                aria-valuenow={Math.round(
-                  (group.size / (group.size + next.size)) * 100,
-                )}
+                aria-valuenow={Math.round((group.size / (group.size + next.size)) * 100)}
                 onKeyDown={(event) => {
                   const direction =
                     event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
@@ -130,11 +116,7 @@ export function EditorGroupLayout(props: {
                   event.preventDefault();
                   const combined = group.size + next.size;
                   const delta = combined * KEYBOARD_RESIZE_STEP * direction;
-                  props.onResizeGroups(
-                    group.id,
-                    next.id,
-                    group.size + delta,
-                  );
+                  props.onResizeGroups(group.id, next.id, group.size + delta);
                 }}
                 onPointerDown={(event) => {
                   if (event.button !== 0) return;
@@ -157,18 +139,13 @@ export function EditorGroupLayout(props: {
                     rightGroupId: next.id,
                     leftSize: group.size,
                     pairSize,
-                    totalSize: groups.reduce(
-                      (sum, candidate) => sum + candidate.size,
-                      0,
-                    ),
+                    totalSize: groups.reduce((sum, candidate) => sum + candidate.size, 0),
                   };
                 }}
                 onPointerMove={resizeFromPointer}
                 onPointerUp={(event) => resizeCommit.commit(event.pointerId)}
                 onPointerCancel={(event) => resizeCommit.commit(event.pointerId)}
-                onLostPointerCapture={(event) =>
-                  resizeCommit.commit(event.pointerId)
-                }
+                onLostPointerCapture={(event) => resizeCommit.commit(event.pointerId)}
                 className="group/resize relative z-10 w-px shrink-0 cursor-col-resize bg-line outline-none before:absolute before:-left-1 before:inset-y-0 before:w-[9px] keyboard:focus-visible:bg-ink/50"
               >
                 <span

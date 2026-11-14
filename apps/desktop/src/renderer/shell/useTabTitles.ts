@@ -26,13 +26,15 @@ export function useTabTitles(workspaceId: string) {
     (tabPath: string, title: string | null, fromPage: boolean) => {
       setKnownTabTitles((previous) => {
         // A title learned for another workspace never labels this one's tabs.
-        const known = previous.workspaceId === workspaceId
-          ? previous
-          : { workspaceId, titles: EMPTY_TAB_LABELS, answered: NO_ANSWERED_TABS };
+        const known =
+          previous.workspaceId === workspaceId
+            ? previous
+            : { workspaceId, titles: EMPTY_TAB_LABELS, answered: NO_ANSWERED_TABS };
         if (!fromPage && known.answered.has(tabPath)) return previous;
-        const answered = fromPage && !known.answered.has(tabPath)
-          ? new Set(known.answered).add(tabPath)
-          : known.answered;
+        const answered =
+          fromPage && !known.answered.has(tabPath)
+            ? new Set(known.answered).add(tabPath)
+            : known.answered;
         if ((known.titles.get(tabPath) ?? null) === title && answered === known.answered) {
           return known === previous ? previous : known;
         }
@@ -44,25 +46,23 @@ export function useTabTitles(workspaceId: string) {
     },
     [workspaceId],
   );
-  // What whoever opens a change's tab knows of its path, until its page answers.
   const rememberMomentDiffPath = useCallback(
-    (momentId: string, filePath: string) => setTabTitle(momentDiffTabPath(momentId), filePath, false),
+    (momentId: string, filePath: string) =>
+      setTabTitle(momentDiffTabPath(momentId), filePath, false),
     [setTabTitle],
   );
   // The change's page answered: its path, or null when History's rules hide it.
   const resolveMomentDiffPath = useCallback(
-    (momentId: string, filePath: string | null) => setTabTitle(momentDiffTabPath(momentId), filePath, true),
+    (momentId: string, filePath: string | null) =>
+      setTabTitle(momentDiffTabPath(momentId), filePath, true),
     [setTabTitle],
   );
-  // An app's page answered with the app's title.
   const resolveAppTitle = useCallback(
     (siteRoot: string, title: string) => setTabTitle(siteTabPath(siteRoot), title, true),
     [setTabTitle],
   );
   const tabLabels =
-    knownTabTitles.workspaceId === workspaceId
-      ? knownTabTitles.titles
-      : EMPTY_TAB_LABELS;
+    knownTabTitles.workspaceId === workspaceId ? knownTabTitles.titles : EMPTY_TAB_LABELS;
 
   return {
     tabLabels,

@@ -51,17 +51,10 @@ describe("share skip recorder", () => {
       share.effects,
       "batching the pages loses the ones a failed pull already committed past",
     ).toEqual(["persist", "persist"]);
-    expect(
-      share.stored()?.skippedOps?.ops.map((op) => op.originSeq),
-    ).toEqual([1, 2, 3]);
+    expect(share.stored()?.skippedOps?.ops.map((op) => op.originSeq)).toEqual([1, 2, 3]);
     expect(share.stored()?.skippedOps?.generation).toBe(2);
   });
 
-  // The fan-out this shape exists to prevent: every renderer broadcast starts
-  // file scans, history reads and relay listings, and a relay refusing on
-  // every page of a long backlog would start one set per page. The recorder
-  // is handed a reader and a writer and nothing else, so a page cannot
-  // broadcast — the pull sites notify once when they settle.
   it("has no effect on a page beyond persisting it", async () => {
     const share = target({ shareId: "share-1" });
 
@@ -82,8 +75,6 @@ describe("share skip recorder", () => {
     expect(share.effects).toEqual([]);
   });
 
-  // A share revoked mid-pull has no record to write to. The recorder changes
-  // the record as it stands at each write for exactly this reason.
   it("writes nothing once the record is gone", async () => {
     const share = target({ shareId: "share-1" });
     await share.recorder([refusal(1)]);

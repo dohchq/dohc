@@ -29,11 +29,11 @@ export interface LiveMembershipFrame {
   /** When true, omission does not establish that a peer left. */
   readonly overflow: boolean;
 }
-// RESULT success: header + string length/identifier + digest + tag + three u64 + bool.
-export const LIVE_FRAME_MINIMUM_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 32 + 1 + 24 + 1;
+export const LIVE_FRAME_MINIMUM_MAX_BYTES =
+  LIVE_FRAME_HEADER_BYTES + 4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 32 + 1 + 24 + 1;
 // BEGIN submit-update: fixed fields, delivery/account/agent identifiers, optional name and scope, and tags.
-export const LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 8 + 1 + 8 + 32 +
-  5 * (4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES) + 6;
+export const LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES =
+  LIVE_FRAME_HEADER_BYTES + 8 + 1 + 8 + 32 + 5 * (4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES) + 6;
 
 export interface LiveFrameReceivePolicy {
   readonly maxFrameBytes: number;
@@ -49,21 +49,59 @@ export type LiveFrameBegin = {
 } & (
   | { readonly purpose: "client-vector" }
   | { readonly purpose: "initial-sync"; readonly appliedThroughJournalCursor: number }
-  | { readonly purpose: "submit-update"; readonly deliveryId: string; readonly authorContext?: LiveAuthorContext }
+  | {
+      readonly purpose: "submit-update";
+      readonly deliveryId: string;
+      readonly authorContext?: LiveAuthorContext;
+    }
   | { readonly purpose: "applied-update"; readonly journalCursor: number }
 );
 export type LiveFrame =
   | LiveMembershipFrame
-  | { readonly kind: "welcome"; readonly hostEpoch: HostEpoch; readonly receivePolicy: LiveFrameReceivePolicy }
+  | {
+      readonly kind: "welcome";
+      readonly hostEpoch: HostEpoch;
+      readonly receivePolicy: LiveFrameReceivePolicy;
+    }
   | { readonly kind: "hello"; readonly receivePolicy: LiveFrameReceivePolicy }
   | LiveFrameBegin
-  | { readonly kind: "chunk"; readonly transferId: number; readonly offset: number; readonly bytes: Uint8Array }
+  | {
+      readonly kind: "chunk";
+      readonly transferId: number;
+      readonly offset: number;
+      readonly bytes: Uint8Array;
+    }
   | { readonly kind: "credit"; readonly grantedBytes: number; readonly grantedFrames: number }
   | { readonly kind: "sync-applied"; readonly appliedThroughJournalCursor: number }
-  | { readonly kind: "result"; readonly result: "success"; readonly ack: LiveUpdateHostApplicationAck }
-  | { readonly kind: "result"; readonly result: "refused"; readonly deliveryId: string; readonly updateDigest: string; readonly reason: LiveUpdateRefusal }
-  | { readonly kind: "result"; readonly result: "retry"; readonly deliveryId: string; readonly updateDigest: string; readonly reason: LiveUpdateRetry }
-  | { readonly kind: "close"; readonly reason: "normal" | "protocol-invalid" | "route-fenced" | "resource-unavailable" | "idle" | "shutdown" };
+  | {
+      readonly kind: "result";
+      readonly result: "success";
+      readonly ack: LiveUpdateHostApplicationAck;
+    }
+  | {
+      readonly kind: "result";
+      readonly result: "refused";
+      readonly deliveryId: string;
+      readonly updateDigest: string;
+      readonly reason: LiveUpdateRefusal;
+    }
+  | {
+      readonly kind: "result";
+      readonly result: "retry";
+      readonly deliveryId: string;
+      readonly updateDigest: string;
+      readonly reason: LiveUpdateRetry;
+    }
+  | {
+      readonly kind: "close";
+      readonly reason:
+        | "normal"
+        | "protocol-invalid"
+        | "route-fenced"
+        | "resource-unavailable"
+        | "idle"
+        | "shutdown";
+    };
 
 export class LiveFrameError extends Error {
   constructor(readonly reason: "invalid" | "limit" | "state" | "credit" | "closed") {
@@ -71,11 +109,16 @@ export class LiveFrameError extends Error {
     this.name = "LiveFrameError";
   }
 }
-function requireFrame(condition: unknown, reason: LiveFrameError["reason"] = "invalid"): asserts condition {
+function requireFrame(
+  condition: unknown,
+  reason: LiveFrameError["reason"] = "invalid",
+): asserts condition {
   if (!condition) throw new LiveFrameError(reason);
 }
 function integer(value: unknown, positive = false): number {
-  requireFrame(typeof value === "number" && Number.isSafeInteger(value) && value >= (positive ? 1 : 0));
+  requireFrame(
+    typeof value === "number" && Number.isSafeInteger(value) && value >= (positive ? 1 : 0),
+  );
   return value;
 }
 function record(value: unknown, fields: readonly string[]): Record<string, unknown> {
@@ -83,7 +126,10 @@ function record(value: unknown, fields: readonly string[]): Record<string, unkno
   const prototype = Object.getPrototypeOf(value);
   requireFrame(prototype === Object.prototype || prototype === null);
   const keys = Reflect.ownKeys(value);
-  requireFrame(keys.length === fields.length && keys.every(key => typeof key === "string" && fields.includes(key)));
+  requireFrame(
+    keys.length === fields.length &&
+      keys.every((key) => typeof key === "string" && fields.includes(key)),
+  );
   const result: Record<string, unknown> = Object.create(null);
   for (const field of fields) {
     const descriptor = Object.getOwnPropertyDescriptor(value, field);
@@ -102,49 +148,107 @@ const typedArray = Object.getPrototypeOf(Uint8Array.prototype);
 const bufferGetter = Object.getOwnPropertyDescriptor(typedArray, "buffer")!.get!;
 const offsetGetter = Object.getOwnPropertyDescriptor(typedArray, "byteOffset")!.get!;
 const lengthGetter = Object.getOwnPropertyDescriptor(typedArray, "byteLength")!.get!;
-const arrayBufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!;
+const arrayBufferLength = Object.getOwnPropertyDescriptor(
+  ArrayBuffer.prototype,
+  "byteLength",
+)!.get!;
 function byteView(value: unknown): Uint8Array {
   requireFrame(value instanceof Uint8Array);
   try {
     const buffer = bufferGetter.call(value) as ArrayBuffer;
     arrayBufferLength.call(buffer); // Reject SharedArrayBuffer without reading caller properties.
     return new Uint8Array(buffer, offsetGetter.call(value), lengthGetter.call(value));
-  } catch { throw new LiveFrameError("invalid"); }
+  } catch {
+    throw new LiveFrameError("invalid");
+  }
 }
 function authorContext(value: unknown): LiveAuthorContext {
   try {
     const kind = discriminant(value, "kind");
-    const fields = kind === "account" ? ["kind", "accountId"] : kind === "link" ? ["kind", "publicPrincipalId"] : ["kind"];
+    const fields =
+      kind === "account"
+        ? ["kind", "accountId"]
+        : kind === "link"
+          ? ["kind", "publicPrincipalId"]
+          : ["kind"];
     const declared = Object.hasOwn(value as object, "agent");
     const source = record(value, [...fields, ...(declared ? ["agent"] : [])]);
     if (declared) {
       const keys = Reflect.ownKeys(source.agent as object);
-      requireFrame(keys.every(key => typeof key === "string" && ["agentId", "agentName", "onBehalfOf", "depth"].includes(key)));
+      requireFrame(
+        keys.every(
+          (key) =>
+            typeof key === "string" &&
+            ["agentId", "agentName", "onBehalfOf", "depth"].includes(key),
+        ),
+      );
       source.agent = record(source.agent, keys as string[]);
     }
     return parseLiveAuthorContext(source);
-  } catch { throw new LiveFrameError("invalid"); }
+  } catch {
+    throw new LiveFrameError("invalid");
+  }
 }
-const policyFields = ["maxFrameBytes", "maxStateVectorBytes", "maxUpdateBytes", "maxSyncBytes"] as const;
+const policyFields = [
+  "maxFrameBytes",
+  "maxStateVectorBytes",
+  "maxUpdateBytes",
+  "maxSyncBytes",
+] as const;
 function policy(value: unknown): LiveFrameReceivePolicy {
   const source = record(value, policyFields);
-  const parsed = Object.fromEntries(policyFields.map(field => [field, integer(source[field], true)])) as unknown as LiveFrameReceivePolicy;
-  requireFrame(parsed.maxFrameBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES && parsed.maxFrameBytes <= 0xffff_ffff + LIVE_FRAME_HEADER_BYTES);
+  const parsed = Object.fromEntries(
+    policyFields.map((field) => [field, integer(source[field], true)]),
+  ) as unknown as LiveFrameReceivePolicy;
+  requireFrame(
+    parsed.maxFrameBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES &&
+      parsed.maxFrameBytes <= 0xffff_ffff + LIVE_FRAME_HEADER_BYTES,
+  );
   return parsed;
 }
 const refusalCodes: Record<LiveUpdateRefusal, number> = {
-  "invalid-update": 1, "authority-refused": 2, "stale-session": 3,
-  "stale-binding": 4, "restore-fenced": 5, "provenance-refused": 6,
-  "baseline-missing": 7, "delivery-conflict": 8, "capacity-refused": 9,
+  "invalid-update": 1,
+  "authority-refused": 2,
+  "stale-session": 3,
+  "stale-binding": 4,
+  "restore-fenced": 5,
+  "provenance-refused": 6,
+  "baseline-missing": 7,
+  "delivery-conflict": 8,
+  "capacity-refused": 9,
 };
 const retryCodes: Record<LiveUpdateRetry, number> = {
-  "admission-unavailable": 1, "host-unavailable": 2, "application-pending": 3,
+  "admission-unavailable": 1,
+  "host-unavailable": 2,
+  "application-pending": 3,
 };
-const closeCodes = { normal: 0, "protocol-invalid": 1, "route-fenced": 2, "resource-unavailable": 3, idle: 4, shutdown: 5 } as const;
-const purposeCodes = { "client-vector": 1, "initial-sync": 2, "submit-update": 3, "applied-update": 4 } as const;
-const kindCodes = { welcome: 1, hello: 2, begin: 3, chunk: 4, credit: 5, "sync-applied": 6, result: 7, close: 8, membership: 9 } as const;
+const closeCodes = {
+  normal: 0,
+  "protocol-invalid": 1,
+  "route-fenced": 2,
+  "resource-unavailable": 3,
+  idle: 4,
+  shutdown: 5,
+} as const;
+const purposeCodes = {
+  "client-vector": 1,
+  "initial-sync": 2,
+  "submit-update": 3,
+  "applied-update": 4,
+} as const;
+const kindCodes = {
+  welcome: 1,
+  hello: 2,
+  begin: 3,
+  chunk: 4,
+  credit: 5,
+  "sync-applied": 6,
+  result: 7,
+  close: 8,
+  membership: 9,
+} as const;
 function fromCode<T extends string>(codes: Record<T, number>, code: number): T {
-  const found = (Object.keys(codes) as T[]).find(key => codes[key] === code);
+  const found = (Object.keys(codes) as T[]).find((key) => codes[key] === code);
   requireFrame(found !== undefined);
   return found;
 }
@@ -152,20 +256,31 @@ function fromCode<T extends string>(codes: Record<T, number>, code: number): T {
 function snapshotFrame(value: unknown, maxFrameBytes: number): LiveFrame {
   requireFrame(typeof value === "object" && value !== null && !Array.isArray(value));
   const keys = Reflect.ownKeys(value);
-  requireFrame(keys.length <= 8 && keys.every(key => typeof key === "string"));
+  requireFrame(keys.length <= 8 && keys.every((key) => typeof key === "string"));
   value = record(value, keys as string[]);
   const kind = discriminant(value, "kind");
   switch (kind) {
     case "membership": {
       const r = record(value, ["kind", "revision", "members", "overflow"]);
       requireFrame(typeof r.overflow === "boolean");
-      requireFrame(Array.isArray(r.members) && Object.getPrototypeOf(r.members) === Array.prototype);
+      requireFrame(
+        Array.isArray(r.members) && Object.getPrototypeOf(r.members) === Array.prototype,
+      );
       const count = integer(Object.getOwnPropertyDescriptor(r.members, "length")?.value);
-      requireFrame(count <= Math.floor((maxFrameBytes - LIVE_MEMBERSHIP_BASE_BYTES) / LIVE_MEMBERSHIP_MEMBER_BYTES), "limit");
+      requireFrame(
+        count <=
+          Math.floor((maxFrameBytes - LIVE_MEMBERSHIP_BASE_BYTES) / LIVE_MEMBERSHIP_MEMBER_BYTES),
+        "limit",
+      );
       requireFrame(Reflect.ownKeys(r.members).length === count + 1);
       const members = Array.from({ length: count }, (_, index) => {
         const descriptor = Object.getOwnPropertyDescriptor(r.members, String(index));
-        requireFrame(descriptor && "value" in descriptor && typeof descriptor.value === "string" && /^[0-9a-f]{32}$/.test(descriptor.value));
+        requireFrame(
+          descriptor &&
+            "value" in descriptor &&
+            typeof descriptor.value === "string" &&
+            /^[0-9a-f]{32}$/.test(descriptor.value),
+        );
         return descriptor.value as string;
       });
       requireFrame(new Set(members).size === members.length);
@@ -173,20 +288,52 @@ function snapshotFrame(value: unknown, maxFrameBytes: number): LiveFrame {
     }
     case "welcome": {
       const r = record(value, ["kind", "hostEpoch", "receivePolicy"]);
-      return { kind, hostEpoch: parseHostEpoch(r.hostEpoch), receivePolicy: policy(r.receivePolicy) };
+      return {
+        kind,
+        hostEpoch: parseHostEpoch(r.hostEpoch),
+        receivePolicy: policy(r.receivePolicy),
+      };
     }
-    case "hello": return { kind, receivePolicy: policy(record(value, ["kind", "receivePolicy"]).receivePolicy) };
+    case "hello":
+      return {
+        kind,
+        receivePolicy: policy(record(value, ["kind", "receivePolicy"]).receivePolicy),
+      };
     case "begin": {
       const purpose = discriminant(value, "purpose");
       requireFrame(typeof purpose === "string" && Object.hasOwn(purposeCodes, purpose));
-      const declared = purpose === "submit-update" && Object.hasOwn(value as object, "authorContext");
-      const extra = purpose === "initial-sync" ? ["appliedThroughJournalCursor"] : purpose === "submit-update" ? ["deliveryId", ...(declared ? ["authorContext"] : [])] : purpose === "applied-update" ? ["journalCursor"] : [];
+      const declared =
+        purpose === "submit-update" && Object.hasOwn(value as object, "authorContext");
+      const extra =
+        purpose === "initial-sync"
+          ? ["appliedThroughJournalCursor"]
+          : purpose === "submit-update"
+            ? ["deliveryId", ...(declared ? ["authorContext"] : [])]
+            : purpose === "applied-update"
+              ? ["journalCursor"]
+              : [];
       const r = record(value, ["kind", "purpose", "transferId", "totalBytes", "digest", ...extra]);
-      const common = { kind, transferId: integer(r.transferId, true), totalBytes: integer(r.totalBytes, true), digest: parseLiveUpdateDigest(r.digest) } as const;
-      if (purpose === "initial-sync") return { ...common, purpose, appliedThroughJournalCursor: integer(r.appliedThroughJournalCursor) };
-      if (purpose === "submit-update") return { ...common, purpose, deliveryId: parseLiveUpdateIdentifier(r.deliveryId),
-        ...(declared ? { authorContext: authorContext(r.authorContext) } : {}) };
-      if (purpose === "applied-update") return { ...common, purpose, journalCursor: integer(r.journalCursor, true) };
+      const common = {
+        kind,
+        transferId: integer(r.transferId, true),
+        totalBytes: integer(r.totalBytes, true),
+        digest: parseLiveUpdateDigest(r.digest),
+      } as const;
+      if (purpose === "initial-sync")
+        return {
+          ...common,
+          purpose,
+          appliedThroughJournalCursor: integer(r.appliedThroughJournalCursor),
+        };
+      if (purpose === "submit-update")
+        return {
+          ...common,
+          purpose,
+          deliveryId: parseLiveUpdateIdentifier(r.deliveryId),
+          ...(declared ? { authorContext: authorContext(r.authorContext) } : {}),
+        };
+      if (purpose === "applied-update")
+        return { ...common, purpose, journalCursor: integer(r.journalCursor, true) };
       return { ...common, purpose: "client-vector" };
     }
     case "chunk": {
@@ -197,27 +344,51 @@ function snapshotFrame(value: unknown, maxFrameBytes: number): LiveFrame {
     }
     case "credit": {
       const r = record(value, ["kind", "grantedBytes", "grantedFrames"]);
-      return { kind, grantedBytes: integer(r.grantedBytes), grantedFrames: integer(r.grantedFrames) };
+      return {
+        kind,
+        grantedBytes: integer(r.grantedBytes),
+        grantedFrames: integer(r.grantedFrames),
+      };
     }
-    case "sync-applied": return { kind, appliedThroughJournalCursor: integer(record(value, ["kind", "appliedThroughJournalCursor"]).appliedThroughJournalCursor) };
+    case "sync-applied":
+      return {
+        kind,
+        appliedThroughJournalCursor: integer(
+          record(value, ["kind", "appliedThroughJournalCursor"]).appliedThroughJournalCursor,
+        ),
+      };
     case "result": {
       const result = discriminant(value, "result");
       if (result === "success") {
         const r = record(value, ["kind", "result", "ack"]);
-        const ack = record(r.ack, ["deliveryId", "updateDigest", "journalCursor", "acceptingHostEpoch", "localYDocSequence", "applicationReplayed"]);
+        const ack = record(r.ack, [
+          "deliveryId",
+          "updateDigest",
+          "journalCursor",
+          "acceptingHostEpoch",
+          "localYDocSequence",
+          "applicationReplayed",
+        ]);
         return { kind, result, ack: parseLiveUpdateHostApplicationAck(ack) };
       }
       requireFrame(result === "refused" || result === "retry");
       const r = record(value, ["kind", "result", "deliveryId", "updateDigest", "reason"]);
-      const common = { kind, deliveryId: parseLiveUpdateIdentifier(r.deliveryId), updateDigest: parseLiveUpdateDigest(r.updateDigest) } as const;
-      return result === "refused" ? { ...common, result, reason: parseLiveUpdateRefusal(r.reason) } : { ...common, result, reason: parseLiveUpdateRetry(r.reason) };
+      const common = {
+        kind,
+        deliveryId: parseLiveUpdateIdentifier(r.deliveryId),
+        updateDigest: parseLiveUpdateDigest(r.updateDigest),
+      } as const;
+      return result === "refused"
+        ? { ...common, result, reason: parseLiveUpdateRefusal(r.reason) }
+        : { ...common, result, reason: parseLiveUpdateRetry(r.reason) };
     }
     case "close": {
       const reason = record(value, ["kind", "reason"]).reason;
       requireFrame(typeof reason === "string" && Object.hasOwn(closeCodes, reason));
       return { kind, reason: reason as keyof typeof closeCodes };
     }
-    default: throw new LiveFrameError("invalid");
+    default:
+      throw new LiveFrameError("invalid");
   }
 }
 
@@ -225,8 +396,13 @@ const utf8 = new TextEncoder();
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 class Writer {
   offset = 0;
-  constructor(readonly limit: number, readonly bytes?: Uint8Array) {}
-  room(size: number) { requireFrame(size <= this.limit - this.offset, "limit"); }
+  constructor(
+    readonly limit: number,
+    readonly bytes?: Uint8Array,
+  ) {}
+  room(size: number) {
+    requireFrame(size <= this.limit - this.offset, "limit");
+  }
   number(value: number, width: 1 | 2 | 4 | 8) {
     this.room(width);
     if (this.bytes) {
@@ -238,10 +414,23 @@ class Writer {
     }
     this.offset += width;
   }
-  raw(bytes: Uint8Array) { this.room(bytes.length); this.bytes?.set(bytes, this.offset); this.offset += bytes.length; }
-  string(value: string) { const bytes = utf8.encode(value); this.number(bytes.length, 4); this.raw(bytes); }
-  digest(value: string) { for (let n = 0; n < 64; n += 2) this.number(Number.parseInt(value.slice(n, n + 2), 16), 1); }
-  blob(value: Uint8Array) { this.number(value.length, 8); this.raw(value); }
+  raw(bytes: Uint8Array) {
+    this.room(bytes.length);
+    this.bytes?.set(bytes, this.offset);
+    this.offset += bytes.length;
+  }
+  string(value: string) {
+    const bytes = utf8.encode(value);
+    this.number(bytes.length, 4);
+    this.raw(bytes);
+  }
+  digest(value: string) {
+    for (let n = 0; n < 64; n += 2) this.number(Number.parseInt(value.slice(n, n + 2), 16), 1);
+  }
+  blob(value: Uint8Array) {
+    this.number(value.length, 8);
+    this.raw(value);
+  }
 }
 function writeBytes(limit: number, write: (writer: Writer) => void): Uint8Array {
   const size = new Writer(limit);
@@ -262,7 +451,11 @@ class Reader {
   number(width: 1 | 2 | 4 | 8): number {
     const bytes = this.raw(width);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    if (width === 8) { const value = view.getBigUint64(0); requireFrame(value <= BigInt(Number.MAX_SAFE_INTEGER)); return Number(value); }
+    if (width === 8) {
+      const value = view.getBigUint64(0);
+      requireFrame(value <= BigInt(Number.MAX_SAFE_INTEGER));
+      return Number(value);
+    }
     return width === 4 ? view.getUint32(0) : width === 2 ? view.getUint16(0) : view.getUint8(0);
   }
   string(max: number) {
@@ -270,26 +463,55 @@ class Reader {
     requireFrame(size <= max, "limit");
     const bytes = this.raw(size);
     let value: string;
-    try { value = strictUtf8.decode(bytes); } catch { throw new LiveFrameError("invalid"); }
+    try {
+      value = strictUtf8.decode(bytes);
+    } catch {
+      throw new LiveFrameError("invalid");
+    }
     return value;
   }
-  digest() { return Array.from(this.raw(32), byte => byte.toString(16).padStart(2, "0")).join(""); }
-  blob(max: number) { const size = this.number(8); requireFrame(size > 0 && size <= max, "limit"); return this.raw(size).slice(); }
-  end() { requireFrame(this.offset === this.bytes.length); }
+  digest() {
+    return Array.from(this.raw(32), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  blob(max: number) {
+    const size = this.number(8);
+    requireFrame(size > 0 && size <= max, "limit");
+    return this.raw(size).slice();
+  }
+  end() {
+    requireFrame(this.offset === this.bytes.length);
+  }
 }
-function equalBytes(a: Uint8Array, b: Uint8Array) { return a.length === b.length && a.every((byte, index) => byte === b[index]); }
-function writePolicy(w: Writer, p: LiveFrameReceivePolicy) { for (const field of policyFields) w.number(p[field], 8); }
-function readPolicy(r: Reader) { return policy(Object.fromEntries(policyFields.map(field => [field, r.number(8)]))); }
+function equalBytes(a: Uint8Array, b: Uint8Array) {
+  return a.length === b.length && a.every((byte, index) => byte === b[index]);
+}
+function writePolicy(w: Writer, p: LiveFrameReceivePolicy) {
+  for (const field of policyFields) w.number(p[field], 8);
+}
+function readPolicy(r: Reader) {
+  return policy(Object.fromEntries(policyFields.map((field) => [field, r.number(8)])));
+}
 function payload(w: Writer, frame: LiveFrame) {
   switch (frame.kind) {
     case "membership":
-      w.number(frame.revision, 8); w.number(frame.overflow ? 1 : 0, 1); w.number(frame.members.length, 4);
-      for (const member of frame.members) for (let n = 0; n < 32; n += 2) w.number(Number.parseInt(member.slice(n, n + 2), 16), 1);
+      w.number(frame.revision, 8);
+      w.number(frame.overflow ? 1 : 0, 1);
+      w.number(frame.members.length, 4);
+      for (const member of frame.members)
+        for (let n = 0; n < 32; n += 2) w.number(Number.parseInt(member.slice(n, n + 2), 16), 1);
       break;
-    case "welcome": w.number(frame.hostEpoch, 8); writePolicy(w, frame.receivePolicy); break;
-    case "hello": writePolicy(w, frame.receivePolicy); break;
+    case "welcome":
+      w.number(frame.hostEpoch, 8);
+      writePolicy(w, frame.receivePolicy);
+      break;
+    case "hello":
+      writePolicy(w, frame.receivePolicy);
+      break;
     case "begin":
-      w.number(frame.transferId, 8); w.number(purposeCodes[frame.purpose], 1); w.number(frame.totalBytes, 8); w.digest(frame.digest);
+      w.number(frame.transferId, 8);
+      w.number(purposeCodes[frame.purpose], 1);
+      w.number(frame.totalBytes, 8);
+      w.digest(frame.digest);
       if (frame.purpose === "initial-sync") w.number(frame.appliedThroughJournalCursor, 8);
       if (frame.purpose === "submit-update") {
         w.string(frame.deliveryId);
@@ -313,19 +535,40 @@ function payload(w: Writer, frame: LiveFrame) {
       }
       if (frame.purpose === "applied-update") w.number(frame.journalCursor, 8);
       break;
-    case "chunk": w.number(frame.transferId, 8); w.number(frame.offset, 8); w.raw(frame.bytes); break;
-    case "credit": w.number(frame.grantedBytes, 8); w.number(frame.grantedFrames, 8); break;
-    case "sync-applied": w.number(frame.appliedThroughJournalCursor, 8); break;
+    case "chunk":
+      w.number(frame.transferId, 8);
+      w.number(frame.offset, 8);
+      w.raw(frame.bytes);
+      break;
+    case "credit":
+      w.number(frame.grantedBytes, 8);
+      w.number(frame.grantedFrames, 8);
+      break;
+    case "sync-applied":
+      w.number(frame.appliedThroughJournalCursor, 8);
+      break;
     case "result": {
       const identity = frame.result === "success" ? frame.ack : frame;
-      w.string(identity.deliveryId); w.digest(identity.updateDigest);
+      w.string(identity.deliveryId);
+      w.digest(identity.updateDigest);
       if (frame.result === "success") {
-        w.number(1, 1); w.number(frame.ack.journalCursor, 8); w.number(frame.ack.acceptingHostEpoch, 8);
-        w.number(frame.ack.localYDocSequence, 8); w.number(frame.ack.applicationReplayed ? 1 : 0, 1);
-      } else { w.number(frame.result === "refused" ? 2 : 3, 1); w.number(frame.result === "refused" ? refusalCodes[frame.reason] : retryCodes[frame.reason], 1); }
+        w.number(1, 1);
+        w.number(frame.ack.journalCursor, 8);
+        w.number(frame.ack.acceptingHostEpoch, 8);
+        w.number(frame.ack.localYDocSequence, 8);
+        w.number(frame.ack.applicationReplayed ? 1 : 0, 1);
+      } else {
+        w.number(frame.result === "refused" ? 2 : 3, 1);
+        w.number(
+          frame.result === "refused" ? refusalCodes[frame.reason] : retryCodes[frame.reason],
+          1,
+        );
+      }
       break;
     }
-    case "close": w.number(closeCodes[frame.reason], 1); break;
+    case "close":
+      w.number(closeCodes[frame.reason], 1);
+      break;
   }
 }
 function measureFrame(frame: LiveFrame, maxFrameBytes: number) {
@@ -336,7 +579,11 @@ function measureFrame(frame: LiveFrame, maxFrameBytes: number) {
 function encodeOwned(frame: LiveFrame, payloadBytes: number) {
   const bytes = new Uint8Array(LIVE_FRAME_HEADER_BYTES + payloadBytes);
   const w = new Writer(bytes.length, bytes);
-  w.number(0x444c4956, 4); w.number(1, 1); w.number(kindCodes[frame.kind], 1); w.number(0, 2); w.number(payloadBytes, 4);
+  w.number(0x444c4956, 4);
+  w.number(1, 1);
+  w.number(kindCodes[frame.kind], 1);
+  w.number(0, 2);
+  w.number(payloadBytes, 4);
   payload(w, frame);
   return bytes;
 }
@@ -356,65 +603,133 @@ function decodeFrame(value: Uint8Array, maxFrameBytes: number, copyChunk: boolea
   let frame: LiveFrame;
   switch (kind) {
     case "membership": {
-      const revision = integer(r.number(8), true), overflow = r.number(1), count = r.number(4);
-      requireFrame(overflow <= 1 && count === (bytes.length - LIVE_MEMBERSHIP_BASE_BYTES) / LIVE_MEMBERSHIP_MEMBER_BYTES);
-      const members = Array.from({ length: count }, () => Array.from(r.raw(LIVE_MEMBERSHIP_MEMBER_BYTES), byte => byte.toString(16).padStart(2, "0")).join(""));
+      const revision = integer(r.number(8), true),
+        overflow = r.number(1),
+        count = r.number(4);
+      requireFrame(
+        overflow <= 1 &&
+          count === (bytes.length - LIVE_MEMBERSHIP_BASE_BYTES) / LIVE_MEMBERSHIP_MEMBER_BYTES,
+      );
+      const members = Array.from({ length: count }, () =>
+        Array.from(r.raw(LIVE_MEMBERSHIP_MEMBER_BYTES), (byte) =>
+          byte.toString(16).padStart(2, "0"),
+        ).join(""),
+      );
       requireFrame(new Set(members).size === members.length);
-      frame = { kind, revision, overflow: overflow === 1, members }; break;
+      frame = { kind, revision, overflow: overflow === 1, members };
+      break;
     }
-    case "welcome": frame = { kind, hostEpoch: parseHostEpoch(r.number(8)), receivePolicy: readPolicy(r) }; break;
-    case "hello": frame = { kind, receivePolicy: readPolicy(r) }; break;
+    case "welcome":
+      frame = { kind, hostEpoch: parseHostEpoch(r.number(8)), receivePolicy: readPolicy(r) };
+      break;
+    case "hello":
+      frame = { kind, receivePolicy: readPolicy(r) };
+      break;
     case "begin": {
       const transferId = integer(r.number(8), true);
       const purpose = fromCode(purposeCodes, r.number(1));
-      const common = { kind, transferId, totalBytes: integer(r.number(8), true), digest: r.digest() } as const;
-      if (purpose === "initial-sync") frame = { ...common, purpose, appliedThroughJournalCursor: r.number(8) };
+      const common = {
+        kind,
+        transferId,
+        totalBytes: integer(r.number(8), true),
+        digest: r.digest(),
+      } as const;
+      if (purpose === "initial-sync")
+        frame = { ...common, purpose, appliedThroughJournalCursor: r.number(8) };
       else if (purpose === "submit-update") {
         const deliveryId = parseLiveUpdateIdentifier(r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES));
         if (r.offset === bytes.length) frame = { ...common, purpose, deliveryId };
         else {
           const tag = r.number(1);
           requireFrame(tag >= 1 && tag <= 3);
-          const context: Record<string, unknown> = tag === 1 ? {kind: "account", accountId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)}
-            : tag === 2 ? {kind: "link", publicPrincipalId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)} : {kind: "signed-out"};
-          const declared = r.number(1); requireFrame(declared <= 1);
+          const context: Record<string, unknown> =
+            tag === 1
+              ? { kind: "account", accountId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES) }
+              : tag === 2
+                ? { kind: "link", publicPrincipalId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES) }
+                : { kind: "signed-out" };
+          const declared = r.number(1);
+          requireFrame(declared <= 1);
           if (declared) {
-            const agent: Record<string, unknown> = {agentId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)};
+            const agent: Record<string, unknown> = {
+              agentId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES),
+            };
             for (const field of ["agentName", "onBehalfOf"] as const) {
-              const present = r.number(1); requireFrame(present <= 1);
+              const present = r.number(1);
+              requireFrame(present <= 1);
               if (present) agent[field] = r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
             }
-            const depth = r.number(1); requireFrame(depth <= 1);
+            const depth = r.number(1);
+            requireFrame(depth <= 1);
             if (depth) agent.depth = r.number(1);
             context.agent = agent;
           }
           frame = { ...common, purpose, deliveryId, authorContext: authorContext(context) };
         }
-      }
-      else if (purpose === "applied-update") frame = { ...common, purpose, journalCursor: integer(r.number(8), true) };
+      } else if (purpose === "applied-update")
+        frame = { ...common, purpose, journalCursor: integer(r.number(8), true) };
       else frame = { ...common, purpose };
       break;
     }
     case "chunk": {
-      const transferId = integer(r.number(8), true); const offset = r.number(8);
+      const transferId = integer(r.number(8), true);
+      const offset = r.number(8);
       const data = r.raw(bytes.length - r.offset);
       requireFrame(data.length > 0);
-      frame = { kind, transferId, offset, bytes: copyChunk ? data.slice() : data }; break;
-    }
-    case "credit": frame = { kind, grantedBytes: r.number(8), grantedFrames: r.number(8) }; break;
-    case "sync-applied": frame = { kind, appliedThroughJournalCursor: r.number(8) }; break;
-    case "result": {
-      const deliveryId = parseLiveUpdateIdentifier(r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES));
-      const updateDigest = r.digest(); const tag = r.number(1);
-      if (tag === 1) {
-        const journalCursor = r.number(8), acceptingHostEpoch = r.number(8), localYDocSequence = r.number(8), replay = r.number(1);
-        requireFrame(replay <= 1);
-        frame = { kind, result: "success", ack: parseLiveUpdateHostApplicationAck({ deliveryId, updateDigest, journalCursor, acceptingHostEpoch, localYDocSequence, applicationReplayed: replay === 1 }) };
-      } else if (tag === 2) frame = { kind, result: "refused", deliveryId, updateDigest, reason: fromCode(refusalCodes, r.number(1)) };
-      else { requireFrame(tag === 3); frame = { kind, result: "retry", deliveryId, updateDigest, reason: fromCode(retryCodes, r.number(1)) }; }
+      frame = { kind, transferId, offset, bytes: copyChunk ? data.slice() : data };
       break;
     }
-    case "close": frame = { kind, reason: fromCode(closeCodes, r.number(1)) }; break;
+    case "credit":
+      frame = { kind, grantedBytes: r.number(8), grantedFrames: r.number(8) };
+      break;
+    case "sync-applied":
+      frame = { kind, appliedThroughJournalCursor: r.number(8) };
+      break;
+    case "result": {
+      const deliveryId = parseLiveUpdateIdentifier(r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES));
+      const updateDigest = r.digest();
+      const tag = r.number(1);
+      if (tag === 1) {
+        const journalCursor = r.number(8),
+          acceptingHostEpoch = r.number(8),
+          localYDocSequence = r.number(8),
+          replay = r.number(1);
+        requireFrame(replay <= 1);
+        frame = {
+          kind,
+          result: "success",
+          ack: parseLiveUpdateHostApplicationAck({
+            deliveryId,
+            updateDigest,
+            journalCursor,
+            acceptingHostEpoch,
+            localYDocSequence,
+            applicationReplayed: replay === 1,
+          }),
+        };
+      } else if (tag === 2)
+        frame = {
+          kind,
+          result: "refused",
+          deliveryId,
+          updateDigest,
+          reason: fromCode(refusalCodes, r.number(1)),
+        };
+      else {
+        requireFrame(tag === 3);
+        frame = {
+          kind,
+          result: "retry",
+          deliveryId,
+          updateDigest,
+          reason: fromCode(retryCodes, r.number(1)),
+        };
+      }
+      break;
+    }
+    case "close":
+      frame = { kind, reason: fromCode(closeCodes, r.number(1)) };
+      break;
   }
   r.end();
   return frame;
@@ -428,43 +743,102 @@ export interface LiveFrameSync {
   readonly hostVector: Uint8Array;
   readonly missingStateUpdate: Uint8Array;
 }
-const bindingFields = ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "selectorPaths", "restoreFenceGeneration"] as const;
+const bindingFields = [
+  "workspaceId",
+  "mainVersionId",
+  "objectId",
+  "lineageClaimId",
+  "currentPath",
+  "selectorPaths",
+  "restoreFenceGeneration",
+] as const;
 function bindingSnapshot(value: unknown) {
   const result = record(value, bindingFields);
   const paths = result.selectorPaths;
   requireFrame(Array.isArray(paths) && Object.getPrototypeOf(paths) === Array.prototype);
   const count = integer(Object.getOwnPropertyDescriptor(paths, "length")?.value, true);
-  requireFrame(count <= LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT && Reflect.ownKeys(paths).length === count + 1);
+  requireFrame(
+    count <= LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT &&
+      Reflect.ownKeys(paths).length === count + 1,
+  );
   result.selectorPaths = Array.from({ length: count }, (_, index) => {
     const descriptor = Object.getOwnPropertyDescriptor(paths, String(index));
-    requireFrame(descriptor && "value" in descriptor); return descriptor.value;
+    requireFrame(descriptor && "value" in descriptor);
+    return descriptor.value;
   });
   return parseLiveObjectBinding(result);
 }
 function writeBinding(w: Writer, b: LiveObjectBinding) {
-  w.string(b.workspaceId); w.string(b.mainVersionId); w.string(b.objectId); w.string(b.lineageClaimId); w.string(b.currentPath);
-  w.number(b.selectorPaths.length, 4); for (const path of b.selectorPaths) w.string(path);
+  w.string(b.workspaceId);
+  w.string(b.mainVersionId);
+  w.string(b.objectId);
+  w.string(b.lineageClaimId);
+  w.string(b.currentPath);
+  w.number(b.selectorPaths.length, 4);
+  for (const path of b.selectorPaths) w.string(path);
   w.number(b.restoreFenceGeneration, 8);
 }
-export function encodeLiveFrameSync(value: LiveFrameSync, receivePolicy: LiveFrameReceivePolicy): Uint8Array {
-  const p = policy(receivePolicy); const r = record(value, ["binding", "hostVector", "missingStateUpdate"]);
-  const binding = bindingSnapshot(r.binding), vector = byteView(r.hostVector), update = byteView(r.missingStateUpdate);
-  requireFrame(vector.length > 0 && vector.length <= p.maxStateVectorBytes && update.length > 0 && update.length <= p.maxSyncBytes, "limit");
-  return writeBytes(p.maxSyncBytes, w => { writeBinding(w, binding); w.blob(vector); w.blob(update); });
+export function encodeLiveFrameSync(
+  value: LiveFrameSync,
+  receivePolicy: LiveFrameReceivePolicy,
+): Uint8Array {
+  const p = policy(receivePolicy);
+  const r = record(value, ["binding", "hostVector", "missingStateUpdate"]);
+  const binding = bindingSnapshot(r.binding),
+    vector = byteView(r.hostVector),
+    update = byteView(r.missingStateUpdate);
+  requireFrame(
+    vector.length > 0 &&
+      vector.length <= p.maxStateVectorBytes &&
+      update.length > 0 &&
+      update.length <= p.maxSyncBytes,
+    "limit",
+  );
+  return writeBytes(p.maxSyncBytes, (w) => {
+    writeBinding(w, binding);
+    w.blob(vector);
+    w.blob(update);
+  });
 }
-export function decodeLiveFrameSync(value: Uint8Array, receivePolicy: LiveFrameReceivePolicy): LiveFrameSync {
-  const p = policy(receivePolicy), bytes = byteView(value);
+export function decodeLiveFrameSync(
+  value: Uint8Array,
+  receivePolicy: LiveFrameReceivePolicy,
+): LiveFrameSync {
+  const p = policy(receivePolicy),
+    bytes = byteView(value);
   requireFrame(bytes.length <= p.maxSyncBytes, "limit");
-  const r = new Reader(bytes), id = () => r.string(LIVE_OBJECT_BINDING_IDENTIFIER_MAX_BYTES), path = () => r.string(LIVE_OBJECT_BINDING_PATH_MAX_BYTES);
-  const workspaceId = id(), mainVersionId = id(), objectId = id(), lineageClaimId = id(), currentPath = path();
+  const r = new Reader(bytes),
+    id = () => r.string(LIVE_OBJECT_BINDING_IDENTIFIER_MAX_BYTES),
+    path = () => r.string(LIVE_OBJECT_BINDING_PATH_MAX_BYTES);
+  const workspaceId = id(),
+    mainVersionId = id(),
+    objectId = id(),
+    lineageClaimId = id(),
+    currentPath = path();
   const count = r.number(4);
   requireFrame(count > 0 && count <= LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, "limit");
-  const selectorPaths = Array.from({ length: count }, path), restoreFenceGeneration = r.number(8);
+  const selectorPaths = Array.from({ length: count }, path),
+    restoreFenceGeneration = r.number(8);
   const bindingEnd = r.offset;
-  const binding = parseLiveObjectBinding({ workspaceId, mainVersionId, objectId, lineageClaimId, currentPath, selectorPaths, restoreFenceGeneration });
-  requireFrame(equalBytes(bytes.subarray(0, bindingEnd), writeBytes(bindingEnd, w => writeBinding(w, binding))));
-  const hostVector = r.blob(p.maxStateVectorBytes), missingStateUpdate = r.blob(p.maxSyncBytes);
-  r.end(); return { binding, hostVector, missingStateUpdate };
+  const binding = parseLiveObjectBinding({
+    workspaceId,
+    mainVersionId,
+    objectId,
+    lineageClaimId,
+    currentPath,
+    selectorPaths,
+    restoreFenceGeneration,
+  });
+  requireFrame(
+    equalBytes(
+      bytes.subarray(0, bindingEnd),
+      writeBytes(bindingEnd, (w) => writeBinding(w, binding)),
+    ),
+  );
+  const hostVector = r.blob(p.maxStateVectorBytes),
+    missingStateUpdate = r.blob(p.maxSyncBytes);
+  r.end();
+  return { binding, hostVector, missingStateUpdate };
 }
 
 export interface LiveFrameSessionPolicy {
@@ -477,7 +851,10 @@ export interface LiveFrameSessionPolicy {
   readonly maxAssemblyBytes: number;
 }
 /** release relinquishes the value; callers must stop retaining or using it afterward. */
-export interface LiveFrameLease<T> { readonly value: T; release(): void }
+export interface LiveFrameLease<T> {
+  readonly value: T;
+  release(): void;
+}
 export interface LiveFrameTransfer {
   readonly begin: LiveFrameBegin;
   /** Opaque, unverified bytes. The consumer must verify the digest before use. */
@@ -503,31 +880,77 @@ interface Direction {
   controlFrames: number;
 }
 function direction(): Direction {
-  return { greeted: false, nextTransferId: 1, grantedBytes: 0, grantedFrames: 0, chargedBytes: 0, chargedFrames: 0, queuedBytes: 0, queuedFrames: 0, controlBytes: 0, controlFrames: 0 };
+  return {
+    greeted: false,
+    nextTransferId: 1,
+    grantedBytes: 0,
+    grantedFrames: 0,
+    chargedBytes: 0,
+    chargedFrames: 0,
+    queuedBytes: 0,
+    queuedFrames: 0,
+    controlBytes: 0,
+    controlFrames: 0,
+  };
 }
-function opposite(side: Side): Side { return side === "client" ? "server" : "client"; }
+function opposite(side: Side): Side {
+  return side === "client" ? "server" : "client";
+}
 
 /**
  * One ordered duplex route. The transport owns its borrowed receive buffer separately.
  * Queue accounting covers one owned frame; assembly accounting covers its copied chunks.
  * Callers own hashing and durable effects. A decoded RESULT proves neither.
  */
-export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy, reserveBytes?: (size: number) => () => void) {
+export function createLiveFrameSession(
+  role: Side,
+  input: LiveFrameSessionPolicy,
+  reserveBytes?: (size: number) => () => void,
+) {
   requireFrame(role === "client" || role === "server");
-  const raw = record(input, ["receive", "maxQueuedBytes", "maxQueuedFrames", "maxControlBytes", "maxControlFrames", "maxAssemblyBytes"]);
+  const raw = record(input, [
+    "receive",
+    "maxQueuedBytes",
+    "maxQueuedFrames",
+    "maxControlBytes",
+    "maxControlFrames",
+    "maxAssemblyBytes",
+  ]);
   const limits: LiveFrameSessionPolicy = {
-    receive: policy(raw.receive), maxQueuedBytes: integer(raw.maxQueuedBytes, true), maxQueuedFrames: integer(raw.maxQueuedFrames, true),
-    maxControlBytes: integer(raw.maxControlBytes, true), maxControlFrames: integer(raw.maxControlFrames, true), maxAssemblyBytes: integer(raw.maxAssemblyBytes, true),
+    receive: policy(raw.receive),
+    maxQueuedBytes: integer(raw.maxQueuedBytes, true),
+    maxQueuedFrames: integer(raw.maxQueuedFrames, true),
+    maxControlBytes: integer(raw.maxControlBytes, true),
+    maxControlFrames: integer(raw.maxControlFrames, true),
+    maxAssemblyBytes: integer(raw.maxAssemblyBytes, true),
   };
-  requireFrame(limits.maxControlBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES && limits.maxQueuedBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES);
-  requireFrame(limits.maxAssemblyBytes >= Math.max(limits.receive.maxUpdateBytes,
-    role === "client" ? limits.receive.maxSyncBytes : limits.receive.maxStateVectorBytes));
+  requireFrame(
+    limits.maxControlBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES &&
+      limits.maxQueuedBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES,
+  );
+  requireFrame(
+    limits.maxAssemblyBytes >=
+      Math.max(
+        limits.receive.maxUpdateBytes,
+        role === "client" ? limits.receive.maxSyncBytes : limits.receive.maxStateVectorBytes,
+      ),
+  );
   const sides = { client: direction(), server: direction() };
-  let terminal = false, vectorDone = false, syncDone = false, live = false, syncCursor = 0, assemblyBytes = 0, membershipRevision = 0;
+  let terminal = false,
+    vectorDone = false,
+    syncDone = false,
+    live = false,
+    syncCursor = 0,
+    assemblyBytes = 0,
+    membershipRevision = 0;
   let pending: { deliveryId: string; updateDigest: string; complete: boolean } | undefined;
   function lease<T>(value: T, relinquish: () => void): LiveFrameLease<T> {
     let held = true;
-    const release = () => { if (!held) return; held = false; relinquish(); };
+    const release = () => {
+      if (!held) return;
+      held = false;
+      relinquish();
+    };
     return { value, release };
   }
   function close() {
@@ -537,24 +960,50 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       if (state.active?.bytes) assemblyBytes -= state.active.begin.totalBytes;
       state.active?.releaseBytes?.();
       state.active = undefined;
-      state.grantedBytes = state.chargedBytes; state.grantedFrames = state.chargedFrames;
+      state.grantedBytes = state.chargedBytes;
+      state.grantedFrames = state.chargedFrames;
     }
     // Consumer-owned completed transfers and in-flight frames stay charged until released.
   }
-  function checkOpen() { requireFrame(!terminal, "closed"); }
-  function maximum(begin: LiveFrameBegin, p: LiveFrameReceivePolicy) {
-    return begin.purpose === "client-vector" ? p.maxStateVectorBytes : begin.purpose === "initial-sync" ? p.maxSyncBytes : p.maxUpdateBytes;
+  function checkOpen() {
+    requireFrame(!terminal, "closed");
   }
-  function preflightChunk(sender: Side, frame: Extract<LiveFrame, { kind: "chunk" }>, size: number) {
-    const state = sides[sender], peer = sides[opposite(sender)];
+  function maximum(begin: LiveFrameBegin, p: LiveFrameReceivePolicy) {
+    return begin.purpose === "client-vector"
+      ? p.maxStateVectorBytes
+      : begin.purpose === "initial-sync"
+        ? p.maxSyncBytes
+        : p.maxUpdateBytes;
+  }
+  function preflightChunk(
+    sender: Side,
+    frame: Extract<LiveFrame, { kind: "chunk" }>,
+    size: number,
+  ) {
+    const state = sides[sender],
+      peer = sides[opposite(sender)];
     requireFrame(state.greeted && peer.greeted, "state");
-    requireFrame(size <= state.grantedBytes - state.chargedBytes && state.chargedFrames < state.grantedFrames, "credit");
+    requireFrame(
+      size <= state.grantedBytes - state.chargedBytes && state.chargedFrames < state.grantedFrames,
+      "credit",
+    );
     const active = state.active;
-    requireFrame(active && frame.transferId === active.begin.transferId && frame.offset === active.offset && frame.bytes.length <= active.begin.totalBytes - active.offset, "state");
+    requireFrame(
+      active &&
+        frame.transferId === active.begin.transferId &&
+        frame.offset === active.offset &&
+        frame.bytes.length <= active.begin.totalBytes - active.offset,
+      "state",
+    );
     return active;
   }
-  function transition(sender: Side, frame: LiveFrame, size: number): LiveFrameLease<LiveFrameTransfer> | undefined {
-    const state = sides[sender], peer = sides[opposite(sender)];
+  function transition(
+    sender: Side,
+    frame: LiveFrame,
+    size: number,
+  ): LiveFrameLease<LiveFrameTransfer> | undefined {
+    const state = sides[sender],
+      peer = sides[opposite(sender)];
     Object.freeze(frame);
     if (frame.kind === "welcome" || frame.kind === "hello") Object.freeze(frame.receivePolicy);
     if (frame.kind === "result" && frame.result === "success") Object.freeze(frame.ack);
@@ -564,57 +1013,116 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       Object.freeze(frame.authorContext);
     }
     if (frame.kind === "welcome" || frame.kind === "hello") {
-      requireFrame(!state.greeted && (frame.kind === "welcome" ? sender === "server" : sender === "client"), "state");
-      if (sender === role) requireFrame(policyFields.every(field => frame.receivePolicy[field] === limits.receive[field]), "state");
-      state.greeted = true; state.receivePolicy = frame.receivePolicy; return;
+      requireFrame(
+        !state.greeted && (frame.kind === "welcome" ? sender === "server" : sender === "client"),
+        "state",
+      );
+      if (sender === role)
+        requireFrame(
+          policyFields.every((field) => frame.receivePolicy[field] === limits.receive[field]),
+          "state",
+        );
+      state.greeted = true;
+      state.receivePolicy = frame.receivePolicy;
+      return;
     }
     requireFrame(state.greeted, "state");
-    if (frame.kind === "close") { close(); return; }
+    if (frame.kind === "close") {
+      close();
+      return;
+    }
     if (frame.kind === "credit") {
       // The sender grants the opposite data direction, including before that peer's greeting.
-      requireFrame(frame.grantedBytes >= peer.grantedBytes && frame.grantedFrames >= peer.grantedFrames &&
-        (frame.grantedBytes > peer.grantedBytes || frame.grantedFrames > peer.grantedFrames), "credit");
+      requireFrame(
+        frame.grantedBytes >= peer.grantedBytes &&
+          frame.grantedFrames >= peer.grantedFrames &&
+          (frame.grantedBytes > peer.grantedBytes || frame.grantedFrames > peer.grantedFrames),
+        "credit",
+      );
       if (sender === role) {
-        requireFrame(frame.grantedBytes - peer.chargedBytes <= limits.maxQueuedBytes - peer.queuedBytes &&
-          frame.grantedFrames - peer.chargedFrames <= limits.maxQueuedFrames - peer.queuedFrames, "credit");
+        requireFrame(
+          frame.grantedBytes - peer.chargedBytes <= limits.maxQueuedBytes - peer.queuedBytes &&
+            frame.grantedFrames - peer.chargedFrames <= limits.maxQueuedFrames - peer.queuedFrames,
+          "credit",
+        );
       }
-      peer.grantedBytes = frame.grantedBytes; peer.grantedFrames = frame.grantedFrames; return;
+      peer.grantedBytes = frame.grantedBytes;
+      peer.grantedFrames = frame.grantedFrames;
+      return;
     }
     requireFrame(peer.greeted, "state");
     if (frame.kind === "membership") {
       requireFrame(sender === "server" && live && frame.revision > membershipRevision, "state");
-      membershipRevision = frame.revision; return;
+      membershipRevision = frame.revision;
+      return;
     }
     if (frame.kind === "sync-applied") {
-      requireFrame(sender === "client" && syncDone && !live && frame.appliedThroughJournalCursor === syncCursor, "state");
-      live = true; return;
+      requireFrame(
+        sender === "client" &&
+          syncDone &&
+          !live &&
+          frame.appliedThroughJournalCursor === syncCursor,
+        "state",
+      );
+      live = true;
+      return;
     }
     if (frame.kind === "result") {
       const identity = frame.result === "success" ? frame.ack : frame;
-      requireFrame(sender === "server" && live && pending?.complete && pending.deliveryId === identity.deliveryId && pending.updateDigest === identity.updateDigest, "state");
+      requireFrame(
+        sender === "server" &&
+          live &&
+          pending?.complete &&
+          pending.deliveryId === identity.deliveryId &&
+          pending.updateDigest === identity.updateDigest,
+        "state",
+      );
       pending = undefined;
       if (frame.result === "refused") close();
       return;
     }
     if (frame.kind === "begin") {
-      requireFrame(size <= state.grantedBytes - state.chargedBytes && state.chargedFrames < state.grantedFrames, "credit");
+      requireFrame(
+        size <= state.grantedBytes - state.chargedBytes &&
+          state.chargedFrames < state.grantedFrames,
+        "credit",
+      );
       requireFrame(!state.active && frame.transferId === state.nextTransferId, "state");
-      requireFrame(frame.totalBytes <= maximum(frame, limits.receive) && frame.totalBytes <= maximum(frame, peer.receivePolicy!), "limit");
-      if (frame.purpose === "client-vector") requireFrame(sender === "client" && !vectorDone && !live, "state");
-      else if (frame.purpose === "initial-sync") requireFrame(sender === "server" && vectorDone && !syncDone && !live, "state");
+      requireFrame(
+        frame.totalBytes <= maximum(frame, limits.receive) &&
+          frame.totalBytes <= maximum(frame, peer.receivePolicy!),
+        "limit",
+      );
+      if (frame.purpose === "client-vector")
+        requireFrame(sender === "client" && !vectorDone && !live, "state");
+      else if (frame.purpose === "initial-sync")
+        requireFrame(sender === "server" && vectorDone && !syncDone && !live, "state");
       else {
-        requireFrame(live && (frame.purpose === "submit-update" ? sender === "client" && !pending : sender === "server"), "state");
+        requireFrame(
+          live &&
+            (frame.purpose === "submit-update"
+              ? sender === "client" && !pending
+              : sender === "server"),
+          "state",
+        );
       }
       let bytes: Uint8Array | undefined, releaseBytes: (() => void) | undefined;
       if (sender !== role) {
         requireFrame(frame.totalBytes <= limits.maxAssemblyBytes - assemblyBytes, "limit");
         releaseBytes = reserveBytes?.(frame.totalBytes);
-        try { bytes = new Uint8Array(frame.totalBytes); } catch (error) { releaseBytes?.(); throw error; }
+        try {
+          bytes = new Uint8Array(frame.totalBytes);
+        } catch (error) {
+          releaseBytes?.();
+          throw error;
+        }
         assemblyBytes += frame.totalBytes;
       }
       state.active = { begin: frame, offset: 0, bytes, releaseBytes };
-      state.nextTransferId = frame.transferId === Number.MAX_SAFE_INTEGER ? 0 : frame.transferId + 1;
-      if (frame.purpose === "submit-update") pending = { deliveryId: frame.deliveryId, updateDigest: frame.digest, complete: false };
+      state.nextTransferId =
+        frame.transferId === Number.MAX_SAFE_INTEGER ? 0 : frame.transferId + 1;
+      if (frame.purpose === "submit-update")
+        pending = { deliveryId: frame.deliveryId, updateDigest: frame.digest, complete: false };
     } else {
       const active = preflightChunk(sender, frame, size);
       active.bytes?.set(frame.bytes, active.offset);
@@ -622,32 +1130,54 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       if (active.offset === active.begin.totalBytes) {
         state.active = undefined;
         if (active.begin.purpose === "client-vector") vectorDone = true;
-        if (active.begin.purpose === "initial-sync") { syncDone = true; syncCursor = active.begin.appliedThroughJournalCursor; }
+        if (active.begin.purpose === "initial-sync") {
+          syncDone = true;
+          syncCursor = active.begin.appliedThroughJournalCursor;
+        }
         if (active.begin.purpose === "submit-update") pending!.complete = true;
-        state.chargedBytes += size; state.chargedFrames += 1;
-        if (active.bytes) return lease({ begin: active.begin, bytes: active.bytes }, () => { assemblyBytes -= active.begin.totalBytes; active.releaseBytes?.(); });
+        state.chargedBytes += size;
+        state.chargedFrames += 1;
+        if (active.bytes)
+          return lease({ begin: active.begin, bytes: active.bytes }, () => {
+            assemblyBytes -= active.begin.totalBytes;
+            active.releaseBytes?.();
+          });
         return;
       }
     }
-    state.chargedBytes += size; state.chargedFrames += 1;
+    state.chargedBytes += size;
+    state.chargedFrames += 1;
   }
   function holdFrame(sender: Side, data: boolean, size: number) {
     const state = sides[sender];
-    const bytesField = data ? "queuedBytes" : "controlBytes", framesField = data ? "queuedFrames" : "controlFrames";
-    requireFrame(size <= (data ? limits.maxQueuedBytes : limits.maxControlBytes) - state[bytesField] &&
-      state[framesField] < (data ? limits.maxQueuedFrames : limits.maxControlFrames), "limit");
+    const bytesField = data ? "queuedBytes" : "controlBytes",
+      framesField = data ? "queuedFrames" : "controlFrames";
+    requireFrame(
+      size <= (data ? limits.maxQueuedBytes : limits.maxControlBytes) - state[bytesField] &&
+        state[framesField] < (data ? limits.maxQueuedFrames : limits.maxControlFrames),
+      "limit",
+    );
     const releaseBytes = reserveBytes?.(size);
-    state[bytesField] += size; state[framesField] += 1;
-    return () => { state[bytesField] -= size; state[framesField] -= 1; releaseBytes?.(); };
+    state[bytesField] += size;
+    state[framesField] += 1;
+    return () => {
+      state[bytesField] -= size;
+      state[framesField] -= 1;
+      releaseBytes?.();
+    };
   }
   return {
     send(value: LiveFrame): LiveFrameLease<Uint8Array> {
       checkOpen();
       // Local shape/encoding and pressure errors consume no protocol position. The
       // caller can repair or wait. An illegal protocol transition retires the route.
-      const max = Math.min(limits.receive.maxFrameBytes, sides[opposite(role)].receivePolicy?.maxFrameBytes ?? limits.receive.maxFrameBytes);
+      const max = Math.min(
+        limits.receive.maxFrameBytes,
+        sides[opposite(role)].receivePolicy?.maxFrameBytes ?? limits.receive.maxFrameBytes,
+      );
       const frame = snapshotFrame(value, max);
-      const payloadBytes = measureFrame(frame, max), size = payloadBytes + LIVE_FRAME_HEADER_BYTES;
+      const payloadBytes = measureFrame(frame, max),
+        size = payloadBytes + LIVE_FRAME_HEADER_BYTES;
       const release = holdFrame(role, frame.kind === "begin" || frame.kind === "chunk", size);
       try {
         if (frame.kind === "chunk") preflightChunk(role, frame, size);
@@ -656,7 +1186,11 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
         return lease(bytes, release);
       } catch (error) {
         release();
-        if (!(error instanceof LiveFrameError) || (error.reason !== "credit" && error.reason !== "limit")) close();
+        if (
+          !(error instanceof LiveFrameError) ||
+          (error.reason !== "credit" && error.reason !== "limit")
+        )
+          close();
         throw error;
       }
     },
@@ -666,22 +1200,44 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       let completed: LiveFrameLease<LiveFrameTransfer> | undefined;
       try {
         const bytes = byteView(value);
-        requireFrame(bytes.length >= LIVE_FRAME_HEADER_BYTES && bytes.length <= limits.receive.maxFrameBytes, "limit");
+        requireFrame(
+          bytes.length >= LIVE_FRAME_HEADER_BYTES && bytes.length <= limits.receive.maxFrameBytes,
+          "limit",
+        );
         const data = bytes[5] === kindCodes.begin || bytes[5] === kindCodes.chunk;
         release = holdFrame(opposite(role), data, bytes.length);
         const borrowed = decodeFrame(bytes, limits.receive.maxFrameBytes, false);
         const transfer = transition(opposite(role), borrowed, bytes.length);
         completed = transfer;
-        const frame = borrowed.kind === "chunk" ? Object.freeze({ ...borrowed, bytes: borrowed.bytes.slice() }) : borrowed;
+        const frame =
+          borrowed.kind === "chunk"
+            ? Object.freeze({ ...borrowed, bytes: borrowed.bytes.slice() })
+            : borrowed;
         return lease({ frame, ...(transfer ? { transfer } : {}) }, release);
-      } catch (error) { completed?.release(); release?.(); close(); throw error; }
+      } catch (error) {
+        completed?.release();
+        release?.();
+        close();
+        throw error;
+      }
     },
     close,
     usage() {
-      const usage = (side: Direction) => ({ queuedBytes: side.queuedBytes, queuedFrames: side.queuedFrames,
-        controlBytes: side.controlBytes, controlFrames: side.controlFrames,
-        promisedBytes: side.grantedBytes - side.chargedBytes, promisedFrames: side.grantedFrames - side.chargedFrames });
-      return { closed: terminal, live, assemblyBytes, incoming: usage(sides[opposite(role)]), outgoing: usage(sides[role]) };
+      const usage = (side: Direction) => ({
+        queuedBytes: side.queuedBytes,
+        queuedFrames: side.queuedFrames,
+        controlBytes: side.controlBytes,
+        controlFrames: side.controlFrames,
+        promisedBytes: side.grantedBytes - side.chargedBytes,
+        promisedFrames: side.grantedFrames - side.chargedFrames,
+      });
+      return {
+        closed: terminal,
+        live,
+        assemblyBytes,
+        incoming: usage(sides[opposite(role)]),
+        outgoing: usage(sides[role]),
+      };
     },
   };
 }

@@ -5,7 +5,12 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
-import { agentsListening, openAgentChat, startAgentYouRun, stopAgentYouRun } from "./helpers/agentTools";
+import {
+  agentsListening,
+  openAgentChat,
+  startAgentYouRun,
+  stopAgentYouRun,
+} from "./helpers/agentTools";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -31,8 +36,21 @@ const SETTINGS: DesktopUserSettings = {
   ...DEFAULT_USER_SETTINGS,
   profile: { preferredName: "Sam" },
   agents: {
-    default: { name: "Nova", hue: "olive", launch: { command }, changesFiles: true, enabled: true, timeoutMinutes: 1 },
-    terminal: { name: "Terminal", hue: "rose", changesFiles: true, enabled: false, timeoutMinutes: 1 },
+    default: {
+      name: "Nova",
+      hue: "olive",
+      launch: { command },
+      changesFiles: true,
+      enabled: true,
+      timeoutMinutes: 1,
+    },
+    terminal: {
+      name: "Terminal",
+      hue: "rose",
+      changesFiles: true,
+      enabled: false,
+      timeoutMinutes: 1,
+    },
     scout: { name: "Scout", hue: "teal", changesFiles: true, enabled: false, timeoutMinutes: 1 },
   },
 };
@@ -47,7 +65,11 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
   await waitForVisibleAnimations(page);
 }
 
-async function shoot(page: Page, target: { screenshot(options: { path: string }): Promise<Buffer> }, name: string): Promise<void> {
+async function shoot(
+  page: Page,
+  target: { screenshot(options: { path: string }): Promise<Buffer> },
+  name: string,
+): Promise<void> {
   for (const theme of ["light", "dark"] as const) {
     await setTheme(page, theme);
     await target.screenshot({ path: join(SHOT_DIR, `${name}-${theme}.png`) });
@@ -64,13 +86,15 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
 
   try {
     await seedWorkspaceManifest(temp, WORKSPACE_ID);
-    await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), `${JSON.stringify(SETTINGS, null, 2)}\n`);
+    await writeFile(
+      join(temp.homeDir, USER_SETTINGS_FILE),
+      `${JSON.stringify(SETTINGS, null, 2)}\n`,
+    );
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     await trustOpenWorkspace(desktop);
 
-    // Terminal connects as itself and waits; Scout isn't connected.
     agent = await startAgentYouRun(page, WORKSPACE_ID, "terminal", REPLY);
     await expect.poll(() => agentsListening(page), { timeout: 30_000 }).toEqual(["terminal"]);
 
@@ -85,11 +109,8 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await page.mouse.move(0, 0);
     await shoot(page, section, "agents-you-run-a-settings");
 
-    // Add agent with Another agent chosen shows the MCP config it will use.
     await section.getByTestId("agent-add").click();
     const sheet = page.getByTestId("agent-add-sheet");
-    // Both themes show the same settled sheet: it has looked for each tool,
-    // and its Copy MCP config is ready.
     await expect(sheet.getByLabel(/^Looking for /)).toHaveCount(0);
     await sheet.getByTestId("agent-runs-with-mcp").click();
     await expect(sheet.locator('[data-testid="agent-add-config-copy"]:enabled')).toHaveCount(1);
@@ -98,7 +119,6 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await sheet.getByRole("button", { name: "Cancel" }).click();
     await expect(sheet).toHaveCount(0);
 
-    // Scout's page: how to connect it, the run that marks its changes, and its menu.
     await row("scout").click();
     const agentPage = section.getByTestId("agent-page");
     await expect(agentPage).toHaveAttribute("data-agent-id", "scout");
@@ -111,7 +131,6 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await shoot(page, dialog, "agents-you-run-c-menu");
     await page.keyboard.press("Escape");
 
-    // Remove asks first. Just after it, the list is back and its toast offers Undo.
     await agentPage.getByRole("button", { name: "Remove Scout…" }).click();
     const confirm = page.getByTestId("remove-agent-dialog");
     await expect(confirm).toContainText("Remove Scout?");
@@ -131,14 +150,17 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     await undo.click();
     await expect(row("scout")).toHaveCount(1);
 
-    // Terminal's reply in its chat, under its name and color.
     await page.getByRole("button", { name: "Close settings" }).click();
     await expect(dialog).toHaveCount(0);
     await openAgentChat(page, "terminal", "Terminal");
-    await page.getByTestId("chats-lane-composer").fill("Are you there? Can you check the trip notes?");
+    await page
+      .getByTestId("chats-lane-composer")
+      .fill("Are you there? Can you check the trip notes?");
     await page.getByTestId("chats-lane-composer").press("Enter");
     const reply = page.getByTestId("chats-lane-message").filter({ hasText: REPLY });
-    await expect(reply.getByTestId("chats-lane-message-author").locator(".text-hue-rose")).toHaveText("Terminal");
+    await expect(
+      reply.getByTestId("chats-lane-message-author").locator(".text-hue-rose"),
+    ).toHaveText("Terminal");
     await expect.poll(() => agent!.exitCode).toBe(0);
     await page.mouse.move(0, 0);
     await shoot(page, page, "agents-you-run-e-reply");

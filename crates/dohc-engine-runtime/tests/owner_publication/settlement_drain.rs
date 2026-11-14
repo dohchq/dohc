@@ -1,6 +1,3 @@
-//! The owner settlement drain through the actor, its queue built by real
-//! owner-settlement admission.
-
 use super::*;
 use dohc_engine_collab::owner_outbox::accepted::{OwnerAcceptedFrameInput, apply_frame_in_tx};
 use dohc_engine_collab::owner_outbox::draft::{
@@ -11,8 +8,6 @@ use dohc_engine_domain::{VersionedTextStore, WriteText};
 const RECORD_PATH: &str = "tasks/record.md";
 const OWNER_PATH: &str = "notes/owner.md";
 
-/// A document whose owner this store observes: the owner's settlement at
-/// accepted cursor 1, and the frame that brings the store to it.
 struct Observed {
     binding: dohc_engine_collab::LiveObjectBinding,
     native_head_sequence: i64,
@@ -55,8 +50,6 @@ fn write_text(store: &mut EngineStore, object: &str, path: &str, text: &str) {
         .unwrap();
 }
 
-/// Observe the owner of `object` at `path`, its Y.Doc `base`, and prepare
-/// the frame `change` makes.
 fn observe(
     store: &mut EngineStore,
     object: &str,
@@ -129,8 +122,6 @@ fn observe(
     }
 }
 
-/// Admit the owner's settlement of `observed` from `origin`, as ordinary
-/// sync brings it with its audited record at cursor 1.
 fn admit(store: &mut EngineStore, observed: &Observed, origin: &str, digit: char) {
     let b = &observed.binding;
     let (before, latest, updated): (String, String, i64) = store
@@ -199,7 +190,6 @@ fn admit(store: &mut EngineStore, observed: &Observed, origin: &str, digit: char
     .unwrap();
 }
 
-/// The owner's authenticated feed reaches cursor 1.
 fn accept(store: &mut EngineStore, observed: &Observed) {
     store
         .write_with(&NoFaults, |tx| {
@@ -250,7 +240,6 @@ async fn drain() -> Drain {
     assert_eq!(settlement_queue(&store).len(), 2, "both wait for cursor 1");
     accept(&mut store, &record);
     accept(&mut store, &owner);
-    // The record's Collection, indexed from its file as the frame left it.
     write_text(
         &mut store,
         "schema",
@@ -346,8 +335,6 @@ impl Drain {
             .unwrap();
     }
 
-    /// The drain's first attempt committed the record's settlement, with its
-    /// field change, under one report, and rolled back the owner document's.
     fn committed_prefix(&self) -> String {
         let queue = settlement_queue(&self.store);
         let report = queue[1].3.clone().expect("the record's report");
@@ -429,11 +416,8 @@ impl dohc_engine_sync::RelayTransport for QuietFeed {
     }
 }
 
-/// A field change of a fact: its field, before and after.
 type FieldChange = (String, Option<String>, Option<String>);
 
-/// What a completed pull reports: its cursor, the paths it changed and the
-/// field changes of its facts.
 type Reported = (dohc_engine_sync::RelayCursor, Vec<String>, Vec<FieldChange>);
 
 fn reported(answer: Answer) -> Reported {
@@ -461,7 +445,6 @@ fn reported(answer: Answer) -> Reported {
     (cursor, paths, fields)
 }
 
-/// Each change and fact the drain owes, once.
 fn owed() -> (Vec<String>, Vec<FieldChange>) {
     (
         vec![OWNER_PATH.into(), RECORD_PATH.into()],
@@ -473,13 +456,12 @@ fn owed() -> (Vec<String>, Vec<FieldChange>) {
     )
 }
 
-/// Sol's review of round 4b2i-1a-2j, finding 2, through the actor and real
-/// admission: the drain applies the record's settlement with its field
-/// change and commits it under its report before the owner document's
-/// decision waits. The request stays outstanding; once validation completes
-/// it goes on in the same report, which names each change and fact once.
-/// The rows stay queued until a cursor naming that report commits: one
-/// naming another releases nothing.
+/// Through the actor and real admission: the drain applies the record's
+/// settlement with its field change and commits it under its report before
+/// the owner document's decision waits. The request stays outstanding; once
+/// validation completes it goes on in the same report, which names each
+/// change and fact once. The rows stay queued until a cursor naming that
+/// report commits: one naming another releases nothing.
 #[tokio::test]
 async fn a_waiting_drain_goes_on_in_its_report_through_real_admission() {
     let d = drain().await;
@@ -526,11 +508,10 @@ async fn a_waiting_drain_goes_on_in_its_report_through_real_admission() {
     d.close().await;
 }
 
-/// Sol's review of round 4b2i-1a-2j, finding 2, cancellation and reopen: a
-/// request cancelled while its drain waits leaves the committed prefix. The
-/// store reopened, the next pull reclaims it under a report of its own with
-/// its change and fact, once, and only a cursor naming that report releases
-/// the rows.
+/// Cancellation and reopen: a request cancelled while its drain waits leaves
+/// the committed prefix. The store reopened, the next pull reclaims it under
+/// a report of its own with its change and fact, once, and only a cursor
+/// naming that report releases the rows.
 #[tokio::test]
 async fn a_cancelled_drain_leaves_its_prefix_to_the_next_pull_after_reopen() {
     let mut d = drain().await;
@@ -573,12 +554,12 @@ async fn a_cancelled_drain_leaves_its_prefix_to_the_next_pull_after_reopen() {
     d.close().await;
 }
 
-/// Sol's review of round 4b2i-1a-2j, finding 1: one pull runs at a time on a
-/// store, across its waits for validation. A second pull that arrives while
-/// the first waits, with the record's settlement and its fact committed,
-/// waits for it without fetching. The first goes on in its report and names
-/// each change and fact once; its cursor commits before the second fetches,
-/// and the second names none of them again.
+/// One pull runs at a time on a store, across its waits for validation. A
+/// second pull that arrives while the first waits, with the record's
+/// settlement and its fact committed, waits for it without fetching. The
+/// first goes on in its report and names each change and fact once; its
+/// cursor commits before the second fetches, and the second names none of
+/// them again.
 #[tokio::test]
 async fn a_second_pull_waits_for_the_first_across_its_validation() {
     let d = drain().await;

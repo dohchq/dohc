@@ -3,10 +3,15 @@ import { documentButtonAccess } from "./documentButtonAccess";
 
 describe("documentButtonAccess", () => {
   const share = (grantedSelector: unknown, ended = false) => ({
-    shareId: "share-1", recipientUserId: "recipient-1", granterEmail: "owner@example.com", genericChatWritable: false,
-    grantedSelector, ...(ended ? { ended } : {}),
+    shareId: "share-1",
+    recipientUserId: "recipient-1",
+    granterEmail: "owner@example.com",
+    genericChatWritable: false,
+    grantedSelector,
+    ...(ended ? { ended } : {}),
   });
-  const edit = (paths: string[], versionId: string | null = null) => share({ paths, versionId, access: "edit" });
+  const edit = (paths: string[], versionId: string | null = null) =>
+    share({ paths, versionId, access: "edit" });
 
   it("lets anyone who can edit this workspace press", () => {
     expect(documentButtonAccess(undefined, "Invoices")).toBe("press");

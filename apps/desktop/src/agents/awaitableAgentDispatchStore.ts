@@ -5,9 +5,7 @@ type AwaitableMethod<T> = T extends (...args: infer TArgs) => infer TResult
   : never;
 
 type AwaitableAgentDispatchStoreBase = {
-  [TKey in keyof AgentDispatchStore]: AwaitableMethod<
-    AgentDispatchStore[TKey]
-  >;
+  [TKey in keyof AgentDispatchStore]: AwaitableMethod<AgentDispatchStore[TKey]>;
 };
 
 export interface AgentDispatchRequestOptions {
@@ -19,40 +17,37 @@ export const AGENT_DISPATCH_RPC_DEADLINE_MS = 2_000;
 
 export type AwaitableAgentDispatchStore = Omit<
   AwaitableAgentDispatchStoreBase,
-  | "getRunRecord"
-  | "listRunMessages"
-  | "markFailureHandled"
-  | "recordRunMessage"
+  "getRunRecord" | "listRunMessages" | "markFailureHandled" | "recordRunMessage"
 > & {
   resolveUncertainClaim?(
     workspaceId: Parameters<AgentDispatchStore["claimNextPending"]>[0],
     options: Parameters<AgentDispatchStore["claimNextPending"]>[1],
-  ): ReturnType<AgentDispatchStore["claimNextPending"]> | Promise<
-    ReturnType<AgentDispatchStore["claimNextPending"]>
-  >;
+  ):
+    | ReturnType<AgentDispatchStore["claimNextPending"]>
+    | Promise<ReturnType<AgentDispatchStore["claimNextPending"]>>;
   getRunRecord(
     runId: Parameters<AgentDispatchStore["getRunRecord"]>[0],
     options?: AgentDispatchRequestOptions,
-  ): ReturnType<AgentDispatchStore["getRunRecord"]> | Promise<
-    ReturnType<AgentDispatchStore["getRunRecord"]>
-  >;
+  ):
+    | ReturnType<AgentDispatchStore["getRunRecord"]>
+    | Promise<ReturnType<AgentDispatchStore["getRunRecord"]>>;
   recordRunMessage(
     input: Parameters<AgentDispatchStore["recordRunMessage"]>[0],
     options?: AgentDispatchRequestOptions,
-  ): ReturnType<AgentDispatchStore["recordRunMessage"]> | Promise<
-    ReturnType<AgentDispatchStore["recordRunMessage"]>
-  >;
+  ):
+    | ReturnType<AgentDispatchStore["recordRunMessage"]>
+    | Promise<ReturnType<AgentDispatchStore["recordRunMessage"]>>;
   listRunMessages(
     workspaceId: Parameters<AgentDispatchStore["listRunMessages"]>[0],
     runId: Parameters<AgentDispatchStore["listRunMessages"]>[1],
     options?: AgentDispatchRequestOptions,
-  ): ReturnType<AgentDispatchStore["listRunMessages"]> | Promise<
-    ReturnType<AgentDispatchStore["listRunMessages"]>
-  >;
+  ):
+    | ReturnType<AgentDispatchStore["listRunMessages"]>
+    | Promise<ReturnType<AgentDispatchStore["listRunMessages"]>>;
   markFailureHandled(
     runId: Parameters<AgentDispatchStore["markFailureHandled"]>[0],
     options?: AgentDispatchRequestOptions,
-  ): ReturnType<AgentDispatchStore["markFailureHandled"]> | Promise<
-    ReturnType<AgentDispatchStore["markFailureHandled"]>
-  >;
+  ):
+    | ReturnType<AgentDispatchStore["markFailureHandled"]>
+    | Promise<ReturnType<AgentDispatchStore["markFailureHandled"]>>;
 };

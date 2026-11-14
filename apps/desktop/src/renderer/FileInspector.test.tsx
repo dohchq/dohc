@@ -10,8 +10,7 @@ const LEGACY_APPS_SEGMENT = ["", "apps"].join(".");
 
 const LEGACY_APP_MANIFEST = ["app", "json"].join(".");
 
-const legacyAppPath = (...segments: string[]) =>
-  [LEGACY_APPS_SEGMENT, ...segments].join("/");
+const legacyAppPath = (...segments: string[]) => [LEGACY_APPS_SEGMENT, ...segments].join("/");
 
 describe("lineSpanInText", () => {
   const text = "first\nsecond line\n\nfourth";
@@ -59,8 +58,12 @@ describe("file kind dispatch", () => {
   }
 
   it("treats legacy app-folder paths as ordinary files", () => {
-    expect(fileKindForPath(`x/${legacyAppPath("ledger", LEGACY_APP_MANIFEST)}`).displayKind).toBe("json");
-    expect(fileKindForPath(`x/${legacyAppPath("ledger", "src", "App.tsx")}`).displayKind).toBe("code");
+    expect(fileKindForPath(`x/${legacyAppPath("ledger", LEGACY_APP_MANIFEST)}`).displayKind).toBe(
+      "json",
+    );
+    expect(fileKindForPath(`x/${legacyAppPath("ledger", "src", "App.tsx")}`).displayKind).toBe(
+      "code",
+    );
   });
 });
 
@@ -121,7 +124,6 @@ describe("markdown WYSIWYG frontmatter seam", () => {
       "---\njust a divider\n---\n# Body\n",
       "---\nnull\n---\n# Body\n",
       "---\n- one\n---\n# Body\n",
-      // Text after a closing delimiter means it does not close the block.
       "---\ntitle: Plan # hidden\n---Body\n",
     ]) {
       expect(markdownEditorBody(markdown)).toBe(markdown);

@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { advertisedCapabilityTools } from "./capabilityExposure.fixture";
 
-vi.mock("@dohc/workspace-contracts/capabilities", async importOriginal => {
+vi.mock("@dohc/workspace-contracts/capabilities", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@dohc/workspace-contracts/capabilities")>();
   const workspaceList = actual.CAPABILITIES["workspace.list"];
   const fileWrite = actual.CAPABILITIES["file.write"];
@@ -22,16 +22,19 @@ vi.mock("@dohc/workspace-contracts/capabilities", async importOriginal => {
 });
 
 it.each(["owner", "view", "comment", "edit"] as const)(
-  "uses table exposure even for previously unconditional registrations at %s", async level => {
+  "uses table exposure even for previously unconditional registrations at %s",
+  async (level) => {
     const tools = await advertisedCapabilityTools(level === "owner" ? undefined : level);
-    expect(tools.some(tool => tool.name === "dohc_list_workspaces")).toBe(level === "view");
+    expect(tools.some((tool) => tool.name === "dohc_list_workspaces")).toBe(level === "view");
   },
 );
 
 it.each(["owner", "view", "comment", "edit"] as const)(
-  "uses table exposure even for previously Owner-only registrations at %s", async level => {
+  "uses table exposure even for previously Owner-only registrations at %s",
+  async (level) => {
     const tools = await advertisedCapabilityTools(level === "owner" ? undefined : level);
-    expect(tools.some(tool => tool.name === "dohc_write_file"))
-      .toBe(level === "owner" || level === "edit");
+    expect(tools.some((tool) => tool.name === "dohc_write_file")).toBe(
+      level === "owner" || level === "edit",
+    );
   },
 );

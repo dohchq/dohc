@@ -1,21 +1,3 @@
-//! A hosted replica: the session host's store for the documents the relay's
-//! scoped feed serves it. The feed serves each hosted document's rows with
-//! their original coordinates and withholds every other row, so one origin's
-//! sequence reaches this store with gaps, and a document that joins the scope
-//! backfills below coordinates already applied. Its journal is therefore the
-//! ledger of what applied; the contiguous origin ack never moves.
-//!
-//! The `hosted_replicas` row selects this mode. Nothing infers it.
-//!
-//! Its fetch position lives here too, never in `sync_relay_cursors`: one main
-//! cursor, frozen while any document backfills, and one backfill cursor per
-//! document. A document that is not ready reads its rows only through its
-//! own cursor, which stops at its first row that cannot apply yet; the main
-//! feed skips its rows, and nothing of it is retained, so a held document
-//! neither freezes the main cursor nor fills deferred work. A document is in
-//! scope while its row carries the replica's scope generation; one that left
-//! keeps its state until it parks, and keeps what its return needs after.
-
 mod held;
 mod park;
 
@@ -34,8 +16,6 @@ pub use held::{
     inspect_held_document, list_held_documents, prove_held_document, release_held_proof,
     shared_proof_failure,
 };
-#[cfg(test)]
-pub(crate) use park::OCCUPANTS_READ;
 pub use park::{
     DepartedDocument, DepartedHead, RetiredFile, departed_hosted_documents,
     departed_hosted_materialization, departed_hosted_object_ids, forget_retired_hosted_file,
@@ -59,8 +39,6 @@ pub const PASSIVE_STORE_CANNOT_HOST: &str = "a passive store cannot host documen
 pub const HOSTED_REPLICA_NOT_PRISTINE: &str =
     "a hosted replica starts from a workspace with no files, history or chats";
 
-/// A conflict child whose `conflict.resolve` parent the feed withheld. Its
-/// document is held at the child until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
 
 /// A Y.Doc row that could destroy work a released chain's tail retains
@@ -196,7 +174,6 @@ pub(crate) fn record_unmaterialized_in_tx(
     Ok(())
 }
 
-/// The longest refusal reason a hosted push response may carry.
 const MAX_PUSH_REFUSAL_REASON_BYTES: usize = 256;
 
 /// Check the relay's refusals of a pushed batch: only a hosted push has any,
@@ -388,8 +365,8 @@ pub(crate) fn forget_before(payload: &mut serde_json::Value) {
 ///
 /// Also hold back a moment that would move its document onto another
 /// spelling of a path another document of the scope holds
-/// ([`spelling_holder`]). A disk that ignores case gives both one file
-/// (#2036). An ordinary replica holds nothing back.
+/// ([`spelling_holder`]). A disk that ignores case gives both one file.
+/// An ordinary replica holds nothing back.
 pub(crate) fn wait_for_occupant_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -512,7 +489,7 @@ pub(crate) fn held_before_routing(
 ///
 /// The same holds for another spelling of the path ([`spelling_holder`]): a
 /// disk that ignores case keeps one file for both, so two documents there
-/// would write each other's file (#2036). A document at exactly the path is
+/// would write each other's file. A document at exactly the path is
 /// named first.
 pub(crate) fn backfill_path_held(
     conn: &Connection,
@@ -558,8 +535,8 @@ pub(crate) fn backfill_path_held(
 ///
 /// A document held waiting, through others, on `object_id` holds nothing
 /// against it while `object_id` is not ready: documents that trade spellings
-/// of their paths each wait on the next, and none would ever move first
-/// (#2421). One that is not ready writes nothing at its head, so it moves
+/// of their paths each wait on the next, and none would ever move first.
+/// One that is not ready writes nothing at its head, so it moves
 /// first, and [`completed_hold`] keeps it from being ready until the others
 /// move too. A ready one would write its head at once, so it is held first.
 fn spelling_holder(
@@ -984,7 +961,6 @@ const LIVE_EDIT_UNADMITTED: &str = "hosted-live-edit-unadmitted";
 const HELD_COLUMNS: &str = "held_reason,held_path,held_by,held_conflict_id,\
     released_hold_binding_json,released_hold_continuation,released_hold_binding_stale";
 
-/// A `hosted_documents` row's [`HELD_COLUMNS`].
 struct HeldColumns {
     reason: Option<String>,
     held_path: Option<String>,
@@ -996,7 +972,6 @@ struct HeldColumns {
 }
 
 impl HeldColumns {
-    /// The columns `row` holds from index `at`.
     fn read(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Self> {
         Ok(Self {
             reason: row.get(at)?,
@@ -1436,10 +1411,6 @@ pub fn commit_hosted_cursor(
             )
             .map_err(SyncError::persist)?;
         }
-        // A ready document's files are written through its read position:
-        // the pass that made it ready wrote its heads, and every committed
-        // pass since materialized what it read. One not ready keeps what
-        // it applied unwritten until then.
         tx.execute(
             "UPDATE hosted_documents SET unmaterialized_seq=NULL \
              WHERE workspace_id=?1 AND scope_generation=?2 AND state='ready' \
@@ -1512,7 +1483,7 @@ fn completed_hold(
         return stopped_hold(occupancy, object_id, &waiting).map(Some);
     }
     // A document that moved while another at a spelling of its path still
-    // waited on it (#2421) shares that one's file on a disk that ignores
+    // waited on it shares that one's file on a disk that ignores
     // case, so it is not ready until that one moves or is ready. One that
     // left the scope keeps its file there until it parks.
     for head in head_writes(conn, workspace_id, object_id)? {

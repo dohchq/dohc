@@ -5,8 +5,13 @@ import { durableDisk } from "./testDurableDisk";
 
 /** One run of the app over `disk`. */
 const launch = (disk: ReturnType<typeof durableDisk>) => createDurableFiles(disk.launch());
-const temporaries = (disk: ReturnType<typeof durableDisk>) => disk.names().filter(name => name.endsWith(".tmp"));
-const rejection = (promise: Promise<unknown>) => promise.then(() => null, (error: unknown) => error);
+const temporaries = (disk: ReturnType<typeof durableDisk>) =>
+  disk.names().filter((name) => name.endsWith(".tmp"));
+const rejection = (promise: Promise<unknown>) =>
+  promise.then(
+    () => null,
+    (error: unknown) => error,
+  );
 const kindOf = async (promise: Promise<unknown>) => {
   const error = await rejection(promise);
   expect(error).toBeInstanceOf(DurableFileError);
@@ -17,12 +22,12 @@ describe("a record", () => {
   it("survives a relaunch once its write resolves, and leaves no temporary file", async () => {
     const disk = durableDisk();
     const files = launch(disk);
-    await files.write("op-1", "{\"body\":\"Hello\"}");
-    await files.write("op-2", "{\"body\":\"Bonjour, é 🙂\"}");
+    await files.write("op-1", '{"body":"Hello"}');
+    await files.write("op-2", '{"body":"Bonjour, é 🙂"}');
 
     const next = launch(disk);
-    await expect(next.read("op-1")).resolves.toBe("{\"body\":\"Hello\"}");
-    await expect(next.read("op-2")).resolves.toBe("{\"body\":\"Bonjour, é 🙂\"}");
+    await expect(next.read("op-1")).resolves.toBe('{"body":"Hello"}');
+    await expect(next.read("op-2")).resolves.toBe('{"body":"Bonjour, é 🙂"}');
     await expect(next.list()).resolves.toEqual(["op-1", "op-2"]);
     await expect(next.read("op-3")).resolves.toBeNull();
     expect(temporaries(disk)).toEqual([]);
@@ -97,7 +102,11 @@ describe("a record", () => {
     await launch(disk).write("op-1", "before");
     disk.holdWrites();
     let settled = false;
-    void launch(disk).write("op-1", "from the run that crashed").finally(() => { settled = true; });
+    void launch(disk)
+      .write("op-1", "from the run that crashed")
+      .finally(() => {
+        settled = true;
+      });
     await vi.waitFor(() => expect(temporaries(disk)).toHaveLength(1));
     disk.crash();
 
@@ -196,7 +205,10 @@ describe("recovery", () => {
     const before = disk.names();
 
     const files = launch(disk);
-    await expect(files.recover()).resolves.toEqual({ leftovers: ["notes.txt", temp], unreadable: ["op-2", "op-4"] });
+    await expect(files.recover()).resolves.toEqual({
+      leftovers: ["notes.txt", temp],
+      unreadable: ["op-2", "op-4"],
+    });
     expect(disk.names()).toEqual(before);
     // An unreadable record stays listed, rejects its read, and goes only when it's deleted, as Discard will.
     await expect(files.list()).resolves.toEqual(["op-1", "op-2", "op-4"]);
@@ -204,7 +216,10 @@ describe("recovery", () => {
     expect(await kindOf(files.read("op-4"))).toBe("unreadable");
     await expect(files.read("op-1")).resolves.toBe("fine");
     await files.remove("op-2");
-    await expect(files.recover()).resolves.toEqual({ leftovers: ["notes.txt", temp], unreadable: ["op-4"] });
+    await expect(files.recover()).resolves.toEqual({
+      leftovers: ["notes.txt", temp],
+      unreadable: ["op-4"],
+    });
     // A leftover that isn't one of the module's temporary files can't be removed.
     expect(await kindOf(files.removeLeftover("notes.txt"))).toBe("invalid");
     expect(await kindOf(files.removeLeftover("op-1"))).toBe("invalid");
@@ -225,11 +240,22 @@ describe("recovery", () => {
 });
 
 describe("names and sizes", () => {
-  it("refuses a name outside letters, digits, \"-\" and \"_\", or longer than 100, before reaching the disk", async () => {
+  it('refuses a name outside letters, digits, "-" and "_", or longer than 100, before reaching the disk', async () => {
     const disk = durableDisk();
     const files = launch(disk);
     // "op-1\n" pins that the pattern's "$" doesn't match before a final newline.
-    for (const name of ["", "a/b", "../op", ".", "op.json", "op 1", "é", "op\u0000", "op-1\n", "x".repeat(101)]) {
+    for (const name of [
+      "",
+      "a/b",
+      "../op",
+      ".",
+      "op.json",
+      "op 1",
+      "é",
+      "op\u0000",
+      "op-1\n",
+      "x".repeat(101),
+    ]) {
       expect(await kindOf(files.write(name, "text")), name).toBe("invalid");
       expect(await kindOf(files.read(name)), name).toBe("invalid");
       expect(await kindOf(files.remove(name)), name).toBe("invalid");
@@ -249,9 +275,15 @@ describe("names and sizes", () => {
     disk.log.length = 0;
 
     expect(await kindOf(files.write("ascii", "a".repeat(RECORD_MAX_BYTES + 1)))).toBe("too-large");
-    expect(await kindOf(files.write("two-byte", "é".repeat(RECORD_MAX_BYTES / 2) + "a"))).toBe("too-large");
-    expect(await kindOf(files.write("three-byte", "€".repeat(Math.floor(RECORD_MAX_BYTES / 3) + 1)))).toBe("too-large");
-    expect(await kindOf(files.write("four-byte", "🙂".repeat(RECORD_MAX_BYTES / 4) + "a"))).toBe("too-large");
+    expect(await kindOf(files.write("two-byte", "é".repeat(RECORD_MAX_BYTES / 2) + "a"))).toBe(
+      "too-large",
+    );
+    expect(
+      await kindOf(files.write("three-byte", "€".repeat(Math.floor(RECORD_MAX_BYTES / 3) + 1))),
+    ).toBe("too-large");
+    expect(await kindOf(files.write("four-byte", "🙂".repeat(RECORD_MAX_BYTES / 4) + "a"))).toBe(
+      "too-large",
+    );
     expect(disk.log).toEqual([]);
     await expect(files.read("ascii")).resolves.toHaveLength(RECORD_MAX_BYTES);
   });

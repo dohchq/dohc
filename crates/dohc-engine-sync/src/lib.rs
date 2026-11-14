@@ -1,4 +1,4 @@
-//! R10 replication, cursor, share, and relay-client substrate.
+//! Replication, cursor, share, and relay-client substrate.
 //!
 //! This core crate owns durable operation coordinates and their crash
 //! boundaries. It deliberately has no HTTP, async runtime, thread, process, or
@@ -26,6 +26,8 @@ mod live_audit;
 mod model;
 mod moment_apply;
 mod outbound;
+mod owner_private;
+pub use owner_private::replay_retained_owner_private;
 mod owner_publication;
 mod settlement_publication;
 pub use owner_publication::{

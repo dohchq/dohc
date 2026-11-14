@@ -1,10 +1,19 @@
 import type { Nodes as HastNodes, Root as HastRoot } from "hast";
-import type { Nodes as MdNodes, Parents as MdParents, PhrasingContent, Root as MdRoot } from "mdast";
+import type {
+  Nodes as MdNodes,
+  Parents as MdParents,
+  PhrasingContent,
+  Root as MdRoot,
+} from "mdast";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
 import { unified } from "unified";
-import { chatMentions, scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import {
+  chatMentions,
+  scanChatLinks,
+  type MentionCandidate,
+} from "@dohc/workspace-contracts/chat-mentions";
 import type { ChatAttachmentRecord } from "../../ipc/bridgeContract";
 import {
   fileReferenceKey,
@@ -40,7 +49,14 @@ export const SAFE_HREF = /^(?:https?:\/\/|mailto:)/iu;
 // chip appears exactly where the engine saw a mention, and never inside code.
 export type Chip =
   | { kind: "mention"; start: number; end: number; mentionKind: MentionCandidate["kind"] }
-  | { kind: "file"; start: number; end: number; path: string; heading?: string; target: FileMentionNavigationTarget }
+  | {
+      kind: "file";
+      start: number;
+      end: number;
+      path: string;
+      heading?: string;
+      target: FileMentionNavigationTarget;
+    }
   | { kind: "work"; start: number; end: number; reference: string };
 
 export function chatChips(
@@ -56,13 +72,20 @@ export function chatChips(
   const chips: Chip[] = [];
   let file = 0;
   for (const mention of mentions) {
-    while (file < fileTokens.length && fileTokens[file]!.end <= mention.start) chips.push(fileChip(fileTokens[file++]!));
-    chips.push({ kind: "mention", start: mention.start, end: mention.end, mentionKind: mention.candidate.kind });
+    while (file < fileTokens.length && fileTokens[file]!.end <= mention.start)
+      chips.push(fileChip(fileTokens[file++]!));
+    chips.push({
+      kind: "mention",
+      start: mention.start,
+      end: mention.end,
+      mentionKind: mention.candidate.kind,
+    });
   }
   while (file < fileTokens.length) chips.push(fileChip(fileTokens[file++]!));
   if (works.length === 0) return chips;
   // A work link holds no "@" name, so no chip overlaps it.
-  for (const work of works) chips.push({ kind: "work", start: work.start, end: work.end, reference: work.reference });
+  for (const work of works)
+    chips.push({ kind: "work", start: work.start, end: work.end, reference: work.reference });
   return chips.sort((a, b) => a.start - b.start);
 
   function fileChip(token: (typeof fileTokens)[number]): Chip {
@@ -93,7 +116,7 @@ export function fitsMainThread(body: string): boolean {
   let cells = 0;
   let lines = 0;
   let marks = 0;
-  for (let lineStart = 0; lineStart <= body.length; ) {
+  for (let lineStart = 0; lineStart <= body.length;) {
     let lineEnd = body.indexOf("\n", lineStart);
     if (lineEnd < 0) lineEnd = body.length;
     let depth = 0;
@@ -101,20 +124,30 @@ export function fitsMainThread(body: string): boolean {
     let pipes = 0;
     let dashes = 0;
     let other = false;
-    // Containers: indentation, quote markers and list markers.
     for (; at < lineEnd; at++) {
       const char = body[at];
       if (char === " ") depth += 0.5;
       else if (char === "\t") depth += 2;
       else if (char === ">") depth += 1;
-      else if ((char === "-" || char === "*" || char === "+") && (body[at + 1] === " " || body[at + 1] === "\t")) depth += 1;
+      else if (
+        (char === "-" || char === "*" || char === "+") &&
+        (body[at + 1] === " " || body[at + 1] === "\t")
+      )
+        depth += 1;
       else if (char === "." || char === ")" || (char! >= "0" && char! <= "9")) depth += 0.25;
       else break;
     }
     if (depth > MAX_DEPTH || ++lines > MAX_LINES) return false;
     for (let scan = lineStart; scan < lineEnd; scan++) {
       const char = body[scan];
-      if (char === "*" || char === "_" || char === "~" || char === "[" || char === "]" || char === "`") {
+      if (
+        char === "*" ||
+        char === "_" ||
+        char === "~" ||
+        char === "[" ||
+        char === "]" ||
+        char === "`"
+      ) {
         if (++marks > MAX_MARKS) return false;
       }
       if (char === "\\") scan++;
@@ -125,7 +158,8 @@ export function fitsMainThread(body: string): boolean {
       else if (char === "-") dashes++;
       else if (char !== ":" && char !== " " && char !== "\t" && char !== "\r") other = true;
     }
-    if (lineStart === lineEnd || (lineEnd - lineStart === 1 && body[lineStart] === "\r")) columns = 0;
+    if (lineStart === lineEnd || (lineEnd - lineStart === 1 && body[lineStart] === "\r"))
+      columns = 0;
     else if (!other && pipes > 0 && dashes > 0) columns = pipes + 1;
     else if (columns > 0 && (cells += columns) > MAX_TABLE_CELLS) return false;
     lineStart = lineEnd + 1;
@@ -174,7 +208,10 @@ const FLOW_PARENTS = new Set(["root", "blockquote", "listItem", "footnoteDefinit
 // whole-message copy gives the Markdown source only when the source shows
 // nothing the reader could not see.
 function rewrite(tree: MdRoot, texts: readonly string[]): { hides: boolean } {
-  const restore = (value: string) => (value.includes(OPEN) ? value.replace(MARKER, (_, id: string) => texts[Number(id)] ?? "") : value);
+  const restore = (value: string) =>
+    value.includes(OPEN)
+      ? value.replace(MARKER, (_, id: string) => texts[Number(id)] ?? "")
+      : value;
   let hides = false;
   const footnotes = new Set<string>();
   const notes: string[] = [];
@@ -202,6 +239,8 @@ function rewrite(tree: MdRoot, texts: readonly string[]): { hides: boolean } {
       case "code":
         if (node.lang || node.meta) hides = true;
         break;
+      default:
+        break;
     }
     for (const field of ["value", "alt", "title", "url", "label", "lang", "meta"] as const) {
       const value = (node as Partial<Record<typeof field, unknown>>)[field];
@@ -216,8 +255,10 @@ function rewrite(tree: MdRoot, texts: readonly string[]): { hides: boolean } {
     const flow = FLOW_PARENTS.has(node.type);
     const children: MdNodes[] = [];
     for (const child of parent.children as MdNodes[]) {
-      if (child.type === "html" && flow) children.push({ type: "paragraph", children: splitText(child.value) });
-      else if (child.type === "text" || child.type === "html") children.push(...splitText(child.value));
+      if (child.type === "html" && flow)
+        children.push({ type: "paragraph", children: splitText(child.value) });
+      else if (child.type === "text" || child.type === "html")
+        children.push(...splitText(child.value));
       else {
         visit(child, link, note);
         children.push(child);
@@ -279,13 +320,15 @@ export function parseChatMarkdown(body: string, chips: readonly Chip[]): ParsedC
 
 // What a drawn tree costs the cache to hold: its text, and 64 for each node
 // for the element and objects behind it.
-export const chatMarkdownWeight = (parsed: ParsedChatMarkdown): number => parsed.chars + parsed.nodes * 64;
+export const chatMarkdownWeight = (parsed: ParsedChatMarkdown): number =>
+  parsed.chars + parsed.nodes * 64;
 
-// Whether a parsed tree is small enough to draw.
 export function withinChatMarkdownLimits(parsed: ParsedChatMarkdown): boolean {
-  return parsed.nodes <= CHAT_MARKDOWN_MAX_NODES &&
+  return (
+    parsed.nodes <= CHAT_MARKDOWN_MAX_NODES &&
     parsed.depth <= CHAT_MARKDOWN_MAX_DEPTH &&
-    parsed.chars <= CHAT_MARKDOWN_MAX_CHARS;
+    parsed.chars <= CHAT_MARKDOWN_MAX_CHARS
+  );
 }
 
 export interface ChatParseRequest {
@@ -310,7 +353,15 @@ export function answerChatParse(request: ChatParseRequest): ChatParseAnswer {
     if (request.body.length > CHAT_MARKDOWN_MAX_LENGTH) return { id: request.id, chips };
     const parsed = parseChatMarkdown(request.body, chips);
     if (!withinChatMarkdownLimits(parsed)) return { id: request.id, chips };
-    return { id: request.id, chips, parsed: { tree: parsed.tree, copiesSource: parsed.copiesSource, weight: chatMarkdownWeight(parsed) } };
+    return {
+      id: request.id,
+      chips,
+      parsed: {
+        tree: parsed.tree,
+        copiesSource: parsed.copiesSource,
+        weight: chatMarkdownWeight(parsed),
+      },
+    };
   } catch {
     return { id: request.id, chips };
   }
@@ -318,7 +369,11 @@ export function answerChatParse(request: ChatParseRequest): ChatParseAnswer {
 
 // Drops source positions and titles, which the drawing does not use, and
 // measures the tree.
-function prune(node: HastNodes, depth: number, size: { nodes: number; depth: number; chars: number }) {
+function prune(
+  node: HastNodes,
+  depth: number,
+  size: { nodes: number; depth: number; chars: number },
+) {
   delete node.position;
   size.nodes++;
   size.depth = Math.max(size.depth, depth);

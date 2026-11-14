@@ -8,7 +8,6 @@ const marker = "live-restore-operation-v1";
 // Adds the declined phase. The phase is final, like resumed, so neither counts
 // as the document's unfinished restore.
 const declinedMarker = "live-restore-declined-v1";
-// Adds a lifecycle's publication reservation and its generation's refused settlements.
 const publicationMarker = "live-restore-publication-v1";
 const safe = Number.MAX_SAFE_INTEGER;
 /** Where a restore no longer blocks another restore of its document. */
@@ -143,20 +142,38 @@ export const LIVE_RESTORE_ACTIVE_V1_SQL = `CREATE UNIQUE INDEX sync_relay_live_r
 // parent before its children, move through temporary copies, and a column a
 // table did not have takes its default. Journal rows that name an operation
 // wait on deferred checks until the operation rows return.
-function rebuild(db: SqliteDb, tables: readonly (keyof typeof schema)[], indexes: readonly (keyof typeof indexSchema)[]): void {
-  const columns = tables.map(table => db.prepare(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`).all().map(row => String(row.name)).join(","));
+function rebuild(
+  db: SqliteDb,
+  tables: readonly (keyof typeof schema)[],
+  indexes: readonly (keyof typeof indexSchema)[],
+): void {
+  const columns = tables.map((table) =>
+    db
+      .prepare(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`)
+      .all()
+      .map((row) => String(row.name))
+      .join(","),
+  );
   db.exec("PRAGMA defer_foreign_keys=ON");
-  for (const table of tables) db.exec(`CREATE TEMP TABLE ${table}_previous AS SELECT * FROM main.${table}`);
+  for (const table of tables)
+    db.exec(`CREATE TEMP TABLE ${table}_previous AS SELECT * FROM main.${table}`);
   for (const table of [...tables].reverse()) db.exec(`DROP TABLE main.${table}`);
   for (const table of tables) db.exec(schema[table]);
-  for (const [index, table] of tables.entries()) db.exec(`INSERT INTO main.${table}(${columns[index]}) SELECT ${columns[index]} FROM temp.${table}_previous`);
+  for (const [index, table] of tables.entries())
+    db.exec(
+      `INSERT INTO main.${table}(${columns[index]}) SELECT ${columns[index]} FROM temp.${table}_previous`,
+    );
   for (const table of tables) db.exec(`DROP TABLE temp.${table}_previous`);
   for (const index of indexes) db.exec(indexSchema[index]);
 }
 
 export function initializeLiveRestoreOperationSchema(db: SqliteDb): void {
-  const isMarked = (migration: string) => db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration) !== undefined;
-  const marked = isMarked(marker), declined = isMarked(declinedMarker), published = isMarked(publicationMarker);
+  const isMarked = (migration: string) =>
+    db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration) !==
+    undefined;
+  const marked = isMarked(marker),
+    declined = isMarked(declinedMarker),
+    published = isMarked(publicationMarker);
   const normalize = (sql: string) => sql.replace(/\s+/g, " ").trim();
   const expected = (name: string, sql: string) => {
     if (!marked) return sql;
@@ -169,40 +186,85 @@ export function initializeLiveRestoreOperationSchema(db: SqliteDb): void {
     if (!marked) {
       if (row) throw new Error("Unmarked live restore schema already exists.");
       db.exec(sql);
-    } else if (!row || row.type !== "table" || typeof row.sql !== "string" || normalize(row.sql) !== normalize(expected(name, sql))) {
+    } else if (
+      !row ||
+      row.type !== "table" ||
+      typeof row.sql !== "string" ||
+      normalize(row.sql) !== normalize(expected(name, sql))
+    ) {
       throw new Error("Live restore schema is missing or damaged.");
     }
   }
-  for (const [name,sql] of Object.entries(indexSchema)) {
-    const row=db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(name);
+  for (const [name, sql] of Object.entries(indexSchema)) {
+    const row = db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(name);
     if (!marked) {
       if (row) throw new Error("Unmarked live restore index already exists.");
       db.exec(sql);
-    } else if (!row || row.type!=="index" || typeof row.sql!=="string" || normalize(row.sql)!==normalize(expected(name, sql))) {
+    } else if (
+      !row ||
+      row.type !== "index" ||
+      typeof row.sql !== "string" ||
+      normalize(row.sql) !== normalize(expected(name, sql))
+    ) {
       throw new Error("Live restore index is missing or damaged.");
     }
   }
-  const tables = [LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_PROPOSALS, LIVE_RESTORE_LIFECYCLES, LIVE_RESTORE_SOURCE_RANGES] as const;
-  if (marked && !declined) rebuild(db, tables, ["sync_relay_live_restore_active", "sync_relay_live_restore_source_clients"]);
-  else if (marked && !published) rebuild(db, tables.slice(2), ["sync_relay_live_restore_source_clients"]);
+  const tables = [
+    LIVE_RESTORE_OPERATIONS,
+    LIVE_RESTORE_PROPOSALS,
+    LIVE_RESTORE_LIFECYCLES,
+    LIVE_RESTORE_SOURCE_RANGES,
+  ] as const;
+  if (marked && !declined)
+    rebuild(db, tables, [
+      "sync_relay_live_restore_active",
+      "sync_relay_live_restore_source_clients",
+    ]);
+  else if (marked && !published)
+    rebuild(db, tables.slice(2), ["sync_relay_live_restore_source_clients"]);
   const indexes = db.prepare(`PRAGMA index_list(${LIVE_RESTORE_OPERATIONS})`).all();
-  if (indexes.length !== 3 || indexes.some(row => row.unique !== 1 || (row.name==="sync_relay_live_restore_active" ? row.partial!==1 || row.origin!=="c" : row.partial!==0 || (row.origin!=="pk" && row.origin!=="u")))) {
+  if (
+    indexes.length !== 3 ||
+    indexes.some(
+      (row) =>
+        row.unique !== 1 ||
+        (row.name === "sync_relay_live_restore_active"
+          ? row.partial !== 1 || row.origin !== "c"
+          : row.partial !== 0 || (row.origin !== "pk" && row.origin !== "u")),
+    )
+  ) {
     throw new Error("Live restore index is damaged.");
   }
-  for (const table of [LIVE_RESTORE_LIFECYCLES,LIVE_RESTORE_SOURCE_RANGES]) {
-    const indexes=db.prepare(`PRAGMA index_list(${table})`).all();
-    const expected=table===LIVE_RESTORE_SOURCE_RANGES?2:1;
-    if (indexes.length!==expected || db.prepare(`PRAGMA foreign_key_check(${table})`).all().length) throw new Error("Live restore lifecycle storage is damaged.");
+  for (const table of [LIVE_RESTORE_LIFECYCLES, LIVE_RESTORE_SOURCE_RANGES]) {
+    const indexes = db.prepare(`PRAGMA index_list(${table})`).all();
+    const expected = table === LIVE_RESTORE_SOURCE_RANGES ? 2 : 1;
+    if (
+      indexes.length !== expected ||
+      db.prepare(`PRAGMA foreign_key_check(${table})`).all().length
+    )
+      throw new Error("Live restore lifecycle storage is damaged.");
   }
   if (db.prepare(`PRAGMA foreign_key_check(${LIVE_RESTORE_OPERATIONS})`).all().length) {
     throw new Error("Live restore parent is damaged.");
   }
   const proposalIndexes = db.prepare(`PRAGMA index_list(${LIVE_RESTORE_PROPOSALS})`).all();
-  if (proposalIndexes.length !== 1 || proposalIndexes[0]!.unique !== 1 || proposalIndexes[0]!.origin !== "pk" ||
-    proposalIndexes[0]!.partial !== 0 || db.prepare(`PRAGMA foreign_key_check(${LIVE_RESTORE_PROPOSALS})`).all().length) {
+  if (
+    proposalIndexes.length !== 1 ||
+    proposalIndexes[0]!.unique !== 1 ||
+    proposalIndexes[0]!.origin !== "pk" ||
+    proposalIndexes[0]!.partial !== 0 ||
+    db.prepare(`PRAGMA foreign_key_check(${LIVE_RESTORE_PROPOSALS})`).all().length
+  ) {
     throw new Error("Live restore proposal storage is damaged.");
   }
-  for (const migration of [...(marked ? [] : [marker]), ...(declined ? [] : [declinedMarker]), ...(published ? [] : [publicationMarker])]) {
-    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(migration, Date.now());
+  for (const migration of [
+    ...(marked ? [] : [marker]),
+    ...(declined ? [] : [declinedMarker]),
+    ...(published ? [] : [publicationMarker]),
+  ]) {
+    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(
+      migration,
+      Date.now(),
+    );
   }
 }

@@ -1,8 +1,4 @@
-// Contracts owns the change-author types and the local-author label's brand.
-import type {
-  ChangeAuthor,
-  NonEmptyLocalAuthorLabel,
-} from "@dohc/workspace-contracts/engine";
+import type { ChangeAuthor, NonEmptyLocalAuthorLabel } from "@dohc/workspace-contracts/engine";
 
 function parseLocalAuthorLabel(label: unknown): NonEmptyLocalAuthorLabel {
   if (typeof label !== "string") {

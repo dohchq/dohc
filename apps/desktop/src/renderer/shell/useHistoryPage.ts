@@ -43,9 +43,11 @@ type MomentPosition = Pick<EngineMomentRecord, "recordedAtMs" | "momentOrder" | 
 
 // Match the engine's newest-first merge: time, text before protected, then order.
 function compareMomentPositions(left: MomentPosition, right: MomentPosition): number {
-  return right.recordedAtMs - left.recordedAtMs ||
+  return (
+    right.recordedAtMs - left.recordedAtMs ||
     Number(left.protected === true) - Number(right.protected === true) ||
-    right.momentOrder - left.momentOrder;
+    right.momentOrder - left.momentOrder
+  );
 }
 
 function waitForHistoryRetry(delayMs: number): Promise<void> {
@@ -183,8 +185,7 @@ export function useHistoryPage(
     // newer statement has already replaced? An answer issued after that
     // statement can never be stale; the engine served it after the switch.
     const isStale = (token: number, versionId: string) =>
-      versionId !== activeVersion.current.versionId &&
-      token < activeVersion.current.token;
+      versionId !== activeVersion.current.versionId && token < activeVersion.current.token;
     // Reads one page from the cursor main handed back, unchanged. Retries an
     // `updating` answer while the read that asked is still current; one that
     // is no longer current stops at the next check, before and after each
@@ -238,8 +239,7 @@ export function useHistoryPage(
         if (token === newestRefresh.current) {
           if (response.status === "policy-unreadable") {
             if (token > committed.current) hideForPolicy(token, response);
-          }
-          else setReadState("updating");
+          } else setReadState("updating");
         }
         return;
       }
@@ -297,8 +297,12 @@ export function useHistoryPage(
         // settling. Releasing the button below gives the user a bounded
         // retry; this expected progress result is never a global error.
         if (answer.status !== "ready") {
-          if (answer.status === "policy-unreadable" && token > committed.current &&
-            token >= newestRefresh.current && (pageVersionId === null || !isStale(token, pageVersionId))) {
+          if (
+            answer.status === "policy-unreadable" &&
+            token > committed.current &&
+            token >= newestRefresh.current &&
+            (pageVersionId === null || !isStale(token, pageVersionId))
+          ) {
             hideForPolicy(token, answer);
           }
           return;
@@ -400,38 +404,59 @@ export function useHistoryPage(
 
   const [namesRevision, setNamesRevision] = useState<{ workspaceId: string } | null>(null);
   const namedRevision = useRef<typeof namesRevision>(null);
-  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
-    if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
-  }), [workspaceId]);
+  useEffect(
+    () =>
+      bridge().onHistoryNamesChanged?.((event) => {
+        if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
+      }),
+    [workspaceId],
+  );
   useEffect(() => {
     const shown = latestPage.current;
     const shownMoments = shown ? fileMoments(shown.entries) : [];
     if (
-      namesRevision?.workspaceId !== workspaceId || namedRevision.current === namesRevision ||
-      loadingMore || shown === null || shownMoments.length === 0
-    ) return;
+      namesRevision?.workspaceId !== workspaceId ||
+      namedRevision.current === namesRevision ||
+      loadingMore ||
+      shown === null ||
+      shownMoments.length === 0
+    )
+      return;
     let liveRequest = true;
     const watermark = committed.current;
     const version = committedVersionId.current;
     const refreshAtStart = newestRefresh.current;
-    const live = () => liveRequest && !loadingMoreNow.current && latestPage.current === shown && committed.current === watermark && committedVersionId.current === version;
-    const oldest = shownMoments.reduce((last, moment) => compareMomentPositions(moment, last) > 0 ? moment : last);
+    const live = () =>
+      liveRequest &&
+      !loadingMoreNow.current &&
+      latestPage.current === shown &&
+      committed.current === watermark &&
+      committedVersionId.current === version;
+    const oldest = shownMoments.reduce((last, moment) =>
+      compareMomentPositions(moment, last) > 0 ? moment : last,
+    );
     // Deletion can move a page cut past its original cursor. Bound the scan
     // by the file position the cursor reached, including progress through
     // filtered, marker-only or Collection-only pages. At equal times, markers
     // follow both moment streams.
     const reachedEnd = ({ engine, engineDone }: TimelineCursor) =>
-      engineDone || engine === null ||
+      engineDone ||
+      engine === null ||
       (engine.text !== null && compareMomentPositions(engine.text, oldest) >= 0) ||
-      (engine.protected !== null && compareMomentPositions({ ...engine.protected, protected: true }, oldest) >= 0) ||
+      (engine.protected !== null &&
+        compareMomentPositions({ ...engine.protected, protected: true }, oldest) >= 0) ||
       (engine.marker !== null && engine.marker.createdAtMs <= oldest.recordedAtMs);
     const scan = async () => {
       const named = new Map<string, EngineMomentRecord>();
-      const remaining = new Set(shownMoments.map(moment => moment.id));
+      const remaining = new Set(shownMoments.map((moment) => moment.id));
       const seenCursors = new Set<string>();
       let cursor: TimelineCursor | undefined;
       do {
-        const response = await bridge().listHistory({ workspaceId, limit: HISTORY_PAGE_LIMIT, ...(cursor ? { cursor } : {}) });
+        const response = await bridge().listHistory({
+          workspaceId,
+          limit: HISTORY_PAGE_LIMIT,
+          ...(cursor ? { cursor } : {}),
+        });
         if (!live()) return false;
         // The rules turned unreadable under the shown rows. Hide them as a
         // refresh would, unless a newer refresh is already asking.
@@ -442,22 +467,31 @@ export function useHistoryPage(
           }
           return true;
         }
-        if (response.status !== "ready" || response.workspaceId !== workspaceId || response.versionId !== version) return false;
+        if (
+          response.status !== "ready" ||
+          response.workspaceId !== workspaceId ||
+          response.versionId !== version
+        )
+          return false;
         for (const moment of fileMoments(response.entries)) {
           named.set(moment.id, moment);
           remaining.delete(moment.id);
         }
-        if (remaining.size === 0 || response.nextCursor === null || reachedEnd(response.nextCursor)) break;
+        if (remaining.size === 0 || response.nextCursor === null || reachedEnd(response.nextCursor))
+          break;
         const position = JSON.stringify(response.nextCursor);
         if (seenCursors.has(position)) return false;
         seenCursors.add(position);
         cursor = response.nextCursor;
       } while (live());
       if (!live()) return false;
-      const next = { ...shown, entries: shown.entries.map((entry) => {
-        const renamed = entry.kind === "file" ? named.get(entry.moment.id) : undefined;
-        return renamed ? { kind: "file" as const, moment: renamed } : entry;
-      }) };
+      const next = {
+        ...shown,
+        entries: shown.entries.map((entry) => {
+          const renamed = entry.kind === "file" ? named.get(entry.moment.id) : undefined;
+          return renamed ? { kind: "file" as const, moment: renamed } : entry;
+        }),
+      };
       latestPage.current = next;
       // An append keeps earlier rows. Consume the event only once their
       // names reach the page; an interrupted scan runs on the new page.
@@ -467,10 +501,16 @@ export function useHistoryPage(
     };
     void (async () => {
       for (let attempt = 0; attempt < 2 && live(); attempt++) {
-        try { if (await scan()) return; } catch { /* Retry once while this page is still current. */ }
+        try {
+          if (await scan()) return;
+        } catch {
+          /* Retry once while this page is still current. */
+        }
       }
     })();
-    return () => { liveRequest = false; };
+    return () => {
+      liveRequest = false;
+    };
   }, [workspaceId, owner, hideForPolicy, issue, page, loadingMore, namesRevision]);
 
   return { page, loadingMore, readState, policyError, ...owner };

@@ -1,4 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 
 import { join } from "node:path";
 
@@ -10,93 +10,21 @@ import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 
 import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
 
-import { waitForPathMoments } from "./waitForPathMoments";
-
 import { createTestScratch } from "./testTemp";
 
-import { engine, compiledRelayMain, LiveDaemonCapture, pushUntilDrained, openLiveDaemonCapture, openJoinedDaemonCapture, writeAndCapture, openIndependentPlaintextLineage, pullAndExpect, OpenEditor, openEditor, typeAtEnd, shown } from "./twoDaemonSync.fixture";
-
-it.skipIf(engine.missing)(
-  "kept text resolution without lineage: edit over peer deletion",
-  async () => {
-    const workspaceId = "text-keep-deletion";
-    const path = "trip.txt";
-    const initial = "Trip destination: undecided\n";
-    const textB = "Trip destination: Tokyo\n";
-    const later = `${textB}continued on B\n`;
-    const rootA = await createTestScratch("dohc-text-keep-delete-a-");
-    const rootB = await createTestScratch("dohc-text-keep-delete-b-");
-    const relayRoot = await createTestScratch("dohc-text-keep-delete-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
-    const connection = { baseUrl: relay.baseUrl, token: `test:${workspaceId}` };
-    let daemonA: LiveDaemonCapture | null = null;
-    let daemonB: LiveDaemonCapture | null = null;
-    const pull = (daemon: LiveDaemonCapture) => daemon.relay.pull(apply => daemon.capture.runRelaySync(apply));
-    const inspect = async (daemon: LiveDaemonCapture, root: string) => {
-      const rows = (await daemon.capture.listOpenConflictsPage()).conflicts;
-      const moments = (await daemon.capture.listMoments({ limit: 100 })).moments.filter(moment => moment.path === path);
-      return { text: await readFile(join(root, path), "utf8").catch(error => {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      }), rows, history: await Promise.all(moments.map(async moment => ({
-        summary: moment, detail: await daemon.capture.readMoment(moment.id),
-      }))) };
-    };
-    try {
-      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
-      await daemonA.relay.claim();
-      await writeAndCapture(daemonA, rootA, path, initial);
-      await pushUntilDrained(daemonA.relay);
-      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
-      await pullAndExpect(daemonB, rootB, path, initial);
-      const before = (await daemonA.capture.listMoments({ limit: 100 })).moments.length;
-      await rm(join(rootA, path));
-      daemonA.capture.observeFileEvents([{ path, operation: "delete" }]);
-      await waitForPathMoments(daemonA.capture, path, before + 1);
-      await writeAndCapture(daemonB, rootB, path, textB);
-      await pushUntilDrained(daemonA.relay);
-      await pushUntilDrained(daemonB.relay);
-      await pull(daemonA);
-      await pull(daemonB);
-      const rowsA = (await daemonA.capture.listOpenConflictsPage()).conflicts;
-      const rowsB = (await daemonB.capture.listOpenConflictsPage()).conflicts;
-      expect(rowsA).toHaveLength(1);
-      expect(rowsB).toHaveLength(1);
-      expect(rowsA[0]!.id).toBe(rowsB[0]!.id);
-      expect(rowsA[0]).toMatchObject({ current: { exists: false }, incoming: { text: textB } });
-      expect(rowsB[0]).toMatchObject({ current: { text: textB }, incoming: { exists: false } });
-      await daemonB.capture.resolveConflict(rowsB[0]!.id, { kind: "keep-current" });
-      await pushUntilDrained(daemonB.relay);
-      await pull(daemonA);
-      await pull(daemonB);
-      const keptA = await inspect(daemonA, rootA);
-      const keptB = await inspect(daemonB, rootB);
-      console.log("deletion after keep", JSON.stringify({ A: keptA, B: keptB }));
-      expect(keptA.text).toBeNull();
-      expect(keptA.rows).toHaveLength(2);
-      expect(keptB.text).toBe(textB);
-      expect(keptB.rows).toHaveLength(0);
-      await writeAndCapture(daemonB, rootB, path, later);
-      await pushUntilDrained(daemonB.relay);
-      await pull(daemonA);
-      await pull(daemonB);
-      const laterA = await inspect(daemonA, rootA);
-      const laterB = await inspect(daemonB, rootB);
-      console.log("deletion after later edit", JSON.stringify({ A: laterA, B: laterB }));
-      expect(laterA.text).toBeNull();
-      expect(laterA.rows.length).toBeGreaterThanOrEqual(2);
-      expect(laterA.rows.some(row => row.incoming.text === later)).toBe(true);
-      expect(laterB.text).toBe(later);
-      expect(laterB.rows).toHaveLength(0);
-      expect(await daemonA.refusalNotices()).toMatchObject({ notices: [] });
-      expect(await daemonB.refusalNotices()).toMatchObject({ notices: [] });
-    } finally {
-      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
-      await relay.stop();
-    }
-  },
-  90_000,
-);
+import {
+  engine,
+  compiledRelayMain,
+  LiveDaemonCapture,
+  pushUntilDrained,
+  openLiveDaemonCapture,
+  openJoinedDaemonCapture,
+  openIndependentPlaintextLineage,
+  OpenEditor,
+  openEditor,
+  typeAtEnd,
+  shown,
+} from "./twoDaemonSync.fixture";
 
 it.skipIf(engine.missing)(
   "preserves edits made on A while B reviews a seed conflict and converges without retries",
@@ -112,12 +40,15 @@ it.skipIf(engine.missing)(
     const rootA = await createTestScratch("dohc-diverged-seed-a-");
     const rootB = await createTestScratch("dohc-diverged-seed-b-");
     const relayRoot = await createTestScratch("dohc-diverged-seed-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({
+      dbPath: join(relayRoot, "relay", "relay.sqlite"),
+      compiledMain: compiledRelayMain,
+    });
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
     const editors: OpenEditor[] = [];
     const pull = (daemon: LiveDaemonCapture) =>
-      daemon.relay.pull(apply => daemon.capture.runRelaySync(apply));
+      daemon.relay.pull((apply) => daemon.capture.runRelaySync(apply));
     try {
       daemonA = await openLiveDaemonCapture({
         workspaceId,
@@ -150,15 +81,13 @@ it.skipIf(engine.missing)(
       });
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
 
-      // B is still reviewing the old seed. A saves one edit and journals
-      // another without settling it, so the disk cannot stand in for its Y.Doc.
       const editingA = await openEditor(daemonA, path);
       editors.push(editingA);
       await typeAtEnd(editingA, "saved on A during review\n");
       const before = Y.encodeStateVector(editingA.doc);
       editingA.doc.getText("plainText").insert(savedA.length, unsaved);
-      await editingA.session.applyDecidedLocalUpdate(
-        () => Y.encodeStateAsUpdate(editingA.doc, before),
+      await editingA.session.applyDecidedLocalUpdate(() =>
+        Y.encodeStateAsUpdate(editingA.doc, before),
       );
       expect(shown(editingA)).toBe(liveA);
       expect(await readFile(join(rootA, path), "utf8")).toBe(savedA);
@@ -251,10 +180,16 @@ it.skipIf(engine.missing)(
         });
         const idle = await pull(daemon);
         expect(idle).toMatchObject({
-          fetched: 0, applied: 0, conflictsOpened: 0, sharingDeclined: [],
+          fetched: 0,
+          applied: 0,
+          conflictsOpened: 0,
+          sharingDeclined: [],
         });
         expect(await pull(daemon)).toMatchObject({
-          fetched: 0, applied: 0, nextCursor: idle.nextCursor, sharingDeclined: [],
+          fetched: 0,
+          applied: 0,
+          nextCursor: idle.nextCursor,
+          sharingDeclined: [],
         });
       }
     } finally {

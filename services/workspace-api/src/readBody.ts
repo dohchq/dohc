@@ -7,7 +7,10 @@ export type BodyRead = { bytes: Uint8Array<ArrayBuffer> } | { tooLarge: number }
  * `maxBytes`, so it holds less than twice what has arrived and never one
  * object per chunk. The reader stays locked, so the caller can drain the rest.
  */
-export async function readBodyAtMost(reader: ReadableStreamDefaultReader<Uint8Array>, maxBytes: number): Promise<BodyRead> {
+export async function readBodyAtMost(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  maxBytes: number,
+): Promise<BodyRead> {
   let bytes = new Uint8Array(0);
   let total = 0;
   for (;;) {

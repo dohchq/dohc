@@ -1,4 +1,4 @@
-import type {SyncRelayStorage} from "./storage.js";
+import type { SyncRelayStorage } from "./storage.js";
 
 /**
  * How long a quiet hosted replica of a ready workspace goes without a pull.
@@ -12,7 +12,15 @@ export const HOSTED_RECOVERY_PROBE_MS = 30_000;
  * finishes, a relay change, the first pull of an attachment, a workspace the
  * relay holds no hosted scope for, or the recovery probe.
  */
-export type HostedPullReason = "activation" | "open" | "unready" | "pending" | "changed" | "first" | "unscoped" | "probe";
+export type HostedPullReason =
+  | "activation"
+  | "open"
+  | "unready"
+  | "pending"
+  | "changed"
+  | "first"
+  | "unscoped"
+  | "probe";
 
 /** What a ready workspace's hosted replica still waits on from its own pulls. Nothing on the relay announces these. */
 export interface HostedPullDuties {
@@ -23,7 +31,7 @@ export interface HostedPullDuties {
    * For each document announced as departing, the pull that must succeed
    * before it counts as gone, and the last pull whose departed list reached it.
    */
-  readonly announced: Iterable<{readonly required: number; readonly reached: number}>;
+  readonly announced: Iterable<{ readonly required: number; readonly reached: number }>;
   /** How the last pull ended, or undefined before the first. */
   readonly last: "done" | "more" | "failed" | undefined;
   /** Whether the next held and departed lists start from the first, and activation heard every page. */
@@ -34,8 +42,15 @@ export interface HostedPullDuties {
    */
   readonly departedNone: boolean;
   /** How many of the workspace's documents wait for a later pull, by why. */
-  readonly waiting: {readonly parking: number; readonly leaving: number; readonly recovering: number; readonly movedRestores: number;
-    readonly retained: number; readonly retiring: number; readonly held: number};
+  readonly waiting: {
+    readonly parking: number;
+    readonly leaving: number;
+    readonly recovering: number;
+    readonly movedRestores: number;
+    readonly retained: number;
+    readonly retiring: number;
+    readonly held: number;
+  };
 }
 
 /**
@@ -46,9 +61,16 @@ export interface HostedPullDuties {
  * change or the recovery probe.
  */
 export function hostedReplicaQuiet(duties: HostedPullDuties): boolean {
-  if (duties.last !== "done" || duties.confirmed !== duties.pulls || !duties.listsWrapped || !duties.departedNone) return false;
-  for (const {required, reached} of duties.announced) if (duties.confirmed < required || reached < required) return false;
-  return Object.values(duties.waiting).every(count => count === 0);
+  if (
+    duties.last !== "done" ||
+    duties.confirmed !== duties.pulls ||
+    !duties.listsWrapped ||
+    !duties.departedNone
+  )
+    return false;
+  for (const { required, reached } of duties.announced)
+    if (duties.confirmed < required || reached < required) return false;
+  return Object.values(duties.waiting).every((count) => count === 0);
 }
 
 /**
@@ -59,8 +81,21 @@ export function hostedReplicaQuiet(duties: HostedPullDuties): boolean {
  * Undefined while the relay holds no hosted scope for the workspace, or no such
  * workspace: the feed then refuses every read, and nothing here says when that ends.
  */
-export function hostedRelayState(storage: SyncRelayStorage, workspaceId: string): string | undefined {
+export function hostedRelayState(
+  storage: SyncRelayStorage,
+  workspaceId: string,
+): string | undefined {
   const scope = storage.readServiceHostFeedScope(workspaceId);
-  return scope ? JSON.stringify([storage.automationWorkspaceLogHead(workspaceId), storage.getEpochLogFloor(workspaceId),
-    scope.replicationEpoch, scope.streamIdentity, [...scope.hosted], [...scope.departed], [...scope.shared], [...scope.settling]]) : undefined;
+  return scope
+    ? JSON.stringify([
+        storage.automationWorkspaceLogHead(workspaceId),
+        storage.getEpochLogFloor(workspaceId),
+        scope.replicationEpoch,
+        scope.streamIdentity,
+        [...scope.hosted],
+        [...scope.departed],
+        [...scope.shared],
+        [...scope.settling],
+      ])
+    : undefined;
 }

@@ -9,7 +9,9 @@ const { ObserverStub } = vi.hoisted(() => {
     observe() {}
     unobserve() {}
     disconnect() {}
-    takeRecords(): never[] { return []; }
+    takeRecords(): never[] {
+      return [];
+    }
   }
   Object.assign(globalThis, { ResizeObserver: ObserverStub, IntersectionObserver: ObserverStub });
   return { ObserverStub };

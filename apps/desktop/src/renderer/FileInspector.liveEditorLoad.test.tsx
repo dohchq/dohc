@@ -49,7 +49,10 @@ function heldOpenBridge() {
       status: "written",
       contentHash: TEST_CONTENT_HASH,
     })),
-    listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
+    listWorkspaceFiles: vi.fn(async () => ({
+      files: [{ path: "a.md", kind: "file" }],
+      folders: [],
+    })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({
       settings: DEFAULT_WORKSPACE_SETTINGS,
@@ -84,12 +87,16 @@ function heldOpenBridge() {
 // until its nodes and images have rendered.
 function stubPaneLayout(tall: () => boolean = () => true) {
   const pane = (element: Element) => element.matches("[data-testid='view-markdown']");
-  const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
-    return pane(this) && tall() && this.textContent?.includes("Base paragraph.") ? 2_000 : 0;
-  });
-  const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
-    return pane(this) ? 200 : 0;
-  });
+  const scrollHeight = vi
+    .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+    .mockImplementation(function (this: HTMLElement) {
+      return pane(this) && tall() && this.textContent?.includes("Base paragraph.") ? 2_000 : 0;
+    });
+  const clientHeight = vi
+    .spyOn(HTMLElement.prototype, "clientHeight", "get")
+    .mockImplementation(function (this: HTMLElement) {
+      return pane(this) ? 200 : 0;
+    });
   return () => {
     scrollHeight.mockRestore();
     clientHeight.mockRestore();
@@ -99,13 +106,21 @@ function stubPaneLayout(tall: () => boolean = () => true) {
 // Keeps each ResizeObserver, so a test can report that the note's content
 // changed size.
 function stubResizeObservers() {
-  const observers: Array<{ callback: ResizeObserverCallback; targets: Element[]; observer: ResizeObserver }> = [];
+  const observers: Array<{
+    callback: ResizeObserverCallback;
+    targets: Element[];
+    observer: ResizeObserver;
+  }> = [];
   vi.stubGlobal(
     "ResizeObserver",
     class {
       private readonly targets: Element[] = [];
       constructor(callback: ResizeObserverCallback) {
-        observers.push({ callback, targets: this.targets, observer: this as unknown as ResizeObserver });
+        observers.push({
+          callback,
+          targets: this.targets,
+          observer: this as unknown as ResizeObserver,
+        });
       }
       observe(target: Element) {
         this.targets.push(target);
@@ -116,7 +131,6 @@ function stubResizeObservers() {
       }
     },
   );
-  // The elements watched by the observers that watch the note's pane content.
   const watched = () => {
     const pane = screen.getByTestId("view-markdown");
     return observers
@@ -130,7 +144,10 @@ function stubResizeObservers() {
         const content = targets.filter((target) => target.parentElement === pane);
         if (content.length === 0) continue;
         callback(
-          content.map((target) => ({ target, contentRect: target.getBoundingClientRect() }) as ResizeObserverEntry),
+          content.map(
+            (target) =>
+              ({ target, contentRect: target.getBoundingClientRect() }) as ResizeObserverEntry,
+          ),
           observer,
         );
       }
@@ -179,8 +196,6 @@ describe("a live note whose editor code loads after it opens", () => {
     const { bridge, bind } = heldOpenBridge();
     vi.stubGlobal("dohcDesktop", bridge);
 
-    // Every frame from the read view to the editor: the note's text, and
-    // never the loading rows.
     const frames: Array<{ text: boolean; rows: boolean; editor: boolean; top: number }> = [];
     const observer = new MutationObserver(() => {
       const pane = document.querySelector("[data-testid='view-markdown']");
@@ -199,7 +214,6 @@ describe("a live note whose editor code loads after it opens", () => {
         expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
       );
       await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
-      // The person reads partway down while the note opens.
       act(() => {
         const pane = screen.getByTestId("view-markdown");
         pane.scrollTop = 600;
@@ -210,7 +224,6 @@ describe("a live note whose editor code loads after it opens", () => {
       await act(async () => {});
       expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph.");
 
-      // The editor's code arrives; the collaboration code is still loading.
       code.editor.release();
       await act(async () => {
         await import("./editor/MarkdownEditor");
@@ -231,7 +244,6 @@ describe("a live note whose editor code loads after it opens", () => {
     const shown = frames.findIndex((frame) => frame.text);
     expect(shown).toBeGreaterThanOrEqual(0);
     expect(frames.slice(shown).filter((frame) => frame.rows || !frame.text)).toEqual([]);
-    // The editor's first frame opens where the person was reading.
     expect(frames.find((frame) => frame.editor)?.top).toBe(600);
   });
 
@@ -262,7 +274,6 @@ describe("a live note whose editor code loads after it opens", () => {
         pane.scrollTop = 50;
         pane.dispatchEvent(new Event("scroll"));
       });
-      // Later edits make the content tall enough for the old position.
       layout.tall = true;
       await act(async () => {
         pane.appendChild(document.createElement("div"));

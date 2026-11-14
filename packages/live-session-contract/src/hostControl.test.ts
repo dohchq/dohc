@@ -26,15 +26,7 @@ describe("host-control shared contract", () => {
   ): void {
     expect(parse(1)).toBe(1);
     expect(parse(Number.MAX_SAFE_INTEGER)).toBe(Number.MAX_SAFE_INTEGER);
-    for (const value of [
-      0,
-      -1,
-      1.5,
-      Number.MAX_SAFE_INTEGER + 1,
-      Infinity,
-      NaN,
-      "1",
-    ]) {
+    for (const value of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, "1"]) {
       expect(() => parse(value)).toThrow();
     }
     expect(next(parse(1))).toBe(2);
@@ -46,10 +38,7 @@ describe("host-control shared contract", () => {
   });
 
   it("pins the host transition generation safe-integer range", () => {
-    pinsSafeIntegerRange(
-      parseHostTransitionGeneration,
-      nextHostTransitionGeneration,
-    );
+    pinsSafeIntegerRange(parseHostTransitionGeneration, nextHostTransitionGeneration);
   });
 
   it("validates identifiers by UTF-8 bytes and well-formed text", () => {

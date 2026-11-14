@@ -11,7 +11,10 @@ import {
   type WorkspaceActivityOptions,
   type WorkspaceCaptureHooks,
 } from "./workspaceActivity";
-import { createInMemoryWorkspaceActivity as createWorkspaceActivity, idleObservation } from "./workspaceActivity.testSupport";
+import {
+  createInMemoryWorkspaceActivity as createWorkspaceActivity,
+  idleObservation,
+} from "./workspaceActivity.testSupport";
 import type { WorkspaceObservationCallbacks } from "./workspaceFileObservation";
 import { observeWorkspaceFiles } from "./workspaceFileObservation";
 import type { CloudSyncFailure } from "./relaySyncEngine";
@@ -30,11 +33,6 @@ const engineUnreachableSessions = new Proxy({} as EngineWorkspaceSessions, {
     );
   },
 });
-
-// The legacy change-set read surface
-// (listChangeSets/readChangeSet) is gone from this layer — engine moments
-// are the only history. These tests cover what remains: the capture hooks
-// and the honest no-recorder status for a workspace without a capture.
 
 let root: string;
 
@@ -64,7 +62,14 @@ describe("workspaceActivity capture hooks", () => {
     const activity = createWorkspaceActivity(vi.fn(), {
       captureFor: (_workspace, value) => {
         hooks = value;
-        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+        return {
+          shareView: false,
+          capture: {
+            start: vi.fn(),
+            stop: vi.fn(async () => {}),
+            settleAndCloseAllLiveSessions: vi.fn(async () => {}),
+          } as never,
+        };
       },
     });
     for (let opening = 0; opening < 2; opening++) {
@@ -78,12 +83,19 @@ describe("workspaceActivity capture hooks", () => {
       expect(failedRead.outsideWriteCopyReadError).toBe("local state not opened");
       expect(failedRead).not.toHaveProperty("outsideWriteCopies");
       hooks.onOutsideWriteCopies?.([], null);
-      expect(activity.getStatus("activity-test")).toMatchObject({ outsideWriteCopies: [], outsideWriteCopyReadError: null });
+      expect(activity.getStatus("activity-test")).toMatchObject({
+        outsideWriteCopies: [],
+        outsideWriteCopyReadError: null,
+      });
       expect(activity.getStatus("activity-test")).not.toHaveProperty("protectedCopies");
       expect(activity.getStatus("activity-test")).not.toHaveProperty("protectedCopyReadError");
-      hooks.onProtectedCopies?.([[".env", "copy-1", 10]], ".dohc/local/protected-copies/broken.json");
+      hooks.onProtectedCopies?.(
+        [[".env", "copy-1", 10]],
+        ".dohc/local/protected-copies/broken.json",
+      );
       expect(activity.getStatus("activity-test")).toMatchObject({
-        protectedCopies: [[".env", "copy-1", 10]], protectedCopyReadError: ".dohc/local/protected-copies/broken.json",
+        protectedCopies: [[".env", "copy-1", 10]],
+        protectedCopyReadError: ".dohc/local/protected-copies/broken.json",
       });
       await activity.stopAll();
     }
@@ -96,12 +108,28 @@ describe("workspaceActivity capture hooks", () => {
       onHeldFiles,
       captureFor: (_workspace, value) => {
         hooks = value;
-        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+        return {
+          shareView: false,
+          capture: {
+            start: vi.fn(),
+            stop: vi.fn(async () => {}),
+            settleAndCloseAllLiveSessions: vi.fn(async () => {}),
+          } as never,
+        };
       },
     });
-    const held = { workspaceId: "activity-test", sourceVersionId: "main", objectId: "held", path: "held.md",
-      observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
-      observedAtMs: 1, attemptCount: 1, retryRequested: false };
+    const held = {
+      workspaceId: "activity-test",
+      sourceVersionId: "main",
+      objectId: "held",
+      path: "held.md",
+      observedSha256: "digest",
+      observedSize: 4,
+      reason: "ydoc-resolution-not-representable" as const,
+      observedAtMs: 1,
+      attemptCount: 1,
+      retryRequested: false,
+    };
     await activity.open(workspace());
     notify.mockClear();
     hooks.onHeldFiles([held]);
@@ -122,7 +150,14 @@ describe("workspaceActivity capture hooks", () => {
     const activity = createWorkspaceActivity(notify, {
       captureFor: (_workspace, value) => {
         hooks = value;
-        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+        return {
+          shareView: false,
+          capture: {
+            start: vi.fn(),
+            stop: vi.fn(async () => {}),
+            settleAndCloseAllLiveSessions: vi.fn(async () => {}),
+          } as never,
+        };
       },
     });
     await activity.open(workspace());
@@ -135,8 +170,12 @@ describe("workspaceActivity capture hooks", () => {
     expect(notify).toHaveBeenCalledOnce();
     hooks.onKeptFiles([["native.md", ".dohc-write-displaced/native.md"]]);
     hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], null);
-    expect(activity.getStatus("activity-test").keptFiles).toEqual([["native.md", ".dohc-write-displaced/native.md"]]);
-    expect(activity.getStatus("activity-test").outsideWriteCopies).toEqual([["n.md", "n (kept copy).md", "copy-n-1"]]);
+    expect(activity.getStatus("activity-test").keptFiles).toEqual([
+      ["native.md", ".dohc-write-displaced/native.md"],
+    ]);
+    expect(activity.getStatus("activity-test").outsideWriteCopies).toEqual([
+      ["n.md", "n (kept copy).md", "copy-n-1"],
+    ]);
     hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], "broken receipt");
     expect(activity.getStatus("activity-test").outsideWriteCopyReadError).toBe("broken receipt");
     hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], null);
@@ -151,9 +190,21 @@ describe("workspaceActivity capture hooks", () => {
     const queueSync = vi.fn();
     const queueWatchedUpload = vi.fn();
     const activity = createWorkspaceActivity(vi.fn(), {
-      observationFor: (w, callbacks) => { observation = callbacks; return idleObservation(w, callbacks); },
-      captureFor: () => { throw new Error("capture failed"); },
-      engineFor: () => ({ start: async () => {}, stop: async () => {}, queueSync, queueWatchedUpload, snapshot: () => ({}) }) as never,
+      observationFor: (w, callbacks) => {
+        observation = callbacks;
+        return idleObservation(w, callbacks);
+      },
+      captureFor: () => {
+        throw new Error("capture failed");
+      },
+      engineFor: () =>
+        ({
+          start: async () => {},
+          stop: async () => {},
+          queueSync,
+          queueWatchedUpload,
+          snapshot: () => ({}),
+        }) as never,
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingUnavailable).toBe(true);
@@ -165,33 +216,59 @@ describe("workspaceActivity capture hooks", () => {
     await activity.stopAll();
   });
 
-  it.each([false, true])("drains and resyncs failed observation before closing live sessions (%s)", async fails => {
-    const steps: string[] = [];
-    const drainFailed = vi.fn(() => { steps.push("unconfirmed"); });
-    const activity = createWorkspaceActivity(vi.fn(), {
-      observationFor: () => ({ ...idleObservation(workspace(), {} as never), stop: async () => {
-        steps.push("drain");
-        if (fails) throw new Error("drain failed");
-      } }),
-      captureFor: () => ({ shareView: false, capture: {
-        start: () => {}, observationDrainFailed: drainFailed,
-        resyncFileObservation: async () => { steps.push("resync"); },
-        settleAndCloseAllLiveSessions: async () => { steps.push("sessions"); },
-        stop: async () => { steps.push("capture"); },
-      } as never }),
-    });
-    await activity.open(workspace());
-    const closed = activity.close("activity-test");
-    if (fails) await expect(closed).rejects.toThrow("drain failed"); else await closed;
-    expect(steps).toEqual(fails ? ["drain", "unconfirmed", "resync", "sessions", "capture"] : ["drain", "sessions", "capture"]);
-  });
+  it.each([false, true])(
+    "drains and resyncs failed observation before closing live sessions (%s)",
+    async (fails) => {
+      const steps: string[] = [];
+      const drainFailed = vi.fn(() => {
+        steps.push("unconfirmed");
+      });
+      const activity = createWorkspaceActivity(vi.fn(), {
+        observationFor: () => ({
+          ...idleObservation(workspace(), {} as never),
+          stop: async () => {
+            steps.push("drain");
+            if (fails) throw new Error("drain failed");
+          },
+        }),
+        captureFor: () => ({
+          shareView: false,
+          capture: {
+            start: () => {},
+            observationDrainFailed: drainFailed,
+            resyncFileObservation: async () => {
+              steps.push("resync");
+            },
+            settleAndCloseAllLiveSessions: async () => {
+              steps.push("sessions");
+            },
+            stop: async () => {
+              steps.push("capture");
+            },
+          } as never,
+        }),
+      });
+      await activity.open(workspace());
+      const closed = activity.close("activity-test");
+      if (fails) await expect(closed).rejects.toThrow("drain failed");
+      else await closed;
+      expect(steps).toEqual(
+        fails
+          ? ["drain", "unconfirmed", "resync", "sessions", "capture"]
+          : ["drain", "sessions", "capture"],
+      );
+    },
+  );
 
   it("bounds a slow first scan without reporting a file observation failure", async () => {
     vi.useFakeTimers();
     try {
       const notify = vi.fn();
       const activity = createWorkspaceActivity(notify, {
-        observationFor: () => ({ ...idleObservation(workspace(), {} as never), ready: new Promise(() => {}) }),
+        observationFor: () => ({
+          ...idleObservation(workspace(), {} as never),
+          ready: new Promise(() => {}),
+        }),
       });
       const opening = activity.open(workspace());
       await vi.advanceTimersByTimeAsync(4_999);
@@ -201,25 +278,44 @@ describe("workspaceActivity capture hooks", () => {
       expect(activity.getStatus("activity-test").fileObservationFailure).toBeUndefined();
       expect(notify).not.toHaveBeenCalled();
       await activity.stopAll();
-    } finally { vi.useRealTimers(); }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("opens a known degraded feed without waiting for the timeout", async () => {
     const activity = createWorkspaceActivity(vi.fn(), {
-      observationFor: (_workspace, callbacks) => observeWorkspaceFiles({
-        callbacks, subscribe: () => () => {}, onError: vi.fn(),
-        read: async () => ({ cursor: { generation: "degraded", revision: 0 }, ready: false, degraded: true, resync: false, facts: [] }),
-      }),
+      observationFor: (_workspace, callbacks) =>
+        observeWorkspaceFiles({
+          callbacks,
+          subscribe: () => () => {},
+          onError: vi.fn(),
+          read: async () => ({
+            cursor: { generation: "degraded", revision: 0 },
+            ready: false,
+            degraded: true,
+            resync: false,
+            facts: [],
+          }),
+        }),
     });
-    expect(await activity.open(workspace())).toMatchObject({ historyRecordingUnavailable: false, fileObservationFailure: "unavailable" });
+    expect(await activity.open(workspace())).toMatchObject({
+      historyRecordingUnavailable: false,
+      fileObservationFailure: "unavailable",
+    });
     await activity.stopAll();
   });
 
   it("close releases an open waiting on readiness", async () => {
-    const read = vi.fn(async () => ({ cursor: { generation: "starting", revision: 0 }, ready: false, resync: false, facts: [] }));
+    const read = vi.fn(async () => ({
+      cursor: { generation: "starting", revision: 0 },
+      ready: false,
+      resync: false,
+      facts: [],
+    }));
     const activity = createWorkspaceActivity(vi.fn(), {
-      observationFor: (_workspace, callbacks) => observeWorkspaceFiles({ callbacks, read,
-        subscribe: () => () => {}, onError: vi.fn() }),
+      observationFor: (_workspace, callbacks) =>
+        observeWorkspaceFiles({ callbacks, read, subscribe: () => () => {}, onError: vi.fn() }),
     });
     const opening = activity.open(workspace());
     await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
@@ -237,10 +333,7 @@ describe("workspaceActivity capture hooks", () => {
         capture: {
           start: vi.fn(),
           settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
-          stop:
-            candidate.rootPath === root
-              ? oldCaptureStop
-              : successorCaptureStop,
+          stop: candidate.rootPath === root ? oldCaptureStop : successorCaptureStop,
         } as never,
       }),
     });
@@ -270,7 +363,10 @@ describe("workspaceActivity capture hooks", () => {
     const notify = vi.fn();
     let observation!: WorkspaceObservationCallbacks;
     const activity = createWorkspaceActivity(notify, {
-      observationFor: (_workspace, callbacks) => { observation = callbacks; return idleObservation(_workspace, callbacks); },
+      observationFor: (_workspace, callbacks) => {
+        observation = callbacks;
+        return idleObservation(_workspace, callbacks);
+      },
       captureFor: () => ({ capture: null, shareView: false }),
     });
     await activity.open(workspace());
@@ -287,78 +383,129 @@ describe("workspaceActivity capture hooks", () => {
       });
     });
     observation.captured(["changed.md"]);
-    expect(notify).toHaveBeenLastCalledWith({ workspaceId: "activity-test", paths: ["changed.md"], pathSetChanged: false });
+    expect(notify).toHaveBeenLastCalledWith({
+      workspaceId: "activity-test",
+      paths: ["changed.md"],
+      pathSetChanged: false,
+    });
     await activity.stopAll();
   });
 
-  it.each(["coalesced with the pull", "with no pull echo"])("delivers a local edit %s without another pull", async scenario => {
-    const notify = vi.fn();
-    const onWatcherBatch = vi.fn();
-    const observeFileEvents = vi.fn();
-    let wake!: () => void;
-    const read = vi.fn().mockResolvedValue({ cursor: { generation: "first", revision: 1 }, ready: true, resync: false, facts: [] });
-    const activity = createPhysicalWorkspaceActivity(notify, {
-      observationFor: (_w, callbacks) => observeWorkspaceFiles({ callbacks, read, onError: vi.fn(),
-        subscribe(onWake) { wake = onWake; return () => {}; } }),
-      onWatcherBatch,
-      captureFor: () => ({ shareView: false, capture: { start() {}, observeFileEvents,
-        settleAndCloseAllLiveSessions: async () => {}, stop: async () => {} } as never }),
-    });
-    const w = workspace();
-    const state = new WorkspaceActivityState();
-    await activity.open(w, state);
-    await writeFile(join(root, "automation.ts"), "pulled definition");
-    activity.pullStarting(state);
-    await activity.handlePulledPaths(state, ["automation.ts"]);
-    expect(onWatcherBatch).toHaveBeenCalledExactlyOnceWith(w, [{ path: "automation.ts", operation: "update" }]);
-    activity.pullFinished(state);
-    onWatcherBatch.mockClear();
-    if (scenario === "with no pull echo") {
-      wake();
-      await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-      expect(onWatcherBatch).not.toHaveBeenCalled();
-    }
-    await writeFile(join(root, "automation.ts"), "local definition");
-    const seenDefinitions: Promise<string>[] = [];
-    onWatcherBatch.mockImplementation((_workspace, events) => {
-      for (const event of events) seenDefinitions.push(readFile(join(root, event.path), "utf8"));
-    });
-    read.mockResolvedValueOnce({ cursor: { generation: "first", revision: 2 }, ready: true, resync: false,
-      facts: [{ path: "automation.ts", kind: "changed" }] });
-    wake();
-    await vi.waitFor(() => expect(observeFileEvents).toHaveBeenCalledOnce());
-    expect(onWatcherBatch).toHaveBeenCalledExactlyOnceWith(w, [{ path: "automation.ts", operation: "update" }]);
-    expect(await Promise.all(seenDefinitions)).toEqual(["local definition"]);
-    expect(notify).toHaveBeenLastCalledWith({ workspaceId: w.workspaceId, paths: ["automation.ts"], pathSetChanged: false });
-    await activity.stop(state);
-  });
-
-  it.each([true, false])("clears a persistent failed read after recovery with ready=%s", async ready => {
-    vi.useFakeTimers();
-    try {
-      const recovered = {
-        cursor: { generation: "recovered", revision: 1 }, ready, resync: false, facts: [],
-      };
-      const read = vi.fn().mockRejectedValue(new Error("read failed"));
-      const activity = createPhysicalWorkspaceActivity(vi.fn(), {
-        observationFor: (_w, callbacks) => observeWorkspaceFiles({ callbacks, read, subscribe: () => () => {}, onError: vi.fn() }),
+  it.each(["coalesced with the pull", "with no pull echo"])(
+    "delivers a local edit %s without another pull",
+    async (scenario) => {
+      const notify = vi.fn();
+      const onWatcherBatch = vi.fn();
+      const observeFileEvents = vi.fn();
+      let wake!: () => void;
+      const read = vi.fn().mockResolvedValue({
+        cursor: { generation: "first", revision: 1 },
+        ready: true,
+        resync: false,
+        facts: [],
       });
-      const state = new WorkspaceActivityState();
+      const activity = createPhysicalWorkspaceActivity(notify, {
+        observationFor: (_w, callbacks) =>
+          observeWorkspaceFiles({
+            callbacks,
+            read,
+            onError: vi.fn(),
+            subscribe(onWake) {
+              wake = onWake;
+              return () => {};
+            },
+          }),
+        onWatcherBatch,
+        captureFor: () => ({
+          shareView: false,
+          capture: {
+            start() {},
+            observeFileEvents,
+            settleAndCloseAllLiveSessions: async () => {},
+            stop: async () => {},
+          } as never,
+        }),
+      });
       const w = workspace();
-      const opening = activity.open(w, state);
-      await vi.advanceTimersByTimeAsync(0);
-      expect((await opening).historyRecordingUnavailable).toBe(false);
-      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
-      await vi.advanceTimersByTimeAsync(7_750);
-      expect(activity.getStatus(w, state)).toMatchObject({ historyRecordingUnavailable: false, fileObservationFailure: "read-failed" });
-      read.mockResolvedValue(recovered);
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
-      await activity.retryFileObservation(state);
-      expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+      const state = new WorkspaceActivityState();
+      await activity.open(w, state);
+      await writeFile(join(root, "automation.ts"), "pulled definition");
+      activity.pullStarting(state);
+      await activity.handlePulledPaths(state, ["automation.ts"]);
+      expect(onWatcherBatch).toHaveBeenCalledExactlyOnceWith(w, [
+        { path: "automation.ts", operation: "update" },
+      ]);
+      activity.pullFinished(state);
+      onWatcherBatch.mockClear();
+      if (scenario === "with no pull echo") {
+        wake();
+        await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+        expect(onWatcherBatch).not.toHaveBeenCalled();
+      }
+      await writeFile(join(root, "automation.ts"), "local definition");
+      const seenDefinitions: Promise<string>[] = [];
+      onWatcherBatch.mockImplementation((_workspace, events) => {
+        for (const event of events) seenDefinitions.push(readFile(join(root, event.path), "utf8"));
+      });
+      read.mockResolvedValueOnce({
+        cursor: { generation: "first", revision: 2 },
+        ready: true,
+        resync: false,
+        facts: [{ path: "automation.ts", kind: "changed" }],
+      });
+      wake();
+      await vi.waitFor(() => expect(observeFileEvents).toHaveBeenCalledOnce());
+      expect(onWatcherBatch).toHaveBeenCalledExactlyOnceWith(w, [
+        { path: "automation.ts", operation: "update" },
+      ]);
+      expect(await Promise.all(seenDefinitions)).toEqual(["local definition"]);
+      expect(notify).toHaveBeenLastCalledWith({
+        workspaceId: w.workspaceId,
+        paths: ["automation.ts"],
+        pathSetChanged: false,
+      });
       await activity.stop(state);
-    } finally { vi.useRealTimers(); }
-  });
+    },
+  );
+
+  it.each([true, false])(
+    "clears a persistent failed read after recovery with ready=%s",
+    async (ready) => {
+      vi.useFakeTimers();
+      try {
+        const recovered = {
+          cursor: { generation: "recovered", revision: 1 },
+          ready,
+          resync: false,
+          facts: [],
+        };
+        const read = vi.fn().mockRejectedValue(new Error("read failed"));
+        const activity = createPhysicalWorkspaceActivity(vi.fn(), {
+          observationFor: (_w, callbacks) =>
+            observeWorkspaceFiles({ callbacks, read, subscribe: () => () => {}, onError: vi.fn() }),
+        });
+        const state = new WorkspaceActivityState();
+        const w = workspace();
+        const opening = activity.open(w, state);
+        await vi.advanceTimersByTimeAsync(0);
+        expect((await opening).historyRecordingUnavailable).toBe(false);
+        expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(7_750);
+        expect(activity.getStatus(w, state)).toMatchObject({
+          historyRecordingUnavailable: false,
+          fileObservationFailure: "read-failed",
+        });
+        read.mockResolvedValue(recovered);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+        await activity.retryFileObservation(state);
+        expect(activity.getStatus(w, state).fileObservationFailure).toBeUndefined();
+        await activity.stop(state);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("forwards the agent-run slot to the open workspace's capture", async () => {
     const setActiveAgentRun = vi.fn(async () => undefined);
@@ -436,7 +583,9 @@ describe("workspaceActivity agent run state", () => {
     });
     return {
       setActiveAgentRun,
-      holdNext: () => { holdNext = true; },
+      holdNext: () => {
+        holdNext = true;
+      },
       release: () => held.shift()?.(),
       decision: () => ({
         shareView: false,
@@ -449,8 +598,12 @@ describe("workspaceActivity agent run state", () => {
       }),
     };
   }
-  const run = (agentRunId: string, agentId = "dohc-mcp"): ActiveAgentRun =>
-    ({ agentId, onBehalfOf: "local", agentRunId, depth: 0 });
+  const run = (agentRunId: string, agentId = "dohc-mcp"): ActiveAgentRun => ({
+    agentId,
+    onBehalfOf: "local",
+    agentRunId,
+    depth: 0,
+  });
   const id = "activity-test";
 
   async function opened() {
@@ -475,10 +628,16 @@ describe("workspaceActivity agent run state", () => {
         observation = callbacks;
         return idleObservation(w, callbacks);
       },
-      captureFor: () => ({ shareView: false, capture: {
-        start, stop, observeFileEvents, setActiveAgentRun,
-        settleAndCloseAllLiveSessions: async () => {},
-      } as never }),
+      captureFor: () => ({
+        shareView: false,
+        capture: {
+          start,
+          stop,
+          observeFileEvents,
+          setActiveAgentRun,
+          settleAndCloseAllLiveSessions: async () => {},
+        } as never,
+      }),
     });
     const w = workspace();
     const state = new WorkspaceActivityState();
@@ -505,7 +664,6 @@ describe("workspaceActivity agent run state", () => {
     const { activity, pushed } = await opened();
     expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 0, active: false });
     await activity.setAgentRun(id, run("run-1"));
-    // One run replacing another is no change in whether the agent works.
     await activity.setAgentRun(id, run("run-2"));
     expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 1, active: true });
     await activity.setAgentRun(id, null);
@@ -522,7 +680,9 @@ describe("workspaceActivity agent run state", () => {
     expect(await activity.claimAgentRun(id, { ...run("dispatch-1"), dispatch: "run" })).toBe(true);
     expect(activity.agentRunState(id).active).toBe(true);
     await activity.clearAgentRun(id, "dispatch-1");
-    expect(await activity.claimAgentRun(id, { ...run("self-test"), dispatch: "self-test" })).toBe(true);
+    expect(await activity.claimAgentRun(id, { ...run("self-test"), dispatch: "self-test" })).toBe(
+      true,
+    );
     expect(activity.agentRunState(id).active).toBe(false);
     await activity.clearAgentRun(id, "self-test");
     expect(pushed.map((event) => event.active)).toEqual([true, false]);
@@ -570,12 +730,19 @@ describe("workspaceActivity agent run state", () => {
     await activity.clearAgentRun(id, "cli-run");
     await activity.claimAgentRun(id, { ...run("dispatch-1"), dispatch: "run" }, undefined, secret);
     expect(activity.dispatchedRunSecret(id)).toBe(secret);
-    // A second run is refused the slot, so it can't replace the secret.
-    expect(await activity.claimAgentRun(id, { ...run("dispatch-2"), dispatch: "run" }, undefined, "b".repeat(64))).toBe(false);
+    expect(
+      await activity.claimAgentRun(
+        id,
+        { ...run("dispatch-2"), dispatch: "run" },
+        undefined,
+        "b".repeat(64),
+      ),
+    ).toBe(false);
     expect(activity.dispatchedRunSecret(id)).toBe(secret);
-    // The secret stops working when the run ends, even if capture keeps the slot.
     capture.setActiveAgentRun.mockRejectedValueOnce(new Error("capture could not flush"));
-    await expect(activity.clearAgentRun(id, "dispatch-1")).rejects.toThrow("capture could not flush");
+    await expect(activity.clearAgentRun(id, "dispatch-1")).rejects.toThrow(
+      "capture could not flush",
+    );
     expect(activity.hasAgentRun(id)).toBe(true);
     expect(activity.dispatchedRunSecret(id)).toBeNull();
     await activity.clearAgentRun(id, "dispatch-1");
@@ -590,7 +757,9 @@ describe("workspaceActivity agent run state", () => {
     expect(pushed).toHaveLength(1);
     await activity.clearAgentRun(id, "run-1");
     capture.setActiveAgentRun.mockRejectedValueOnce(new Error("capture refused the run"));
-    await expect(activity.claimAgentRun(id, run("run-3"))).rejects.toThrow("capture refused the run");
+    await expect(activity.claimAgentRun(id, run("run-3"))).rejects.toThrow(
+      "capture refused the run",
+    );
     expect(activity.agentRunState(id).active).toBe(false);
     expect(pushed.at(-1)).toMatchObject({ active: false });
     await activity.stopAll();
@@ -605,7 +774,6 @@ describe("workspaceActivity agent run state", () => {
     capture.release();
     await ending;
     expect(activity.agentRunState(id).active).toBe(true);
-    // Ending an older run does nothing for a run it does not hold.
     await activity.clearAgentRun(id, "run-1");
     expect(activity.agentRunState(id).active).toBe(true);
     expect(pushed).toEqual([{ workspaceId: id, revision: 1, active: true }]);
@@ -618,7 +786,9 @@ describe("workspaceActivity agent run state", () => {
     await activity.clearAgentRun(id, "run-1");
     capture.holdNext();
     const starting = activity.setAgentRun(id, run("run-2"));
-    await vi.waitFor(() => expect(capture.setActiveAgentRun).toHaveBeenLastCalledWith(run("run-2")));
+    await vi.waitFor(() =>
+      expect(capture.setActiveAgentRun).toHaveBeenLastCalledWith(run("run-2")),
+    );
     await activity.setAgentRun(id, run("run-3"));
     await activity.close(id);
     capture.release();
@@ -637,16 +807,10 @@ describe("workspaceActivity history-off status", () => {
     const status = await activity.open(workspace());
     expect(status.historyRecordingUnavailable).toBe(false);
     expect(status.historyShareView).toBe(false);
-    // No capture also means no versions surface.
     expect(activity.engineCaptureFor("activity-test")).toBeNull();
     await activity.stopAll();
   });
 
-  // A shared view's null capture is a capability — the view is fed by
-  // the share's pull and never records here. Without this cause on the
-  // status, the notice blames a Settings toggle nobody touched. Wired
-  // through the real gate, so the share rule and the status thread are
-  // pinned together: deleting either breaks this test.
   it("separates a shared view's null capture from a failed build", async () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (w, hooks) =>
@@ -664,13 +828,10 @@ describe("workspaceActivity history-off status", () => {
     const status = await activity.open(workspace());
     expect(status.historyShareView).toBe(true);
     expect(activity.getStatus("activity-test").historyShareView).toBe(true);
-    // A capability, not a failure.
     expect(status.historyRecordingUnavailable).toBe(false);
     await activity.stopAll();
   });
 
-  // A capture build that threw leaves an empty recorder, and the cause is a
-  // failure. The status says so, so the notice can.
   it("marks a failed capture build unavailable", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const activity = createWorkspaceActivity(() => {}, {
@@ -680,11 +841,8 @@ describe("workspaceActivity history-off status", () => {
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingUnavailable).toBe(true);
-    expect(
-      activity.getStatus("activity-test").historyRecordingUnavailable,
-    ).toBe(true);
+    expect(activity.getStatus("activity-test").historyRecordingUnavailable).toBe(true);
     expect(activity.engineCaptureFor("activity-test")).toBeNull();
-    // The failure itself stays developer-facing, in the log.
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
     await activity.stopAll();
@@ -696,7 +854,6 @@ describe("workspaceActivity history-off status", () => {
     // history is off (nothing is known yet).
     expect(activity.getStatus("activity-test").historyRecordingUnavailable).toBe(false);
     const status = await activity.open(workspace());
-    // No captureFor option at all (test/legacy wiring): stays false.
     expect(status.historyRecordingUnavailable).toBe(false);
     await activity.stopAll();
   });
@@ -712,7 +869,9 @@ describe("workspaceActivity cloud sync nudge", () => {
       },
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      retryNow: async () => undefined,
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
         retrying: false,
@@ -726,7 +885,8 @@ describe("workspaceActivity cloud sync nudge", () => {
             path: "notes/large.md",
             objectId: "notes/large.md",
             versionId: "main",
-            lineagePruned: false, headBlobSha256: null,
+            lineagePruned: false,
+            headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 262_144,
             observedBytes: 280_001,
@@ -752,12 +912,24 @@ describe("workspaceActivity cloud sync nudge", () => {
   });
 
   describe("the Collections wait across signing in and out", () => {
-    // Signing in attaches this engine; it knows nothing about the wait.
     const syncEngine = () => ({
-      start: async () => {}, queueSync: () => {}, queuePull: () => {}, queueWatchedUpload: () => {}, retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined, stop: async () => {},
+      start: async () => {},
+      queueSync: () => {},
+      queuePull: () => {},
+      queueWatchedUpload: () => {},
+      retryNow: async () => undefined,
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
+      stop: async () => {},
       snapshot: () => ({
-        syncFailure: null, retrying: false, syncing: true, lastSyncedAtMs: null, pendingChangeCount: 0,
-        conflictCount: 0, authExpired: false, sharingDeclined: [],
+        syncFailure: null,
+        retrying: false,
+        syncing: true,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount: 0,
+        authExpired: false,
+        sharingDeclined: [],
       }),
     });
 
@@ -775,11 +947,19 @@ describe("workspaceActivity cloud sync nudge", () => {
       // The same promise the activity awaits, so its answer lands first.
       await atOpen;
       return {
-        service, state,
+        service,
+        state,
         waiting: () => service.getStatus(workspace(), state).collectionsWaitingForSync,
-        signIn: () => { signedIn = true; service.reconcileCloud(state, () => syncEngine(), false); },
-        signOut: async () => { signedIn = false; await service.stopEngine(state, false); },
-        passEnded: (failed: boolean, answer: boolean) => service.syncPassEnded(workspace(), state, failed, async () => answer),
+        signIn: () => {
+          signedIn = true;
+          service.reconcileCloud(state, () => syncEngine(), false);
+        },
+        signOut: async () => {
+          signedIn = false;
+          await service.stopEngine(state, false);
+        },
+        passEnded: (failed: boolean, answer: boolean) =>
+          service.syncPassEnded(workspace(), state, failed, async () => answer),
       };
     }
 
@@ -838,7 +1018,10 @@ describe("workspaceActivity cloud sync nudge", () => {
     const notify = vi.fn();
     const check = Promise.withResolvers<boolean>();
     const onNetworkShare = vi.fn(() => check.promise);
-    const service = createPhysicalWorkspaceActivity(notify, { observationFor: idleObservation, onNetworkShare });
+    const service = createPhysicalWorkspaceActivity(notify, {
+      observationFor: idleObservation,
+      onNetworkShare,
+    });
     const state = new WorkspaceActivityState();
     const opened = await service.open(workspace(), state);
     expect(onNetworkShare).toHaveBeenCalledWith(workspace().rootPath);
@@ -854,7 +1037,10 @@ describe("workspaceActivity cloud sync nudge", () => {
     const notify = vi.fn();
     const late = Promise.withResolvers<boolean>();
     let answer: Promise<boolean> = Promise.resolve(false);
-    const service = createPhysicalWorkspaceActivity(notify, { observationFor: idleObservation, onNetworkShare: () => answer });
+    const service = createPhysicalWorkspaceActivity(notify, {
+      observationFor: idleObservation,
+      onNetworkShare: () => answer,
+    });
     const state = new WorkspaceActivityState();
     await service.open(workspace(), state);
     await answer;
@@ -875,10 +1061,15 @@ describe("workspaceActivity cloud sync nudge", () => {
   it("never lets a slow Collections answer for one workspace change another", async () => {
     const notify = vi.fn();
     const slow = Promise.withResolvers<boolean>();
-    const other: ActivityWorkspace = { ...workspace(), workspaceId: "activity-other", attachmentId: Symbol("other") };
+    const other: ActivityWorkspace = {
+      ...workspace(),
+      workspaceId: "activity-other",
+      attachmentId: Symbol("other"),
+    };
     const service = createPhysicalWorkspaceActivity(notify, {
       observationFor: idleObservation,
-      collectionsWaitingFor: target => (target.workspaceId === "activity-test" ? slow.promise : Promise.resolve(false)),
+      collectionsWaitingFor: (target) =>
+        target.workspaceId === "activity-test" ? slow.promise : Promise.resolve(false),
     });
     const a = new WorkspaceActivityState();
     const b = new WorkspaceActivityState();
@@ -911,7 +1102,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.open(workspace());
     await reads[0];
     expect(activity.getStatus("activity-test").collectionsWaitingForSync).toBe("sync");
-    // Abandoning the pull ends the wait the next open reads.
     await activity.close("activity-test");
     pullUnfinished = false;
     await activity.open(workspace());
@@ -923,7 +1113,9 @@ describe("workspaceActivity cloud sync nudge", () => {
   it("keeps a failed reopen after a pause until the engine answers that nothing waits", async () => {
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
     const answers: Array<() => Promise<boolean>> = [
-      async () => { throw new Error("workspace-open-failed"); },
+      async () => {
+        throw new Error("workspace-open-failed");
+      },
       async () => false,
     ];
     const reads: Promise<boolean>[] = [];
@@ -938,7 +1130,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     const state = new WorkspaceActivityState();
     try {
       service.recordSyncPauseReopenFailed(workspace(), state);
-      // The activity opens though the engine refused the owner open.
       await service.open(workspace(), state);
       await reads[0]!.catch(() => undefined);
       expect(service.getStatus(workspace(), state).collectionsWaitingForSync).toBe("reopen");
@@ -958,11 +1149,20 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => { passes += 1; }, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      retryNow: async () => {
+        passes += 1;
+      },
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
       snapshot: () => ({
-        syncFailure: failure, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
-        // A conflict shows first in the status, and must not hide a failed pass.
-        conflictCount: 1, authExpired: false, sharingDeclined: [],
+        syncFailure: failure,
+        retrying: false,
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount: 1,
+        authExpired: false,
+        sharingDeclined: [],
       }),
       stop: async () => {},
     };
@@ -973,7 +1173,9 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.open(workspace());
     await expect(activity.syncNow("activity-test")).resolves.toBeUndefined();
     failure = { cause: "server-unreachable", detail: "fetch failed", sinceMs: 1, attempts: 1 };
-    await expect(activity.syncNow("activity-test")).rejects.toThrow("dohc could not sync this workspace with your server");
+    await expect(activity.syncNow("activity-test")).rejects.toThrow(
+      "dohc could not sync this workspace with your server",
+    );
     expect(passes).toBe(2);
     await activity.stopAll();
   });
@@ -981,16 +1183,31 @@ describe("workspaceActivity cloud sync nudge", () => {
   it("syncs now through a busy server's answers, and names the server when it stays busy", async () => {
     let busyPasses = 0;
     let passes = 0;
-    const busy: CloudSyncFailure = { cause: "server-busy", detail: "RelayBusyError: The server is busy.", sinceMs: 1, attempts: 1 };
+    const busy: CloudSyncFailure = {
+      cause: "server-busy",
+      detail: "RelayBusyError: The server is busy.",
+      sinceMs: 1,
+      attempts: 1,
+    };
     const engine = {
       start: async () => {},
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => { passes += 1; }, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      retryNow: async () => {
+        passes += 1;
+      },
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
       snapshot: () => ({
-        syncFailure: passes <= busyPasses ? busy : null, retrying: false, syncing: false, lastSyncedAtMs: null,
-        pendingChangeCount: 0, conflictCount: 0, authExpired: false, sharingDeclined: [],
+        syncFailure: passes <= busyPasses ? busy : null,
+        retrying: false,
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount: 0,
+        authExpired: false,
+        sharingDeclined: [],
       }),
       stop: async () => {},
     };
@@ -1010,7 +1227,9 @@ describe("workspaceActivity cloud sync nudge", () => {
       passes = 0;
       busyPasses = Infinity;
       const stayedBusy = activity.syncNow("activity-test");
-      const settled = expect(stayedBusy).rejects.toThrow("The server is busy, so dohc stopped undoing runs part way.");
+      const settled = expect(stayedBusy).rejects.toThrow(
+        "The server is busy, so dohc stopped undoing runs part way.",
+      );
       await vi.advanceTimersByTimeAsync(15_000);
       await settled;
       // Passes at 0, 1, 3, 7 and 15 seconds. The next pause would end past 15.
@@ -1027,11 +1246,22 @@ describe("workspaceActivity cloud sync nudge", () => {
     let conflictCount = 0;
     const stop = vi.fn(async () => {});
     const engine = {
-      start: async () => {}, queueSync: () => {}, queueWatchedUpload: () => {}, queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      start: async () => {},
+      queueSync: () => {},
+      queueWatchedUpload: () => {},
+      queuePull: () => {},
+      retryNow: async () => undefined,
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
       snapshot: () => ({
-        syncFailure: null, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
-        conflictCount, authExpired, sharingDeclined: [],
+        syncFailure: null,
+        retrying: false,
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount,
+        authExpired,
+        sharingDeclined: [],
       }),
       stop,
     };
@@ -1048,7 +1278,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     authExpired = true;
     expect(read().state).toBe("sign-in-expired");
     expect(read().signInExpired).toBe(true);
-    // A conflict shows first, and the expired sign-in still reaches Settings.
     conflictCount = 1;
     expect(read().state).toBe("conflict");
     expect(read().signInExpired).toBe(true);
@@ -1058,8 +1287,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     blocked = "not-connected";
     expect(read().state).toBe("not-connected");
     blocked = undefined;
-    // The account matches and the sign-in is accepted: sync reads normal
-    // again, with no pause and the engine never stopped.
     authExpired = false;
     const confirmed = read();
     expect(confirmed.state).toBe("synced");
@@ -1073,20 +1300,39 @@ describe("workspaceActivity cloud sync nudge", () => {
   // the new session, as adoptCompletedCloudLoginSession does. Main builds no
   // engine for a paused workspace, whose pause removed its remote.
   describe("signing in again after the server stopped accepting the sign-in", () => {
-    const PAUSE = { atMs: 7, author: { kind: "person" as const, personId: "local:person", self: true } };
+    const PAUSE = {
+      atMs: 7,
+      author: { kind: "person" as const, personId: "local:person", self: true },
+    };
     function engineFor(remote: () => boolean) {
       const built: Array<{ start: ReturnType<typeof vi.fn>; expire: () => void }> = [];
       const build = () => {
         if (!remote()) return null;
         let authExpired = false;
         const start = vi.fn(async () => {});
-        built.push({ start, expire: () => { authExpired = true; } });
+        built.push({
+          start,
+          expire: () => {
+            authExpired = true;
+          },
+        });
         return {
-          start, queueSync: () => {}, queueWatchedUpload: () => {}, queuePull: () => {},
-          retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+          start,
+          queueSync: () => {},
+          queueWatchedUpload: () => {},
+          queuePull: () => {},
+          retryNow: async () => undefined,
+          pushRecorded: async () => undefined,
+          catchUp: async () => undefined,
           snapshot: () => ({
-            syncFailure: null, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
-            conflictCount: 0, authExpired, sharingDeclined: [],
+            syncFailure: null,
+            retrying: false,
+            syncing: false,
+            lastSyncedAtMs: null,
+            pendingChangeCount: 0,
+            conflictCount: 0,
+            authExpired,
+            sharingDeclined: [],
           }),
           stop: async () => {},
         };
@@ -1146,11 +1392,22 @@ describe("workspaceActivity cloud sync nudge", () => {
   describe("the workspace name the server shows the owner", () => {
     type SendWorkspaceName = NonNullable<WorkspaceActivityOptions["sendWorkspaceName"]>;
     const syncEngine = () => ({
-      start: vi.fn(async () => {}), queueSync: () => {}, queueWatchedUpload: () => {}, queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      start: vi.fn(async () => {}),
+      queueSync: () => {},
+      queueWatchedUpload: () => {},
+      queuePull: () => {},
+      retryNow: async () => undefined,
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
       snapshot: () => ({
-        syncFailure: null, retrying: false, syncing: false, lastSyncedAtMs: null, pendingChangeCount: 0,
-        conflictCount: 0, authExpired: false, sharingDeclined: [],
+        syncFailure: null,
+        retrying: false,
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount: 0,
+        authExpired: false,
+        sharingDeclined: [],
       }),
       stop: async () => {},
     });
@@ -1168,21 +1425,20 @@ describe("workspaceActivity cloud sync nudge", () => {
       const state = new WorkspaceActivityState();
       await service.open(workspace(), state);
       expect(sendWorkspaceName).toHaveBeenCalledTimes(1);
-      expect(sendWorkspaceName).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "activity-test", rootPath: root }));
+      expect(sendWorkspaceName).toHaveBeenLastCalledWith(
+        expect.objectContaining({ workspaceId: "activity-test", rootPath: root }),
+      );
 
-      // Signing in again attaches a new engine. Reconciling while one is attached sends nothing.
       await service.stopEngine(state, false);
       service.reconcileCloud(state, build, false);
       service.reconcileCloud(state, build, false);
       expect(sendWorkspaceName).toHaveBeenCalledTimes(2);
 
-      // Turning sync on attaches one more, and only once.
       await service.stopEngine(state, false);
       await service.enableCloud(workspace(), state);
       await service.enableCloud(workspace(), state);
       expect(sendWorkspaceName).toHaveBeenCalledTimes(3);
 
-      // Signed out, no engine attaches and no name goes out.
       await service.stopEngine(state, false);
       signedIn = false;
       service.reconcileCloud(state, build, false);
@@ -1194,9 +1450,12 @@ describe("workspaceActivity cloud sync nudge", () => {
       const refused = new Error("not found");
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       const engines: ReturnType<typeof syncEngine>[] = [];
-      const sendWorkspaceName = vi.fn<SendWorkspaceName>()
+      const sendWorkspaceName = vi
+        .fn<SendWorkspaceName>()
         .mockRejectedValueOnce(refused)
-        .mockImplementationOnce(() => { throw refused; });
+        .mockImplementationOnce(() => {
+          throw refused;
+        });
       const service = createPhysicalWorkspaceActivity(() => {}, {
         observationFor: idleObservation,
         cloudStateFor: () => ({}),
@@ -1230,7 +1489,9 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      retryNow: async () => undefined,
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
         retrying: false,
@@ -1254,7 +1515,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
-  // Failed-join rollback (0P-C gate fix): close() tears down exactly one
+  // Failed-join rollback: close() tears down exactly one
   // workspace — engine stopped, entry forgotten — leaving others untouched.
   // A pass someone asked for reads as syncing, not as the failure it may
   // clear; an automatic pass does not hide the failure.
@@ -1266,9 +1527,16 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      retryNow: async () => undefined,
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
       snapshot: () => ({
-        syncFailure: { cause: "server-unreachable" as const, detail: "down", sinceMs: 1, attempts: 2 },
+        syncFailure: {
+          cause: "server-unreachable" as const,
+          detail: "down",
+          sinceMs: 1,
+          attempts: 2,
+        },
         retrying,
         claimingIdentity,
         syncing: true,
@@ -1301,7 +1569,9 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueSync: () => {},
       queueWatchedUpload: () => {},
       queuePull: () => {},
-      retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+      retryNow: async () => undefined,
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
         retrying: false,
@@ -1355,7 +1625,9 @@ describe("workspaceActivity cloud sync nudge", () => {
           queueSync: () => undefined,
           queueWatchedUpload: () => {},
           queuePull: () => undefined,
-          retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+          retryNow: async () => undefined,
+          pushRecorded: async () => undefined,
+          catchUp: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
             retrying: false,
@@ -1393,9 +1665,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     const closeError = new Error("engine stop failed");
     activity = createWorkspaceActivity(
       () => {
-        statusesSeenByRenderer.push(
-          activity.getStatus("activity-test").engineStoreRefused,
-        );
+        statusesSeenByRenderer.push(activity.getStatus("activity-test").engineStoreRefused);
       },
       {
         captureFor: (_workspace, captureHooks) => {
@@ -1415,7 +1685,9 @@ describe("workspaceActivity cloud sync nudge", () => {
           queueSync: () => undefined,
           queueWatchedUpload: () => {},
           queuePull: () => undefined,
-          retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+          retryNow: async () => undefined,
+          pushRecorded: async () => undefined,
+          catchUp: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
             retrying: false,
@@ -1437,14 +1709,12 @@ describe("workspaceActivity cloud sync nudge", () => {
     hooks!.onCaptureOutcome("unsupported-fingerprint");
     statusesSeenByRenderer.length = 0;
 
-    await expect(
-      activity.close("activity-test", { preserveStatus: true }),
-    ).rejects.toBe(closeError);
+    await expect(activity.close("activity-test", { preserveStatus: true })).rejects.toBe(
+      closeError,
+    );
 
     expect(activity.listOpenWorkspaceIds()).toEqual([]);
-    expect(activity.getStatus("activity-test").engineStoreRefused).toBe(
-      "unsupported-fingerprint",
-    );
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBe("unsupported-fingerprint");
     expect(statusesSeenByRenderer).toEqual(["unsupported-fingerprint"]);
     await activity.stopAll();
   });
@@ -1488,14 +1758,10 @@ describe("workspaceActivity cloud sync nudge", () => {
     hooks!.onCaptureOutcome("unsupported-fingerprint");
 
     await activity.close("activity-test", { preserveStatus: true });
-    expect(activity.getStatus("activity-test").engineStoreRefused).toBe(
-      "unsupported-fingerprint",
-    );
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBe("unsupported-fingerprint");
 
     const reopening = activity.open(workspace());
-    expect(activity.getStatus("activity-test").engineStoreRefused).toBe(
-      "unsupported-fingerprint",
-    );
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBe("unsupported-fingerprint");
     finishReopen();
     await reopening;
 
@@ -1586,7 +1852,9 @@ describe("workspaceActivity cloud sync nudge", () => {
         queueSync: () => undefined,
         queueWatchedUpload: () => {},
         queuePull: () => undefined,
-        retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined,
+        retryNow: async () => undefined,
+        pushRecorded: async () => undefined,
+        catchUp: async () => undefined,
         snapshot: () => ({
           syncFailure: null,
           retrying: false,
@@ -1622,9 +1890,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     );
   });
 
-  // A shared view has no recorder, so its refresh reports the store's
-  // refusal. The status carries it like a capture's, and only a shared view
-  // takes it: a workspace with a recorder hears its store through capture.
   it("puts a shared view's store refusal on its status", async () => {
     const notify = vi.fn();
     const activity = createWorkspaceActivity(notify, {
@@ -1632,13 +1897,21 @@ describe("workspaceActivity cloud sync nudge", () => {
     });
     await activity.open(workspace());
     notify.mockClear();
-    activity.recordShareViewStoreRefusal("activity-test", "migrated-by-newer-build", "a newer build ran migration 5 (next)");
+    activity.recordShareViewStoreRefusal(
+      "activity-test",
+      "migrated-by-newer-build",
+      "a newer build ran migration 5 (next)",
+    );
     const refused = activity.getStatus("activity-test");
     expect(refused.historyShareView).toBe(true);
     expect(refused.engineStoreRefused).toBe("migrated-by-newer-build");
     expect(refused.engineStoreRefusedDetail).toBe("a newer build ran migration 5 (next)");
     expect(notify).toHaveBeenCalledOnce();
-    activity.recordShareViewStoreRefusal("activity-test", "migrated-by-newer-build", "a newer build ran migration 5 (next)");
+    activity.recordShareViewStoreRefusal(
+      "activity-test",
+      "migrated-by-newer-build",
+      "a newer build ran migration 5 (next)",
+    );
     expect(notify).toHaveBeenCalledOnce();
     activity.recordShareViewStoreRefusal("activity-test", null, null);
     expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
@@ -1653,8 +1926,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     await owned.stopAll();
   });
 
-  // The engine's own words for a refusal ride along, so a report can carry
-  // them without the log, and leave with the refusal.
   it("carries the refusal detail on the status", async () => {
     let hooks: WorkspaceCaptureHooks | null = null;
     const activity = createWorkspaceActivity(vi.fn(), {
@@ -1672,19 +1943,20 @@ describe("workspaceActivity cloud sync nudge", () => {
       },
     });
     await activity.open(workspace());
-    hooks!.onCaptureOutcome("migration-failed", "migration v2-baseline was applied from a different definition than this build's");
+    hooks!.onCaptureOutcome(
+      "migration-failed",
+      "migration v2-baseline was applied from a different definition than this build's",
+    );
     const refused = activity.getStatus("activity-test");
     expect(refused.engineStoreRefused).toBe("migration-failed");
-    expect(refused.engineStoreRefusedDetail).toBe("migration v2-baseline was applied from a different definition than this build's");
+    expect(refused.engineStoreRefusedDetail).toBe(
+      "migration v2-baseline was applied from a different definition than this build's",
+    );
     hooks!.onCaptureOutcome(null);
     expect(activity.getStatus("activity-test").engineStoreRefusedDetail).toBeUndefined();
     await activity.stopAll();
   });
 
-  // A refused engine store rides the capture outcome into the status
-  // the notice center reads, transition-only like the capture-failed flag —
-  // a persistently refused store re-reports the same code on every pass and
-  // must not re-notify.
   it("publishes a store refusal, clears it on recovery, and notifies only on transitions", async () => {
     let hooks: WorkspaceCaptureHooks | null = null;
     const notify = vi.fn();
@@ -1712,11 +1984,9 @@ describe("workspaceActivity cloud sync nudge", () => {
     expect(refused.historyCaptureFailed).toBe(true);
     expect(notify).toHaveBeenCalledTimes(1);
 
-    // The same refusal again is not news.
     hooks!.onCaptureOutcome("unsupported-fingerprint");
     expect(notify).toHaveBeenCalledTimes(1);
 
-    // A pass that reached the store clears the refusal with the failure.
     hooks!.onCaptureOutcome(null);
     expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
     expect(notify).toHaveBeenCalledTimes(2);
@@ -1735,50 +2005,95 @@ describe("workspaceActivity cloud sync nudge", () => {
   });
 });
 
-it("still settles healthy workspaces when an outage checkpoint fails",async()=>{
- let release!:()=>void;const healthyDrain=new Promise<void>(done=>{release=done;});const settled=vi.fn(async()=>{});
- const quit=settleYDocsAfterFileObservation([Promise.reject(Error("checkpoint disk full")),healthyDrain],settled);await Promise.resolve();expect(settled).not.toHaveBeenCalled();release();await quit;expect(settled).toHaveBeenCalledOnce();
+it("still settles healthy workspaces when an outage checkpoint fails", async () => {
+  let release!: () => void;
+  const healthyDrain = new Promise<void>((done) => {
+    release = done;
+  });
+  const settled = vi.fn(async () => {});
+  const quit = settleYDocsAfterFileObservation(
+    [Promise.reject(Error("checkpoint disk full")), healthyDrain],
+    settled,
+  );
+  await Promise.resolve();
+  expect(settled).not.toHaveBeenCalled();
+  release();
+  await quit;
+  expect(settled).toHaveBeenCalledOnce();
 });
 
 it("reads current pause metadata even while activity preserves a failure status", async () => {
   let atMs = 42;
   const activity = createPhysicalWorkspaceActivity(vi.fn(), {
-    observationFor: w => idleObservation(w, {} as never),
-    cloudStateFor: () => ({ syncPause: { atMs,
-      author: { kind: "person", personId: "local:person", self: true } } }),
+    observationFor: (w) => idleObservation(w, {} as never),
+    cloudStateFor: () => ({
+      syncPause: { atMs, author: { kind: "person", personId: "local:person", self: true } },
+    }),
   });
   const state = new WorkspaceActivityState();
-  state.preservedStatus = { state: "local-changes", pendingChangeCount: 1, lastSyncedAtMs: null,
-    historyRecordingUnavailable: true, historyShareView: false, liveSessionsGeneration: 0 };
+  state.preservedStatus = {
+    state: "local-changes",
+    pendingChangeCount: 1,
+    lastSyncedAtMs: null,
+    historyRecordingUnavailable: true,
+    historyShareView: false,
+    liveSessionsGeneration: 0,
+  };
   expect(activity.getStatus(workspace(), state).syncPause?.atMs).toBe(42);
   atMs = 84;
-  expect(activity.getStatus(workspace(), state)).toMatchObject({ historyRecordingUnavailable: true,
-    syncPause: { atMs: 84, author: { self: true } } });
-});
- it.each(["appeared", "changed", "disappeared"] as const)("round2 policy %s reaches listing refresh but no file-work consumer", async kind => {
-  const notify = vi.fn();
-  const observeFileEvents = vi.fn();
-  const handleWatcherEvents = vi.fn();
-  const sources = vi.fn(async () => ["index.html"]);
-  const apps = createFolderAppDetection({ sources, updated: vi.fn(), failed: vi.fn() });
-  const onWatcherBatch = vi.fn((w, events) => { handleWatcherEvents(events); apps.settledEvents(w, events); });
-  let observation!: WorkspaceObservationCallbacks;
-  const w = workspace();
-  const activity = createWorkspaceActivity(notify, {
-    observationFor: (w, callbacks) => { observation = callbacks; return idleObservation(w, callbacks); },
-    onWatcherBatch,
-    captureFor: () => ({ shareView: false, capture: { start() {}, observeFileEvents, settleAndCloseAllLiveSessions: async () => {}, stop: async () => {} } as never }),
+  expect(activity.getStatus(workspace(), state)).toMatchObject({
+    historyRecordingUnavailable: true,
+    syncPause: { atMs: 84, author: { self: true } },
   });
-  try {
-    await activity.open(w);
-    await apps.read(w, ".");
-    notify.mockClear();
-    observation.facts([{ path: ".dohc/visibility.toml", kind }]);
-    await apps.retire(w.attachmentId);
-    expect.soft(observeFileEvents).not.toHaveBeenCalled();
-    expect.soft(onWatcherBatch).not.toHaveBeenCalled();
-    expect.soft(handleWatcherEvents).not.toHaveBeenCalled();
-    expect.soft(sources).toHaveBeenCalledOnce();
-    expect(notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: w.workspaceId, paths: [".dohc/visibility.toml"], pathSetChanged: kind !== "changed" });
-  } finally { await activity.stopAll(); await apps.retire(w.attachmentId); }
- });
+});
+it.each(["appeared", "changed", "disappeared"] as const)(
+  "round2 policy %s reaches listing refresh but no file-work consumer",
+  async (kind) => {
+    const notify = vi.fn();
+    const observeFileEvents = vi.fn();
+    const handleWatcherEvents = vi.fn();
+    const sources = vi.fn(async () => ["index.html"]);
+    const apps = createFolderAppDetection({ sources, updated: vi.fn(), failed: vi.fn() });
+    const onWatcherBatch = vi.fn((w, events) => {
+      handleWatcherEvents(events);
+      apps.settledEvents(w, events);
+    });
+    let observation!: WorkspaceObservationCallbacks;
+    const w = workspace();
+    const activity = createWorkspaceActivity(notify, {
+      observationFor: (w, callbacks) => {
+        observation = callbacks;
+        return idleObservation(w, callbacks);
+      },
+      onWatcherBatch,
+      captureFor: () => ({
+        shareView: false,
+        capture: {
+          start() {},
+          observeFileEvents,
+          settleAndCloseAllLiveSessions: async () => {},
+          stop: async () => {},
+        } as never,
+      }),
+    });
+    try {
+      await activity.open(w);
+      await apps.read(w, ".");
+      notify.mockClear();
+      observation.facts([{ path: ".dohc/visibility.toml", kind }]);
+      await apps.retire(w.attachmentId);
+      expect.soft(observeFileEvents).not.toHaveBeenCalled();
+      expect.soft(onWatcherBatch).not.toHaveBeenCalled();
+      expect.soft(handleWatcherEvents).not.toHaveBeenCalled();
+      expect.soft(sources).toHaveBeenCalledOnce();
+      expect(notify).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: w.workspaceId,
+        paths: [".dohc/visibility.toml"],
+        pathSetChanged: kind !== "changed",
+      });
+    } finally {
+      await activity.stopAll();
+      await apps.retire(w.attachmentId);
+    }
+  },
+);

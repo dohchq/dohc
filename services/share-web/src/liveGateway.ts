@@ -1,7 +1,18 @@
-import {createLiveBufferBudget, LIVE_CONNECTION_LIMIT_CLOSE_CODE, liveConnectionLimitMessage, type LiveConnectionLimitCode} from "@dohc/live-session-contract/live-connection";
+import {
+  createLiveBufferBudget,
+  LIVE_CONNECTION_LIMIT_CLOSE_CODE,
+  liveConnectionLimitMessage,
+  type LiveConnectionLimitCode,
+} from "@dohc/live-session-contract/live-connection";
+import { randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
+import {
+  NAMED_SESSION_CHECK_MAX_INTERVAL_MS,
+  NAMED_SESSION_CHECK_MIN_INTERVAL_MS,
+} from "@dohc/live-session-contract/named-session-check";
 import { createLiveGatewayRequestParser } from "./liveGatewayRequest.js";
 
 interface LiveGatewayScope {
@@ -10,10 +21,11 @@ interface LiveGatewayScope {
   readonly grantId: string;
 }
 
-export type LiveGatewaySession = LiveGatewayScope & (
-  | { readonly kind: "named"; readonly userId: string }
-  | { readonly kind: "link"; readonly principalId: string; readonly sessionId: string }
-);
+export type LiveGatewaySession = LiveGatewayScope &
+  (
+    | { readonly kind: "named"; readonly userId: string }
+    | { readonly kind: "link"; readonly principalId: string; readonly sessionId: string }
+  );
 
 export interface LiveGatewayHostRoute {
   // Exclusively owned, open, and paused before any application bytes are read.
@@ -58,50 +70,132 @@ export interface LiveGatewayOptions {
   readonly bufferBudget?: ReturnType<typeof createLiveBufferBudget>;
   // The adapter resolves trusted route scope and the account cookie through
   // relay named authentication. The discriminator is a lookup key, not identity.
-  resolveSession(request: IncomingMessage, discriminator: string, signal: AbortSignal): Promise<LiveGatewaySession | null>;
+  resolveSession(
+    request: IncomingMessage,
+    discriminator: string,
+    signal: AbortSignal,
+  ): Promise<LiveGatewaySession | null>;
   // Apply these options when constructing or accepting the host socket, before
   // receiving any bytes. An already-open socket's decoder cannot be reconfigured.
   // The private relay rederives identity and redeems once before accepting the socket.
-  openHostRoute(input: {request: IncomingMessage; discriminator: string; ticketToken: string}, signal: AbortSignal, receive: LiveGatewayHostReceiveOptions): Promise<LiveGatewayHostRoute | null>;
+  openHostRoute(
+    input: { request: IncomingMessage; discriminator: string; ticketToken: string },
+    signal: AbortSignal,
+    receive: LiveGatewayHostReceiveOptions,
+  ): Promise<LiveGatewayHostRoute | null>;
 }
 
 export function parseLiveGatewayLimits(value: unknown): LiveGatewayLimits {
-  const names: (keyof LiveGatewayLimits)[] = ["maxConnections", "maxConnectionsPerWorkspace", "reservedOwnerConnections", "maxConnectionsPerSession", "maxConnectionsPerPrincipal",
-    "maxConnectionsPerGrant", "maxFrameBytes", "maxBufferedBytes", "maxPendingBytes", "maxPendingFrames", "maxFragments", "maxBufferedChunks",
-    "upgradeTimeoutMs", "idleTimeoutMs", "drainTimeoutMs"];
-  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== names.length ||
-    Object.keys(value).some(key => !names.includes(key as keyof LiveGatewayLimits))) throw new TypeError("Invalid live gateway limits.");
-  const limits = {...value} as LiveGatewayLimits;
+  const names: (keyof LiveGatewayLimits)[] = [
+    "maxConnections",
+    "maxConnectionsPerWorkspace",
+    "reservedOwnerConnections",
+    "maxConnectionsPerSession",
+    "maxConnectionsPerPrincipal",
+    "maxConnectionsPerGrant",
+    "maxFrameBytes",
+    "maxBufferedBytes",
+    "maxPendingBytes",
+    "maxPendingFrames",
+    "maxFragments",
+    "maxBufferedChunks",
+    "upgradeTimeoutMs",
+    "idleTimeoutMs",
+    "drainTimeoutMs",
+  ];
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== names.length ||
+    Object.keys(value).some((key) => !names.includes(key as keyof LiveGatewayLimits))
+  )
+    throw new TypeError("Invalid live gateway limits.");
+  const limits = { ...value } as LiveGatewayLimits;
   for (const name of names) {
-    if (!Number.isSafeInteger(limits[name]) || (name === "reservedOwnerConnections" ? limits[name] < 0 : limits[name] <= 0) ||
-      ((name.endsWith("TimeoutMs") || name === "maxFrameBytes" || name === "maxFragments" || name === "maxBufferedChunks") &&
-        limits[name] > 2_147_483_647)) throw new TypeError(`Invalid live gateway limit: ${name}.`);
+    if (
+      !Number.isSafeInteger(limits[name]) ||
+      (name === "reservedOwnerConnections" ? limits[name] < 0 : limits[name] <= 0) ||
+      ((name.endsWith("TimeoutMs") ||
+        name === "maxFrameBytes" ||
+        name === "maxFragments" ||
+        name === "maxBufferedChunks") &&
+        limits[name] > 2_147_483_647)
+    )
+      throw new TypeError(`Invalid live gateway limit: ${name}.`);
   }
-  if (limits.reservedOwnerConnections >= Math.min(limits.maxConnections, limits.maxConnectionsPerWorkspace)) throw new TypeError("Invalid live gateway limits.");
-  if (limits.maxPendingBytes < 4 * 1024 * 1024) throw new TypeError("Live gateway pending capacity must cover the browser credit window.");
+  if (
+    limits.reservedOwnerConnections >=
+    Math.min(limits.maxConnections, limits.maxConnectionsPerWorkspace)
+  )
+    throw new TypeError("Invalid live gateway limits.");
+  if (limits.maxPendingBytes < 4 * 1024 * 1024)
+    throw new TypeError("Live gateway pending capacity must cover the browser credit window.");
   return limits;
 }
 
 function copiedSession(value: LiveGatewaySession): LiveGatewaySession {
   const { kind, workspaceId, shareId, grantId } = value;
-  const identity = kind === "named" ? [value.userId] : kind === "link" ? [value.principalId, value.sessionId] : [null];
-  if ([...identity, workspaceId, shareId, grantId].some(id => typeof id !== "string" || id.length === 0)) {
+  const identity =
+    kind === "named"
+      ? [value.userId]
+      : kind === "link"
+        ? [value.principalId, value.sessionId]
+        : [null];
+  if (
+    [...identity, workspaceId, shareId, grantId].some(
+      (id) => typeof id !== "string" || id.length === 0,
+    )
+  ) {
     throw new TypeError("Invalid live gateway session.");
   }
-  return Object.freeze(kind === "named" ? { kind, userId: value.userId, workspaceId, shareId, grantId } :
-    { kind, principalId: value.principalId, sessionId: value.sessionId, workspaceId, shareId, grantId });
+  return Object.freeze(
+    kind === "named"
+      ? { kind, userId: value.userId, workspaceId, shareId, grantId }
+      : {
+          kind,
+          principalId: value.principalId,
+          sessionId: value.sessionId,
+          workspaceId,
+          shareId,
+          grantId,
+        },
+  );
 }
 
-function untilCancelled<T>(pending: Promise<T>, signal: AbortSignal, dispose?: (value: T) => void): Promise<T | null> {
+function untilCancelled<T>(
+  pending: Promise<T>,
+  signal: AbortSignal,
+  dispose?: (value: T) => void,
+): Promise<T | null> {
   return new Promise((resolve, reject) => {
     const cancelled = () => resolve(null);
     signal.addEventListener("abort", cancelled, { once: true });
     if (signal.aborted) cancelled();
-    pending.then(value => {
-      if (signal.aborted) dispose?.(value); else resolve(value);
-    }, reject).finally(() => signal.removeEventListener("abort", cancelled));
+    pending
+      .then((value) => {
+        if (signal.aborted) dispose?.(value);
+        else resolve(value);
+      }, reject)
+      .finally(() => signal.removeEventListener("abort", cancelled));
   });
 }
+
+// A named editor's account session is read again every this many keepalive
+// pings, about every 5 minutes at a 60 s idle timeout, so a sign-out closes an
+// editor that stays open.
+const SESSION_CHECK_PINGS = 10;
+
+/** How often the gateway checks an open named editor's session. */
+export function namedSessionCheckIntervalMs(limits: Pick<LiveGatewayLimits, "idleTimeoutMs">) {
+  return (SESSION_CHECK_PINGS * limits.idleTimeoutMs) / 2;
+}
+
+/** The named gateway idle timeouts whose check interval the relay accepts. */
+export const NAMED_GATEWAY_IDLE_TIMEOUT_RANGE_MS = {
+  min: (2 * NAMED_SESSION_CHECK_MIN_INTERVAL_MS) / SESSION_CHECK_PINGS,
+  max: (2 * NAMED_SESSION_CHECK_MAX_INTERVAL_MS) / SESSION_CHECK_PINGS,
+} as const;
 
 /** Private transport: no production listener or admission defaults. */
 export function createLiveGateway(options: LiveGatewayOptions) {
@@ -110,11 +204,18 @@ export function createLiveGateway(options: LiveGatewayOptions) {
   const resolveSession = options.resolveSession.bind(options);
   const openHostRoute = options.openHostRoute.bind(options);
   const hostReceive: LiveGatewayHostReceiveOptions = Object.freeze({
-    maxPayload: limits.maxFrameBytes, maxFragments: limits.maxFragments, maxBufferedChunks: limits.maxBufferedChunks,
-    closeTimeout: limits.drainTimeoutMs, perMessageDeflate: false, autoPong: false,
+    maxPayload: limits.maxFrameBytes,
+    maxFragments: limits.maxFragments,
+    maxBufferedChunks: limits.maxBufferedChunks,
+    closeTimeout: limits.drainTimeoutMs,
+    perMessageDeflate: false,
+    autoPong: false,
   });
   const wsOptions = {
-    ...hostReceive, noServer: true, clientTracking: false, handleProtocols: () => "dohc-live-v1",
+    ...hostReceive,
+    noServer: true,
+    clientTracking: false,
+    handleProtocols: () => "dohc-live-v1",
   };
   const server = new WebSocketServer(wsOptions);
   const connections = new Map<() => void, () => void>();
@@ -127,33 +228,54 @@ export function createLiveGateway(options: LiveGatewayOptions) {
 
   function refuse(socket: Duplex) {
     if (socket.destroyed || refusedSockets.has(socket)) return;
-    if (socket.writableEnded || !socket.writable) { socket.destroy(); return; }
+    if (socket.writableEnded || !socket.writable) {
+      socket.destroy();
+      return;
+    }
     refusedSockets.add(socket);
     const deadline = setTimeout(() => socket.destroy(), limits.drainTimeoutMs);
     deadline.unref();
     socket.once("close", () => clearTimeout(deadline));
     socket.once("error", () => socket.destroy());
-    socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
+    socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () =>
+      socket.destroy(),
+    );
   }
   server.on("wsClientError", (_error, socket) => refuse(socket));
 
-  function reserve(keys: [string, number, LiveConnectionLimitCode][]): (() => void) | LiveConnectionLimitCode {
+  function reserve(
+    keys: [string, number, LiveConnectionLimitCode][],
+  ): (() => void) | LiveConnectionLimitCode {
     const exceeded = keys.find(([key, maximum]) => (counts.get(key) ?? 0) >= maximum);
     if (exceeded) return exceeded[2];
     for (const [key] of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
     return () => {
       for (const [key] of keys) {
         const next = counts.get(key)! - 1;
-        if (next === 0) counts.delete(key); else counts.set(key, next);
+        if (next === 0) counts.delete(key);
+        else counts.set(key, next);
       }
     };
   }
 
-  async function handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
+  async function handleUpgrade(
+    request: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+  ): Promise<void> {
     const parsed = parseRequest(request);
-    if (heldSockets.has(socket)) { socket.destroy(); return; }
-    if (!parsed || closed || connections.size >= 2 * limits.maxConnections || head.length > limits.maxPendingBytes) {
-      refuse(socket); return;
+    if (heldSockets.has(socket)) {
+      socket.destroy();
+      return;
+    }
+    if (
+      !parsed ||
+      closed ||
+      connections.size >= 2 * limits.maxConnections ||
+      head.length > limits.maxPendingBytes
+    ) {
+      refuse(socket);
+      return;
     }
     heldSockets.add(socket);
     socket.pause();
@@ -162,15 +284,24 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     let route: LiveGatewayHostRoute | undefined;
     let release: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let keepalive: ReturnType<typeof setInterval> | undefined;
     let done = false;
-    let draining = false, closingForLimit = false;
+    let draining = false,
+      closingForLimit = false;
     let refusalCode: LiveConnectionLimitCode | undefined;
     function refuseLimit(code: LiveConnectionLimitCode) {
       if (done) return;
-      if (!browser) server.handleUpgrade(request, socket, Buffer.alloc(0), accepted => { browser = accepted; accepted.on("error", stop); });
+      if (!browser)
+        server.handleUpgrade(request, socket, Buffer.alloc(0), (accepted) => {
+          browser = accepted;
+          accepted.on("error", stop);
+        });
       if (browser) {
-        closingForLimit = true; browser.close(LIVE_CONNECTION_LIMIT_CLOSE_CODE, code); socket.resume();
-        const deadline = setTimeout(() => browser?.terminate(), limits.drainTimeoutMs); deadline.unref();
+        closingForLimit = true;
+        browser.close(LIVE_CONNECTION_LIMIT_CLOSE_CODE, code);
+        socket.resume();
+        const deadline = setTimeout(() => browser?.terminate(), limits.drainTimeoutMs);
+        deadline.unref();
         browser.once("close", () => clearTimeout(deadline));
       }
       stop();
@@ -180,14 +311,22 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      clearInterval(keepalive);
       abort.abort();
       route?.invalidated.removeEventListener("abort", stop);
-      const releaseConnection = () => { release?.(); connections.delete(stop); scopes.delete(stop); };
-      if (closingForLimit && browser && browser.readyState !== WebSocket.CLOSED) browser.once("close", releaseConnection);
+      const releaseConnection = () => {
+        release?.();
+        connections.delete(stop);
+        scopes.delete(stop);
+      };
+      if (closingForLimit && browser && browser.readyState !== WebSocket.CLOSED)
+        browser.once("close", releaseConnection);
       else releaseConnection();
       // Refusal and fencing discard queued work. No successful frame is synthesized.
       route?.socket.terminate();
-      if (browser) { if (!closingForLimit) browser.terminate(); } else refuse(socket);
+      if (browser) {
+        if (!closingForLimit) browser.terminate();
+      } else refuse(socket);
     }
     const touch = () => {
       clearTimeout(timer);
@@ -195,9 +334,13 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       timer.unref();
     };
     connections.set(stop, () => {
-      if (!browser) { stop(); return; }
+      if (!browser) {
+        stop();
+        return;
+      }
       draining = true;
       clearTimeout(timer);
+      clearInterval(keepalive);
       timer = setTimeout(stop, limits.drainTimeoutMs);
       timer.unref();
       browser.close(1001);
@@ -209,57 +352,154 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     timer.unref();
 
     try {
-      const resolved = await untilCancelled(resolveSession(request, parsed.session, abort.signal), abort.signal);
+      const resolved = await untilCancelled(
+        resolveSession(request, parsed.session, abort.signal),
+        abort.signal,
+      );
       if (done) return;
-      if (resolved === null) { stop(); return; }
+      if (resolved === null) {
+        stop();
+        return;
+      }
       const session = copiedSession(resolved);
       scopes.set(stop, session);
-      const opened = await untilCancelled(openHostRoute({request, discriminator: parsed.session, ticketToken: parsed.ticketToken}, abort.signal, hostReceive), abort.signal, late => {
-        if (late !== null) {
-          late.socket.on("error", () => undefined);
-          late.socket.terminate();
-        }
-      });
-      if (opened === null) { stop(); return; }
+      const opened = await untilCancelled(
+        openHostRoute(
+          { request, discriminator: parsed.session, ticketToken: parsed.ticketToken },
+          abort.signal,
+          hostReceive,
+        ),
+        abort.signal,
+        (late) => {
+          if (late !== null) {
+            late.socket.on("error", () => undefined);
+            late.socket.terminate();
+          }
+        },
+      );
+      if (opened === null) {
+        stop();
+        return;
+      }
       opened.socket.on("error", stop);
-      if (done) { opened.socket.terminate(); return; }
+      if (done) {
+        opened.socket.terminate();
+        return;
+      }
       route = { socket: opened.socket, invalidated: opened.invalidated };
       route.socket.once("close", (code, reason) => {
         const limit = reason.toString();
-        if (code === LIVE_CONNECTION_LIMIT_CLOSE_CODE && liveConnectionLimitMessage(limit)) refuseLimit(limit as LiveConnectionLimitCode);
+        if (code === LIVE_CONNECTION_LIMIT_CLOSE_CODE && liveConnectionLimitMessage(limit))
+          refuseLimit(limit as LiveConnectionLimitCode);
         else stop();
       });
       if (route.socket.readyState !== WebSocket.OPEN || !route.socket.isPaused) {
-        stop(); return;
+        stop();
+        return;
       }
       route.socket.binaryType = "nodebuffer";
       route.invalidated.addEventListener("abort", stop, { once: true });
-      if (route.invalidated.aborted || done || socket.destroyed || !socket.readable || !socket.writable) { stop(); return; }
+      if (
+        route.invalidated.aborted ||
+        done ||
+        socket.destroyed ||
+        !socket.readable ||
+        !socket.writable
+      ) {
+        stop();
+        return;
+      }
       const reserved = reserve([
-        ["connections", limits.maxConnections - limits.reservedOwnerConnections, "live_total_limit"],
-        [JSON.stringify(["workspace", session.workspaceId]), limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections, "live_workspace_limit"],
-        [JSON.stringify(["session", session.kind, session.kind === "named" ? session.userId : session.sessionId,
-          session.workspaceId, session.grantId, parsed.session]), limits.maxConnectionsPerSession, "live_session_limit"],
-        [JSON.stringify(session.kind === "named" ? ["principal", "named", session.userId] :
-          ["principal", "link", session.workspaceId, session.grantId, session.principalId]), limits.maxConnectionsPerPrincipal, "live_person_limit"],
-        [JSON.stringify(["grant", session.workspaceId, session.grantId]), limits.maxConnectionsPerGrant, "live_grant_limit"],
+        [
+          "connections",
+          limits.maxConnections - limits.reservedOwnerConnections,
+          "live_total_limit",
+        ],
+        [
+          JSON.stringify(["workspace", session.workspaceId]),
+          limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections,
+          "live_workspace_limit",
+        ],
+        [
+          JSON.stringify([
+            "session",
+            session.kind,
+            session.kind === "named" ? session.userId : session.sessionId,
+            session.workspaceId,
+            session.grantId,
+            parsed.session,
+          ]),
+          limits.maxConnectionsPerSession,
+          "live_session_limit",
+        ],
+        [
+          JSON.stringify(
+            session.kind === "named"
+              ? ["principal", "named", session.userId]
+              : ["principal", "link", session.workspaceId, session.grantId, session.principalId],
+          ),
+          limits.maxConnectionsPerPrincipal,
+          "live_person_limit",
+        ],
+        [
+          JSON.stringify(["grant", session.workspaceId, session.grantId]),
+          limits.maxConnectionsPerGrant,
+          "live_grant_limit",
+        ],
       ]);
-      if (typeof reserved === "string") refusalCode = reserved; else release = reserved;
-      if (refusalCode) { refuseLimit(refusalCode); return; }
+      if (typeof reserved === "string") refusalCode = reserved;
+      else release = reserved;
+      if (refusalCode) {
+        refuseLimit(refusalCode);
+        return;
+      }
       const bufferScopes: [string, number][] = [
-        [JSON.stringify(["workspace", session.workspaceId]),
-          Math.max(1, Math.floor(limits.maxBufferedBytes * Math.min(1,
-            (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) / limits.maxConnections)))],
-        [JSON.stringify(session.kind === "named" ? ["principal", "named", session.userId] :
-          ["principal", "link", session.workspaceId, session.grantId, session.principalId]),
-          Math.max(1, Math.floor(limits.maxBufferedBytes * Math.min(1, limits.maxConnectionsPerPrincipal / limits.maxConnections)))],
-        [JSON.stringify(["share", session.workspaceId, session.shareId]),
-          Math.max(1, Math.floor(limits.maxBufferedBytes * Math.min(1, limits.maxConnectionsPerGrant / limits.maxConnections)))],
+        [
+          JSON.stringify(["workspace", session.workspaceId]),
+          Math.max(
+            1,
+            Math.floor(
+              limits.maxBufferedBytes *
+                Math.min(
+                  1,
+                  (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) /
+                    limits.maxConnections,
+                ),
+            ),
+          ),
+        ],
+        [
+          JSON.stringify(
+            session.kind === "named"
+              ? ["principal", "named", session.userId]
+              : ["principal", "link", session.workspaceId, session.grantId, session.principalId],
+          ),
+          Math.max(
+            1,
+            Math.floor(
+              limits.maxBufferedBytes *
+                Math.min(1, limits.maxConnectionsPerPrincipal / limits.maxConnections),
+            ),
+          ),
+        ],
+        [
+          JSON.stringify(["share", session.workspaceId, session.shareId]),
+          Math.max(
+            1,
+            Math.floor(
+              limits.maxBufferedBytes *
+                Math.min(1, limits.maxConnectionsPerGrant / limits.maxConnections),
+            ),
+          ),
+        ],
       ];
       // No asynchronous step may separate this invalidation check from the 101.
-      server.handleUpgrade(request, socket, head, accepted => {
+      server.handleUpgrade(request, socket, head, (accepted) => {
         browser = accepted;
-        if (done) { accepted.terminate(); return; }
+        if (done) {
+          accepted.terminate();
+          return;
+        }
         accepted.binaryType = "nodebuffer";
         const host = route!.socket;
         accepted.on("error", stop);
@@ -270,39 +510,122 @@ export function createLiveGateway(options: LiveGatewayOptions) {
           let pendingFrames = 0;
           return (data: unknown, pong = false) => {
             if (done || draining) return;
-            if (!Buffer.isBuffer(data)) { stop(); return; }
+            if (!Buffer.isBuffer(data)) {
+              stop();
+              return;
+            }
             const size = data.byteLength;
-            if ((!pong && (size === 0 || size > limits.maxFrameBytes)) || size > limits.maxPendingBytes - pendingBytes ||
-              pendingFrames >= limits.maxPendingFrames || destination.readyState !== WebSocket.OPEN ||
-              destination.bufferedAmount > limits.maxPendingBytes - size) { stop(); return; }
+            if (
+              (!pong && (size === 0 || size > limits.maxFrameBytes)) ||
+              size > limits.maxPendingBytes - pendingBytes ||
+              pendingFrames >= limits.maxPendingFrames ||
+              destination.readyState !== WebSocket.OPEN ||
+              destination.bufferedAmount > limits.maxPendingBytes - size
+            ) {
+              stop();
+              return;
+            }
             let releaseBytes: () => void;
-            try { releaseBytes = buffers.reserve(2 * size, bufferScopes); } catch { refuseLimit("live_buffer_limit"); return; }
+            try {
+              releaseBytes = buffers.reserve(2 * size, bufferScopes);
+            } catch {
+              refuseLimit("live_buffer_limit");
+              return;
+            }
             try {
               const bytes = Buffer.from(data);
               pendingBytes += size;
               pendingFrames += 1;
               touch();
               const completed = (error?: Error) => {
-                releaseBytes(); pendingBytes -= size;
+                releaseBytes();
+                pendingBytes -= size;
                 pendingFrames -= 1;
                 if (error) stop();
               };
               if (pong) destination.pong(bytes, undefined, completed);
               else destination.send(bytes, { binary: true, compress: false }, completed);
-            } catch { releaseBytes(); stop(); }
+            } catch {
+              releaseBytes();
+              stop();
+            }
           };
         }
-        const toBrowser = writer(accepted), toHost = writer(host);
-        accepted.on("message", (data, binary) => { if (binary) toHost(data); else stop(); });
-        host.on("message", (data, binary) => { if (binary) toBrowser(data); else stop(); });
-        accepted.on("ping", data => toBrowser(data, true));
-        host.on("ping", data => toHost(data, true));
+        const toBrowser = writer(accepted),
+          toHost = writer(host);
+        accepted.on("message", (data, binary) => {
+          if (binary) toHost(data);
+          else stop();
+        });
+        host.on("message", (data, binary) => {
+          if (binary) toBrowser(data);
+          else stop();
+        });
+        accepted.on("ping", (data) => toBrowser(data, true));
+        host.on("ping", (data) => toHost(data, true));
+        // An idle editor sends no frames, so the gateway pings both legs. A pong
+        // restarts the idle timer only once both legs return this round's nonce,
+        // so while no frames flow, a leg that stops answering closes the pair.
+        let round: Buffer | undefined,
+          browserAnswered = false,
+          hostAnswered = false,
+          pings = 0,
+          checking = false;
+        const answered = (leg: WebSocket) => (data: Buffer) => {
+          if (done || draining || !round || !data.equals(round)) return;
+          if (leg === accepted) browserAnswered = true;
+          else hostAnswered = true;
+          if (browserAnswered && hostAnswered) {
+            round = undefined;
+            touch();
+          }
+        };
+        accepted.on("pong", answered(accepted));
+        host.on("pong", answered(host));
+        const checkSession = async () => {
+          checking = true;
+          try {
+            const current = await resolveSession(request, parsed.session, abort.signal);
+            if (!done && (current === null || !isDeepStrictEqual(copiedSession(current), session)))
+              stop();
+          } catch {
+            stop();
+          } finally {
+            checking = false;
+          }
+        };
+        keepalive = setInterval(() => {
+          if (done || draining) return;
+          // A check still waiting when the next is due counts as failed.
+          if (session.kind === "named" && ++pings % SESSION_CHECK_PINGS === 0) {
+            if (checking) {
+              stop();
+              return;
+            }
+            void checkSession();
+          }
+          round = randomBytes(8);
+          browserAnswered = false;
+          hostAnswered = false;
+          const sent = (error?: Error) => {
+            if (error) stop();
+          };
+          try {
+            accepted.ping(round, undefined, sent);
+            host.ping(round, undefined, sent);
+          } catch {
+            stop();
+          }
+        }, limits.idleTimeoutMs / 2);
+        keepalive.unref();
         touch();
         host.resume();
         socket.resume();
       });
       if (!browser) stop();
-    } catch { stop(); }
+    } catch {
+      stop();
+    }
   }
 
   return {
@@ -310,7 +633,12 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     deleteAccount(userId: string, workspaceIds: readonly string[]) {
       for (const stop of connections.keys()) {
         const session = scopes.get(stop);
-        if (session && (workspaceIds.includes(session.workspaceId) || (session.kind === "named" && session.userId === userId))) stop();
+        if (
+          session &&
+          (workspaceIds.includes(session.workspaceId) ||
+            (session.kind === "named" && session.userId === userId))
+        )
+          stop();
       }
     },
     close() {

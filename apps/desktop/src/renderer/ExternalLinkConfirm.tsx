@@ -69,16 +69,16 @@ export function ExternalLinkConfirm(props: { workspaceId: string }) {
       cancelTestId="external-link-confirm-cancel"
       confirmTestId="external-link-confirm-open"
     >
-        <p
-          data-testid="external-link-confirm-url"
-          className="break-all font-mono text-xs leading-5 text-ink"
-        >
-          {url}
-        </p>
-        <p className="text-xs leading-5">
-          dohc opens this link in another app. Turn off Confirm external links
-          in Settings to open links without asking.
-        </p>
+      <p
+        data-testid="external-link-confirm-url"
+        className="break-all font-mono text-xs leading-5 text-ink"
+      >
+        {url}
+      </p>
+      <p className="text-xs leading-5">
+        dohc opens this link in another app. Turn off Confirm external links in Settings to open
+        links without asking.
+      </p>
     </ConfirmDialog>
   );
 }

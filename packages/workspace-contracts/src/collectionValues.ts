@@ -78,8 +78,7 @@ function rustF64Text(value: number): string {
   const shortest = String(value);
   const exponentForm = /^(-?)(\d+)(?:\.(\d+))?e([+-]\d+)$/.exec(shortest);
   if (exponentForm === null) return shortest;
-  const [, sign = "", whole = "", fraction = "", exponentText = "0"] =
-    exponentForm;
+  const [, sign = "", whole = "", fraction = "", exponentText = "0"] = exponentForm;
   const digits = whole + fraction;
   const point = Number(exponentText) + whole.length;
   if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
@@ -91,11 +90,7 @@ function rustF64Text(value: number): string {
 
 export function yamlKeyText(value: unknown): string | null {
   if (typeof value === "number") return rustF64Text(value);
-  if (
-    typeof value === "string" ||
-    typeof value === "bigint" ||
-    typeof value === "boolean"
-  ) {
+  if (typeof value === "string" || typeof value === "bigint" || typeof value === "boolean") {
     return String(value);
   }
   return value === null ? "null" : null;
@@ -218,11 +213,7 @@ export function isNormalizedRelativePath(value: string): boolean {
   return value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
-function parseOptions(
-  raw: unknown,
-  path: string,
-  reasons: CollectionSchemaReason[],
-): string[] {
+function parseOptions(raw: unknown, path: string, reasons: CollectionSchemaReason[]): string[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) {
     reason(reasons, "expected-sequence", path);
@@ -351,12 +342,7 @@ function parseFields(
     }
 
     if (rawType === "relation") {
-      reportUnknownProperties(
-        field,
-        new Set(["type", "collection", "many"]),
-        path,
-        reasons,
-      );
+      reportUnknownProperties(field, new Set(["type", "collection", "many"]), path, reasons);
       const collection = readRequiredText(field, "collection", path, reasons);
       let many: boolean | null = null;
       if (!("many" in field)) {
@@ -596,11 +582,15 @@ export function parseCollectionSchema(yamlText: string): CollectionSchemaParseRe
     return {
       status: "degraded",
       schema: emptyCollectionSchema(),
-      reasons: [{
-        code: typeof raw.version === "number" && Number.isSafeInteger(raw.version) && raw.version > 1
-          ? "unsupported-version" : "invalid-version",
-        path: "/version",
-      }],
+      reasons: [
+        {
+          code:
+            typeof raw.version === "number" && Number.isSafeInteger(raw.version) && raw.version > 1
+              ? "unsupported-version"
+              : "invalid-version",
+          path: "/version",
+        },
+      ],
     };
   }
   const reasons: CollectionSchemaReason[] = [];
@@ -677,10 +667,7 @@ function valueExceedsDepth(value: unknown, maximum: number): boolean {
   return false;
 }
 
-export function validateFieldValue(
-  field: FieldDefinition,
-  value: unknown,
-): FieldValueValidation {
+export function validateFieldValue(field: FieldDefinition, value: unknown): FieldValueValidation {
   if (valueExceedsDepth(value, MAX_COLLECTION_FIELD_VALUE_DEPTH)) {
     return flag("value-depth-exceeded");
   }
@@ -704,9 +691,7 @@ export function validateFieldValue(
     case "multi-select":
       return validateMany(value, (entry, path) => {
         if (typeof entry !== "string") return flag("expected-text", path);
-        return field.options.includes(entry)
-          ? { status: "valid" }
-          : flag("unknown-option", path);
+        return field.options.includes(entry) ? { status: "valid" } : flag("unknown-option", path);
       });
     case "person":
       if (typeof value !== "string") return flag("expected-text");
@@ -742,7 +727,11 @@ export function parseCollectionRecordFields(markdown: string): Record<string, un
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
   if (!match || new TextEncoder().encode(markdown).byteLength > 16_384) return null;
   try {
-    const value = yamlToPlain(load(match[1], {schema: COLLECTION_SCHEMA, json: false, maxAliases: 0, maxDepth: 4}));
+    const value = yamlToPlain(
+      load(match[1], { schema: COLLECTION_SCHEMA, json: false, maxAliases: 0, maxDepth: 4 }),
+    );
     return isMapping(value) ? value : null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }

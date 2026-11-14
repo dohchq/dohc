@@ -606,8 +606,6 @@ fn request_ids_replay_ingest_and_retire_exactly_once() {
         .capture_retire(&delete_replay, &NO_FAULTS)
         .expect("retire replay");
     assert!(replay_delete.deduped);
-    // The replayed inner result reports its own dedupe honestly; every
-    // other field must match the original byte-for-byte.
     let mut expected = first_delete.retired.clone();
     if let Some(expected) = expected.as_mut() {
         expected.deduped = true;
@@ -753,7 +751,6 @@ fn binary_capture_persists_a_jobless_binary_head_and_dedupes() {
     assert_eq!(second.moment_order, first.moment_order);
     assert_eq!(moment_count(&mut store), 1);
 
-    // Changed bytes append one new moment on the same object.
     let third = VersionedTextStore::new(&mut store)
         .capture_ingest_binary(&ingest_binary("photo.png", &[0xaa, 0xbb], 30), &NO_FAULTS)
         .expect("changed binary capture");
@@ -773,13 +770,11 @@ fn binary_capture_replaces_a_text_head_and_text_recaptures_over_binary() {
         .expect("flip to binary");
     assert!(!flipped.deduped);
 
-    // read_text fails closed on the binary head (BINHEAD contract).
     let err = VersionedTextStore::new(&mut store)
         .read_text(WS, VERSION, "flip.md")
         .expect_err("binary head is not text");
     assert!(matches!(err, DomainError::BinaryHeadNotText));
 
-    // And text capture flips it back on the same object.
     let back = VersionedTextStore::new(&mut store)
         .capture_ingest(&ingest("flip.md", "text again", 30), &NO_FAULTS)
         .expect("flip back to text");
@@ -901,7 +896,7 @@ fn capture_supersedes_an_older_pending_materialization_job() {
     std::fs::write(scratch.path().join("doc.bin"), disk_bytes).expect("seed disk");
 
     // An older mirrored-resolve write enqueues a pending job whose preimage
-    // matches the current disk bytes (the exact codex-review scenario).
+    // matches the current disk bytes.
     let stale_sha = hex_sha256(stale_bytes);
     store
         .write_with(&NO_FAULTS, |tx| {
@@ -926,7 +921,6 @@ fn capture_supersedes_an_older_pending_materialization_job() {
         })
         .expect("older resolve write with pending job");
 
-    // The user's on-disk bytes are captured at a newer generation.
     VersionedTextStore::new(&mut store)
         .capture_ingest_binary(&ingest_binary("doc.bin", disk_bytes, 20), &NO_FAULTS)
         .expect("capture the live disk bytes");
@@ -1032,9 +1026,6 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
     let stale_bytes = b"older stale content";
     std::fs::write(scratch.path().join("doc.bin"), live_bytes).expect("seed disk");
 
-    // Two sequential resolve writes to the same path leave an older pending
-    // job (stale bytes, preimage matching the current disk) beneath the head
-    // whose own newer job is also still pending.
     store
         .write_with(&NO_FAULTS, |tx| {
             put_binary_blob(tx, stale_bytes).map_err(DomainError::from)?;
@@ -1146,7 +1137,6 @@ fn the_capture_origin_is_reserved_on_the_public_write_path() {
         .expect_err("the real write path must reserve the capture origin");
     assert!(matches!(err, DomainError::InvalidInput { .. }));
 
-    // Every ordinary origin still passes.
     let ordinary = WriteText {
         metadata_origin: "api".to_owned(),
         ..forged
@@ -1157,7 +1147,6 @@ fn the_capture_origin_is_reserved_on_the_public_write_path() {
 #[test]
 fn a_claimed_dedupe_transfers_ownership_to_capture() {
     let (_scratch, mut store) = open_store();
-    // A foreign writer establishes the head.
     VersionedTextStore::new(&mut store)
         .write_text(
             &dohc_engine_domain::WriteText {
@@ -1240,11 +1229,6 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
             )
         })
         .expect("ydoc head");
-    // The manifest seeds 'ydoc' rows into the baseline scanner, so its file
-    // deleted while the daemon was down must retire the head — a stale
-    // snapshot must not stay readable forever. Mutation check: drop the
-    // YDOC_ORIGIN arm from `capture_retire_in_tx`'s origin gate — this
-    // retire settles as a no-op and the assertion fails.
     let result = VersionedTextStore::new(&mut store)
         .capture_retire(
             &CaptureRetire {
@@ -1259,7 +1243,6 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
         "materialized ydoc heads are disk-owned"
     );
 
-    // RPC/agent-origin heads stay protected from disk-driven retires.
     VersionedTextStore::new(&mut store)
         .write_text(
             &dohc_engine_domain::WriteText {
@@ -1339,7 +1322,7 @@ fn capture_manifest_excludes_pending_conflict_installed_ydoc_asset() {
     );
 }
 
-// dohc#3622. Only this version's own unwritten switch write keeps its head out
+// Only this version's own unwritten switch write keeps its head out
 // of the seed. Another version's pending write of the same bytes doesn't.
 #[test]
 fn capture_manifest_ignores_another_versions_unwritten_switch_write() {
@@ -1404,14 +1387,13 @@ fn capture_manifest_ignores_another_versions_unwritten_switch_write() {
 
 #[test]
 fn snapshot_metadata_reports_which_paths_the_ydoc_editor_owns() {
-    // AUDIT-SILENTSAVE round 4 (D3). `has_ydoc_marker` is what stops the
+    // `has_ydoc_marker` is what stops the
     // desktop capture layer from retiring a settled Y.Doc for exceeding a cap
     // a Y.Doc is not bound by. The whole daemon half of that fix rests on this
     // exists subquery, so it is asserted both ways here rather than only
     // through the e2e.
     let (_scratch, mut store) = open_store();
 
-    // An ordinary captured text file: no Y.Doc lineage.
     VersionedTextStore::new(&mut store)
         .capture_ingest(&ingest("notes/plain.md", "plain body", 10), &NO_FAULTS)
         .expect("plain ingest");
@@ -1471,14 +1453,12 @@ fn snapshot_metadata_reports_which_paths_the_ydoc_editor_owns() {
 
 #[test]
 fn a_non_ownable_retire_must_not_destroy_a_materialized_ydoc_head() {
-    // AUDIT-SILENTSAVE round 3. The origin gate admits Y.Doc heads so a file
-    // DELETED while the daemon was down still retires. The capture sink then
-    // reused that permission for a different reason — "no longer
-    // engine-ownable" — and a settled Y.Doc past the 128 KiB capture cap is
-    // reported exactly that way. Result: the user pastes 131 KB, sees an
-    // honest "Saved" with the bytes on disk, quits, reopens, and reconcile
-    // journals "Stopped tracking non-text content" over a document they are
-    // actively editing. The reason must decide, not the origin alone.
+    // The origin gate admits Y.Doc heads so a file deleted while the daemon
+    // was down still retires. A settled Y.Doc past the 128 KiB capture cap
+    // is reported as "no longer engine-ownable". If that reason retired it
+    // too, a user who pasted 131 KB and saw "Saved" would reopen to
+    // "Stopped tracking non-text content" over a document they are editing.
+    // The reason must decide, not the origin alone.
     let (_scratch, mut store) = open_store();
     store
         .write_with(&NO_FAULTS, |tx| {
@@ -1519,7 +1499,6 @@ fn a_non_ownable_retire_must_not_destroy_a_materialized_ydoc_head() {
         "a settled Y.Doc head must survive a not-engine-ownable retire"
     );
 
-    // The head is genuinely still readable — not merely "no moment minted".
     let head = VersionedTextStore::new(&mut store)
         .read_text(WS, VERSION, "notes/huge.md")
         .expect("read head");
@@ -1643,7 +1622,6 @@ fn live_capture_labels_default_at_the_primitive() {
         Some("Updated photo.png")
     );
 
-    // text -> binary flip on the same object.
     let flipped = VersionedTextStore::new(&mut store)
         .capture_ingest_binary(
             &ingest_binary("notes/plain.md", &[0xff, 0x00], 30),
@@ -1664,7 +1642,6 @@ fn live_capture_labels_default_at_the_primitive() {
         Some("Became a binary file")
     );
 
-    // ...and back to text.
     let back = VersionedTextStore::new(&mut store)
         .capture_ingest(&ingest("notes/plain.md", "text again", 40), &NO_FAULTS)
         .expect("flip back to text");

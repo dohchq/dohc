@@ -4,8 +4,6 @@ import * as Y from "yjs";
 import { bindDocPresence } from "./docPresence";
 import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "./presenceChannel";
 
-// A relay stand-in that fans publishes from all bound clients into one shared
-// scope, so two doc-presence bindings genuinely see each other's Yjs awareness.
 function sharedRelay() {
   const entries = new Map<string, PresencePeer>();
   let version = 0;
@@ -96,7 +94,6 @@ describe("bindDocPresence", () => {
 
     await flush();
 
-    // Alice sees Bob among the doc's editors, via the Yjs Awareness states.
     expect(a.awareness.getStates().size).toBeGreaterThanOrEqual(2);
     expect(a.awareness.getStates().get(docB.clientID)?.user).toEqual({
       name: "Bob",
@@ -144,7 +141,6 @@ describe("bindDocPresence", () => {
 
     b.destroy();
     await flush();
-    // Bob's awareness state is pruned on Alice's side.
     const names = namesA.mock.calls.at(-1)?.[0] as string[];
     expect(names).toEqual([]);
 
@@ -170,7 +166,6 @@ describe("bindDocPresence", () => {
       return update;
     };
 
-    // Honest peer Alice, publishing her real awareness state.
     const aliceDoc = new Y.Doc();
     const aliceAw = new Awareness(aliceDoc);
     aliceAw.setLocalState({ user: { name: "Alice", color: "#f00" } });
@@ -247,7 +242,6 @@ describe("bindDocPresence", () => {
     expect(aliceState?.user?.name).toBe("Alice");
     expect(onPeers.mock.calls.at(-1)?.[0]).not.toContain("Impostor");
 
-    // (2) Mallory claims our clientID: dropped, local state untouched.
     await push([
       alicePeer,
       {
@@ -265,8 +259,6 @@ describe("bindDocPresence", () => {
     };
     expect(localState?.user?.name).toBe("Me");
 
-    // (3) Mallory claims her own (unowned) yc but smuggles Alice's id into the
-    // update: rejected wholesale — Alice intact and Mallory never applied.
     const smuggleDoc = new Y.Doc();
     smuggleDoc.clientID = 424242;
     const smuggleAw = new Awareness(smuggleDoc);
@@ -346,7 +338,6 @@ describe("bindDocPresence", () => {
         state: null,
         updatedAtMs: 0,
       },
-      // Valid update, but the advertised name is not a string.
       {
         faceToken: "p4",
         sessionToken: "p4",

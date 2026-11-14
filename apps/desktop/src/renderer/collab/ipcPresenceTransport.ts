@@ -1,24 +1,6 @@
-import type {
-  PresenceResult,
-  PresenceScopeInput,
-} from "../../ipc/bridgeContract";
+import type { PresenceResult, PresenceScopeInput } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { PresenceSnapshot, PresenceTransport } from "./presenceChannel";
-
-// MU-C5 — the IPC-PROXIED presence transport.
-//
-// SECURITY: the renderer never holds the relay bearer token. This transport
-// implements the same PresenceTransport contract as createRelayPresenceTransport
-// but makes NO relay request itself — it calls the presence IPC handlers, and
-// MAIN (the sole token holder) makes the actual relay presence call. The renderer
-// only ever sees the resulting snapshot. Scope is authorized in main; a scope
-// this account can't join comes back as { ok: false } → the channel degrades to
-// dark, exactly like an unreachable relay.
-//
-// A poll long-polls over IPC (main holds the relay long-poll open). The poll's
-// AbortSignal — fired by PresenceChannel.stop() on unmount / workspace switch —
-// is wired to presenceCancel(pollId), so main aborts the exact in-flight relay
-// fetch rather than leaking a request or repainting a switched-away workspace.
 
 let pollCounter = 0;
 
@@ -45,9 +27,7 @@ function toSnapshot(snapshot: Extract<PresenceResult, { ok: true }>["snapshot"])
   };
 }
 
-export function createIpcPresenceTransport(
-  scope: PresenceScopeInput,
-): PresenceTransport {
+export function createIpcPresenceTransport(scope: PresenceScopeInput): PresenceTransport {
   return {
     async publish({ topic, clientId, incarnationId, state }): Promise<PresenceSnapshot> {
       const result = await bridge().presencePublish({
@@ -76,8 +56,9 @@ export function createIpcPresenceTransport(
       if (signal.aborted) throw new DOMException("Aborted", "AbortError");
       const pollId = nextPollId();
       const onAbort = () => {
-        // Tell main to abort the in-flight relay long-poll for this poll id.
-        void bridge().presenceCancel({ pollId }).catch(() => undefined);
+        void bridge()
+          .presenceCancel({ pollId })
+          .catch(() => undefined);
       };
       signal.addEventListener("abort", onAbort, { once: true });
       try {

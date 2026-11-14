@@ -12,20 +12,47 @@ function registry(options: ConstructorParameters<typeof ReplicaWatches>[1] = {})
   registries.push(watches);
   return { watches, wake };
 }
-function authorized(workspaceId = "a", reader = "reader", owner = "owner", grantId = "grant"): AuthorizedShareAction {
+function authorized(
+  workspaceId = "a",
+  reader = "reader",
+  owner = "owner",
+  grantId = "grant",
+): AuthorizedShareAction {
   return {
     ok: true,
-    share: { shareId: "share", workspaceId, granterUserId: owner, selectorJson: '{"paths":["/"]}', createdAtMs: 1 },
-    grant: { grantId, shareId: "share", principalKind: "user", principalUserId: reader, principalEmail: null,
-      access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
+    share: {
+      shareId: "share",
+      workspaceId,
+      granterUserId: owner,
+      selectorJson: '{"paths":["/"]}',
+      createdAtMs: 1,
+    },
+    grant: {
+      grantId,
+      shareId: "share",
+      principalKind: "user",
+      principalUserId: reader,
+      principalEmail: null,
+      access: "view",
+      generation: 1,
+      status: "active",
+      createdAtMs: 1,
+      revokedAtMs: null,
+      parentGrantId: null,
+    },
     effectiveSelector: { versionId: "main", paths: ["/"], access: "view" },
   };
 }
 // Inspect keys without exposing them in the production API or any response.
 function state(watches: ReplicaWatches) {
-  return (watches as unknown as { workspaces: Map<string, { holders: Map<string, unknown> }> }).workspaces;
+  return (watches as unknown as { workspaces: Map<string, { holders: Map<string, unknown> }> })
+    .workspaces;
 }
-afterEach(() => { vi.restoreAllMocks(); for (const watches of registries.splice(0)) watches.dispose(); vi.useRealTimers(); });
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const watches of registries.splice(0)) watches.dispose();
+  vi.useRealTimers();
+});
 
 describe("replica watches", () => {
   it("expires at 35 s without traffic and refreshes without boolean flicker", async () => {
@@ -48,15 +75,32 @@ describe("replica watches", () => {
     expect(watches.watched("a")).toBe(true);
   });
 
-  it.each(["owner", "reader"] as const)("checks the %s quota before looking at the global cap", (quota) => {
-    const { watches } = registry({ maxWorkspaces: 1, maxWorkspacesPerOwner: 1, maxWorkspacesPerReader: 1 });
-    watches.holdReader(authorized());
-    const size = vi.spyOn(state(watches), "size", "get").mockImplementation(() => { throw new Error("global cap inspected"); });
-    expect(() => watches.holdReader(authorized("b", quota === "owner" ? "other" : "reader", quota === "reader" ? "other-owner" : "owner"))).not.toThrow();
-    expect(size).not.toHaveBeenCalled();
-    size.mockRestore();
-    expect(watches.watched("b")).toBe(false);
-  });
+  it.each(["owner", "reader"] as const)(
+    "checks the %s quota before looking at the global cap",
+    (quota) => {
+      const { watches } = registry({
+        maxWorkspaces: 1,
+        maxWorkspacesPerOwner: 1,
+        maxWorkspacesPerReader: 1,
+      });
+      watches.holdReader(authorized());
+      const size = vi.spyOn(state(watches), "size", "get").mockImplementation(() => {
+        throw new Error("global cap inspected");
+      });
+      expect(() =>
+        watches.holdReader(
+          authorized(
+            "b",
+            quota === "owner" ? "other" : "reader",
+            quota === "reader" ? "other-owner" : "owner",
+          ),
+        ),
+      ).not.toThrow();
+      expect(size).not.toHaveBeenCalled();
+      size.mockRestore();
+      expect(watches.watched("b")).toBe(false);
+    },
+  );
 
   it("refreshes a reader and owner already at their workspace limits", async () => {
     vi.useFakeTimers();
@@ -74,7 +118,8 @@ describe("replica watches", () => {
 
   it("limits one reader to 16 workspaces even across owners and grants", () => {
     const { watches } = registry();
-    for (let i = 0; i < 17; i++) watches.holdReader(authorized(`w${i}`, "reader", `owner${i}`, `grant${i}`));
+    for (let i = 0; i < 17; i++)
+      watches.holdReader(authorized(`w${i}`, "reader", `owner${i}`, `grant${i}`));
     expect(watches.stats()).toEqual({ workspaces: 16, holders: 16 });
     expect(watches.watched("w16")).toBe(false);
     watches.holdReader(authorized("w16", "another", "owner16"));
@@ -94,7 +139,8 @@ describe("replica watches", () => {
     const { watches } = registry();
     for (let i = 0; i < 65; i++) watches.holdReader(authorized("a", `reader${i}`));
     expect(watches.stats().holders).toBe(64);
-    for (let i = 1; i <= 1_024; i++) watches.holdReader(authorized(`w${i}`, `other${i}`, `owner${i}`));
+    for (let i = 1; i <= 1_024; i++)
+      watches.holdReader(authorized(`w${i}`, `other${i}`, `owner${i}`));
     expect(watches.stats()).toEqual({ workspaces: 1_024, holders: 1_087 });
     expect(watches.watched("w1024")).toBe(false);
   });
@@ -122,17 +168,21 @@ describe("replica watches", () => {
     const { watches } = registry();
     watches.holdReader(authorized());
     const first = [...state(watches).get("a")!.holders.keys()][0];
-    expect(first).toBe(createHash("sha256").update(JSON.stringify(["user", "reader"])).digest("base64url"));
+    expect(first).toBe(
+      createHash("sha256")
+        .update(JSON.stringify(["user", "reader"]))
+        .digest("base64url"),
+    );
     watches.holdReader(authorized("a", "reader", "owner", "another-grant"));
     expect(watches.stats().holders).toBe(1);
     watches.holdReader(authorized("a", "two"));
     watches.holdReader(authorized("b"));
-    const keys = [...state(watches).values()].flatMap(w => [...w.holders.keys()]);
+    const keys = [...state(watches).values()].flatMap((w) => [...w.holders.keys()]);
     expect(new Set(keys).size).toBe(2);
     expect([...state(watches).get("b")!.holders.keys()]).toEqual([first]);
-    expect(keys.every(k => /^[A-Za-z0-9_-]{43}$/.test(k))).toBe(true);
+    expect(keys.every((k) => /^[A-Za-z0-9_-]{43}$/.test(k))).toBe(true);
     watches.holdReader(authorized("a", "reader".repeat(1_000)));
-    expect([...state(watches).get("a")!.holders.keys()].every(k => k.length === 43)).toBe(true);
+    expect([...state(watches).get("a")!.holders.keys()].every((k) => k.length === 43)).toBe(true);
   });
 
   it("keys accountless readers by link grant, never by browser instance", () => {
@@ -146,7 +196,11 @@ describe("replica watches", () => {
     watches.holdReader({ ...link, grant: { ...link.grant, grantId: "other" } });
     expect(watches.stats().holders).toBe(2);
     const linkKey = [...state(watches).get("a")!.holders.keys()][0];
-    expect(linkKey).toBe(createHash("sha256").update(JSON.stringify(["link", "grant"])).digest("base64url"));
+    expect(linkKey).toBe(
+      createHash("sha256")
+        .update(JSON.stringify(["link", "grant"]))
+        .digest("base64url"),
+    );
     watches.holdReader(authorized("a", "grant"));
     expect(watches.stats().holders).toBe(3);
     expect([...state(watches).get("a")!.holders.keys()][2]).not.toBe(linkKey);

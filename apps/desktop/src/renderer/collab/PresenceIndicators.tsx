@@ -3,21 +3,24 @@ import { relayPresentation } from "../workbench/actorPresentation";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
-// MU-C1 — calm presence UI. Small initials for who's here and a subtle typing
+// Calm presence UI. Small initials for who's here and a subtle typing
 // line. Deliberately quiet: no layout thrash, no noisy badges, and it renders
 // nothing when nobody else is around (solo stays solo). Presence changes are
 // announced politely (aria-live="polite"), never as a spam of alerts.
 
 const MAX_FACES = 3;
 
-// An agent publishes presence with `agent: true` in its state.
 function isAgentPeer(peer: PresencePeer): boolean {
   return (peer.state as { agent?: unknown } | null)?.agent === true;
 }
 
 // `live` false draws the same faces with the same name but no live region,
 // for a second copy beside one that already announces them.
-export function PresenceFaces(props: { others: PresencePeer[]; className?: string; live?: boolean }) {
+export function PresenceFaces(props: {
+  others: PresencePeer[];
+  className?: string;
+  live?: boolean;
+}) {
   // Collapse a user's multiple devices/tabs into one face.
   const unique = useMemo(() => {
     const byUser = new Map<string, PresencePeer>();
@@ -37,7 +40,9 @@ export function PresenceFaces(props: { others: PresencePeer[]; className?: strin
   return (
     <div
       className={`dohc-presence-faces flex items-center gap-1 ${props.className ?? ""}`}
-      {...(props.live === false ? { role: "img" } : { role: "status", "aria-live": "polite" as const })}
+      {...(props.live === false
+        ? { role: "img" }
+        : { role: "status", "aria-live": "polite" as const })}
       aria-label={label}
       title={names.join(", ")}
     >

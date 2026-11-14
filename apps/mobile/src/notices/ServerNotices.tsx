@@ -4,35 +4,47 @@ import { Stack } from "expo-router";
 import { Check } from "lucide-react-native";
 import { StyleSheet, Text, View } from "react-native";
 import { useTheme } from "../theme";
+import { HoldRow } from "../workspace/ListStates";
 import { NoticeRow } from "./NoticeRow";
 import { useNotices } from "./NoticesState";
 
-// Notices in a signed-in build. The phone reads no notices from the server yet, so it lists what failed on this phone,
-// such as a read of Home or Chats, each with Try again, until it's retried, dismissed or succeeds.
+// The account's Notices, and failures held on this phone. The header shows at once. Until the whole list is known,
+// from the server or from the copy saved at the last launch, an empty list holds its place, so it never says All
+// clear too soon. A read that failed is a row here with its cause and Try again. Pulling down reads the list again.
 export function ServerNotices() {
   const theme = useTheme();
-  const { notices, unread, dismiss, markAllRead } = useNotices();
+  const { notices, unread, known, dismiss, setRead, markAllRead, refresh } = useNotices();
   return (
     <>
       <Stack.Screen options={{ title: noticesWords.heading }} />
       {unread > 0 ? (
         <Stack.Toolbar placement="right">
-          <Stack.Toolbar.Button onPress={markAllRead}>{noticesWords.markAllRead}</Stack.Toolbar.Button>
+          <Stack.Toolbar.Button onPress={markAllRead}>
+            {noticesWords.markAllRead}
+          </Stack.Toolbar.Button>
         </Stack.Toolbar>
       ) : null}
       <LegendList
         data={notices}
-        keyExtractor={notice => notice.id}
+        keyExtractor={(notice) => notice.id}
         estimatedItemSize={128}
         style={{ backgroundColor: theme.bg }}
         contentInsetAdjustmentBehavior="automatic"
-        ListFooterComponent={notices.length === 0 ? (
-          <View style={styles.empty}>
-            <Check size={40} color={theme.subtle} strokeWidth={1.75} />
-            <Text style={[styles.emptyText, { color: theme.ink }]}>{noticesWords.allClear}</Text>
-          </View>
-        ) : undefined}
-        renderItem={({ item }) => <NoticeRow notice={item} onDismiss={dismiss} />}
+        refreshing={false}
+        onRefresh={refresh}
+        ListFooterComponent={
+          notices.length > 0 ? undefined : known ? (
+            <View style={styles.empty}>
+              <Check size={40} color={theme.subtle} strokeWidth={1.75} />
+              <Text style={[styles.emptyText, { color: theme.ink }]}>{noticesWords.allClear}</Text>
+            </View>
+          ) : (
+            <HoldRow />
+          )
+        }
+        renderItem={({ item }) => (
+          <NoticeRow notice={item} onDismiss={dismiss} onSetRead={setRead} />
+        )}
       />
     </>
   );

@@ -169,8 +169,7 @@ function renderActiveHeadingHarness(
       toJSON: () => {},
     }) satisfies DOMRect;
   scroller.getBoundingClientRect = () => rect(100, 200);
-  editorDom.getBoundingClientRect = () =>
-    rect(100 + editorTop - scroller.scrollTop, editorHeight);
+  editorDom.getBoundingClientRect = () => rect(100 + editorTop - scroller.scrollTop, editorHeight);
   editorContainer.append(editorDom, reactMount);
   scroller.appendChild(editorContainer);
   document.body.appendChild(scroller);
@@ -209,8 +208,6 @@ function renderActiveHeadingHarness(
     textContent: string;
     isTextblock: true;
   };
-  // A document of the current headings. Each edit makes a new one, which
-  // differs from the last everywhere.
   const headingsDoc = () => {
     const shown = [...headings];
     const node = (heading: OutlineHeading): FakeHeadingNode => ({
@@ -228,7 +225,11 @@ function renderActiveHeadingHarness(
       descendants(callback: (node: FakeHeadingNode, pos: number) => void) {
         for (const heading of shown) callback(node(heading), heading.pos);
       },
-      nodesBetween(from: number, to: number, callback: (node: FakeHeadingNode, pos: number) => void) {
+      nodesBetween(
+        from: number,
+        to: number,
+        callback: (node: FakeHeadingNode, pos: number) => void,
+      ) {
         for (const heading of shown) {
           if (heading.pos >= from && heading.pos < to) callback(node(heading), heading.pos);
         }
@@ -320,9 +321,9 @@ function renderActiveHeadingHarness(
           type: "childList",
         } as unknown as MutationRecord;
         for (const [callback, observations] of mutationObservers) {
-          if (observations.some(({ target, options }) =>
-            target === scroller && options.childList
-          )) {
+          if (
+            observations.some(({ target, options }) => target === scroller && options.childList)
+          ) {
             callback([record], {} as MutationObserver);
           }
         }
@@ -347,12 +348,15 @@ function renderActiveHeadingHarness(
           type: "attributes",
         } as unknown as MutationRecord;
         for (const [callback, observations] of mutationObservers) {
-          if (observations.some(({ target, options }) =>
-            target === editorDom
-            && options.attributes
-            && options.subtree
-            && options.attributeFilter?.includes("open")
-          )) {
+          if (
+            observations.some(
+              ({ target, options }) =>
+                target === editorDom &&
+                options.attributes &&
+                options.subtree &&
+                options.attributeFilter?.includes("open"),
+            )
+          ) {
             callback([record], {} as MutationObserver);
           }
         }
@@ -387,9 +391,7 @@ function renderActiveHeadingHarness(
       act(flushFrames);
     },
     activeText() {
-      return view.container
-        .querySelector<HTMLButtonElement>('[aria-current="true"]')
-        ?.textContent;
+      return view.container.querySelector<HTMLButtonElement>('[aria-current="true"]')?.textContent;
     },
     resize() {
       act(() => {
@@ -521,7 +523,6 @@ describe("OutlinePanel active heading", () => {
     const harness = renderActiveHeadingHarness([0, 200, 400]);
     harness.setMarginHits(true);
 
-    // The line sits 10 px above Plan, where a hit resolves to Plan's start.
     harness.scrollTo(118);
     expect(harness.activeText()).toBe("Intro");
 
@@ -530,8 +531,6 @@ describe("OutlinePanel active heading", () => {
   });
 
   it("takes the last reached heading of a row, as in document order", () => {
-    // Plan and Review sit side by side in one table row; the hit lands in
-    // Plan's cell.
     const harness = renderActiveHeadingHarness([0, 200, 200]);
     harness.setHitHeading(1);
 
@@ -541,8 +540,6 @@ describe("OutlinePanel active heading", () => {
   });
 
   it("walks back past every heading of a cell the line has not reached", () => {
-    // Plan and Review sit low in a row's first cell; the hit lands in the
-    // second cell, after both in document order.
     const harness = renderActiveHeadingHarness([0, 300, 400]);
     harness.setHitHeading(2);
 
@@ -552,8 +549,6 @@ describe("OutlinePanel active heading", () => {
   });
 
   it("walks back past a folded heading to the last drawn one", () => {
-    // Plan is folded away; Review and Done sit low in a row's first cell and
-    // the hit lands in the second cell.
     const harness = renderActiveHeadingHarness([0, 0, 300, 400]);
     harness.fold(1);
     harness.setHitHeading(3);
@@ -564,7 +559,6 @@ describe("OutlinePanel active heading", () => {
   });
 
   it("passes over a folded heading between headings of a row", () => {
-    // Plan and Done share a row; Review, between them, is folded away.
     const harness = renderActiveHeadingHarness([0, 200, 0, 200]);
     harness.fold(2);
     harness.setHitHeading(1);
@@ -588,7 +582,7 @@ describe("OutlinePanel active heading", () => {
       ],
       [0, 200, 400],
     );
-    harness.emitDocumentTransaction({ mapPosition: (pos) => pos >= 5 ? pos + 1 : pos });
+    harness.emitDocumentTransaction({ mapPosition: (pos) => (pos >= 5 ? pos + 1 : pos) });
 
     expect(harness.renderCommits).not.toHaveBeenCalled();
     expect(harness.activeText()).toBe("Review");
@@ -637,7 +631,7 @@ describe("OutlinePanel active heading", () => {
       ],
       [0, 200, 300, 400, 700],
     );
-    const mapPosition = vi.fn((pos: number) => pos >= 20 ? pos + 10 : pos);
+    const mapPosition = vi.fn((pos: number) => (pos >= 20 ? pos + 10 : pos));
     harness.emitDocumentTransaction({ flush: false, mapPosition });
 
     expect(mapPosition).toHaveBeenCalledWith(20);
@@ -659,7 +653,7 @@ describe("OutlinePanel active heading", () => {
       ],
       [0, 200, 400],
     );
-    const mapPosition = vi.fn((pos: number) => pos === 20 ? 25 : pos);
+    const mapPosition = vi.fn((pos: number) => (pos === 20 ? 25 : pos));
     harness.emitDocumentTransaction({ flush: false, mapPosition });
 
     expect(mapPosition).toHaveBeenCalledWith(20);

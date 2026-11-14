@@ -12,12 +12,7 @@ import {
   type SetStateAction,
 } from "react";
 import { ShellErrorReporter } from "../shell/useShellError";
-import {
-  Extension,
-  resolveFocusPosition,
-  type Editor,
-  type JSONContent,
-} from "@tiptap/core";
+import { Extension, resolveFocusPosition, type Editor, type JSONContent } from "@tiptap/core";
 import { parseRichdocMarkdown, serializeRichdocBody } from "@dohc/ydoc-projection";
 import {
   DohcMarkdownTable,
@@ -33,7 +28,6 @@ import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
 import { closeHistory } from "@tiptap/pm/history";
-import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
@@ -83,11 +77,7 @@ import {
   type LinkMenuState,
 } from "./linkMenu";
 import type { WorkspaceLinkTarget } from "../linkActivation";
-import {
-  makeWikilinkPlugin,
-  type AutocompleteState,
-  type WikilinkFile,
-} from "./wikilinkPlugin";
+import { makeWikilinkPlugin, type AutocompleteState, type WikilinkFile } from "./wikilinkPlugin";
 import { makeMentionPlugin } from "./mentionTrigger";
 import { WikilinkPicker, type WikilinkPickerState } from "./WikilinkPicker";
 import { makeEmojiPlugin } from "./emojiTrigger";
@@ -146,7 +136,10 @@ import {
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
-import { CollaborationHistoryInput, createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import {
+  CollaborationHistoryInput,
+  createCollaborationHistoryHandle,
+} from "./sharedCollaborationHistory";
 import { ListConversions, parseMarkdownListClipboard } from "./listEditing";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
@@ -264,22 +257,13 @@ const PLACEHOLDER_EXTENSION = Placeholder.configure({
   // empty paragraph in the document stamps "Type '/' for commands" at once.
   showOnlyCurrent: true,
   placeholder: ({ node }) => {
-    if (
-      node.type.name === "tableCell" ||
-      node.type.name === "tableHeader"
-    ) {
+    if (node.type.name === "tableCell" || node.type.name === "tableHeader") {
       return "";
     }
     if (node.type.name === "heading") return "Heading";
     return "Type '/' for commands";
   },
 });
-// The projection's table parses and writes the row-height annotation, so a
-// source-view edit keeps resized rows. Column resizing is off by default in
-// Tiptap; it is turned on here so the grip/menu UI (tableControls.tsx) has
-// resizing to coexist with. These are runtime options: they do not change
-// the schema, so the projection's unconfigured table stays in parity. See
-// schema-parity.test.ts.
 const TABLE_EXTENSION = DohcMarkdownTable.configure({
   resizable: true,
   // A useful default column measure makes appended columns grow the table
@@ -331,10 +315,7 @@ function BubbleButton(props: {
 // transaction, so the toolbar reads the block and marks under the selection
 // from the editor's state; a render-time read showed the previous
 // selection's. selectionFormat keeps that read cheap on every keystroke.
-function SelectionToolbar(props: {
-  editor: Editor;
-  onOpenLink: (state: LinkMenuState) => void;
-}) {
+function SelectionToolbar(props: { editor: Editor; onOpenLink: (state: LinkMenuState) => void }) {
   const { editor } = props;
   const active = useEditorState({
     editor,
@@ -401,10 +382,7 @@ function SelectionToolbar(props: {
  *  prove where it sits. Two ways that refinement is dropped: it says
  *  so, or it resolved to a range that rendered nothing to scroll. Both leave
  *  the block start, which is what this did before it could refine anything. */
-function scrollToBlock(
-  editor: Editor,
-  target: BlockNavigationTarget,
-): (() => void) | undefined {
+function scrollToBlock(editor: Editor, target: BlockNavigationTarget): (() => void) | undefined {
   const doc = editor.state.doc;
   if (doc.childCount === 0) return;
   const child = Math.min(Math.max(target.index, 0), doc.childCount - 1);
@@ -491,16 +469,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const [emojiState, setEmojiState] = useState<AutocompleteState>({
       active: false,
     });
-    const [slashState, setSlashState] = useState<SlashCommandState>(
-      CLOSED_SLASH_COMMAND_STATE,
-    );
-    const [blockMenuState, setBlockMenuState] = useState<BlockMenuState>(
-      CLOSED_BLOCK_MENU_STATE,
-    );
+    const [slashState, setSlashState] = useState<SlashCommandState>(CLOSED_SLASH_COMMAND_STATE);
+    const [blockMenuState, setBlockMenuState] = useState<BlockMenuState>(CLOSED_BLOCK_MENU_STATE);
     const [chromeReady, setChromeReady] = useState(false);
-    const [linkMenuState, setLinkMenuState] = useState<LinkMenuState>(
-      CLOSED_LINK_MENU_STATE,
-    );
+    const [linkMenuState, setLinkMenuState] = useState<LinkMenuState>(CLOSED_LINK_MENU_STATE);
     const linkMenuStateRef = useRef<LinkMenuState>(linkMenuState);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashStateRef = useRef<SlashCommandState>(slashState);
@@ -511,15 +483,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
     const applyingPendingUndoRef = useRef(false);
     const appliedPendingUndoToken = useRef<number | null>(null);
-    const includePlaceholdersRef = useRef(
-      value.length <= LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS,
+    const includePlaceholdersRef = useRef(value.length <= LARGE_DOCUMENT_PLACEHOLDER_LIMIT_CHARS);
+    const onOpenWikilinkRef = useRef<((target: string) => void) | null>(onOpenWikilink ?? null);
+    const onOpenWorkspaceLinkRef = useRef<((target: WorkspaceLinkTarget) => void) | null>(
+      onOpenWorkspaceLink ?? null,
     );
-    const onOpenWikilinkRef = useRef<((target: string) => void) | null>(
-      onOpenWikilink ?? null,
-    );
-    const onOpenWorkspaceLinkRef = useRef<
-      ((target: WorkspaceLinkTarget) => void) | null
-    >(onOpenWorkspaceLink ?? null);
     // The offer a URL pasted on its own line raises, and its row. Mod+K in
     // the editor moves focus to the row.
     const [urlOffer, setUrlOffer] = useState<UrlPasteOfferState | null>(null);
@@ -534,15 +502,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     // ProseMirror invokes menu handlers outside React's render cycle. Keep the
     // imperative ref current in the same tick as the visual state so rapid
     // typing/arrow keys never read the previous menu query or selection.
-    const publishSlashState = useCallback<
-      Dispatch<SetStateAction<SlashCommandState>>
-    >((update) => {
+    const publishSlashState = useCallback<Dispatch<SetStateAction<SlashCommandState>>>((update) => {
       const current = slashStateRef.current;
       const next = typeof update === "function" ? update(current) : update;
       slashStateRef.current = next;
-      setSlashState((rendered) =>
-        slashCommandStatesEqual(rendered, next) ? rendered : next,
-      );
+      setSlashState((rendered) => (slashCommandStatesEqual(rendered, next) ? rendered : next));
     }, []);
 
     // Refs (not props) so the editorProps closures below — created once with
@@ -676,8 +640,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeLinkMenuPlugin({
                 stateRef: linkMenuStateRef,
                 setState: setLinkMenuState,
-                openWorkspaceLink: (target) =>
-                  onOpenWorkspaceLinkRef.current?.(target),
+                openWorkspaceLink: (target) => onOpenWorkspaceLinkRef.current?.(target),
               }),
               makeCodeBlockChromePlugin(() => reportErrorRef.current),
               // After the slash-command plugin (menu keeps ArrowDown while
@@ -694,10 +657,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeTableControlsPlugin({
                 rowResizeEnabled: Boolean(collab?.ydoc),
               }),
-              makeUrlPasteOfferPlugin(
-                setUrlOffer,
-                collaborationExtensions?.yTiptap ?? null,
-              ),
+              makeUrlPasteOfferPlugin(setUrlOffer, collaborationExtensions?.yTiptap ?? null),
             ];
           },
         }),
@@ -717,62 +677,56 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       return createCollaborationHistoryHandle(collab.ydoc, {
         trackedOrigin: collaborationExtensions.yTiptap.ySyncPluginKey,
         deleteFilter: (item) =>
-          collaborationExtensions.yTiptap.defaultDeleteFilter(
-            item,
-            protectedNodes,
-          ),
+          collaborationExtensions.yTiptap.defaultDeleteFilter(item, protectedNodes),
       });
     }, [collab?.ydoc, collaborationExtensions]);
 
-    const extensions = useMemo(
-      () => {
-        const collabYDoc = collab?.ydoc ?? null;
-        const awareness = collab?.awareness ?? null;
-        const isCollab = Boolean(collabYDoc && collaborationExtensions);
-        return [
-          ...desktopMarkdownExtensions,
-          isCollab ? COLLAB_STARTER_KIT : LOCAL_STARTER_KIT,
-          ...STATIC_EDITOR_EXTENSIONS,
-          findReplaceExtension,
-          ...(includePlaceholdersRef.current ? [PLACEHOLDER_EXTENSION] : []),
-          ...(isCollab
-            ? [
-                collaborationExtensions!.Collaboration.configure({
-                  document: collabYDoc,
-                  field: "body",
-                  yUndoOptions: { undoManager: collaborationHistory! },
-                }),
-                CollaborationHistoryInput,
-                // Only wired when the caller hands us an Awareness
-                // bound to this same ydoc (docPresence.ts's bindDocPresence).
-                // No awareness (today's only caller, or a peer that dropped
-                // off the presence channel) means no carets, never a crash —
-                // the calm "N editing" indicator above the editor is
-                // unaffected either way.
-                ...(awareness
-                  ? [
-                      collaborationExtensions!.CollaborationCaret.configure({
-                        provider: { awareness },
-                        user: resolveCaretUser(awareness),
-                        selectionRender: caretSelectionRender,
-                      }),
-                    ]
-                  : []),
-              ]
-            : [TRAILING_NODE_EXTENSION]),
-          dohcPlugins,
-          linkMenuExtension,
-        ];
-      },
-      [
-        collab?.ydoc,
-        collab?.awareness,
-        collaborationExtensions,
-        collaborationHistory,
+    const extensions = useMemo(() => {
+      const collabYDoc = collab?.ydoc ?? null;
+      const awareness = collab?.awareness ?? null;
+      const isCollab = Boolean(collabYDoc && collaborationExtensions);
+      return [
+        ...desktopMarkdownExtensions,
+        isCollab ? COLLAB_STARTER_KIT : LOCAL_STARTER_KIT,
+        ...STATIC_EDITOR_EXTENSIONS,
+        findReplaceExtension,
+        ...(includePlaceholdersRef.current ? [PLACEHOLDER_EXTENSION] : []),
+        ...(isCollab
+          ? [
+              collaborationExtensions!.Collaboration.configure({
+                document: collabYDoc,
+                field: "body",
+                yUndoOptions: { undoManager: collaborationHistory! },
+              }),
+              CollaborationHistoryInput,
+              // Only wired when the caller hands us an Awareness
+              // bound to this same ydoc (docPresence.ts's bindDocPresence).
+              // No awareness (today's only caller, or a peer that dropped
+              // off the presence channel) means no carets, never a crash —
+              // the calm "N editing" indicator above the editor is
+              // unaffected either way.
+              ...(awareness
+                ? [
+                    collaborationExtensions!.CollaborationCaret.configure({
+                      provider: { awareness },
+                      user: resolveCaretUser(awareness),
+                      selectionRender: caretSelectionRender,
+                    }),
+                  ]
+                : []),
+            ]
+          : [TRAILING_NODE_EXTENSION]),
         dohcPlugins,
         linkMenuExtension,
-      ],
-    );
+      ];
+    }, [
+      collab?.ydoc,
+      collab?.awareness,
+      collaborationExtensions,
+      collaborationHistory,
+      dohcPlugins,
+      linkMenuExtension,
+    ]);
 
     const collabActive = Boolean(collab?.ydoc && collaborationExtensions);
     // Recomputed on the same deps as useEditor's own rebuild trigger below
@@ -823,8 +777,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
           },
-          handlePaste: (view, event) =>
-            handleImagePaste(view, event, pasteContextRef.current),
+          handlePaste: (view, event) => handleImagePaste(view, event, pasteContextRef.current),
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
           handleKeyDown: (view, event) => {
@@ -848,16 +801,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         // passes its own false, and a pending undo raises
         // `applyingPendingUndoRef`. What reaches here after those is the user's
         // own edit, so it is reported. There is deliberately no window in which
-        // updates are ignored — one used to exist, keyed on an animation frame,
-        // and it dropped keystrokes that arrived first.
+        // updates are ignored. A window keyed on an animation frame would drop
+        // keystrokes that arrive first.
         onUpdate({ editor, transaction }) {
           if (collabActive) return;
           if (applyingPendingUndoRef.current) return;
           if (!transaction.docChanged) return;
           const document = editor.state.doc;
-          onDirty(() =>
-            serializeRichdocBody(escapeHighlightMarkdown(document.toJSON())),
-          );
+          onDirty(() => serializeRichdocBody(escapeHighlightMarkdown(document.toJSON())));
         },
       },
       [extensions, collabActive],
@@ -888,8 +839,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       const container = containerRef.current;
       const view = editor?.view;
       if (!container || !view) return;
-      const pane =
-        container.closest<HTMLElement>("[data-dohc-doc-pane]") ?? container;
+      const pane = container.closest<HTMLElement>("[data-dohc-doc-pane]") ?? container;
       const onDragOver = (event: DragEvent) => {
         handlePaneImageDragOver(event);
       };
@@ -1055,9 +1005,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       const current = serializeRichdocBody(escapeHighlightMarkdown(editor.getJSON()));
       // The restore arrives as the file's source, which can spell raw HTML and
       // escapes differently from a save, so compare the document it reads as.
-      const restored = editor.schema.nodeFromJSON(
-        parseRichdocMarkdown(pendingUndo.restoredText),
-      );
+      const restored = editor.schema.nodeFromJSON(parseRichdocMarkdown(pendingUndo.restoredText));
       if (current !== serializeRichdocBody(escapeHighlightMarkdown(restored.toJSON()))) {
         onPendingUndoConsumed?.(pendingUndo.token);
         return;
@@ -1181,7 +1129,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             .split("\n")
             .map((line) => schema.nodes.paragraph!.create(null, line ? schema.text(line) : null));
           // An empty document's one empty paragraph gives way to the text.
-          const empty = doc.childCount === 1 && doc.firstChild!.isTextblock && doc.firstChild!.content.size === 0;
+          const empty =
+            doc.childCount === 1 &&
+            doc.firstChild!.isTextblock &&
+            doc.firstChild!.content.size === 0;
           tr.replaceWith(0, empty ? doc.content.size : 0, paragraphs);
           // Each paragraph before the caret's line is its text plus its two
           // boundaries; 1 enters the first paragraph.
@@ -1233,20 +1184,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
          * in styles.css for the full mechanism. */}
         <div className="dohc-editor-surface">
           <EditorContent editor={editor} />
-          <OutlinePanel
-            editor={editor}
-            containerRef={containerRef}
-            headingTarget={headingTarget}
-          />
+          <OutlinePanel editor={editor} containerRef={containerRef} headingTarget={headingTarget} />
         </div>
         {editor ? <FindReplaceBar editor={editor} /> : null}
         {editor && chromeReady ? (
           <BubbleMenu
             editor={editor}
             className="dohc-bubble-menu"
-            shouldShow={({ editor: instance }) =>
-              hasFormattableSelection(instance.state.selection)
-            }
+            shouldShow={({ editor: instance }) => hasFormattableSelection(instance.state.selection)}
           >
             <SelectionToolbar editor={editor} onOpenLink={setLinkMenuState} />
           </BubbleMenu>
@@ -1305,40 +1250,35 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
   },
 );
 
-const MarkdownEditorCollabLoader = forwardRef<
-  MarkdownEditorHandle,
-  MarkdownEditorProps
->(function MarkdownEditorCollabLoader(props, ref) {
-  const [load, setLoad] = useState(currentCollaborationExtensionsLoad);
+const MarkdownEditorCollabLoader = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(
+  function MarkdownEditorCollabLoader(props, ref) {
+    const [load, setLoad] = useState(currentCollaborationExtensionsLoad);
 
-  useAsyncResponseEffect(
-    () => (load.status === "loading" ? loadCollaborationExtensions() : null),
-    {
-      onSuccess: (extensions) => setLoad({ status: "ready", extensions }),
-      onError: (error) =>
-        setLoad({ status: "failed", error: collaborationLoadError(error) }),
-    },
-    [load.status],
-  );
-
-  if (load.status === "failed") throw load.error;
-
-  if (load.status === "loading") {
-    return (
-      <div className="dohc-tiptap-editor h-full" data-collab-state={props.collab?.status ?? "connecting"}>
-        <SkeletonRows layout="document" label="Loading editor..." className="pt-1.5" />
-      </div>
+    useAsyncResponseEffect(
+      () => (load.status === "loading" ? loadCollaborationExtensions() : null),
+      {
+        onSuccess: (extensions) => setLoad({ status: "ready", extensions }),
+        onError: (error) => setLoad({ status: "failed", error: collaborationLoadError(error) }),
+      },
+      [load.status],
     );
-  }
 
-  return (
-    <MarkdownEditorInner
-      {...props}
-      ref={ref}
-      collaborationExtensions={load.extensions}
-    />
-  );
-});
+    if (load.status === "failed") throw load.error;
+
+    if (load.status === "loading") {
+      return (
+        <div
+          className="dohc-tiptap-editor h-full"
+          data-collab-state={props.collab?.status ?? "connecting"}
+        >
+          <SkeletonRows layout="document" label="Loading editor..." className="pt-1.5" />
+        </div>
+      );
+    }
+
+    return <MarkdownEditorInner {...props} ref={ref} collaborationExtensions={load.extensions} />;
+  },
+);
 
 export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorProps>(
   function MarkdownEditor(props, ref) {

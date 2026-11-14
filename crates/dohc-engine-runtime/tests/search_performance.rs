@@ -1,5 +1,3 @@
-//! Manual measurements of the production preview helper. No timing assertions.
-
 use dohc_engine_runtime::search::preview_line_matches;
 use std::hint::black_box;
 use std::time::Instant;

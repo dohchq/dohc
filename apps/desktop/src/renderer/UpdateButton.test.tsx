@@ -12,11 +12,37 @@ import {
   type DesktopUpdate,
 } from "./UpdateButton";
 
-const BASE = { currentVersion: "1.2.3", channel: "latest" as const, canCheck: false, canInstall: false };
-const idle: UpdateStateEvent = { ...BASE, status: "idle", message: "Updates have not been checked yet.", canCheck: true };
-const available: UpdateStateEvent = { ...BASE, status: "available", message: "dohc 1.2.4 is available.", version: "1.2.4" };
-const downloading: UpdateStateEvent = { ...BASE, status: "downloading", message: "Downloading update 1.2.4…", version: "1.2.4" };
-const ready: UpdateStateEvent = { ...BASE, status: "ready", message: "Update 1.2.4 is ready.", version: "1.2.4", canInstall: true };
+const BASE = {
+  currentVersion: "1.2.3",
+  channel: "latest" as const,
+  canCheck: false,
+  canInstall: false,
+};
+const idle: UpdateStateEvent = {
+  ...BASE,
+  status: "idle",
+  message: "Updates have not been checked yet.",
+  canCheck: true,
+};
+const available: UpdateStateEvent = {
+  ...BASE,
+  status: "available",
+  message: "dohc 1.2.4 is available.",
+  version: "1.2.4",
+};
+const downloading: UpdateStateEvent = {
+  ...BASE,
+  status: "downloading",
+  message: "Downloading update 1.2.4…",
+  version: "1.2.4",
+};
+const ready: UpdateStateEvent = {
+  ...BASE,
+  status: "ready",
+  message: "Update 1.2.4 is ready.",
+  version: "1.2.4",
+  canInstall: true,
+};
 
 function update(state: UpdateStateEvent | null, run = vi.fn(async () => {})): DesktopUpdate {
   return { state, step: updateStep(state, null), run };
@@ -28,16 +54,59 @@ describe("updateStep", () => {
   it("names each step a person can take, and only the found update's steps get an icon", () => {
     const step = (state: UpdateStateEvent, pending: "check" | "install" | null = null) => {
       const s = updateStep(state, pending)!;
-      return { action: s.action, label: s.label, percent: s.percent, title: s.title, icon: s.Icon !== null };
+      return {
+        action: s.action,
+        label: s.label,
+        percent: s.percent,
+        title: s.title,
+        icon: s.Icon !== null,
+      };
     };
-    expect(step(idle)).toEqual({ action: "check", label: "Check for updates", percent: undefined, title: "Check for updates", icon: false });
+    expect(step(idle)).toEqual({
+      action: "check",
+      label: "Check for updates",
+      percent: undefined,
+      title: "Check for updates",
+      icon: false,
+    });
     expect(step(idle, "check")).toMatchObject({ action: null, label: "Checking…", icon: false });
-    expect(step({ ...idle, canCheck: false })).toMatchObject({ action: null, label: "Check for updates" });
-    expect(step(available)).toEqual({ action: "download", label: "Update", percent: undefined, title: "Download update 1.2.4", icon: true });
-    expect(step(downloading)).toEqual({ action: null, label: "Downloading…", percent: undefined, title: "Downloading update 1.2.4", icon: true });
-    expect(step({ ...downloading, percent: 41.6 })).toEqual({ action: null, label: "Downloading", percent: 42, title: "Downloading update 1.2.4, 42%", icon: true });
-    expect(step(ready)).toEqual({ action: "install", label: "Restart to update", percent: undefined, title: "Restart to install update 1.2.4", icon: true });
-    expect(step(ready, "install")).toMatchObject({ action: null, label: "Restarting…", icon: true });
+    expect(step({ ...idle, canCheck: false })).toMatchObject({
+      action: null,
+      label: "Check for updates",
+    });
+    expect(step(available)).toEqual({
+      action: "download",
+      label: "Update",
+      percent: undefined,
+      title: "Download update 1.2.4",
+      icon: true,
+    });
+    expect(step(downloading)).toEqual({
+      action: null,
+      label: "Downloading…",
+      percent: undefined,
+      title: "Downloading update 1.2.4",
+      icon: true,
+    });
+    expect(step({ ...downloading, percent: 41.6 })).toEqual({
+      action: null,
+      label: "Downloading",
+      percent: 42,
+      title: "Downloading update 1.2.4, 42%",
+      icon: true,
+    });
+    expect(step(ready)).toEqual({
+      action: "install",
+      label: "Restart to update",
+      percent: undefined,
+      title: "Restart to install update 1.2.4",
+      icon: true,
+    });
+    expect(step(ready, "install")).toMatchObject({
+      action: null,
+      label: "Restarting…",
+      icon: true,
+    });
     expect(updateStep(null, null)).toBeNull();
   });
 });
@@ -53,12 +122,28 @@ describe("updateFailureTitle", () => {
 describe("updateStatusLine", () => {
   it("leads a failure with the step that failed, and names the version the title leaves out", () => {
     expect(updateStatusLine(available)).toBe("dohc 1.2.4 is available.");
-    expect(updateStatusLine({ ...available, message: "socket hang up", failure: { step: "download", id: 2 } }))
-      .toBe("dohc could not download version 1.2.4. socket hang up");
-    expect(updateStatusLine({ ...ready, message: "Run this command in a terminal to install it.", failure: { step: "install", id: 3 } }))
-      .toBe("dohc could not install version 1.2.4. Run this command in a terminal to install it.");
-    expect(updateStatusLine({ ...idle, status: "error", message: "feed returned 500", failure: { step: "check", id: 4 } }))
-      .toBe("dohc could not check for updates. feed returned 500");
+    expect(
+      updateStatusLine({
+        ...available,
+        message: "socket hang up",
+        failure: { step: "download", id: 2 },
+      }),
+    ).toBe("dohc could not download version 1.2.4. socket hang up");
+    expect(
+      updateStatusLine({
+        ...ready,
+        message: "Run this command in a terminal to install it.",
+        failure: { step: "install", id: 3 },
+      }),
+    ).toBe("dohc could not install version 1.2.4. Run this command in a terminal to install it.");
+    expect(
+      updateStatusLine({
+        ...idle,
+        status: "error",
+        message: "feed returned 500",
+        failure: { step: "check", id: 4 },
+      }),
+    ).toBe("dohc could not check for updates. feed returned 500");
   });
 });
 
@@ -66,19 +151,28 @@ describe("useUpdateFailureNotices", () => {
   it("reports each failure once, keeps a repeated one quiet, and clears the row once the step works", () => {
     const report = vi.fn();
     const clear = vi.fn();
-    const failed: UpdateStateEvent = { ...idle, status: "error", message: "feed returned 500", failure: { step: "check", id: 1 } };
-    const { rerender } = renderHook((props: { state: UpdateStateEvent }) =>
-      useUpdateFailureNotices(update(props.state), "ws-1", report, clear), { initialProps: { state: failed } });
+    const failed: UpdateStateEvent = {
+      ...idle,
+      status: "error",
+      message: "feed returned 500",
+      failure: { step: "check", id: 1 },
+    };
+    const { rerender } = renderHook(
+      (props: { state: UpdateStateEvent }) =>
+        useUpdateFailureNotices(update(props.state), "ws-1", report, clear),
+      { initialProps: { state: failed } },
+    );
 
     expect(report).toHaveBeenCalledOnce();
-    expect(report).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "update",
-      title: "dohc could not check for updates",
-      message: "feed returned 500",
-      details: [["Cause", "feed returned 500"]],
-    }));
+    expect(report).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "update",
+        title: "dohc could not check for updates",
+        message: "feed returned 500",
+        details: [["Cause", "feed returned 500"]],
+      }),
+    );
 
-    // The same failure in a new state object, and a check that runs again.
     rerender({ state: { ...failed } });
     rerender({ state: { ...idle, status: "checking", message: "Checking for updates…" } });
     expect(report).toHaveBeenCalledOnce();
@@ -93,8 +187,14 @@ describe("useUpdateFailureNotices", () => {
 
   it("files a failure it already toasted as a quiet row in the next workspace", () => {
     const report = vi.fn();
-    const failed = { ...available, message: "socket hang up", failure: { step: "download" as const, id: 41 } };
-    const first = renderHook(() => useUpdateFailureNotices(update(failed), "ws-1", report, () => {}));
+    const failed = {
+      ...available,
+      message: "socket hang up",
+      failure: { step: "download" as const, id: 41 },
+    };
+    const first = renderHook(() =>
+      useUpdateFailureNotices(update(failed), "ws-1", report, () => {}),
+    );
     first.unmount();
     renderHook(() => useUpdateFailureNotices(update(failed), "ws-2", report, () => {}));
     expect(report.mock.calls.map(([failure]) => failure.quiet)).toEqual([false, true]);
@@ -103,13 +203,29 @@ describe("useUpdateFailureNotices", () => {
   it("titles every failed step with no version", () => {
     const report = vi.fn();
     const failures: UpdateStateEvent[] = [
-      { ...idle, status: "error", message: "feed returned 500", failure: { step: "check", id: 101 } },
+      {
+        ...idle,
+        status: "error",
+        message: "feed returned 500",
+        failure: { step: "check", id: 101 },
+      },
       { ...available, message: "socket hang up", failure: { step: "download", id: 102 } },
-      { ...ready, message: "Run this command in a terminal to install it.", failure: { step: "install", id: 103 } },
-      { ...available, version: "1.2.5", message: "dohc is still on version 1.2.3.", failure: { step: "download", id: 104, notInstalled: "1.2.4" } },
+      {
+        ...ready,
+        message: "Run this command in a terminal to install it.",
+        failure: { step: "install", id: 103 },
+      },
+      {
+        ...available,
+        version: "1.2.5",
+        message: "dohc is still on version 1.2.3.",
+        failure: { step: "download", id: 104, notInstalled: "1.2.4" },
+      },
     ];
     for (const failed of failures) {
-      renderHook(() => useUpdateFailureNotices(update(failed), "ws-titles", report, () => {})).unmount();
+      renderHook(() =>
+        useUpdateFailureNotices(update(failed), "ws-titles", report, () => {}),
+      ).unmount();
     }
     const titles = report.mock.calls.map(([failure]) => failure.title as string);
     expect(titles).toEqual([
@@ -124,7 +240,11 @@ describe("useUpdateFailureNotices", () => {
   it("retries the step that failed", () => {
     const run = vi.fn(async () => {});
     const report = vi.fn();
-    const failed = { ...available, message: "socket hang up", failure: { step: "download" as const, id: 1 } };
+    const failed = {
+      ...available,
+      message: "socket hang up",
+      failure: { step: "download" as const, id: 1 },
+    };
     renderHook(() => useUpdateFailureNotices(update(failed, run), "ws-1", report, () => {}));
 
     report.mock.calls[0]![0].retry();
@@ -141,18 +261,24 @@ describe("useUpdateFailureNotices", () => {
       message: "dohc is still on version 1.2.3.",
       failure: { step: "download", id: 70, notInstalled: "1.2.4" },
     };
-    const { rerender } = renderHook((props: { state: UpdateStateEvent }) =>
-      useUpdateFailureNotices(update(props.state, run), "ws-1", report, clear), { initialProps: { state: notInstalled } });
+    const { rerender } = renderHook(
+      (props: { state: UpdateStateEvent }) =>
+        useUpdateFailureNotices(update(props.state, run), "ws-1", report, clear),
+      { initialProps: { state: notInstalled } },
+    );
 
-    expect(report).toHaveBeenCalledWith(expect.objectContaining({
-      title: "dohc could not install the update",
-      message: "dohc is still on version 1.2.3.",
-      details: [],
-    }));
-    expect(updateStatusLine(notInstalled)).toBe("dohc could not install version 1.2.4 and is still on version 1.2.3.");
+    expect(report).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "dohc could not install the update",
+        message: "dohc is still on version 1.2.3.",
+        details: [],
+      }),
+    );
+    expect(updateStatusLine(notInstalled)).toBe(
+      "dohc could not install version 1.2.4 and is still on version 1.2.3.",
+    );
     report.mock.calls[0]![0].retry();
     expect(run).toHaveBeenCalledWith("download");
-    // The title bar shows the download from here on.
     rerender({ state: { ...downloading, version: "1.2.5" } });
     expect(clear).toHaveBeenCalledOnce();
   });

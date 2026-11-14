@@ -49,7 +49,6 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // selection (see the contrast test).
     hover: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
     selected: "color-mix(in srgb, var(--dohc-ink) 14%, transparent)",
-    // The fill of loading bars.
     skeleton: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
     scrim: "rgba(0, 0, 0, 0.40)",
     muted: "#55524a",
@@ -77,7 +76,6 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // AA as text on a menu row's 14% fill, its tightest surface (see the
     // contrast test).
     danger: "#9d3c28",
-    // A danger confirm's fill and label.
     dangerFill: "#9d3c28",
     onDanger: "#faf9f5",
     // The tile behind a danger confirmation's glyph, and nothing else.
@@ -169,13 +167,6 @@ export const identityHues: Record<"light" | "dark", Record<IdentityHue, string>>
   },
 };
 
-/**
- * The type stacks, which do not change with theme. Same duplication guard as
- * the palette: tokens.test.ts asserts these against styles.css :root.
- *
- * Both stacks name bundled families first and fall through to the system
- * families rather than to the browser default.
- */
 export const fonts = {
   "--font-sans": '"Inter Variable", system-ui, "Segoe UI", sans-serif',
   "--font-mono":

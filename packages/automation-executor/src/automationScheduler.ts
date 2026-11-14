@@ -1,7 +1,9 @@
 import { dueTimes, nextDue } from "@dohc/workspace-contracts/automation-schedule";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 
-type AutomationScheduleMark = Awaited<ReturnType<VersionedLiveAdapter["listAutomationScheduleMarks"]>>["marks"][number];
+type AutomationScheduleMark = Awaited<
+  ReturnType<VersionedLiveAdapter["listAutomationScheduleMarks"]>
+>["marks"][number];
 import type { ScheduledAutomation } from "./collectionAutomations";
 
 // The one scheduler for every workspace this computer runs schedules for.
@@ -96,9 +98,17 @@ export interface AutomationSchedulerOptions {
    * A step is about to skip due times. The mark moves past them only after
    * this resolves, so a crash can repeat a report and never lose one.
    */
-  onSkipped?(workspaceId: string, schedule: ScheduledAutomation, skipped: SkippedRuns): Promise<void>;
+  onSkipped?(
+    workspaceId: string,
+    schedule: ScheduledAutomation,
+    skipped: SkippedRuns,
+  ): Promise<void>;
   /** The schedule changed while its skip was reported, so that skip did not happen: take the report back. */
-  onSkipWithdrawn?(workspaceId: string, schedule: ScheduledAutomation, skipped: SkippedRuns): Promise<void>;
+  onSkipWithdrawn?(
+    workspaceId: string,
+    schedule: ScheduledAutomation,
+    skipped: SkippedRuns,
+  ): Promise<void>;
 }
 
 /** Wall time this computer did not live through: after `from`, up to and including `through`. */
@@ -122,12 +132,18 @@ export function planScheduleStep(
   skippedSpans: readonly SkippedSpan[] = [],
   reportFrom = Number.NEGATIVE_INFINITY,
 ): { run: number[]; throughMs: number; skipped?: SkippedRuns } | null {
-  if (mark === undefined || mark.scheduleHash !== schedule.scheduleHash) return { run: [], throughMs: nowMs };
+  if (mark === undefined || mark.scheduleHash !== schedule.scheduleHash)
+    return { run: [], throughMs: nowMs };
   if (mark.throughMs >= nowMs) return null;
   const first = nextDue(schedule.trigger, mark.throughMs);
   if (first === null || first > nowMs) return null;
   const quietUntil = Math.max(reportFrom, schedule.enabledSince ?? reportFrom);
-  const due = dueTimes(schedule.trigger, Math.max(mark.throughMs, schedule.enabledSince ?? mark.throughMs), nowMs, MAX_DUE_TIMES_PER_STEP);
+  const due = dueTimes(
+    schedule.trigger,
+    Math.max(mark.throughMs, schedule.enabledSince ?? mark.throughMs),
+    nowMs,
+    MAX_DUE_TIMES_PER_STEP,
+  );
   const run: number[] = [];
   const skipped: SkippedRuns = { first: [], count: 0 };
   // Past a bound, the rest wait for the next step instead of being skipped.
@@ -151,7 +167,9 @@ const sameSkip = (left: SkippedRuns | undefined, right: SkippedRuns | undefined)
   left?.count === right?.count && JSON.stringify(left?.first) === JSON.stringify(right?.first);
 
 const spanAt = (skipped: readonly SkippedSpan[], instant: number | null) =>
-  instant === null ? undefined : skipped.find((span) => span.from < instant && instant <= span.through);
+  instant === null
+    ? undefined
+    : skipped.find((span) => span.from < instant && instant <= span.through);
 
 interface Workspace {
   /** Null while the workspace is not open. */
@@ -220,11 +238,16 @@ export class AutomationScheduler {
   /** How many schedules this computer runs, open or not. */
   runningSchedules(): number {
     let count = 0;
-    for (const workspace of this.workspaces.values()) count += workspace.record?.schedules.length ?? 0;
+    for (const workspace of this.workspaces.values())
+      count += workspace.record?.schedules.length ?? 0;
     return count;
   }
 
-  private entry(source: ScheduleSource | null, host: ScheduleHost | null, record: ScheduleRecord | null): Workspace {
+  private entry(
+    source: ScheduleSource | null,
+    host: ScheduleHost | null,
+    record: ScheduleRecord | null,
+  ): Workspace {
     return {
       source,
       host,
@@ -254,7 +277,8 @@ export class AutomationScheduler {
     if (!workspace) return;
     const now = this.options.clock.now();
     const from = startAfterMs ?? Math.max(now, floorMs ?? now);
-    workspace.coveredFrom = startAfterMs === null ? from : Math.max(workspace.coveredFrom, startAfterMs);
+    workspace.coveredFrom =
+      startAfterMs === null ? from : Math.max(workspace.coveredFrom, startAfterMs);
     workspace.unmarkedFrom = startAfterMs === null ? null : workspace.coveredFrom;
     // Without a release, another computer may have run anything before now.
     workspace.reportFrom = Math.max(workspace.reportFrom, from);
@@ -376,7 +400,8 @@ export class AutomationScheduler {
     // A workspace this computer does not run has no marks to keep behind.
     // One whose first answer is still out keeps the span until it knows.
     for (const workspace of this.workspaces.values()) {
-      if (workspace.runs !== false || workspace.record !== null) workspace.skipped.push({ from, through });
+      if (workspace.runs !== false || workspace.record !== null)
+        workspace.skipped.push({ from, through });
     }
   }
 
@@ -388,7 +413,10 @@ export class AutomationScheduler {
     const monotonic = clock.monotonic();
     const last = this.sample;
     this.sample = { wall, monotonic };
-    if (last !== null && Math.abs(wall - last.wall - (monotonic - last.monotonic)) > CLOCK_JUMP_MS) {
+    if (
+      last !== null &&
+      Math.abs(wall - last.wall - (monotonic - last.monotonic)) > CLOCK_JUMP_MS
+    ) {
       this.skip(last.wall, wall);
     }
   }
@@ -460,7 +488,11 @@ export class AutomationScheduler {
       const schedule = source.schedules()?.find((current) => current.automationId === automationId);
       const step = schedule ? plan(schedule) : null;
       if (!schedule || step === null) return "nothing";
-      const mark = await source.claimSchedule({ automationId, scheduleHash: schedule.scheduleHash, ...step });
+      const mark = await source.claimSchedule({
+        automationId,
+        scheduleHash: schedule.scheduleHash,
+        ...step,
+      });
       // Read the marks again once the engine answers.
       if (mark === null) workspace.marks = null;
       else marks.set(automationId, mark);
@@ -471,16 +503,28 @@ export class AutomationScheduler {
       if (workspace.unmarkedFrom !== null) {
         const from = workspace.unmarkedFrom;
         const adopted = await claim(automationId, (schedule) =>
-          marks.get(automationId)?.scheduleHash === schedule.scheduleHash ? null : { run: [], throughMs: from });
+          marks.get(automationId)?.scheduleHash === schedule.scheduleHash
+            ? null
+            : { run: [], throughMs: from },
+        );
         if (adopted === null) return null;
       }
       const plan = (schedule: ScheduledAutomation) =>
-        planScheduleStep(schedule, marks.get(automationId), now, workspace.coveredFrom, workspace.skipped, workspace.reportFrom);
+        planScheduleStep(
+          schedule,
+          marks.get(automationId),
+          now,
+          workspace.coveredFrom,
+          workspace.skipped,
+          workspace.reportFrom,
+        );
       // Reported before the mark moves past them. The claim plans again from
       // the schedule as it is then: when the schedule changed while the
       // notice was posted, the reported skip is not the one that happens,
       // so the notice is taken back and the next step reports afresh.
-      const current = source.schedules()?.find((schedule) => schedule.automationId === automationId);
+      const current = source
+        .schedules()
+        ?.find((schedule) => schedule.automationId === automationId);
       const skipped = current ? plan(current)?.skipped : undefined;
       if (current && skipped) await this.options.onSkipped?.(workspaceId, current, skipped);
       let reported = skipped === undefined;
@@ -503,16 +547,29 @@ export class AutomationScheduler {
     workspace.unmarkedFrom = null;
     // Every mark passed these spans, so nothing is left to skip in them.
     workspace.skipped = workspace.skipped.filter((span) => span.through > through);
-    this.setRecord(workspaceId, workspace, handingOver ? null : {
-      schedules: schedules.map((schedule) => {
-        const mark = marks.get(schedule.automationId);
-        return { ...schedule, throughMs: mark?.scheduleHash === schedule.scheduleHash ? mark.throughMs : null };
-      }),
-    });
+    this.setRecord(
+      workspaceId,
+      workspace,
+      handingOver
+        ? null
+        : {
+            schedules: schedules.map((schedule) => {
+              const mark = marks.get(schedule.automationId);
+              return {
+                ...schedule,
+                throughMs: mark?.scheduleHash === schedule.scheduleHash ? mark.throughMs : null,
+              };
+            }),
+          },
+    );
     return through;
   }
 
-  private setRecord(workspaceId: string, workspace: Workspace, record: ScheduleRecord | null): void {
+  private setRecord(
+    workspaceId: string,
+    workspace: Workspace,
+    record: ScheduleRecord | null,
+  ): void {
     if (JSON.stringify(record) === JSON.stringify(workspace.record)) return;
     workspace.record = record;
     this.options.onRecord?.(workspaceId, record);
@@ -524,11 +581,20 @@ export class AutomationScheduler {
     let due: number | null = null;
     for (const schedule of workspace.record?.schedules ?? []) {
       if (schedule.throughMs === null) continue;
-      let from = Math.max(schedule.throughMs, workspace.coveredFrom, schedule.enabledSince ?? 0, after);
+      let from = Math.max(
+        schedule.throughMs,
+        workspace.coveredFrom,
+        schedule.enabledSince ?? 0,
+        after,
+      );
       try {
         let next = nextDue(schedule.trigger, from);
         // A due time in a span slept through or jumped over does not run.
-        for (let span = spanAt(workspace.skipped, next); next !== null && span; span = spanAt(workspace.skipped, next)) {
+        for (
+          let span = spanAt(workspace.skipped, next);
+          next !== null && span;
+          span = spanAt(workspace.skipped, next)
+        ) {
           from = span.through;
           next = nextDue(schedule.trigger, from);
         }
@@ -549,11 +615,14 @@ export class AutomationScheduler {
     workspace.openingInBackground = true;
     const before = workspace.record;
     void open(workspaceId)
-      .catch((error: unknown) => this.options.onError(`run the schedules of closed workspace "${workspaceId}"`, error))
+      .catch((error: unknown) =>
+        this.options.onError(`run the schedules of closed workspace "${workspaceId}"`, error),
+      )
       .finally(() => {
         workspace.openingInBackground = false;
         // An open that moved no mark tries again within the cap, not at once.
-        workspace.retryOpenAt = workspace.record === before ? this.options.clock.now() + MAX_TIMER_MS : null;
+        workspace.retryOpenAt =
+          workspace.record === before ? this.options.clock.now() + MAX_TIMER_MS : null;
         this.wake();
       });
   }
@@ -580,7 +649,10 @@ export class AutomationScheduler {
         }
         schedules = live;
       } catch (error) {
-        this.options.onError(`set the timer for the schedules in workspace "${workspaceId}"`, error);
+        this.options.onError(
+          `set the timer for the schedules in workspace "${workspaceId}"`,
+          error,
+        );
         wakeAt = Math.min(wakeAt ?? latest, latest);
         continue;
       }

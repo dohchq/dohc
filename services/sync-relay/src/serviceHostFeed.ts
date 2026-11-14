@@ -37,28 +37,63 @@ const REACH_IDLE_MS = 10 * 60_000;
 
 type DocumentClaim = { objectId: unknown; versionId: unknown; path: unknown; workspaceId: unknown };
 
-// The document a row names, read where each kind states it.
 function claimedDocument(opKind: string, payload: Record<string, unknown>): DocumentClaim | null {
   if (opKind === "moment.append" || opKind === "ydoc.update") {
-    return { objectId: payload.objectId, versionId: payload.versionId, path: payload.path, workspaceId: undefined };
+    return {
+      objectId: payload.objectId,
+      versionId: payload.versionId,
+      path: payload.path,
+      workspaceId: undefined,
+    };
   }
   if (opKind === "live.audit.application") {
-    return { objectId: payload.objectId, versionId: payload.mainVersionId, path: undefined, workspaceId: undefined };
+    return {
+      objectId: payload.objectId,
+      versionId: payload.mainVersionId,
+      path: undefined,
+      workspaceId: undefined,
+    };
   }
   const record = asRecord(payload.record);
-  const binding = asRecord(opKind === "live.audit.settlement" ? record?.binding
-    : opKind === "live.audit.base" ? asRecord(record?.checkpoint)?.binding : undefined);
-  return binding && { objectId: binding.objectId, versionId: binding.mainVersionId, path: binding.currentPath, workspaceId: binding.workspaceId };
+  const binding = asRecord(
+    opKind === "live.audit.settlement"
+      ? record?.binding
+      : opKind === "live.audit.base"
+        ? asRecord(record?.checkpoint)?.binding
+        : undefined,
+  );
+  return (
+    binding && {
+      objectId: binding.objectId,
+      versionId: binding.mainVersionId,
+      path: binding.currentPath,
+      workspaceId: binding.workspaceId,
+    }
+  );
 }
 
-function hostedObject(scope: ServiceHostFeedScope, claim: DocumentClaim | null, documents: ReadonlyMap<string, string>): string | null {
-  if (!claim || claim.versionId !== "main" || typeof claim.objectId !== "string" || !documents.has(claim.objectId)) return null;
-  return claim.workspaceId === undefined || claim.workspaceId === scope.workspaceId ? claim.objectId : null;
+function hostedObject(
+  scope: ServiceHostFeedScope,
+  claim: DocumentClaim | null,
+  documents: ReadonlyMap<string, string>,
+): string | null {
+  if (
+    !claim ||
+    claim.versionId !== "main" ||
+    typeof claim.objectId !== "string" ||
+    !documents.has(claim.objectId)
+  )
+    return null;
+  return claim.workspaceId === undefined || claim.workspaceId === scope.workspaceId
+    ? claim.objectId
+    : null;
 }
 
 const absent = (value: unknown) => value === undefined || value === null;
 
-export type HostedRowDecision = { allowed: false } | { allowed: true; objectId: string | null; blobSha256s: string[] };
+export type HostedRowDecision =
+  | { allowed: false }
+  | { allowed: true; objectId: string | null; blobSha256s: string[] };
 
 /** Whether the host may read a row, and the blobs that row lets it fetch. */
 export function hostedRowDecision(
@@ -66,22 +101,37 @@ export function hostedRowDecision(
   row: Pick<SyncRelayLogRow, "opKind" | "payloadJson" | "recordedAtMs" | "settlementAdmission">,
 ): HostedRowDecision {
   let payload: unknown;
-  try { payload = JSON.parse(row.payloadJson); } catch { return { allowed: false }; }
+  try {
+    payload = JSON.parse(row.payloadJson);
+  } catch {
+    return { allowed: false };
+  }
   const record = asRecord(payload);
   if (!record) return { allowed: false };
   if (row.opKind === "workspace.init") {
-    return Object.keys(record).length === 0 ? { allowed: true, objectId: null, blobSha256s: [] } : { allowed: false };
+    return Object.keys(record).length === 0
+      ? { allowed: true, objectId: null, blobSha256s: [] }
+      : { allowed: false };
   }
   const objectId = hostedObject(scope, claimedDocument(row.opKind, record), scope.shared);
   if (objectId === null) return { allowed: false };
   // A refused row stays in the history but grants no bytes: append never checked its blobs.
-  if (row.settlementAdmission?.status === "refused") return { allowed: true, objectId, blobSha256s: [] };
+  if (row.settlementAdmission?.status === "refused")
+    return { allowed: true, objectId, blobSha256s: [] };
   // A moment that replaced another object names that object's content as its
   // before state. The row carries the lineage; the other object's bytes stay.
-  const foreignBefore = row.opKind === "moment.append" && !absent(record.beforeObjectId) && record.beforeObjectId !== objectId;
+  const foreignBefore =
+    row.opKind === "moment.append" &&
+    !absent(record.beforeObjectId) &&
+    record.beforeObjectId !== objectId;
   const blobSha256s = foreignBefore
-    ? typeof record.payloadAfterBlobSha256 === "string" ? [record.payloadAfterBlobSha256] : []
-    : referencedBlobShas(row.opKind, row.payloadJson, { workspaceId: scope.workspaceId, recordedAtMs: row.recordedAtMs });
+    ? typeof record.payloadAfterBlobSha256 === "string"
+      ? [record.payloadAfterBlobSha256]
+      : []
+    : referencedBlobShas(row.opKind, row.payloadJson, {
+        workspaceId: scope.workspaceId,
+        recordedAtMs: row.recordedAtMs,
+      });
   return { allowed: true, objectId, blobSha256s };
 }
 
@@ -92,7 +142,12 @@ export function hostedRowDecision(
  * revoked share or a move leaves the enabled enrolled document writable, so
  * edits the host accepted can settle.
  */
-function hostedWriter(scope: ServiceHostFeedScope, documents: ReadonlyMap<string, string>, opKind: string, payload: unknown): string | null {
+function hostedWriter(
+  scope: ServiceHostFeedScope,
+  documents: ReadonlyMap<string, string>,
+  opKind: string,
+  payload: unknown,
+): string | null {
   const record = asRecord(payload);
   if (!record) return null;
   const claim = claimedDocument(opKind, record);
@@ -103,12 +158,21 @@ function hostedWriter(scope: ServiceHostFeedScope, documents: ReadonlyMap<string
   if (claim!.path !== path) return null;
   if (opKind === "ydoc.update") return record.contentKind === "richdoc" ? objectId : null;
   if (opKind !== "moment.append") return objectId;
-  return record.operation === "write" && record.payloadAfterPath === path &&
-    [record.payloadBeforePath, record.beforePath].every(value => absent(value) || value === path) &&
-    (absent(record.beforeObjectId) || record.beforeObjectId === objectId) ? objectId : null;
+  return record.operation === "write" &&
+    record.payloadAfterPath === path &&
+    [record.payloadBeforePath, record.beforePath].every(
+      (value) => absent(value) || value === path,
+    ) &&
+    (absent(record.beforeObjectId) || record.beforeObjectId === objectId)
+    ? objectId
+    : null;
 }
 
-export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, payload: unknown): boolean {
+export function hostedWriteAllowed(
+  scope: ServiceHostFeedScope,
+  opKind: string,
+  payload: unknown,
+): boolean {
   return hostedWriter(scope, scope.hosted, opKind, payload) !== null;
 }
 
@@ -119,8 +183,10 @@ export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, 
  */
 export type HostedRefusalReason = "outside-hosted-documents" | RetirementRefusal;
 
-type HostedPublication = { kind: "accepted" | "departed" } | { kind: "retiring"; retirement: ServiceActivationRetirement } |
-  { kind: "refused"; reason: HostedRefusalReason };
+type HostedPublication =
+  | { kind: "accepted" | "departed" }
+  | { kind: "retiring"; retirement: ServiceActivationRetirement }
+  | { kind: "refused"; reason: HostedRefusalReason };
 
 /**
  * The decision for one new coordinate. An op may name only blobs the host
@@ -130,13 +196,25 @@ type HostedPublication = { kind: "accepted" | "departed" } | { kind: "retiring";
  * the host uploads it and retries. A document out of the share settles that
  * way. A settling document's row still needs the retirement writer's proof.
  */
-function hostedPublication(scope: ServiceHostFeedScope, known: BlobReach, op: SyncRelayLogInput): HostedPublication {
+function hostedPublication(
+  scope: ServiceHostFeedScope,
+  known: BlobReach,
+  op: SyncRelayLogInput,
+): HostedPublication {
   const payload: unknown = JSON.parse(op.payloadJson);
-  const settling = hostedWriter(scope, new Map([...scope.settling].map(([objectId, row]) => [objectId, row.path])), op.opKind, payload);
+  const settling = hostedWriter(
+    scope,
+    new Map([...scope.settling].map(([objectId, row]) => [objectId, row.path])),
+    op.opKind,
+    payload,
+  );
   const objectId = settling ?? hostedWriter(scope, scope.hosted, op.opKind, payload);
   if (objectId === null) return { kind: "refused", reason: "outside-hosted-documents" };
-  const blobs = referencedBlobShas(op.opKind, op.payloadJson, { workspaceId: scope.workspaceId, recordedAtMs: op.recordedAtMs });
-  const unknown = blobs.filter(sha256 => !known(sha256));
+  const blobs = referencedBlobShas(op.opKind, op.payloadJson, {
+    workspaceId: scope.workspaceId,
+    recordedAtMs: op.recordedAtMs,
+  });
+  const unknown = blobs.filter((sha256) => !known(sha256));
   if (unknown.length) throw logBlobsMissing(unknown);
   if (settling !== null) return { kind: "retiring", retirement: scope.settling.get(settling)! };
   return { kind: scope.departed.has(objectId) ? "departed" : "accepted" };
@@ -163,7 +241,9 @@ type BlobReach = (sha256: string) => boolean;
  * long history never holds the event loop. `known` stays synchronous for the
  * append's writer and reads only rows above each reach it already has.
  */
-function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumentRows" | "serviceHostUploaded">) {
+function createBlobReach(
+  storage: Pick<SyncRelayStorage, "listServiceHostDocumentRows" | "serviceHostUploaded">,
+) {
   const workspaces = new Map<string, WorkspaceReach>();
   // One warm-up per workspace, which every request that arrives during it awaits.
   const warming = new Map<string, Promise<void>>();
@@ -173,16 +253,22 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
     // A workspace that stopped being hosted never asks again, so others' requests sweep it.
     if (nowMs - sweptAtMs >= REACH_IDLE_MS) {
       sweptAtMs = nowMs;
-      for (const [id, entry] of workspaces) if (nowMs - entry.usedAtMs >= REACH_IDLE_MS) workspaces.delete(id);
+      for (const [id, entry] of workspaces)
+        if (nowMs - entry.usedAtMs >= REACH_IDLE_MS) workspaces.delete(id);
     }
     let entry = workspaces.get(workspaceId);
-    if (!entry) workspaces.set(workspaceId, entry = { documents: new Map(), usedAtMs: nowMs });
+    if (!entry) workspaces.set(workspaceId, (entry = { documents: new Map(), usedAtMs: nowMs }));
     entry.usedAtMs = nowMs;
     return entry;
   };
   // Extends a document's reach by one page, and tells whether it reached the end of the history.
   const extend = (scope: ServiceHostFeedScope, document: DocumentReach, objectId: string) => {
-    const rows = storage.listServiceHostDocumentRows({ workspaceId: scope.workspaceId, objectId, afterRelaySeq: document.through, limit: REACH_PAGE_ROWS });
+    const rows = storage.listServiceHostDocumentRows({
+      workspaceId: scope.workspaceId,
+      objectId,
+      afterRelaySeq: document.through,
+      limit: REACH_PAGE_ROWS,
+    });
     for (const row of rows) {
       const decision = hostedRowDecision(scope, row);
       if (decision.allowed) for (const sha256 of decision.blobSha256s) document.blobs.add(sha256);
@@ -193,20 +279,23 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
   const currentReach = (scope: ServiceHostFeedScope) => {
     const entry = workspaceReach(scope.workspaceId);
     // A document that left the scope takes its blobs along.
-    for (const objectId of entry.documents.keys()) if (!scope.shared.has(objectId)) entry.documents.delete(objectId);
+    for (const objectId of entry.documents.keys())
+      if (!scope.shared.has(objectId)) entry.documents.delete(objectId);
     return entry;
   };
   const known = (scope: ServiceHostFeedScope): BlobReach => {
     const entry = currentReach(scope);
     // A document with no reach yet grants nothing until a warm-up builds it, so
     // a write naming its blobs fails as missing and lands on the host's retry.
-    const reaches = [...scope.shared.keys()].flatMap(objectId => {
+    const reaches = [...scope.shared.keys()].flatMap((objectId) => {
       const document = entry.documents.get(objectId);
       if (!document) return [];
       while (!extend(scope, document, objectId));
       return [document.blobs];
     });
-    return sha256 => reaches.some(blobs => blobs.has(sha256)) || storage.serviceHostUploaded(scope.workspaceId, sha256);
+    return (sha256) =>
+      reaches.some((blobs) => blobs.has(sha256)) ||
+      storage.serviceHostUploaded(scope.workspaceId, sha256);
   };
   const warm = (workspaceId: string, readScope: () => ServiceHostFeedScope): Promise<void> => {
     let running = warming.get(workspaceId);
@@ -215,13 +304,14 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
       // A reach is kept only once complete, so no request reads part of one.
       const building = new Map<string, DocumentReach>();
       for (;;) {
-        const scope = readScope(), entry = currentReach(scope);
-        const objectId = [...scope.shared.keys()].find(id => !entry.documents.has(id));
+        const scope = readScope(),
+          entry = currentReach(scope);
+        const objectId = [...scope.shared.keys()].find((id) => !entry.documents.has(id));
         if (objectId === undefined) return;
         let document = building.get(objectId);
-        if (!document) building.set(objectId, document = { through: 0, blobs: new Set() });
+        if (!document) building.set(objectId, (document = { through: 0, blobs: new Set() }));
         if (extend(scope, document, objectId)) entry.documents.set(objectId, document);
-        await new Promise<void>(resolve => setImmediate(resolve));
+        await new Promise<void>((resolve) => setImmediate(resolve));
       }
     })().finally(() => warming.delete(workspaceId));
     warming.set(workspaceId, running);
@@ -235,20 +325,37 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
  * service host credential for the workspace owner; this decides scope.
  * A row or blob outside the scope answers exactly as an absent one.
  */
-export function createServiceHostFeed(storage: SyncRelayStorage, activity: Pick<DiscussionActivityHub, "wakeLog">, lookupUserDisplayName?: LogAuthorNameLookup) {
+export function createServiceHostFeed(
+  storage: SyncRelayStorage,
+  activity: Pick<DiscussionActivityHub, "wakeLog">,
+  lookupUserDisplayName?: LogAuthorNameLookup,
+) {
   // It passes no session reauthentication, so a held log read answers at once.
-  const replication = createWorkspaceReplicationRoutes(storage, Date.now,
-    { wakeLog: (workspaceId) => activity.wakeLog(workspaceId), wait: async () => {} }, { watched: () => false },
-    lookupUserDisplayName);
+  const replication = createWorkspaceReplicationRoutes(
+    storage,
+    Date.now,
+    { wakeLog: (workspaceId) => activity.wakeLog(workspaceId), wait: async () => {} },
+    { watched: () => false },
+    lookupUserDisplayName,
+  );
   const blobReach = createBlobReach(storage);
   const currentScope = (workspaceId: string) => {
     const scope = storage.readServiceHostFeedScope(workspaceId);
     if (!scope) throw notFound();
     return scope;
   };
-  const warmReach = (workspaceId: string) => blobReach.warm(workspaceId, () => currentScope(workspaceId));
+  const warmReach = (workspaceId: string) =>
+    blobReach.warm(workspaceId, () => currentScope(workspaceId));
 
-  return async (request: Request, input: { workspaceId: string; route: readonly string[]; actor: { userId: string }; guard(): void }) => {
+  return async (
+    request: Request,
+    input: {
+      workspaceId: string;
+      route: readonly string[];
+      actor: { userId: string };
+      guard(): void;
+    },
+  ) => {
     const { workspaceId, route, guard } = input;
     guard();
     const url = new URL(request.url);
@@ -256,8 +363,12 @@ export function createServiceHostFeed(storage: SyncRelayStorage, activity: Pick<
 
     if (head === "bootstrap" && route.length === 1 && request.method === "GET") {
       const scope = currentScope(workspaceId);
-      return jsonResponse({ ok: true, hasContent: scope.shared.size > 0,
-        replicationEpoch: scope.replicationEpoch, streamIdentity: scope.streamIdentity });
+      return jsonResponse({
+        ok: true,
+        hasContent: scope.shared.size > 0,
+        replicationEpoch: scope.replicationEpoch,
+        streamIdentity: scope.streamIdentity,
+      });
     }
 
     if (head === "log" && route.length === 1 && request.method === "GET") {
@@ -266,42 +377,58 @@ export function createServiceHostFeed(storage: SyncRelayStorage, activity: Pick<
       const requestedSince = parseCursor(url.searchParams.get("since"));
       const limit = parseLimit(url.searchParams.get("limit"));
       const scope = currentScope(workspaceId);
-      const described = { token: scope.token, documents: [...scope.shared].map(([objectId, path]) => ({ objectId, path })) };
+      const described = {
+        token: scope.token,
+        documents: [...scope.shared].map(([objectId, path]) => ({ objectId, path })),
+      };
       // A reader still on an older scope learns the new one before any row:
       // it must backfill a document that joined, even below its cursor.
       if (url.searchParams.get("scope") !== scope.token) {
-        return jsonResponse({ ok: true, scope: described, ops: [], nextCursor: requestedSince, hasMore: false });
+        return jsonResponse({
+          ok: true,
+          scope: described,
+          ops: [],
+          nextCursor: requestedSince,
+          hasMore: false,
+        });
       }
       const objects = new Set(url.searchParams.getAll("object"));
-      if ([...objects].some(objectId => !scope.shared.has(objectId))) throw badRequest("object is not in this scope");
+      if ([...objects].some((objectId) => !scope.shared.has(objectId)))
+        throw badRequest("object is not in this scope");
       const since = Math.max(requestedSince, epochLogFloor);
-      const page = scanFilteredLog(storage, { workspaceId, since, limit, maxRawRows: MAX_RAW_ROWS_PER_LINK_PAGE }, row => {
-        const decision = hostedRowDecision(scope, row);
-        if (!decision.allowed) return null;
-        if (objects.size && (decision.objectId === null || !objects.has(decision.objectId))) return null;
-        return servedLogOp(row);
+      const page = scanFilteredLog(
+        storage,
+        { workspaceId, since, limit, maxRawRows: MAX_RAW_ROWS_PER_LINK_PAGE },
+        (row) => {
+          const decision = hostedRowDecision(scope, row);
+          if (!decision.allowed) return null;
+          if (objects.size && (decision.objectId === null || !objects.has(decision.objectId)))
+            return null;
+          return servedLogOp(row);
+        },
+      );
+      return jsonResponse({
+        ok: true,
+        scope: described,
+        ops: page.items,
+        nextCursor: page.nextCursor === since ? requestedSince : page.nextCursor,
+        hasMore: page.hasMore,
       });
-      return jsonResponse({ ok: true, scope: described, ops: page.items,
-        nextCursor: page.nextCursor === since ? requestedSince : page.nextCursor, hasMore: page.hasMore });
     }
 
     if (head === "log" && route.length === 1 && request.method === "POST") {
-      // Each coordinate gets its own decision. A refused op still takes its
-      // coordinate, as a relay-written refusal, so the host's later ops land.
-      // What the scope already rules out is refused, and a blob out of reach
-      // fails the request, before preparation, which must never probe a blob
-      // the host may not name; the rest is decided again under the append's
-      // writer, where the scope cannot move.
       const received = new WeakMap<SyncRelayLogInput, string>();
       const refuse = (op: SyncRelayLogInput, reason: HostedRefusalReason) =>
         refuseOp(op, { opKind: op.opKind, payloadSha256: received.get(op)!, reason });
-      let pushOrigin = "", batched = false;
+      let pushOrigin = "",
+        batched = false;
       const admission: HostedAdmission = {
         async screen(originId, ops) {
           await warmReach(workspaceId);
           guard();
           pushOrigin = originId;
-          const scope = currentScope(workspaceId), known = blobReach.known(scope);
+          const scope = currentScope(workspaceId),
+            known = blobReach.known(scope);
           const held = storage.maxOriginSeq(workspaceId, originId);
           const audits: SyncRelayLogInput[] = [];
           let proofs = 0;
@@ -313,24 +440,43 @@ export function createServiceHostFeed(storage: SyncRelayStorage, activity: Pick<
               else {
                 if (chargesProofBudget(op)) proofs++;
                 // A settlement audit's proof waits for no companion moment, so it is proved here.
-                if (decision.kind === "retiring" && op.opKind === "live.audit.settlement") audits.push(op);
+                if (decision.kind === "retiring" && op.opKind === "live.audit.settlement")
+                  audits.push(op);
               }
               continue;
             }
             // A retried refusal gets its original decision; anything else at a held coordinate is compared on append.
-            const stored = storage.fetchLogCoordinate({ workspaceId, originId, originSeq: op.originSeq });
+            const stored = storage.fetchLogCoordinate({
+              workspaceId,
+              originId,
+              originSeq: op.originSeq,
+            });
             const refusal = stored && readRefusal(stored);
-            if (refusal && refusal.opKind === op.opKind && refusal.payloadSha256 === received.get(op) && stored.recordedAtMs === op.recordedAtMs) {
+            if (
+              refusal &&
+              refusal.opKind === op.opKind &&
+              refusal.payloadSha256 === received.get(op) &&
+              stored.recordedAtMs === op.recordedAtMs
+            ) {
               refuseOp(op, refusal);
             }
           }
           // Only a push holding another proof can leave room for an exhausted one by halving.
           batched = proofs > 1;
-          if (audits.length) await storage.prepareSettlementAudits({ workspaceId, ops: audits, batched }, request.signal);
+          if (audits.length)
+            await storage.prepareSettlementAudits(
+              { workspaceId, ops: audits, batched },
+              request.signal,
+            );
         },
         admit(ops) {
-          const scope = currentScope(workspaceId), known = blobReach.known(scope);
-          const batch = { originId: pushOrigin, ops: new Map(ops.map(op => [op.originSeq, op])), batched };
+          const scope = currentScope(workspaceId),
+            known = blobReach.known(scope);
+          const batch = {
+            originId: pushOrigin,
+            ops: new Map(ops.map((op) => [op.originSeq, op])),
+            batched,
+          };
           for (const op of ops) {
             if (op.relayAdmission === "refused") continue;
             const decision = hostedPublication(scope, known, op);
@@ -344,20 +490,39 @@ export function createServiceHostFeed(storage: SyncRelayStorage, activity: Pick<
           }
         },
         confirm(ops) {
-          for (const op of ops) if (op.relayAdmission === "departed" && !storage.retirementPublicationConfirmed(op)) refuse(op, "unproved-retirement-output");
+          for (const op of ops)
+            if (op.relayAdmission === "departed" && !storage.retirementPublicationConfirmed(op))
+              refuse(op, "unproved-retirement-output");
         },
       };
-      return await replication.respondToWorkspaceReplication(request, { route: "log", workspaceId, serviceHost: admission }, input.actor,
-        () => { guard(); currentScope(workspaceId); });
+      return await replication.respondToWorkspaceReplication(
+        request,
+        { route: "log", workspaceId, serviceHost: admission },
+        input.actor,
+        () => {
+          guard();
+          currentScope(workspaceId);
+        },
+      );
     }
 
     if (head === "log" && route.length === 3 && request.method === "GET") {
       const originSeq = Number(third);
-      if (!second || !/^\d+$/.test(third ?? "") || !Number.isSafeInteger(originSeq)) throw notFound();
-      const epochLogFloor = enforceWorkspaceIdentity(storage, workspaceId, parseOptionalWorkspaceIdentityQuery(url.searchParams));
+      if (!second || !/^\d+$/.test(third ?? "") || !Number.isSafeInteger(originSeq))
+        throw notFound();
+      const epochLogFloor = enforceWorkspaceIdentity(
+        storage,
+        workspaceId,
+        parseOptionalWorkspaceIdentityQuery(url.searchParams),
+      );
       const row = storage.fetchLogCoordinate({ workspaceId, originId: second, originSeq });
       const scope = currentScope(workspaceId);
-      return jsonResponse(logCoordinateAnswer(row && hostedRowDecision(scope, row).allowed ? row : null, epochLogFloor));
+      return jsonResponse(
+        logCoordinateAnswer(
+          row && hostedRowDecision(scope, row).allowed ? row : null,
+          epochLogFloor,
+        ),
+      );
     }
 
     if (head === "blobs" && second === "have" && route.length === 2 && request.method === "POST") {
@@ -378,19 +543,36 @@ export function createServiceHostFeed(storage: SyncRelayStorage, activity: Pick<
       if (!writable(scope)) return jsonResponse({ ok: true, missing: [] });
       const stored = new Set(sha256s.filter(blobReach.known(scope)));
       for (const sha256 of storage.missingBlobs(workspaceId, [...stored])) stored.delete(sha256);
-      return jsonResponse({ ok: true, missing: sha256s.filter(sha256 => !stored.has(sha256)) });
+      return jsonResponse({ ok: true, missing: sha256s.filter((sha256) => !stored.has(sha256)) });
     }
 
-    if (head === "blobs" && second && second !== "have" && route.length === 2 && request.method === "GET") {
+    if (
+      head === "blobs" &&
+      second &&
+      second !== "have" &&
+      route.length === 2 &&
+      request.method === "GET"
+    ) {
       assertSha256(second);
       await warmReach(workspaceId);
       guard();
-      const blob = blobReach.known(currentScope(workspaceId))(second) ? storage.getBlob(workspaceId, second) : null;
+      const blob = blobReach.known(currentScope(workspaceId))(second)
+        ? storage.getBlob(workspaceId, second)
+        : null;
       if (!blob) throw relayError("blob_not_found");
-      return new Response(arrayBufferForBytes(blob), { status: 200, headers: { "content-type": "application/octet-stream" } });
+      return new Response(arrayBufferForBytes(blob), {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      });
     }
 
-    if (head === "blobs" && second && second !== "have" && route.length === 2 && request.method === "PUT") {
+    if (
+      head === "blobs" &&
+      second &&
+      second !== "have" &&
+      route.length === 2 &&
+      request.method === "PUT"
+    ) {
       assertSha256(second);
       guard();
       let scope = currentScope(workspaceId);
@@ -402,9 +584,20 @@ export function createServiceHostFeed(storage: SyncRelayStorage, activity: Pick<
       scope = currentScope(workspaceId);
       if (!writable(scope)) throw notFound();
       const known = blobReach.known(scope)(second);
-      const put = storage.putServiceHostBlob({ workspaceId, sha256: second, content: bytes, createdAtMs: Date.now() });
+      const put = storage.putServiceHostBlob({
+        workspaceId,
+        sha256: second,
+        content: bytes,
+        createdAtMs: Date.now(),
+      });
       // Whether the owner already held these bytes is theirs to know, unless the host could already fetch them.
-      return jsonResponse({ ok: true, workspaceId, sha256: second, byteLength: put.byteLength, alreadyHad: put.alreadyHad && known });
+      return jsonResponse({
+        ok: true,
+        workspaceId,
+        sha256: second,
+        byteLength: put.byteLength,
+        alreadyHad: put.alreadyHad && known,
+      });
     }
 
     throw notFound();

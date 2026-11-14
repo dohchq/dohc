@@ -3,59 +3,148 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createReplicaEngineStarter } from "./replicaEngine";
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), closeSocket: vi.fn(async () => {}), status: "Seccomp:\t2\n" }));
-vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
-vi.mock("node:fs", () => ({readFileSync: () => mocks.status}));
-vi.mock("node:os", () => ({release: () => "6.18.54"}));
-beforeEach(() => {mocks.status = "Seccomp:\t2\n"; vi.stubGlobal("process", {...process, platform: "linux"});});
-vi.mock("./replicaRelaySocket", () => ({
-  serveReplicaRelay: async (dir: string) => ({socketPath: `${dir}/relay.sock`, close: mocks.closeSocket}),
+const mocks = vi.hoisted(() => ({
+  spawn: vi.fn(),
+  closeSocket: vi.fn(async () => {}),
+  status: "Seccomp:\t2\n",
 }));
-afterEach(() => { vi.useRealTimers(); mocks.spawn.mockReset(); mocks.closeSocket.mockClear(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
+vi.mock("node:fs", () => ({ readFileSync: () => mocks.status }));
+vi.mock("node:os", () => ({ release: () => "6.18.54" }));
+beforeEach(() => {
+  mocks.status = "Seccomp:\t2\n";
+  vi.stubGlobal("process", { ...process, platform: "linux" });
+});
+vi.mock("./replicaRelaySocket", () => ({
+  serveReplicaRelay: async (dir: string) => ({
+    socketPath: `${dir}/relay.sock`,
+    close: mocks.closeSocket,
+  }),
+}));
+afterEach(() => {
+  vi.useRealTimers();
+  mocks.spawn.mockReset();
+  mocks.closeSocket.mockClear();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
 
 const frame = (row: unknown) => {
-  const bytes = Buffer.from(JSON.stringify(row)), header = Buffer.alloc(12);
-  header.write("DOP1"); header[4] = 1; header.writeUInt32LE(bytes.length, 8); return Buffer.concat([header, bytes]);
+  const bytes = Buffer.from(JSON.stringify(row)),
+    header = Buffer.alloc(12);
+  header.write("DOP1");
+  header[4] = 1;
+  header.writeUInt32LE(bytes.length, 8);
+  return Buffer.concat([header, bytes]);
 };
 class Child extends EventEmitter {
-  stdin = new PassThrough(); stdout = new PassThrough(); stderr = new PassThrough(); pid = 123;
+  stdin = new PassThrough();
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  pid = 123;
   manualClose = false;
   mode = "replica";
   abi: unknown = 2;
   limitOnPull?: string;
-  fetched: unknown = {pageToken: "fetched"};
+  fetched: unknown = { pageToken: "fetched" };
   requests: Array<{ method: string; workspace?: string; params: Record<string, unknown> }> = [];
-  pages = [{ status: "complete", nextCursor: 2, pendingCursor: { kind: "relay", token: "issued-2" }, hasMore: true },
-    { status: "complete", nextCursor: 3, pendingCursor: { kind: "relay", token: "issued-3" }, hasMore: false }];
-  kill = vi.fn(() => { if (!this.manualClose) this.finish(); return true; });
+  pages = [
+    {
+      status: "complete",
+      nextCursor: 2,
+      pendingCursor: { kind: "relay", token: "issued-2" },
+      hasMore: true,
+    },
+    {
+      status: "complete",
+      nextCursor: 3,
+      pendingCursor: { kind: "relay", token: "issued-3" },
+      hasMore: false,
+    },
+  ];
+  kill = vi.fn(() => {
+    if (!this.manualClose) this.finish();
+    return true;
+  });
   constructor() {
-    super(); let buffered = Buffer.alloc(0);
+    super();
+    let buffered = Buffer.alloc(0);
     this.stdin.on("data", (bytes: Buffer) => {
       buffered = Buffer.concat([buffered, bytes]);
       while (buffered.length >= 12 && buffered.length >= 12 + buffered.readUInt32LE(8)) {
-        const length = buffered.readUInt32LE(8), row = JSON.parse(buffered.subarray(12, 12 + length).toString());
+        const length = buffered.readUInt32LE(8),
+          row = JSON.parse(buffered.subarray(12, 12 + length).toString());
         buffered = buffered.subarray(12 + length);
-        if (row.type === "hello") this.stdout.write(frame({ type: "helloAck", protocolVersion: 2, sessionGeneration: 1,
-          capabilities: ["blobs"], limits: { maxFrameBytes: 14 * 1024 * 1024, maxStringBytes: 14 * 1024 * 1024,
-            maxCollectionLen: 16_384, maxJsonDepth: 32, maxBatchLen: 64, maxBlobChunkBytes: 262_144 } }));
+        if (row.type === "hello")
+          this.stdout.write(
+            frame({
+              type: "helloAck",
+              protocolVersion: 2,
+              sessionGeneration: 1,
+              capabilities: ["blobs"],
+              limits: {
+                maxFrameBytes: 14 * 1024 * 1024,
+                maxStringBytes: 14 * 1024 * 1024,
+                maxCollectionLen: 16_384,
+                maxJsonDepth: 32,
+                maxBatchLen: 64,
+                maxBlobChunkBytes: 262_144,
+              },
+            }),
+          );
         else {
           this.requests.push(row);
-          if (row.method === "sync.applyPull" && this.limitOnPull) {this.finish(this.limitOnPull); return;}
-          const result = row.method === "engine.ping" ? {ok: true, mode: this.mode, landlockAbi: this.abi} : row.method === "workspace.open" ? { workspace: "private-handle" } :
-            row.method === "replica.frontiers" ? {revision: 1, logCursor: 3, journalCursor: 0} :
-            row.method === "sync.fetchPull" ? this.fetched : row.method === "sync.applyPull" ? this.pages.shift() : { adopted: true, committed: true };
+          if (row.method === "sync.applyPull" && this.limitOnPull) {
+            this.finish(this.limitOnPull);
+            return;
+          }
+          const result =
+            row.method === "engine.ping"
+              ? { ok: true, mode: this.mode, landlockAbi: this.abi }
+              : row.method === "workspace.open"
+                ? { workspace: "private-handle" }
+                : row.method === "replica.frontiers"
+                  ? { revision: 1, logCursor: 3, journalCursor: 0 }
+                  : row.method === "sync.fetchPull"
+                    ? this.fetched
+                    : row.method === "sync.applyPull"
+                      ? this.pages.shift()
+                      : { adopted: true, committed: true };
           this.stdout.write(frame({ type: "response", id: row.id, result }));
         }
       }
     });
   }
-  finish(signal: string = "SIGKILL") { this.stdout.end(); this.stderr.end(); this.emit("close", 0, signal); }
+  finish(signal: string = "SIGKILL") {
+    this.stdout.end();
+    this.stderr.end();
+    this.emit("close", 0, signal);
+  }
 }
-const input = () => ({ storeDir: process.cwd(), relayHandler: vi.fn(async (_request: Request) => Response.json({rows: [], nextCursor: 0, hasMore: false})), lease: { workspaceId: "w", ownerUserId: "owner", replicationEpoch: "epoch",
-  streamIdentity: "stream", epochLogFloor: 0, logSeq: 3, journalCursor: 0, shareGrantBindings: '[["grant",1]]', incarnation: "private", bearer: "dohc-replica-read-v1.test" } });
+const input = () => ({
+  storeDir: process.cwd(),
+  relayHandler: vi.fn(async (_request: Request) =>
+    Response.json({ rows: [], nextCursor: 0, hasMore: false }),
+  ),
+  lease: {
+    workspaceId: "w",
+    ownerUserId: "owner",
+    replicationEpoch: "epoch",
+    streamIdentity: "stream",
+    epochLogFloor: 0,
+    logSeq: 3,
+    journalCursor: 0,
+    shareGrantBindings: '[["grant",1]]',
+    incarnation: "private",
+    bearer: "dohc-replica-read-v1.test",
+  },
+});
 async function fixture(child = new Child()) {
   mocks.spawn.mockReturnValue(child);
-  const start = createReplicaEngineStarter({ engineExecutable: process.execPath, allowDevelopment: true });
+  const start = createReplicaEngineStarter({
+    engineExecutable: process.execPath,
+    allowDevelopment: true,
+  });
   const childInput = input();
   return { child, childInput, replica: await start(childInput) };
 }
@@ -65,14 +154,31 @@ it("gives the child only its private directory, fresh RPC token, and GET lease",
   try {
     expect(mocks.spawn.mock.calls[0]![1]).toEqual(["--replica"]);
     await replica.pull();
-    expect(child.requests.map(row => row.method)).toEqual(["engine.ping", "workspace.open", "sync.adoptJoinIdentity", "sync.fetchPull", "sync.applyPull", "sync.commitCursor", "sync.fetchPull", "sync.applyPull", "sync.commitCursor", "replica.frontiers"]);
-    expect(child.requests[1]!.params).toMatchObject({ rootDir: input().storeDir, storeMode: "passive", captureMode: "none",
-      relay: { socketPath: `${input().storeDir}/relay.sock`, bearerToken: input().lease.bearer } });
-    expect(child.requests.slice(2).every(row => row.workspace === "private-handle")).toBe(true);
+    expect(child.requests.map((row) => row.method)).toEqual([
+      "engine.ping",
+      "workspace.open",
+      "sync.adoptJoinIdentity",
+      "sync.fetchPull",
+      "sync.applyPull",
+      "sync.commitCursor",
+      "sync.fetchPull",
+      "sync.applyPull",
+      "sync.commitCursor",
+      "replica.frontiers",
+    ]);
+    expect(child.requests[1]!.params).toMatchObject({
+      rootDir: input().storeDir,
+      storeMode: "passive",
+      captureMode: "none",
+      relay: { socketPath: `${input().storeDir}/relay.sock`, bearerToken: input().lease.bearer },
+    });
+    expect(child.requests.slice(2).every((row) => row.workspace === "private-handle")).toBe(true);
     expect(child.requests[5]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-2" });
     expect(child.requests[8]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-3" });
     const [command, args, options] = mocks.spawn.mock.calls[0]!;
-    expect(command).toBe(process.execPath); expect(args).toEqual(["--replica"]); expect(options.cwd).toBe(input().storeDir);
+    expect(command).toBe(process.execPath);
+    expect(args).toEqual(["--replica"]);
+    expect(options.cwd).toBe(input().storeDir);
     expect(Object.keys(options.env).sort()).toEqual(["DOHC_ENGINE_AUTH_TOKEN", "TMPDIR"]);
     expect(options.env.TMPDIR).toBe(childInput.storeDir);
     expect(options.env.DOHC_ENGINE_AUTH_TOKEN).toMatch(/^[a-f0-9]{64}$/);
@@ -80,94 +186,151 @@ it("gives the child only its private directory, fresh RPC token, and GET lease",
     const journalRequest = childInput.relayHandler.mock.calls[0]![0] as Request;
     expect(new URL(journalRequest.url).pathname).toBe("/sync/w/live-journal");
     expect(journalRequest.headers.get("authorization")).toBe(`Bearer ${input().lease.bearer}`);
-    expect(JSON.stringify(child.requests)).not.toContain("serviceHost"); expect(JSON.stringify(child.requests)).not.toContain("ownerSecret");
-  } finally { await replica.close(); }
+    expect(JSON.stringify(child.requests)).not.toContain("serviceHost");
+    expect(JSON.stringify(child.requests)).not.toContain("ownerSecret");
+  } finally {
+    await replica.close();
+  }
 });
 
-it.each([{}, {pageToken: 1}, {pageToken: null}])("rejects an invalid fetched page before apply: %s", async fetched => {
-  const child = new Child(); child.fetched = fetched;
-  const {replica} = await fixture(child);
-  try {
-    await expect(replica.pull()).rejects.toThrow(/sync\.fetchPull result:/);
-    expect(child.requests.some(row => row.method === "sync.applyPull")).toBe(false);
-  } finally { await replica.close(); }
-});
+it.each([{}, { pageToken: 1 }, { pageToken: null }])(
+  "rejects an invalid fetched page before apply: %s",
+  async (fetched) => {
+    const child = new Child();
+    child.fetched = fetched;
+    const { replica } = await fixture(child);
+    try {
+      await expect(replica.pull()).rejects.toThrow(/sync\.fetchPull result:/);
+      expect(child.requests.some((row) => row.method === "sync.applyPull")).toBe(false);
+    } finally {
+      await replica.close();
+    }
+  },
+);
 
 it("kills a child that does not attest replica mode before opening a workspace", async () => {
-  const child = new Child(); child.mode = "ordinary";
+  const child = new Child();
+  child.mode = "ordinary";
   await expect(fixture(child)).rejects.toThrow("mode is unavailable");
-  expect(child.requests.map(row => row.method)).toEqual(["engine.ping"]);
+  expect(child.requests.map((row) => row.method)).toEqual(["engine.ping"]);
   expect(child.kill).toHaveBeenCalled();
   expect(mocks.closeSocket).toHaveBeenCalled();
 });
 
 it("closes the listener when spawn throws", async () => {
-  mocks.spawn.mockImplementation(() => { throw Error("spawn failed"); });
-  const start = createReplicaEngineStarter({engineExecutable: process.execPath, allowDevelopment: true});
+  mocks.spawn.mockImplementation(() => {
+    throw Error("spawn failed");
+  });
+  const start = createReplicaEngineStarter({
+    engineExecutable: process.execPath,
+    allowDevelopment: true,
+  });
   await expect(start(input())).rejects.toThrow("spawn failed");
   expect(mocks.closeSocket).toHaveBeenCalled();
 });
 
 it("refuses a non-progressing native pull instead of spinning forever", async () => {
-  const child = new Child(); child.pages[1] = { ...child.pages[0]! };
+  const child = new Child();
+  child.pages[1] = { ...child.pages[0]! };
   const { replica } = await fixture(child);
   try {
     await expect(replica.pull()).rejects.toThrow("progressing cursor");
-    expect(child.requests.filter(row => row.method === "sync.commitCursor")).toHaveLength(1);
-  } finally { await replica.close(); }
+    expect(child.requests.filter((row) => row.method === "sync.commitCursor")).toHaveLength(1);
+  } finally {
+    await replica.close();
+  }
 });
 
 it("waits for actual child termination before closing", async () => {
-  const { child, replica } = await fixture(); child.manualClose = true;
-  let closed = false; const closing = replica.close().then(() => { closed = true; });
-  await Promise.resolve(); expect(closed).toBe(false); expect(child.kill).toHaveBeenCalled();
-  child.finish(); await closing; expect(closed).toBe(true);
+  const { child, replica } = await fixture();
+  child.manualClose = true;
+  let closed = false;
+  const closing = replica.close().then(() => {
+    closed = true;
+  });
+  await Promise.resolve();
+  expect(closed).toBe(false);
+  expect(child.kill).toHaveBeenCalled();
+  child.finish();
+  await closing;
+  expect(closed).toBe(true);
 });
 
 it("requires development opt-in even on Linux with isolation", () => {
   vi.stubGlobal("process", { ...process, platform: "linux" });
-  expect(() => createReplicaEngineStarter({ engineExecutable: process.execPath })).toThrow(/development/i);
+  expect(() => createReplicaEngineStarter({ engineExecutable: process.execPath })).toThrow(
+    /development/i,
+  );
 });
 
-it.each(["win32", "darwin", "freebsd"])("refuses %s before spawn even with development opt-in", platform => {
-  vi.stubGlobal("process", {...process, platform});
-  expect(() => createReplicaEngineStarter({engineExecutable: process.execPath, allowDevelopment: true})).toThrow(/Linux 5.19.*Landlock/);
-  expect(mocks.spawn).not.toHaveBeenCalled();
-});
+it.each(["win32", "darwin", "freebsd"])(
+  "refuses %s before spawn even with development opt-in",
+  (platform) => {
+    vi.stubGlobal("process", { ...process, platform });
+    expect(() =>
+      createReplicaEngineStarter({ engineExecutable: process.execPath, allowDevelopment: true }),
+    ).toThrow(/Linux 5.19.*Landlock/);
+    expect(mocks.spawn).not.toHaveBeenCalled();
+  },
+);
 
-it.each([undefined, null, 0, 1, "2", 2.5])("kills a child with invalid Landlock ABI %s before open", async abi => {
-  const child = new Child(); child.abi = abi;
-  await expect(fixture(child)).rejects.toThrow(/Landlock/);
-  expect(child.requests.map(row => row.method)).toEqual(["engine.ping"]);
-  expect(child.kill).toHaveBeenCalledWith("SIGKILL");
-  expect(mocks.closeSocket).toHaveBeenCalled();
-});
+it.each([undefined, null, 0, 1, "2", 2.5])(
+  "kills a child with invalid Landlock ABI %s before open",
+  async (abi) => {
+    const child = new Child();
+    child.abi = abi;
+    await expect(fixture(child)).rejects.toThrow(/Landlock/);
+    expect(child.requests.map((row) => row.method)).toEqual(["engine.ping"]);
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(mocks.closeSocket).toHaveBeenCalled();
+  },
+);
 
 it("exposes child exit while idle so the supervisor can retire it", async () => {
-  const { child, childInput, replica } = await fixture();
+  const { child, replica } = await fixture();
   try {
     const exited = (replica as { exited?: Promise<void> }).exited;
     expect(exited).toBeInstanceOf(Promise);
-    child.finish(); await exited;
-  } finally { await replica.close(); }
+    child.finish();
+    await exited;
+  } finally {
+    await replica.close();
+  }
 });
 
 it("refuses an unfiltered relay before spawn", () => {
   mocks.status = "Seccomp:\t0\n";
-  expect(() => createReplicaEngineStarter({engineExecutable: process.execPath, allowDevelopment: true})).toThrow(/outer seccomp filter/);
+  expect(() =>
+    createReplicaEngineStarter({ engineExecutable: process.execPath, allowDevelopment: true }),
+  ).toThrow(/outer seccomp filter/);
   expect(mocks.spawn).not.toHaveBeenCalled();
 });
 
-it.each([["SIGXFSZ", "RLIMIT_FSIZE"], ["SIGXCPU", "RLIMIT_CPU"], ["SIGKILL", "RLIMIT_CPU"], ["SIGABRT", "RLIMIT_AS"]])("preserves a resource-limit diagnosis for %s", async (signal, limit) => {
-  const {child, replica} = await fixture();
+it.each([
+  ["SIGXFSZ", "RLIMIT_FSIZE"],
+  ["SIGXCPU", "RLIMIT_CPU"],
+  ["SIGKILL", "RLIMIT_CPU"],
+  ["SIGABRT", "RLIMIT_AS"],
+])("preserves a resource-limit diagnosis for %s", async (signal, limit) => {
+  const { child, replica } = await fixture();
   child.finish(signal);
   expect(String(await replica.exited)).toContain(limit);
   await replica.close();
 });
 
-it.each([["SIGXFSZ", "RLIMIT_FSIZE"], ["SIGXCPU", "RLIMIT_CPU"]])("reports %s during the first pull as a budget failure", async (signal, limit) => {
-  const child = new Child(); child.limitOnPull = signal;
-  const {replica} = await fixture(child);
-  try {await expect(replica.pull()).rejects.toMatchObject({message: expect.stringContaining(limit), constructor: expect.objectContaining({name: "ReplicaBudgetError"})});}
-  finally {await replica.close();}
+it.each([
+  ["SIGXFSZ", "RLIMIT_FSIZE"],
+  ["SIGXCPU", "RLIMIT_CPU"],
+])("reports %s during the first pull as a budget failure", async (signal, limit) => {
+  const child = new Child();
+  child.limitOnPull = signal;
+  const { replica } = await fixture(child);
+  try {
+    await expect(replica.pull()).rejects.toMatchObject({
+      message: expect.stringContaining(limit),
+      constructor: expect.objectContaining({ name: "ReplicaBudgetError" }),
+    });
+  } finally {
+    await replica.close();
+  }
 });

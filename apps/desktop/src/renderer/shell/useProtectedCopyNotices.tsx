@@ -24,14 +24,31 @@ function failure(failed: string, error: unknown): { title?: string; message: str
  * paths only, never the kept text. A row has no Dismiss while its copy is
  * listed, because it is the only way back to the copy.
  */
-export function useProtectedCopyNotices(input: {
-  workspaceId: string;
-  copies: readonly ProtectedCopyRow[] | undefined;
-  readError: string | null | undefined;
-  retryRead: () => void;
-} & Pick<ReturnType<typeof useShellError>, "reportShellFailure" | "showSuccessNotice" | "clearIdentity">) {
-  const { workspaceId, copies, readError, retryRead, reportShellFailure, showSuccessNotice, clearIdentity } = input;
-  const [discarding, setDiscarding] = useState<{ workspaceId: string; path: string; id: string } | null>(null);
+export function useProtectedCopyNotices(
+  input: {
+    workspaceId: string;
+    copies: readonly ProtectedCopyRow[] | undefined;
+    readError: string | null | undefined;
+    retryRead: () => void;
+  } & Pick<
+    ReturnType<typeof useShellError>,
+    "reportShellFailure" | "showSuccessNotice" | "clearIdentity"
+  >,
+) {
+  const {
+    workspaceId,
+    copies,
+    readError,
+    retryRead,
+    reportShellFailure,
+    showSuccessNotice,
+    clearIdentity,
+  } = input;
+  const [discarding, setDiscarding] = useState<{
+    workspaceId: string;
+    path: string;
+    id: string;
+  } | null>(null);
   const currentWorkspace = useRef(workspaceId);
   currentWorkspace.current = workspaceId;
   const shown = useRef(new Set<string>());
@@ -59,34 +76,48 @@ export function useProtectedCopyNotices(input: {
   const restore = (asked: string, path: string, id: string): void => {
     const done = begin(asked, id);
     if (!done) return;
-    void bridge().restoreProtectedCopy({ workspaceId: asked, id }).finally(done).then((restored) => {
-      if (currentWorkspace.current !== asked) return;
-      latest.current.clearIdentity(identityOf(id));
-      latest.current.showSuccessNotice(`Restored your change to ${restored.path}`);
-    }, (error: unknown) => {
-      if (currentWorkspace.current !== asked) return;
-      latest.current.reportShellFailure({
-        ...failure(`dohc could not restore your change to ${path}`, error),
-        cause: error,
-        retry: isProtectedCopyFinal(error) ? null : () => restore(asked, path, id),
-      });
-    });
+    void bridge()
+      .restoreProtectedCopy({ workspaceId: asked, id })
+      .finally(done)
+      .then(
+        (restored) => {
+          if (currentWorkspace.current !== asked) return;
+          latest.current.clearIdentity(identityOf(id));
+          latest.current.showSuccessNotice(`Restored your change to ${restored.path}`);
+        },
+        (error: unknown) => {
+          if (currentWorkspace.current !== asked) return;
+          latest.current.reportShellFailure({
+            ...failure(`dohc could not restore your change to ${path}`, error),
+            cause: error,
+            retry: isProtectedCopyFinal(error) ? null : () => restore(asked, path, id),
+          });
+        },
+      );
   };
   const discard = (asked: string, path: string, id: string): void => {
     const done = begin(asked, id);
     if (!done) return;
-    void bridge().discardProtectedCopy({ workspaceId: asked, id }).finally(done).then(() => {
-      if (currentWorkspace.current !== asked) return;
-      latest.current.clearIdentity(identityOf(id));
-      latest.current.showSuccessNotice(`Discarded your change to ${path}`);
-    }, (error: unknown) => {
-      if (currentWorkspace.current !== asked) return;
-      latest.current.reportShellFailure({
-        ...failure(`dohc could not discard your change to ${path}`, error),
-        cause: error,
-        retry: isProtectedCopyFinal(error) ? null : () => setDiscarding({ workspaceId: asked, path, id }),
-      });
-    });
+    void bridge()
+      .discardProtectedCopy({ workspaceId: asked, id })
+      .finally(done)
+      .then(
+        () => {
+          if (currentWorkspace.current !== asked) return;
+          latest.current.clearIdentity(identityOf(id));
+          latest.current.showSuccessNotice(`Discarded your change to ${path}`);
+        },
+        (error: unknown) => {
+          if (currentWorkspace.current !== asked) return;
+          latest.current.reportShellFailure({
+            ...failure(`dohc could not discard your change to ${path}`, error),
+            cause: error,
+            retry: isProtectedCopyFinal(error)
+              ? null
+              : () => setDiscarding({ workspaceId: asked, path, id }),
+          });
+        },
+      );
   };
   const restoreRef = useRef(restore);
   restoreRef.current = restore;
@@ -106,7 +137,8 @@ export function useProtectedCopyNotices(input: {
         identity: identityOf(id),
         tone: "warning",
         title: `Kept your change to ${path}`,
-        message: "A sync replaced or deleted this file before dohc saved your change to History. Until you restore it, your change is only on this computer.",
+        message:
+          "A sync replaced or deleted this file before dohc saved your change to History. Until you restore it, your change is only on this computer.",
         retry: null,
         noDismiss: true,
         target: { to: "file", path },
@@ -122,22 +154,36 @@ export function useProtectedCopyNotices(input: {
   useEffect(() => {
     if (readError === undefined || readError === shownReadError.current) return;
     shownReadError.current = readError;
-    if (readError === null) { clearIdentity(READ_ERROR_IDENTITY); return; }
+    if (readError === null) {
+      clearIdentity(READ_ERROR_IDENTITY);
+      return;
+    }
     reportShellFailure({
       identity: READ_ERROR_IDENTITY,
       kind: "protected-copy-read",
       title: "dohc could not list every kept change",
-      message: "dohc could not read a kept change to a protected file. It stays in .dohc/local/protected-copies on this computer.",
+      message:
+        "dohc could not read a kept change to a protected file. It stays in .dohc/local/protected-copies on this computer.",
       details: [["Cause", readError]],
       retry: retryRead,
     });
   }, [readError, retryRead, reportShellFailure, clearIdentity]);
 
   return discarding && discarding.workspaceId === workspaceId ? (
-    <ConfirmDialog intent="danger" icon={Trash2} title={`Discard your change to ${discarding.path}?`} confirmLabel="Discard change"
-      testId="protected-discard-dialog" cancelTestId="protected-discard-cancel" confirmTestId="protected-discard-confirm"
+    <ConfirmDialog
+      intent="danger"
+      icon={Trash2}
+      title={`Discard your change to ${discarding.path}?`}
+      confirmLabel="Discard change"
+      testId="protected-discard-dialog"
+      cancelTestId="protected-discard-cancel"
+      confirmTestId="protected-discard-confirm"
       onCancel={() => setDiscarding(null)}
-      onConfirm={() => { setDiscarding(null); discard(discarding.workspaceId, discarding.path, discarding.id); }}>
+      onConfirm={() => {
+        setDiscarding(null);
+        discard(discarding.workspaceId, discarding.path, discarding.id);
+      }}
+    >
       <p>Your change is only on this computer, and History never held it. This cannot be undone.</p>
     </ConfirmDialog>
   ) : null;

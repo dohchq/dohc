@@ -58,7 +58,13 @@ describe("renderer reload admission", () => {
     const startSitePreview = createStartSitePreviewHandler({
       authority: {
         requireTrustedSender: (event: { sender: typeof renderer }) => event.sender,
-        withActiveWorkspace: async (requestSender: typeof renderer, _workspaceId, _subject, _action, work) => {
+        withActiveWorkspace: async (
+          requestSender: typeof renderer,
+          _workspaceId,
+          _subject,
+          _action,
+          work,
+        ) => {
           const session = sessions.current(requestSender);
           if (!session) throw new Error("Site preview has no active lease.");
           return work({ workspace, session });
@@ -76,8 +82,7 @@ describe("renderer reload admission", () => {
     const openYDocSession = vi.fn();
     const yDoc = createEngineYDocSessionIpc({
       localPersonId: () => "person-local",
-      sessionFor: (requestSender) =>
-        sessions.current(requestSender as typeof renderer),
+      sessionFor: (requestSender) => sessions.current(requestSender as typeof renderer),
       authorities: { isCurrentAttachment: () => true },
       acquireWorkspace: () => ({
         workspace,
@@ -93,10 +98,7 @@ describe("renderer reload admission", () => {
 
     const searchStart = vi.fn(async () => ({ settled: Promise.resolve() }));
     const searchCancel = vi.fn();
-    const search = workspaceSearchHandlers<
-      { sender: typeof renderer },
-      typeof workspace
-    >({
+    const search = workspaceSearchHandlers<{ sender: typeof renderer }, typeof workspace>({
       withWorkspaceOperation: async (event, workspaceId, work) => {
         const session = sessions.current(event.sender);
         if (!session || session.workspaceId !== workspaceId) {
@@ -121,7 +123,13 @@ describe("renderer reload admission", () => {
     await expect(
       startSitePreview(
         { sender: renderer },
-        { workspaceId: workspace.workspaceId, siteRoot: "site", mode: "static", holderId: "tab", restart: false },
+        {
+          workspaceId: workspace.workspaceId,
+          siteRoot: "site",
+          mode: "static",
+          holderId: "tab",
+          restart: false,
+        },
       ),
     ).rejects.toThrow("no active lease");
     await expect(
@@ -162,11 +170,7 @@ describe("renderer reload admission", () => {
       { searchId: "reused-search-id" },
       { event: { sender: replacement } },
     );
-    expect(searchCancel).toHaveBeenCalledWith(
-      replacement.id,
-      "reused-search-id",
-    );
-
+    expect(searchCancel).toHaveBeenCalledWith(replacement.id, "reused-search-id");
   });
 });
 
@@ -193,32 +197,21 @@ describe("presence mutation admission", () => {
       publish: () => Promise<string>;
       leave: () => Promise<void>;
     }) => {
-      const current = sessions.currentForDocument(
-        renderer,
-        input.rendererDocumentId,
-      );
+      const current = sessions.currentForDocument(renderer, input.rendererDocumentId);
       if (!current) return "unavailable";
-      return await mutations.publish(
-        current,
-        topicKey,
-        input.incarnationId,
-        {
-          resolve: async () => ({
-            publish: input.publish,
-            leave: input.leave,
-          }),
-        },
-      );
+      return await mutations.publish(current, topicKey, input.incarnationId, {
+        resolve: async () => ({
+          publish: input.publish,
+          leave: input.leave,
+        }),
+      });
     };
     const invokeLeave = async (input: {
       rendererDocumentId: string;
       incarnationId: string;
       leave: () => Promise<void>;
     }) => {
-      const current = sessions.currentForDocument(
-        renderer,
-        input.rendererDocumentId,
-      );
+      const current = sessions.currentForDocument(renderer, input.rendererDocumentId);
       if (!current) return "unavailable";
       return (await mutations.leave(
         current,
@@ -289,11 +282,7 @@ describe("presence mutation admission", () => {
     });
     await sessions.open(renderer, physical("workspace-a"), "document-1");
     await sessions.retireForReload(renderer, "document-1");
-    const successor = await sessions.open(
-      renderer,
-      physical("workspace-a"),
-      "document-2",
-    );
+    const successor = await sessions.open(renderer, physical("workspace-a"), "document-2");
 
     expect(sessions.currentForDocument(renderer, "document-1")).toBeUndefined();
     expect(sessions.currentForDocument(renderer, "document-2")).toBe(successor);

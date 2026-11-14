@@ -72,7 +72,6 @@ describe("CloudLogin fields", () => {
     expect(field.getAttribute("aria-invalid")).toBe("true");
     expect(field.getAttribute("aria-describedby")).toBe("cloud-connection-error");
 
-    // Typing clears it until the next check.
     await user.type(field, "x");
     expect(screen.queryByTestId("cloud-connection-error")).toBeNull();
     expect(field.getAttribute("aria-invalid")).toBeNull();
@@ -95,7 +94,10 @@ describe("CloudLogin fields", () => {
   it("asks for browser approval in few words", async () => {
     const user = userEvent.setup();
     render(<CloudLogin onConnectionError={() => undefined} />);
-    await user.type(await screen.findByTestId("cloud-server-url"), "https://dohc.example.test{Enter}");
+    await user.type(
+      await screen.findByTestId("cloud-server-url"),
+      "https://dohc.example.test{Enter}",
+    );
     const pending = await screen.findByTestId("cloud-login-pending");
     expect(pending.textContent).toContain("Approve this device in your browser.");
     expect(screen.getByTestId("cloud-user-code").textContent).toBe("ABCD");

@@ -8,9 +8,13 @@ import {
   findThreadCreateFileBinding,
 } from "./objectIndex";
 
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+const { DatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as typeof import("node:sqlite");
 const databases: InstanceType<typeof DatabaseSync>[] = [];
-afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+afterEach(() => {
+  for (const db of databases.splice(0)) db.close();
+});
 
 function fixture() {
   const db = new DatabaseSync(":memory:");
@@ -23,44 +27,60 @@ function fixture() {
     WHERE op_kind = 'chat.thread.create';
   CREATE INDEX channel_creates ON sync_relay_log(workspace_id, relay_seq)
     WHERE op_kind = 'chat.channel.create';`);
-  const insert = db.prepare("INSERT INTO sync_relay_log (workspace_id, op_kind, payload_json) VALUES (?, ?, ?)");
+  const insert = db.prepare(
+    "INSERT INTO sync_relay_log (workspace_id, op_kind, payload_json) VALUES (?, ?, ?)",
+  );
   return {
     db,
     storage: { db } as unknown as StorageContext,
     append(opKind: string, payload: unknown, workspaceId = "workspace") {
       insert.run(workspaceId, opKind, JSON.stringify(payload));
     },
-    appendRaw(opKind: string, payload: string) { insert.run("workspace", opKind, payload); },
+    appendRaw(opKind: string, payload: string) {
+      insert.run("workspace", opKind, payload);
+    },
   };
 }
 
 const cases = [
   {
-    name: "thread channel", opKind: "chat.thread.create", idKey: "threadId",
+    name: "thread channel",
+    opKind: "chat.thread.create",
+    idKey: "threadId",
     resolve: findThreadCreateChannelWireId,
-    binding: { channelWireId: "channel" }, expected: "channel",
+    binding: { channelWireId: "channel" },
+    expected: "channel",
   },
   {
-    name: "thread file", opKind: "chat.thread.create", idKey: "threadId",
+    name: "thread file",
+    opKind: "chat.thread.create",
+    idKey: "threadId",
     resolve: findThreadCreateFileBinding,
-    binding: { linkedObjectId: "file" }, expected: { kind: "object", objectId: "file" },
+    binding: { linkedObjectId: "file" },
+    expected: { kind: "object", objectId: "file" },
   },
   {
-    name: "channel kind", opKind: "chat.channel.create", idKey: "wireId",
+    name: "channel kind",
+    opKind: "chat.channel.create",
+    idKey: "wireId",
     resolve: findChannelCreateKind,
     binding: { channelId: "channel", name: "Team", slug: "team", kind: "channel", createdAtMs: 1 },
     expected: "channel",
   },
   {
-    name: "channel folder", opKind: "chat.channel.create", idKey: "wireId",
+    name: "channel folder",
+    opKind: "chat.channel.create",
+    idKey: "wireId",
     resolve: findChannelCreateFolderPath,
-    binding: { folderPath: "docs" }, expected: "docs",
+    binding: { folderPath: "docs" },
+    expected: "docs",
   },
 ];
 
 describe.each(cases)("earliest $name create", ({ opKind, idKey, resolve, binding, expected }) => {
   it("skips LIKE false positives and preserves the first exact binding", () => {
-    const f = fixture(), id = 'Id_%\\"日本語';
+    const f = fixture(),
+      id = 'Id_%\\"日本語';
     f.appendRaw(opKind, `{"${idKey}":${JSON.stringify(id)},`);
     f.append(opKind, { nested: { [idKey]: id }, ...binding });
     f.append(opKind, { [idKey]: id.toLowerCase(), ...binding });
@@ -73,7 +93,8 @@ describe.each(cases)("earliest $name create", ({ opKind, idKey, resolve, binding
   });
 
   it("keeps valid earliest bindings and releases the cursor before returning", () => {
-    const f = fixture(), id = "exact-id";
+    const f = fixture(),
+      id = "exact-id";
     f.append(opKind, { nested: { [idKey]: id } });
     f.append(opKind, { [idKey]: id, ...binding });
     f.append(opKind, { [idKey]: id });
@@ -83,7 +104,8 @@ describe.each(cases)("earliest $name create", ({ opKind, idKey, resolve, binding
   });
 
   it("distinguishes absent creates from malformed ones and scopes the workspace and op kind", () => {
-    const f = fixture(), id = "exact-id";
+    const f = fixture(),
+      id = "exact-id";
     f.append(opKind, { [idKey]: id, ...binding }, "other-workspace");
     f.append("unrelated.create", { [idKey]: id, ...binding });
     expect(resolve(f.storage, "workspace", "")).toBeUndefined();
@@ -95,8 +117,14 @@ describe.each(cases)("earliest $name create", ({ opKind, idKey, resolve, binding
 });
 
 it("refuses an earliest file create with two owners instead of accepting a later binding", () => {
-  const f = fixture(), threadId = "thread";
-  f.append("chat.thread.create", { threadId, linkedObjectId: "object", linkedPath: "docs/file.md", channelWireId: "channel" });
+  const f = fixture(),
+    threadId = "thread";
+  f.append("chat.thread.create", {
+    threadId,
+    linkedObjectId: "object",
+    linkedPath: "docs/file.md",
+    channelWireId: "channel",
+  });
   f.append("chat.thread.create", { threadId, linkedObjectId: "replacement" });
   expect(findThreadCreateFileBinding(f.storage, "workspace", threadId)).toBeNull();
   expect(findThreadCreateChannelWireId(f.storage, "workspace", threadId)).toBeNull();

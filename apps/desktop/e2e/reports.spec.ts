@@ -25,8 +25,6 @@ async function openPrivacy(temp: TempWorkspace): Promise<LaunchedDesktopApp> {
 const usageSwitch = (page: Page) => page.getByRole("switch", { name: "Send usage reports" });
 const errorSwitch = (page: Page) => page.getByRole("switch", { name: "Send error reports" });
 
-// A development build names no report service, so it sends nothing and
-// shows no notice. The switches, diagnostics, copy, and save still work.
 test("@telemetry-smoke report switches persist, and diagnostics show, copy, and save", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
@@ -38,17 +36,23 @@ test("@telemetry-smoke report switches persist, and diagnostics show, copy, and 
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expect(usageSwitch(page)).toHaveAttribute("aria-checked", "true");
     await expect(errorSwitch(page)).toHaveAttribute("aria-checked", "true");
-    await expect(page.getByTestId("settings-row-usage-reports")).toContainText("This launch sends no usage reports.");
-    await expect(page.getByTestId("settings-row-error-reports")).toContainText("This launch sends no error reports.");
+    await expect(page.getByTestId("settings-row-usage-reports")).toContainText(
+      "This launch sends no usage reports.",
+    );
+    await expect(page.getByTestId("settings-row-error-reports")).toContainText(
+      "This launch sends no error reports.",
+    );
 
-    // Keyboard: the switch takes focus and Space changes only that switch.
     await usageSwitch(page).focus();
     await page.keyboard.press("Space");
     await expect(usageSwitch(page)).toHaveAttribute("aria-checked", "false");
     await expect(errorSwitch(page)).toHaveAttribute("aria-checked", "true");
-    await expect.poll(async () =>
-      JSON.parse(await readFile(join(temp.homeDir, "dohc-settings.json"), "utf8")).privacy,
-    ).toEqual({ usageReports: false, errorReports: true });
+    await expect
+      .poll(
+        async () =>
+          JSON.parse(await readFile(join(temp.homeDir, "dohc-settings.json"), "utf8")).privacy,
+      )
+      .toEqual({ usageReports: false, errorReports: true });
 
     await page.getByTestId("diagnostics-show").click();
     const text = page.getByTestId("diagnostics-text");
@@ -65,12 +69,19 @@ test("@telemetry-smoke report switches persist, and diagnostics show, copy, and 
 
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await page.getByTestId("diagnostics-copy").click({ timeout: remainingMs() });
-      await expect.poll(() => app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toContain("dohc diagnostics");
+      await expect
+        .poll(() => app.evaluate(({ clipboard }) => clipboard.readText()), {
+          timeout: remainingMs(),
+        })
+        .toContain("dohc diagnostics");
     });
 
     const saved = join(temp.baseDir, "diagnostics.txt");
     await app.evaluate(({ dialog }, path) => {
-      dialog.showSaveDialog = (async () => ({ canceled: false, filePath: path })) as typeof dialog.showSaveDialog;
+      dialog.showSaveDialog = (async () => ({
+        canceled: false,
+        filePath: path,
+      })) as typeof dialog.showSaveDialog;
     }, saved);
     await page.getByTestId("diagnostics-save").click();
     await expect.poll(() => existsSync(saved)).toBe(true);

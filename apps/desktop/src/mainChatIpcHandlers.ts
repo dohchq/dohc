@@ -8,18 +8,13 @@ import {
   MAX_CHAT_CHANNEL_SHARE_ROWS,
 } from "./ipc/bridgeContract";
 
-export type MainChatIpcHandler<Event, Result> = (
-  event: Event,
-  payload: unknown,
-) => Promise<Result>;
+export type MainChatIpcHandler<Event, Result> = (event: Event, payload: unknown) => Promise<Result>;
 
 export async function chatViewerAuthorId(input: {
   localFallbackAuthorId: string;
   resolveReplicationAuthorId: () => Promise<string | undefined>;
 }): Promise<string> {
-  return (
-    (await input.resolveReplicationAuthorId()) ?? input.localFallbackAuthorId
-  );
+  return (await input.resolveReplicationAuthorId()) ?? input.localFallbackAuthorId;
 }
 
 export async function awaitCredentialGeneration<Result>(input: {
@@ -55,12 +50,7 @@ export function reactionsForViewer<
       reaction.authorId === input.localFallbackAuthorId
         ? { ...reaction, authorId: input.viewerAuthorId }
         : reaction;
-    const key = [
-      mapped.threadId,
-      mapped.messageId,
-      mapped.emoji,
-      mapped.authorId,
-    ].join("\u0000");
+    const key = [mapped.threadId, mapped.messageId, mapped.emoji, mapped.authorId].join("\u0000");
     const current = byCell.get(key);
     if (!current || (isCurrentIdentity && !current.isCurrentIdentity)) {
       byCell.set(key, { reaction: mapped, isCurrentIdentity });
@@ -144,11 +134,7 @@ export async function readRelayChatShareLanes(input: {
   // escaping to the contract parse would reject the whole IPC call, which the
   // renderer reads as an unknown listing and clears.
   try {
-    const mapped = mapRelayShareListing(
-      listing,
-      input.workspaceId,
-      input.shareIdsClaimedElsewhere,
-    );
+    const mapped = mapRelayShareListing(listing, input.workspaceId, input.shareIdsClaimedElsewhere);
     // Size is validated here, not by the contract schema. Every row can be
     // valid and the lane still be one dohc cannot list, and the schema sits
     // outside this guard: an over-cap lane reaching it throws, the IPC call
@@ -170,16 +156,16 @@ export async function readRelayChatShareLanes(input: {
     // OVER-LIMIT, carrying what it observed and the configured limit, and it
     // is non-authoritative for exactly the same reason unreachable is, so
     // cached rows still stand.
-    const overCap = ([
-      ["granted", mapped.granted.length],
-      ["received", mapped.received.length],
-    ] as const).filter(([, rows]) => rows > MAX_CHAT_CHANNEL_SHARE_ROWS);
+    const overCap = (
+      [
+        ["granted", mapped.granted.length],
+        ["received", mapped.received.length],
+      ] as const
+    ).filter(([, rows]) => rows > MAX_CHAT_CHANNEL_SHARE_ROWS);
     if (overCap.length > 0) {
       // Every over-cap lane, not the first: naming one of two sends the reader
       // to fix half the problem.
-      const lanes = overCap
-        .map(([lane, rows]) => `"${lane}" holds ${rows} rows`)
-        .join(", ");
+      const lanes = overCap.map(([lane, rows]) => `"${lane}" holds ${rows} rows`).join(", ");
       console.warn(
         `[desktop] relay share listing ${lanes}; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
       );
@@ -192,9 +178,7 @@ export async function readRelayChatShareLanes(input: {
     return {
       state: "answered",
       granted: mapped.granted.map((row) => ChatChannelShareGrantRow.parse(row)),
-      received: mapped.received.map((row) =>
-        ChatChannelShareReceivedRow.parse(row),
-      ),
+      received: mapped.received.map((row) => ChatChannelShareReceivedRow.parse(row)),
       removed: removedShareIds(listing.removed),
     };
   } catch {
@@ -209,7 +193,9 @@ function removedShareIds(lane: unknown): string[] {
   if (lane === undefined) return [];
   if (!Array.isArray(lane)) throw new Error("relay share listing lanes must be arrays");
   return lane.flatMap((row: unknown) =>
-    typeof row === "object" && row !== null && !Array.isArray(row) &&
+    typeof row === "object" &&
+    row !== null &&
+    !Array.isArray(row) &&
     typeof (row as { shareId?: unknown }).shareId === "string"
       ? [(row as { shareId: string }).shareId]
       : [],
@@ -228,9 +214,7 @@ function mapRelayShareListing(
   received: Array<Record<string, unknown>>;
 } {
   const chatSelector = (row: Record<string, unknown>) => {
-    const selector = row.selector as
-      | { kind?: unknown; channelWireId?: unknown }
-      | undefined;
+    const selector = row.selector as { kind?: unknown; channelWireId?: unknown } | undefined;
     const kind = selector?.kind;
     if (
       !selector ||
@@ -264,17 +248,6 @@ function mapRelayShareListing(
     // from another workspace is managed there.
     if (!selector || workspaceId === null) continue;
     if (row.workspaceId !== workspaceId) continue;
-    // Revoked grants are the granted lane's tombstones, and they are dropped
-    // rather than listed. The relay keeps returning them to the granter, so
-    // counting them made the cap measure an account's lifetime grants: past
-    // 4096 the listing stayed over-limit with every grant revoked, new grants
-    // were blocked, and revoking more could not reduce the count — a permanent
-    // lockout with no user action that helps.
-    //
-    // The rule is that a cap may only count what the user can actually
-    // reduce. Nothing displays these either — grantedByWire
-    // skips them — so dropping them shrinks the payload the cap exists to
-    // bound instead of merely uncounting it.
     if (row.revokedAtMs !== null && row.revokedAtMs !== undefined) continue;
     granted.push({
       shareId: row.shareId,
@@ -315,10 +288,7 @@ interface RelaySessionIdentity {
   token: string;
 }
 
-function sameRelaySession(
-  left: RelaySessionIdentity,
-  right: RelaySessionIdentity | null,
-): boolean {
+function sameRelaySession(left: RelaySessionIdentity, right: RelaySessionIdentity | null): boolean {
   return (
     right !== null &&
     right.token === left.token &&
@@ -342,9 +312,7 @@ export async function handleRelayUnauthorized(input: {
   // cache (a completed login poll saves the next session before main adopts
   // it), so the store compares and clears inside its own mutation queue — a
   // login save can never land between the check and the clear.
-  invalidatePersistedSessionIf: (
-    expected: RelaySessionIdentity,
-  ) => Promise<void>;
+  invalidatePersistedSessionIf: (expected: RelaySessionIdentity) => Promise<void>;
 }): Promise<boolean> {
   if (!sameRelaySession(input.requestCredentials, input.currentCredentials)) {
     return false;

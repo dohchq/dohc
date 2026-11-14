@@ -28,7 +28,8 @@ let lookRevision = 0;
 function numberSuffix(fontFamily: string): string | null {
   if (fontFamily === "mono") return "2";
   if ((EDITOR_FONTS as readonly string[]).includes(fontFamily)) return null;
-  const context = typeof OffscreenCanvas === "undefined" ? null : new OffscreenCanvas(1, 1).getContext("2d");
+  const context =
+    typeof OffscreenCanvas === "undefined" ? null : new OffscreenCanvas(1, 1).getContext("2d");
   if (!context) return null;
   context.font = `100px "${fontFamily}", ${getComputedStyle(document.documentElement).getPropertyValue("--font-sans")}`;
   return context.measureText(".").width === context.measureText("0").width ? "2" : null;
@@ -46,7 +47,10 @@ function setProperty(name: string, value: string | null): void {
 // this change starts end at once.
 function applyColors(theme: "light" | "dark", accent: string | null): void {
   const root = document.documentElement;
-  if (root.dataset.theme !== theme || root.style.getPropertyValue("--dohc-accent") !== (accent ?? "")) {
+  if (
+    root.dataset.theme !== theme ||
+    root.style.getPropertyValue("--dohc-accent") !== (accent ?? "")
+  ) {
     const running = new Set(document.getAnimations());
     root.dataset.theme = theme;
     setProperty("--dohc-accent", accent);
@@ -149,8 +153,7 @@ async function setThemeMode(themeMode: ThemeMode): Promise<void> {
 }
 
 export function toggleTheme(): void {
-  const next =
-    document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   void setThemeMode(next).catch((error) => {
     console.warn("Failed to persist theme mode", error);
   });

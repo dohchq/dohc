@@ -22,9 +22,16 @@ export function useOldWindowState(workspaceId: string | null): {
     const asked = shown.current;
     if (asked === null) return;
     const request = requests.next();
-    void bridge().readOldWindowState({}).then((answer) => {
-      if (requests.isCurrent(request) && shown.current === asked) setState(answer?.workspaceId === asked ? answer : null);
-    }, (error: unknown) => console.error("[dohc] could not read whether this window can edit its workspace:", error));
+    void bridge()
+      .readOldWindowState({})
+      .then(
+        (answer) => {
+          if (requests.isCurrent(request) && shown.current === asked)
+            setState(answer?.workspaceId === asked ? answer : null);
+        },
+        (error: unknown) =>
+          console.error("[dohc] could not read whether this window can edit its workspace:", error),
+      );
   }, [requests]);
   useEffect(() => {
     recheck();

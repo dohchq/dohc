@@ -6,27 +6,65 @@ import { copyFlakyFixture } from "./flaky-fixture.mjs";
 // The owner implementations are copied unchanged. External build, Git, Docker,
 // YAML, and doctor boundaries use offline adapters; no service or build starts.
 export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, cleanupFails = false) {
-  const put = (path, text) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); };
+  const put = (path, text) => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+  };
   const copy = (path) => put(path, readFileSync(join(sourceRoot, path)));
   put("package.json", '{"type":"module"}');
   copyFlakyFixture(root, sourceRoot);
-  for (const file of ["build.mjs", "verify.mjs", "ticket-evidence.mjs", "queue.mjs", "queue-supervisor.mjs", "js-tests.mjs", "selection.mjs", "cancellation.mjs", "timing.mjs"]) {
+  for (const file of [
+    "build.mjs",
+    "verify.mjs",
+    "ticket-evidence.mjs",
+    "queue.mjs",
+    "queue-supervisor.mjs",
+    "js-tests.mjs",
+    "selection.mjs",
+    "cancellation.mjs",
+    "timing.mjs",
+  ]) {
     const path = `scripts/verification/${file}`;
     if (existsSync(join(sourceRoot, path))) copy(path);
   }
   put("apps/desktop/package.json", "{}");
-  put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
-  put("scripts/verification/linux.mjs", "export const linuxDistro=()=>null;export const linuxRustJob=()=>{throw Error('unexpected Linux job');};");
+  put(
+    "scripts/verification/rust-reuse.mjs",
+    "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};",
+  );
+  put(
+    "scripts/verification/linux.mjs",
+    "export const linuxDistro=()=>null;export const linuxRustJob=()=>{throw Error('unexpected Linux job');};",
+  );
   put(".github/workflows/pr-checks.yml", "fixture workflow");
-  put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};");
-  put("tools/rust-engine-program/build-slot-real.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/build-slot.mjs")));
-  put("tools/rust-engine-program/build-slot.mjs", "export {acquireExclusiveSlot, buildQueueStatus, heldVerificationSlots, macSlotRoot, maxVerificationLanes, readVerificationLanes} from './build-slot-real.mjs';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};export const acquireVerificationSlot=()=>null;");
+  put(
+    "node_modules/js-yaml/index.js",
+    "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};",
+  );
+  put(
+    "tools/rust-engine-program/build-slot-real.mjs",
+    readFileSync(join(sourceRoot, "tools/rust-engine-program/build-slot.mjs")),
+  );
+  put(
+    "tools/rust-engine-program/build-slot.mjs",
+    "export {acquireExclusiveSlot, buildQueueStatus, heldVerificationSlots, macSlotRoot, maxVerificationLanes, readVerificationLanes} from './build-slot-real.mjs';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};export const acquireVerificationSlot=()=>null;",
+  );
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/doctor.mjs", "export const doctor=()=>({checks:[]});");
-  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;");
-  put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
-  for (const file of ["git-read.mjs", "gate-commands.mjs"]) copy(`tools/rust-engine-program/${file}`);
-  if (kind === "verify") put("scripts/verification/build.mjs", `
+  put(
+    "scripts/verification/admission.mjs",
+    "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;",
+  );
+  put(
+    "tools/rust-engine-program/tree-provenance.mjs",
+    "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});",
+  );
+  for (const file of ["git-read.mjs", "gate-commands.mjs"])
+    copy(`tools/rust-engine-program/${file}`);
+  if (kind === "verify")
+    put(
+      "scripts/verification/build.mjs",
+      `
     import {existsSync} from 'node:fs';
     import {interruptDuringSync} from './process.mjs';
     export const prepare=async()=>{};
@@ -38,8 +76,11 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
     export const assertIndependentStagedEngine=()=>{};
     export const hashFile=()=>{throw Error('unexpected engine hashing after cancellation');};
     export function sourceFingerprint(){if(existsSync('typecheck-complete'))interruptDuringSync();return 'fixture';}
-  `);
-  put("scripts/verification/process.mjs", `
+  `,
+    );
+  put(
+    "scripts/verification/process.mjs",
+    `
     import assert from 'node:assert/strict';
     import {execFileSync} from 'node:child_process';
     import {appendFileSync,existsSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
@@ -78,8 +119,14 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
       }
       return {stdout:''};
     }
-  `);
-  const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+  `,
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
     import cp from 'node:child_process';
     import {syncBuiltinESMExports} from 'node:module';
     import {writeFileSync} from 'node:fs';
@@ -108,14 +155,34 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
       outcome.checkoutReleased=true;
     }
     writeFileSync('outcome.json',JSON.stringify({...outcome,listeners:[process.listenerCount('SIGINT'),process.listenerCount('SIGTERM')]}));
-  `], { cwd: root, encoding: "utf8", timeout: 20_000 });
-  const json = (path) => existsSync(join(root, path)) ? JSON.parse(readFileSync(join(root, path), "utf8")) : null;
+  `,
+    ],
+    { cwd: root, encoding: "utf8", timeout: 20_000 },
+  );
+  const json = (path) =>
+    existsSync(join(root, path)) ? JSON.parse(readFileSync(join(root, path), "utf8")) : null;
   const reports = join(root, ".agent-artifacts/verification");
   // The blocked second run writes its own report, and a clock step can sort it first.
-  const ownerReport = () => readdirSync(reports).map(name => json(`.agent-artifacts/verification/${name}/result.json`)).find(report => report?.scope === "js") ?? null;
-  return { pid: result.pid, status: result.status, signal: result.signal, error: result.error?.message, stdout: result.stdout, stderr: result.stderr,
-    entered: existsSync(join(root, "sync-entered")), syncReturned: existsSync(join(root, "sync-returned")),
-    lockExists: existsSync(join(root, ".dohc-dev/verification/build.json.lock")), containerExists: existsSync(join(root, "container")),
-    outcome: json("outcome.json"), commands: readFileSync(join(root, "commands.jsonl"), "utf8").trim().split(/\r?\n/).map(JSON.parse),
-    report: existsSync(reports) ? ownerReport() : null };
+  const ownerReport = () =>
+    readdirSync(reports)
+      .map((name) => json(`.agent-artifacts/verification/${name}/result.json`))
+      .find((report) => report?.scope === "js") ?? null;
+  return {
+    pid: result.pid,
+    status: result.status,
+    signal: result.signal,
+    error: result.error?.message,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    entered: existsSync(join(root, "sync-entered")),
+    syncReturned: existsSync(join(root, "sync-returned")),
+    lockExists: existsSync(join(root, ".dohc-dev/verification/build.json.lock")),
+    containerExists: existsSync(join(root, "container")),
+    outcome: json("outcome.json"),
+    commands: readFileSync(join(root, "commands.jsonl"), "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map(JSON.parse),
+    report: existsSync(reports) ? ownerReport() : null,
+  };
 }

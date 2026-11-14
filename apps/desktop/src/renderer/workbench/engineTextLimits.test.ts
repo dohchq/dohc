@@ -1,15 +1,3 @@
-// The conflict surface bounds what "Combine by hand" will edit. That
-// bound is only honest while it stays inside what `conflicts.resolve` accepts,
-// and #569 changed what that is: there is no longer a cap on the merged body.
-// A resolve succeeds when the whole JSON-ENCODED request fits one control
-// frame, so what a body may weigh is whatever the rest of its request leaves.
-//
-// The gate no longer restates the engine's number. It imports the
-// contract from `@dohc/workspace-engine-client/limits` — a leaf module that
-// imports nothing, so a renderer can take it without pulling `node:crypto`
-// into the browser bundle — and proves the renderer's own editing bound fits
-// inside it. The import IS the drift guard: when the frame budget moves, this
-// arithmetic moves with it, and no hand-copied number can fall behind.
 import {
   RESOLVE_REQUEST_FRAME_BYTES,
   jsonStringEncodedLength,
@@ -31,28 +19,21 @@ import {
 /// envelope to the byte.
 const RESOLVE_REQUEST_OVERHEAD_BUDGET = 128 * 1024;
 
-
 describe("the bound on what a combined copy can be edited to", () => {
   it("leaves a whole worst-case body inside the resolve frame", () => {
     // The worst case is not the raw byte count. U+0001 is one UTF-8 byte and
     // six JSON-encoded ones, the highest ratio the encoder produces, so a body
     // full of them is the largest a body at this bound can become on the wire.
-    const worstCase = String.fromCharCode(1).repeat(
-      CONFLICT_COMBINED_EDIT_MAX_BYTES,
-    );
+    const worstCase = String.fromCharCode(1).repeat(CONFLICT_COMBINED_EDIT_MAX_BYTES);
     const encoded = jsonStringEncodedLength(worstCase);
     expect(encoded).toBe(CONFLICT_COMBINED_EDIT_MAX_BYTES * 6 + 2);
-    expect(encoded + RESOLVE_REQUEST_OVERHEAD_BUDGET).toBeLessThan(
-      RESOLVE_REQUEST_FRAME_BYTES,
-    );
+    expect(encoded + RESOLVE_REQUEST_OVERHEAD_BUDGET).toBeLessThan(RESOLVE_REQUEST_FRAME_BYTES);
   });
 
   it("sits above the largest healthy document, in the unit it is enforced in", () => {
     // Both numbers are UTF-8 bytes. Comparing the byte limit against a
     // character count proved nothing for any multi-byte script — see below.
-    expect(CONFLICT_COMBINED_EDIT_MAX_BYTES).toBeGreaterThan(
-      CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES,
-    );
+    expect(CONFLICT_COMBINED_EDIT_MAX_BYTES).toBeGreaterThan(CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES);
   });
 
   it("measures a multi-byte document in bytes, not characters", () => {

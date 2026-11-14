@@ -1,5 +1,11 @@
 import { hasPrimaryModifier, shortcutTitle } from "../shortcuts/shortcutRegistry";
-import { SAVED_HERE, SAVING, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
+import {
+  SAVED_HERE,
+  SAVING,
+  saveProblem,
+  saveStateEqual,
+  type SaveState,
+} from "@dohc/workspace-contracts/save-state";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { RecordButtonsRow } from "./collections/RecordButtonsRow";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
@@ -65,10 +71,7 @@ import {
   orderFrontmatter,
   parseFrontmatter,
 } from "./markdown/frontmatter";
-import type {
-  BlockNavigationTarget,
-  MarkdownEditorHandle,
-} from "./editor/MarkdownEditor";
+import type { BlockNavigationTarget, MarkdownEditorHandle } from "./editor/MarkdownEditor";
 import {
   LazyMarkdownEditor,
   preloadMarkdownEditor,
@@ -83,13 +86,20 @@ import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
-import { extractWorkspaceHeadings, resolveWorkspaceHeadingAnchorTarget } from "../workspaces/workspaceHeadings";
+import {
+  extractWorkspaceHeadings,
+  resolveWorkspaceHeadingAnchorTarget,
+} from "../workspaces/workspaceHeadings";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { LazyMarkdownReadView } from "./markdown/LazyMarkdownReadView";
 import { useAuthoritativeValueRevision } from "./useAuthoritativeValueRevision";
 import { useCollectionFieldMarks } from "./collections/collectionFieldMarks";
 import { dirnameOf } from "./path";
-import { WORKSPACE_TEXT_EDITOR_MAX_BYTES, WYSIWYG_MARKDOWN_THRESHOLD_BYTES, exceedsUtf8Bytes } from "../workspaces/workspaceTextLimits";
+import {
+  WORKSPACE_TEXT_EDITOR_MAX_BYTES,
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES,
+  exceedsUtf8Bytes,
+} from "../workspaces/workspaceTextLimits";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
@@ -138,8 +148,13 @@ export const SOURCE_PROOF_WAIT_MS = 2_000;
 
 function sourceProofWithin(doc: Y.Doc): Promise<string> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("The source proof took too long.")), SOURCE_PROOF_WAIT_MS);
-    projectArtifactSource(doc).then(resolve, reject).finally(() => clearTimeout(timer));
+    const timer = setTimeout(
+      () => reject(new Error("The source proof took too long.")),
+      SOURCE_PROOF_WAIT_MS,
+    );
+    projectArtifactSource(doc)
+      .then(resolve, reject)
+      .finally(() => clearTimeout(timer));
   });
 }
 
@@ -153,8 +168,7 @@ function loadImportExport(): Promise<typeof import("./editor/import-export")> {
  *  body, and this is the offset between them. */
 function frontmatterLineCount(markdown: string): number {
   const body = markdownEditorBody(markdown);
-  return (markdown.slice(0, markdown.length - body.length).match(/\n/g) ?? [])
-    .length;
+  return (markdown.slice(0, markdown.length - body.length).match(/\n/g) ?? []).length;
 }
 
 // The restore half of the cancel-and-restore: one row per set-aside
@@ -178,8 +192,7 @@ function goneNotice(cause: DocumentGoneCause | null, hasSetAsideEdit: boolean): 
     : DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE;
 }
 
-export const CHANGED_OUTSIDE_NOTICE =
-  "This file changed outside dohc.";
+export const CHANGED_OUTSIDE_NOTICE = "This file changed outside dohc.";
 
 // How long the save chip says Reloaded after the document took in a change
 // made outside dohc.
@@ -192,7 +205,10 @@ type NoteContent = { body: string; frontmatter: Record<string, unknown> };
 
 function noteContent(doc: Y.Doc | null): NoteContent | null {
   return doc
-    ? { body: doc.getXmlFragment("body").toString(), frontmatter: frontmatterMapValues(doc.getMap("frontmatter")) }
+    ? {
+        body: doc.getXmlFragment("body").toString(),
+        frontmatter: frontmatterMapValues(doc.getMap("frontmatter")),
+      }
     : null;
 }
 
@@ -239,7 +255,11 @@ function PropertiesFallback() {
   return (
     <div className={PROPERTIES_PANEL}>
       <div className={PROPERTIES_LINE}>
-        <SkeletonRows rows={1} label="Loading properties..." className="h-6 w-full justify-center" />
+        <SkeletonRows
+          rows={1}
+          label="Loading properties..."
+          className="h-6 w-full justify-center"
+        />
       </div>
     </div>
   );
@@ -285,7 +305,6 @@ export function MarkdownView(props: {
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: SaveState) => void;
-  // A live document became read-only while it was open.
   onLiveReadOnly?: () => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
@@ -300,7 +319,7 @@ export function MarkdownView(props: {
   liveEditingPaused?: "refused" | "full";
   // Opens Live documents at this note's row, the way out of a refused pause.
   onOpenLiveDocuments?: (path: string) => void;
-  // G2-C-3 version-switch re-bind token (the shell's versionEpoch), forwarded
+  // Version-switch re-bind token (the shell's versionEpoch), forwarded
   // to useEngineDoc so switching the active version reopens the engine session
   // against the new version's lineage.
   reopenKey?: number;
@@ -337,8 +356,6 @@ export function MarkdownView(props: {
   // reread fail before the queued open answers — so an open owned here would be
   // cancelled by the very race its refusal exists to name.
   engine: UseEngineDoc;
-  // Whether the note is a lossy note. The inspector holds the engine open
-  // until this is "clear", so "checking" waits as an open does.
   lossyNote: LossyNoteCheck;
   // The engine holds a change to this note, which Edit anyway saves.
   changeHeld?: boolean;
@@ -380,7 +397,7 @@ export function MarkdownView(props: {
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
   const [saveState, setSaveStateValue] = useState<SaveState>(SAVED_HERE);
   const setSaveState = (state: SaveState) => {
-    setSaveStateValue((current) => saveStateEqual(current, state) ? current : state);
+    setSaveStateValue((current) => (saveStateEqual(current, state) ? current : state));
   };
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
@@ -407,14 +424,14 @@ export function MarkdownView(props: {
       setSaveState(SAVING);
     }
   }, [engine.available, pendingMarkdownOwner]);
-  // The engine open runs ON the capture chain, so a document opened
+  // The engine open runs on the capture chain, so a document opened
   // while that chain is busy (startup reconciliation of a 1,000-file
   // workspace, a version switch) waits before dohc knows whether it is
   // engine-backed. `available: false` alone cannot tell that wait apart from
-  // "not engine-backed", so this surface used to answer it with the plain
-  // editor — writable, autosaving straight TO disk — while the session about
-  // to bind seeded from the engine head. Keystrokes in that window took a path
-  // that session never sees. Nothing here is writable until the open answers.
+  // "not engine-backed". The plain editor is writable and autosaves straight
+  // to disk, while the session about to bind seeds from the engine head, so
+  // keystrokes in that window would take a path that session never sees.
+  // Nothing here is writable until the open answers.
   // The read view's text stays until the live editor can replace it in one
   // frame, never with loading rows between them.
   const editorSettled = useLiveEditorSettled(engine.doc !== null);
@@ -453,9 +470,7 @@ export function MarkdownView(props: {
   // The editor reports the jump it landed, and it goes away. Keyed by nonce so
   // a report for a jump this view has already replaced is ignored.
   const retireJump = useCallback((nonce: number) => {
-    setJump((current) =>
-      current?.kind === "block" && current.nonce === nonce ? null : current,
-    );
+    setJump((current) => (current?.kind === "block" && current.nonce === nonce ? null : current));
   }, []);
   // A version switch retires a jump that has not landed yet. Reporting back
   // covers the applied one; this covers everything before that, where the
@@ -474,7 +489,6 @@ export function MarkdownView(props: {
     setMode("source");
     setJump({ kind: "line", line: props.scrollTarget.line });
     // Applied once per jump: nonce is the identity of one click.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTargetNonce]);
   const wysiwygRef = useRef<MarkdownEditorHandle | null>(null);
   const latestDraft = useRef(props.body);
@@ -507,8 +521,7 @@ export function MarkdownView(props: {
   const draftRevision = useRef(0);
   // CodeMirror owns local keystrokes. Advance only when an accepted external
   // value must replace its document and local undo history.
-  const [sourceValueRevision, bumpSourceValueRevision] =
-    useAuthoritativeValueRevision();
+  const [sourceValueRevision, bumpSourceValueRevision] = useAuthoritativeValueRevision();
   const unmounted = useRef(false);
   const serializeDraftRef = useRef<() => string>(() => props.body);
   const editing = surfaceMode !== "read";
@@ -550,18 +563,12 @@ export function MarkdownView(props: {
       revision: sharedSnapshot.revision,
     };
     const bodyChanged = latestDraft.current !== sharedSnapshot.body;
-    const baselineChanged =
-      baseContentHash.current !== sharedSnapshot.contentHash;
+    const baselineChanged = baseContentHash.current !== sharedSnapshot.contentHash;
     baseContentHash.current = sharedSnapshot.contentHash;
     latestDraft.current = sharedSnapshot.body;
     setSaveState(sharedSnapshot.saveState);
-    const newerInitialization =
-      sharedSnapshot.source === null && baselineChanged;
-    if (
-      sharedSnapshot.saveState.kind === "saved-here" &&
-      !sharedSnapshot.dirty &&
-      !bodyChanged
-    ) {
+    const newerInitialization = sharedSnapshot.source === null && baselineChanged;
+    if (sharedSnapshot.saveState.kind === "saved-here" && !sharedSnapshot.dirty && !bodyChanged) {
       if (saveTimer.current) {
         clearTimeout(saveTimer.current);
         saveTimer.current = null;
@@ -580,9 +587,7 @@ export function MarkdownView(props: {
     setDraft(sharedSnapshot.body);
     setSavedBody(sharedSnapshot.body);
     if (mode === "wysiwyg") {
-      wysiwygRef.current?.replaceMarkdown(
-        markdownEditorBody(sharedSnapshot.body),
-      );
+      wysiwygRef.current?.replaceMarkdown(markdownEditorBody(sharedSnapshot.body));
     }
   }, [bumpSourceValueRevision, engine.available, mode, sharedSnapshot]);
 
@@ -591,14 +596,9 @@ export function MarkdownView(props: {
       text ??
       (unmounted.current
         ? latestDraft.current
-        : props.localBuffer.takePendingDraft(localSource.current) ??
-          latestDraft.current);
+        : (props.localBuffer.takePendingDraft(localSource.current) ?? latestDraft.current));
     if (capturedConflictDraft.current === capturedText) return;
-    conflictDraftId.current = captureOrphanedDraft(
-      props.workspaceId,
-      props.path,
-      capturedText,
-    );
+    conflictDraftId.current = captureOrphanedDraft(props.workspaceId, props.path, capturedText);
     capturedConflictDraft.current = capturedText;
   }
 
@@ -608,12 +608,10 @@ export function MarkdownView(props: {
       saveTimer.current = null;
     }
     unsavedDraft.current = false;
-    blockedDraftRevision.current = Math.max(
-      blockedDraftRevision.current,
-      draftRevision.current,
-    );
+    blockedDraftRevision.current = Math.max(blockedDraftRevision.current, draftRevision.current);
     captureLatestConflictDraft();
-    if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
+    if (!unmounted.current)
+      setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
   }
 
   function acceptSnapshot(
@@ -650,10 +648,7 @@ export function MarkdownView(props: {
     unsavedDraft.current = false;
     draftRevision.current += 1;
     bumpSourceValueRevision();
-    blockedDraftRevision.current = Math.max(
-      blockedDraftRevision.current,
-      draftRevision.current,
-    );
+    blockedDraftRevision.current = Math.max(blockedDraftRevision.current, draftRevision.current);
     staleBaseline.current = false;
     baseContentHash.current = snapshot.contentHash;
     baseContentRequestId.current = snapshot.requestId;
@@ -663,10 +658,7 @@ export function MarkdownView(props: {
     ) {
       verifyAfterRequestId.current = null;
     }
-    acceptedRequestFloor.current = Math.max(
-      acceptedRequestFloor.current,
-      snapshot.requestId,
-    );
+    acceptedRequestFloor.current = Math.max(acceptedRequestFloor.current, snapshot.requestId);
     setDraft(snapshot.body);
     setSavedBody(snapshot.body);
     latestDraft.current = snapshot.body;
@@ -681,22 +673,20 @@ export function MarkdownView(props: {
     if (
       (snapshot.contentHash !== conflictContentHash.current &&
         snapshot.requestId <= conflictRequestId.current) ||
-      (shared.initialized &&
-        !shared.dirty &&
-        shared.contentHash !== snapshot.contentHash)
+      (shared.initialized && !shared.dirty && shared.contentHash !== snapshot.contentHash)
     ) {
       return false;
     }
-    return acceptSnapshot(snapshot, saveProblem("error", "dohc could not confirm the file was saved."));
+    return acceptSnapshot(
+      snapshot,
+      saveProblem("error", "dohc could not confirm the file was saved."),
+    );
   }
 
   function reconcileConflictSnapshot() {
     if (acceptConflictSnapshotIfCurrent()) return;
     const shared = props.localBuffer.getSnapshot();
-    if (
-      shared.dirty &&
-      (shared.source !== localSource.current || writersLive.current > 0)
-    ) {
+    if (shared.dirty && (shared.source !== localSource.current || writersLive.current > 0)) {
       return;
     }
     const requestId = latestSnapshot.current.requestId;
@@ -727,8 +717,11 @@ export function MarkdownView(props: {
   const lastLiveDoc = useRef<{ key: string; doc: Y.Doc } | null>(null);
   const [endedCopy, setEndedCopy] = useState<{ key: string; doc: Y.Doc } | null>(null);
   if (engine.doc) lastLiveDoc.current = { key: props.documentKey, doc: engine.doc };
-  const showEndedCopy = !engine.doc && !opening &&
-    engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0;
+  const showEndedCopy =
+    !engine.doc &&
+    !opening &&
+    engine.readOnlyCause === "access-ended" &&
+    orphanedDrafts.length === 0;
   const endedSnapshot = useMemo(() => {
     const live = lastLiveDoc.current;
     return showEndedCopy && live?.key === props.documentKey
@@ -752,7 +745,7 @@ export function MarkdownView(props: {
   // editor's code has loaded. Until both, it stays in read mode, as it opened,
   // and its editor mounts once, editable.
   const displayDoc =
-    props.lossyNote === "checking" || awaitingEditor ? null : engine.doc ?? readOnlyCopy;
+    props.lossyNote === "checking" || awaitingEditor ? null : (engine.doc ?? readOnlyCopy);
 
   const openingRef = useRef(opening);
   if (opening && !openingRef.current) {
@@ -763,11 +756,7 @@ export function MarkdownView(props: {
     if (unsavedDraft.current) {
       unsavedDraft.current = false;
       props.localBuffer.clearPendingDraft(localSource.current);
-      captureOrphanedDraft(
-        props.workspaceId,
-        props.path,
-        serializeDraftRef.current(),
-      );
+      captureOrphanedDraft(props.workspaceId, props.path, serializeDraftRef.current());
       // The armed save will never issue, so "saving" must not stand. The
       // set-aside edit's own signal is derived from the store below — that
       // way Dismiss retires it instead of stranding an
@@ -786,10 +775,7 @@ export function MarkdownView(props: {
       latestDraft.current = props.body;
       baseContentHash.current = props.contentHash;
       baseContentRequestId.current = props.contentRequestId;
-      acceptedRequestFloor.current = Math.max(
-        acceptedRequestFloor.current,
-        props.contentRequestId,
-      );
+      acceptedRequestFloor.current = Math.max(acceptedRequestFloor.current, props.contentRequestId);
     }
   }
   openingRef.current = opening;
@@ -813,8 +799,11 @@ export function MarkdownView(props: {
       ? saveState
       : orphanedDrafts.length > 0
         ? ("recovery" as const)
-        : engine.readOnlyCause === "access-ended" ? "read-only"
-          : engine.readOnlyCause ? "read-only-unavailable" : "saved";
+        : engine.readOnlyCause === "access-ended"
+          ? "read-only"
+          : engine.readOnlyCause
+            ? "read-only-unavailable"
+            : "saved";
   // The file changed outside dohc. Reopening closes this session first, and
   // main lets the disk version stand. Reload can wait for capture to record it.
   // A document with nothing unsaved reopens by itself, never over edits main
@@ -839,9 +828,10 @@ export function MarkdownView(props: {
     if (!reloadsItself) return;
     setReloadedItself(true);
     if (!engine.unsavedEditsPending()) reloadChangedOutside();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadsItself, reloadChangedOutside]);
-  const changedOutsideNotice = engine.outsideWriteWaiting || engine.changedOutside === "unsaved" ||
+  const changedOutsideNotice =
+    engine.outsideWriteWaiting ||
+    engine.changedOutside === "unsaved" ||
     (engine.changedOutside === "saved" && reloadedItself && !reloading);
   // The Reloaded sign starts when the reopened document binds.
   const [reloadedSign, setReloadedSign] = useState(0);
@@ -851,7 +841,6 @@ export function MarkdownView(props: {
     setReloading(false);
     setReloadedSign((count) => count + 1);
     if (!sameNoteContent(noteContent(engine.doc), replacedText.current)) setReloadedItself(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadedBound]);
   const [reloadedShown, setReloadedShown] = useState(false);
   useEffect(() => {
@@ -866,10 +855,14 @@ export function MarkdownView(props: {
     if (!engine.outsideWriteWaiting) return;
     setReloading(false);
     const message = outsideVersionWaitingMessage(props.path);
-    onButtonError?.(message, new Error(message), () => {
-      if (!unmounted.current) reloadChangedOutside();
-    }, `outside-write-waiting:${props.workspaceId}:${props.path}`);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    onButtonError?.(
+      message,
+      new Error(message),
+      () => {
+        if (!unmounted.current) reloadChangedOutside();
+      },
+      `outside-write-waiting:${props.workspaceId}:${props.path}`,
+    );
   }, [engine.outsideWriteWaiting]);
   // The engine branch has its own authoritative save state; the set-aside
   // draft still is not in the document it shows, so a settled engine must
@@ -877,10 +870,10 @@ export function MarkdownView(props: {
   const engineChipState =
     engine.saveState.kind === "saved-here" && orphanedDrafts.length > 0
       ? ("recovery" as const)
-      : engine.goneCause ??
+      : (engine.goneCause ??
         (reloadedShown && engine.saveState.kind === "saved-here" && engine.changedOutside === null
           ? ("reloaded" as const)
-          : engine.saveState);
+          : engine.saveState));
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -899,14 +892,21 @@ export function MarkdownView(props: {
   const serializeEngineDraft = async (): Promise<string | null> => {
     if (displayDoc) {
       if (wysiwygRef.current === null || displayDoc.isDestroyed) return null;
-      if (canPreserveMarkdownSource(displayDoc.getMap('meta').get('dohcMarkdownSource'))) {
-        try {return await sourceProofWithin(displayDoc);} catch { /* Canonical output needs no witness proof. */ }
+      if (canPreserveMarkdownSource(displayDoc.getMap("meta").get("dohcMarkdownSource"))) {
+        try {
+          return await sourceProofWithin(displayDoc);
+        } catch {
+          /* Canonical output needs no witness proof. */
+        }
       }
-      const {yDocToMarkdown} = await loadImportExport();
+      const { yDocToMarkdown } = await loadImportExport();
       return displayDoc.isDestroyed ? null : yDocToMarkdown(displayDoc);
     }
     const editorBody = wysiwygRef.current?.getMarkdown();
-    return mergeMarkdownEditorBody(latestDraft.current, editorBody ?? markdownEditorBody(props.body));
+    return mergeMarkdownEditorBody(
+      latestDraft.current,
+      editorBody ?? markdownEditorBody(props.body),
+    );
   };
 
   const hasSetAsideEdit =
@@ -919,8 +919,8 @@ export function MarkdownView(props: {
     accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
     shared: !!props.forceReadOnly,
     transition: transitionReason(engine),
-    // Its set-aside row says why until the person dismisses it.
-    notSaved: engine.permanentFailureWhileEditing &&
+    notSaved:
+      engine.permanentFailureWhileEditing &&
       !orphanedDrafts.some((draft) => draft.id === engine.permanentFailureDraftId),
     livePaused: props.liveEditingPaused,
   }).join(" ");
@@ -938,39 +938,40 @@ export function MarkdownView(props: {
     if (engine.readOnlyWhileEditing) onLiveReadOnly.current?.();
   }, [engine.readOnlyWhileEditing]);
 
-  // Parse-once + visible-first: the memo stops re-parses on
-  // unrelated re-renders (collab status flips, save-state ticks), and the
-  // incremental document commits only the opening window up front, idle-
-  // backfilling the rest — a 250KB doc opens in tens of ms, not ~575ms.
-  // Strip YAML frontmatter before rendering the read view: the title/icon it
-  // encodes is already surfaced by <PageIdentity> above the document, so the
-  // raw `---`/`title:`/`icon:` block must not also render as body content (the
-  // WYSIWYG editor uses the same `markdownEditorBody` split — keep read mode in
-  // lockstep so both show the document body, not its metadata).
   const linkNavigationNonce = useRef(0);
   const openWikilinkRef = useRef<(target: string) => void>(() => undefined);
-  const openWorkspaceLinkRef = useRef<(target: WorkspaceLinkTarget) => void>(
-    () => undefined,
-  );
+  const openWorkspaceLinkRef = useRef<(target: WorkspaceLinkTarget) => void>(() => undefined);
   const navigationIdentity = useRef({ workspaceId: props.workspaceId, path: props.path });
-  if (navigationIdentity.current.workspaceId !== props.workspaceId || navigationIdentity.current.path !== props.path) {
+  if (
+    navigationIdentity.current.workspaceId !== props.workspaceId ||
+    navigationIdentity.current.path !== props.path
+  ) {
     navigationIdentity.current = { workspaceId: props.workspaceId, path: props.path };
   }
-  useEffect(() => () => { navigationIdentity.current = { workspaceId: "", path: "" }; }, []);
+  useEffect(
+    () => () => {
+      navigationIdentity.current = { workspaceId: "", path: "" };
+    },
+    [],
+  );
   const navigate = (literal: string, kind: "wikilink" | "markdown") => {
     const identity = navigationIdentity.current;
     const nonce = ++linkNavigationNonce.current;
-    const current = () => navigationIdentity.current === identity && linkNavigationNonce.current === nonce;
+    const current = () =>
+      navigationIdentity.current === identity && linkNavigationNonce.current === nonce;
     void resolveLinkNavigation(props.workspaceId, props.path, literal, kind, nonce)
-      .then(navigation => {
+      .then((navigation) => {
         if (current() && navigation) props.onOpenPath?.(navigation.path, navigation.headingTarget);
       })
-      .catch(error => {
-        if (current()) props.onButtonError?.("This link could not be opened.", error, () => navigate(literal, kind));
+      .catch((error) => {
+        if (current())
+          props.onButtonError?.("This link could not be opened.", error, () =>
+            navigate(literal, kind),
+          );
       });
   };
-  openWikilinkRef.current = target => navigate(target, "wikilink");
-  openWorkspaceLinkRef.current = target => {
+  openWikilinkRef.current = (target) => navigate(target, "wikilink");
+  openWorkspaceLinkRef.current = (target) => {
     // The activation parser has decoded the path. Encode delimiters before the
     // engine splits the literal's query and fragment, then decodes its path.
     const path = target.path.split("/").map(encodeURIComponent).join("/");
@@ -1000,39 +1001,51 @@ export function MarkdownView(props: {
     [onMarkdownRendered, props.path, props.reopenKey, props.workspaceId, savedBody],
   );
   const openThisNote = props.onOpenPath ? () => props.onOpenPath?.(props.path) : undefined;
-  const onShareCurrentPath = props.onSharePath
-    ? () => props.onSharePath?.(props.path)
-    : undefined;
+  const onShareCurrentPath = props.onSharePath ? () => props.onSharePath?.(props.path) : undefined;
 
   // The engine refused because the path is not in the version this workspace is
   // on. The plain editor is writable too, so falling back to it would
   // autosave the file the version switch removed back into the version as a
   // phantom. Hand the refusal up; the caller replaces the document.
   //
-  // A pending draft reached disk by two routes, and turning the document
-  // read-only closed neither, because both held a stale `readOnly`: the armed
-  // 800ms autosave (see writeDraftNow) and the unmount flush below, which had
-  // `readOnly` in its deps and so ran its previous cleanup on the very
-  // false->true transition with `readOnly === false` captured. Making the
-  // document read-only was itself the write. Both now read `readOnlyRef`.
+  // A pending draft can reach disk by two routes: the armed 800ms autosave
+  // (see writeDraftNow) and the unmount flush below. Both read `readOnlyRef`,
+  // never a captured `readOnly`. With `readOnly` in its deps, the unmount
+  // flush would run its previous cleanup on the false->true transition with
+  // `readOnly === false` captured, so making the document read-only would
+  // itself be the write.
   //
-  // #567 decided the `opening` half: a reopen cancels the armed autosave and
-  // sets the draft aside (the render-phase capture above), and every write
-  // path refuses while `opening` holds, via `openingRef` — assigned during
-  // render for the same reason as `readOnlyRef`.
+  // A reopen cancels the armed autosave and sets the draft aside (the
+  // render-phase capture above), and every write path refuses while `opening`
+  // holds, via `openingRef`, assigned during render for the same reason as
+  // `readOnlyRef`.
   //
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
   const { onPendingDraftChange } = props;
   // The record this file is, as the record row hears from main. The engine
   // gave it its `id`, so the properties count that line as shown.
-  const [record, setRecord] = useState<{ workspaceId: string; path: string; id: string } | null>(null);
-  const recordId = record?.workspaceId === props.workspaceId && record.path === props.path ? record.id : undefined;
-  const recordButtons = props.onButtonError && props.onButtonNotice && props.onOpenRecordHistory ? (
-    <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} onRecord={setRecord} />
-  ) : null;
-  // Read-only properties and a refused title offer this file to open externally.
-  const noteFile = { workspaceId: props.workspaceId, path: props.path, onError: props.onButtonError };
+  const [record, setRecord] = useState<{ workspaceId: string; path: string; id: string } | null>(
+    null,
+  );
+  const recordId =
+    record?.workspaceId === props.workspaceId && record.path === props.path ? record.id : undefined;
+  const recordButtons =
+    props.onButtonError && props.onButtonNotice && props.onOpenRecordHistory ? (
+      <RecordButtonsRow
+        workspaceId={props.workspaceId}
+        path={props.path}
+        onError={props.onButtonError}
+        onNotice={props.onButtonNotice}
+        onOpenHistory={props.onOpenRecordHistory}
+        onRecord={setRecord}
+      />
+    ) : null;
+  const noteFile = {
+    workspaceId: props.workspaceId,
+    path: props.path,
+    onError: props.onButtonError,
+  };
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not
     // discarded — the store outlives this view and the refusal screen renders
@@ -1060,13 +1073,20 @@ export function MarkdownView(props: {
   // Invalid bytes read as U+FFFD can take a note's text past the live limit
   // while its file stays under it, and the check counts that text as lossy.
   const lossy = props.lossyNote === "lossy";
-  const tooLarge = useMemo(() => lossy && exceedsUtf8Bytes(props.body, WORKSPACE_TEXT_EDITOR_MAX_BYTES), [lossy, props.body]);
+  const tooLarge = useMemo(
+    () => lossy && exceedsUtf8Bytes(props.body, WORKSPACE_TEXT_EDITOR_MAX_BYTES),
+    [lossy, props.body],
+  );
   // A disabled Edit says why: the chip's words, or else the restriction its
   // notice states. Never the chip's save state: a set-aside edit doesn't stop
   // editing.
-  const editReason = readOnlyWords || (lossy && !tooLarge ? LOSSY_NOTE_TITLE
-    : props.truncated || tooLarge ? SAVE_STATE["too-large"].title
-    : undefined);
+  const editReason =
+    readOnlyWords ||
+    (lossy && !tooLarge
+      ? LOSSY_NOTE_TITLE
+      : props.truncated || tooLarge
+        ? SAVE_STATE["too-large"].title
+        : undefined);
   // Every write guard reads this, never the captured `readOnly`. Assigned
   // during render so a cleanup or an armed timer that runs after the flip sees
   // the flip. See writeDraftNow and the unmount flush.
@@ -1099,12 +1119,16 @@ export function MarkdownView(props: {
           // Without a live session the title field writes the draft, so the
           // page's title does too.
           const { meta } = parseFrontmatter(latestDraft.current);
-          onPropertiesDraft(applyFrontmatter(latestDraft.current, orderFrontmatter({ ...meta, ...Object.fromEntries(values) })));
+          onPropertiesDraft(
+            applyFrontmatter(
+              latestDraft.current,
+              orderFrontmatter({ ...meta, ...Object.fromEntries(values) }),
+            ),
+          );
         }
       },
     });
     // onPropertiesDraft reads refs and this render's readOnly, checked above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayDoc, onEditorReady, opening, pageEditor, readOnly, surfaceMode]);
   // A record's properties show the ⚡ of the automations that set them. An
   // editable file in a folder asks; main answers none for a folder that is
@@ -1131,16 +1155,25 @@ export function MarkdownView(props: {
   const saveNowRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const reportSave = (failure: { cause?: unknown } | null) => {
     const written = props.localBuffer;
-    reportTextSave(props.workspaceId, props.path, failure && {
-      ...failure,
-      retry: () => {
-        if (unmounted.current || activeLocalBuffer.current !== written || writesBlocked() || openingRef.current) {
-          return false;
-        }
-        void saveNowRef.current();
-        return true;
+    reportTextSave(
+      props.workspaceId,
+      props.path,
+      failure && {
+        ...failure,
+        retry: () => {
+          if (
+            unmounted.current ||
+            activeLocalBuffer.current !== written ||
+            writesBlocked() ||
+            openingRef.current
+          ) {
+            return false;
+          }
+          void saveNowRef.current();
+          return true;
+        },
       },
-    });
+    );
   };
   const engineMode = displayDoc !== null;
   const engineModeRef = useRef(engineMode);
@@ -1167,8 +1200,7 @@ export function MarkdownView(props: {
   // The key is FileInspector's existing workspace/path/version generation;
   // doc identity also covers a same-version engine retry.
   const sourceMarkdown =
-    sourceProjection?.documentKey === props.documentKey &&
-    sourceProjection.doc === displayDoc
+    sourceProjection?.documentKey === props.documentKey && sourceProjection.doc === displayDoc
       ? sourceProjection.markdown
       : null;
   const readDocumentRef = useRef<HTMLDivElement | null>(null);
@@ -1176,7 +1208,6 @@ export function MarkdownView(props: {
   // The engine branch's scroller. It holds the top-matter (title, properties)
   // above the editor, which is where a frontmatter search hit actually lives.
   const engineDocPaneRef = useRef<HTMLDivElement | null>(null);
-  // The whole view: its actions where it draws them itself, its notices and its text.
   const viewRef = useRef<HTMLDivElement | null>(null);
   // Where the person is in the read view, as of its last scroll. The editor
   // that replaces it opens at the same place.
@@ -1215,9 +1246,9 @@ export function MarkdownView(props: {
     for (const move of moves) pane.addEventListener(move, stop, true);
     return stop;
   }, [engineShown, props.documentKey]);
-  const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<
-    number | null
-  >(null);
+  const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<number | null>(
+    null,
+  );
   const headingTargetNonce = props.headingTarget?.nonce;
   function applyHeadingTarget(
     targetMode: "read" | "wysiwyg" | "source" = surfaceMode,
@@ -1248,8 +1279,7 @@ export function MarkdownView(props: {
       pane.scrollTo({ top: 0 });
       return true;
     }
-    const source =
-      replaySource ?? (targetMode === "source" ? latestDraft.current : savedBody);
+    const source = replaySource ?? (targetMode === "source" ? latestDraft.current : savedBody);
     const markdown = markdownEditorBody(source);
     const headings = extractWorkspaceHeadings(markdown);
     const heading = resolveWorkspaceHeadingAnchorTarget(headings, props.headingTarget);
@@ -1277,9 +1307,7 @@ export function MarkdownView(props: {
   // local editable mode active during that window resyncs after success,
   // preserving a pending edit as an orphaned draft first. A standing heading
   // target is an optional replay layered on that resync, never its gate.
-  const armedLocalResyncMode = useRef<
-    "read" | "source" | "wysiwyg" | null
-  >(null);
+  const armedLocalResyncMode = useRef<"read" | "source" | "wysiwyg" | null>(null);
   // External changes (agent edits, sync pulls) flow into the open document
   // only while not editing and with no unsaved draft — mid-edit, the user's
   // draft wins until saved. Read mode now edits frontmatter inline (title/icon
@@ -1303,10 +1331,7 @@ export function MarkdownView(props: {
         if (snapshot.contentHash === baseContentHash.current) {
           verifyAfterRequestId.current = null;
           baseContentRequestId.current = snapshot.requestId;
-          acceptedRequestFloor.current = Math.max(
-            acceptedRequestFloor.current,
-            snapshot.requestId,
-          );
+          acceptedRequestFloor.current = Math.max(acceptedRequestFloor.current, snapshot.requestId);
           setSaveState(SAVED_HERE);
           return;
         }
@@ -1314,7 +1339,10 @@ export function MarkdownView(props: {
         conflictContentHash.current = snapshot.contentHash;
         conflictRequestId.current = snapshot.requestId;
         captureLatestConflictDraft();
-        acceptSnapshot(snapshot, saveProblem("error", "dohc could not confirm the file was saved."));
+        acceptSnapshot(
+          snapshot,
+          saveProblem("error", "dohc could not confirm the file was saved."),
+        );
         return;
       }
     }
@@ -1327,7 +1355,6 @@ export function MarkdownView(props: {
       acceptSnapshot(latestSnapshot.current, SAVED_HERE);
     }
     // The helpers read mutable writer state and the atomic snapshot above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     props.body,
     props.contentHash,
@@ -1353,7 +1380,6 @@ export function MarkdownView(props: {
       setPendingRenderedHeadingIndex(null);
       armedHeadingReplayMode.current = mode === "source" ? "source" : "read";
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.reopenKey]);
   useEffect(() => {
     if (!engineMode && props.switchReadPending) {
@@ -1379,27 +1405,16 @@ export function MarkdownView(props: {
         // and write it. The text itself is not lost: the capture below takes
         // it from the live editor.
         props.localBuffer.clearPendingDraft(localSource.current);
-        captureOrphanedDraft(
-          props.workspaceId,
-          props.path,
-          serializeDraftRef.current(),
-        );
+        captureOrphanedDraft(props.workspaceId, props.path, serializeDraftRef.current());
         setSaveState(SAVED_HERE);
       }
       const sharedBeforeResync = props.localBuffer.getSnapshot();
       const peerDraftPending =
-        sharedBeforeResync.dirty &&
-        sharedBeforeResync.source !== localSource.current;
+        sharedBeforeResync.dirty && sharedBeforeResync.source !== localSource.current;
       if (!peerDraftPending) {
-        props.localBuffer.reset(
-          props.body,
-          props.contentHash,
-          localSource.current,
-        );
+        props.localBuffer.reset(props.body, props.contentHash, localSource.current);
       }
-      const resyncBody = peerDraftPending
-        ? sharedBeforeResync.body
-        : props.body;
+      const resyncBody = peerDraftPending ? sharedBeforeResync.body : props.body;
       const resyncContentHash = peerDraftPending
         ? sharedBeforeResync.contentHash
         : props.contentHash;
@@ -1411,10 +1426,7 @@ export function MarkdownView(props: {
       baseContentHash.current = resyncContentHash;
       baseContentRequestId.current = props.contentRequestId;
       if (peerDraftPending) setSaveState(sharedBeforeResync.saveState);
-      acceptedRequestFloor.current = Math.max(
-        acceptedRequestFloor.current,
-        props.contentRequestId,
-      );
+      acceptedRequestFloor.current = Math.max(acceptedRequestFloor.current, props.contentRequestId);
       if (resyncMode === "wysiwyg") {
         setWysiwygResyncEpoch((epoch) => epoch + 1);
       }
@@ -1425,7 +1437,6 @@ export function MarkdownView(props: {
       applyHeadingTarget(replayMode, props.body);
     }
     props.switchUnresyncedRef.current = false;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.switchReadPending]);
   useEffect(() => {
     const applied = applyHeadingTarget();
@@ -1434,16 +1445,16 @@ export function MarkdownView(props: {
     // resolved to no heading, must not be replayed later as if the reader had
     // visited it.
     if (applied) appliedHeadingNonce.current = headingTargetNonce;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [headingTargetNonce]);
   useEffect(() => {
     if (pendingRenderedHeadingIndex === null || surfaceMode !== "read") return;
     const container = readDocumentRef.current;
     if (!container) return;
     const applyTarget = () => {
-      const target = container.querySelectorAll<HTMLElement>(
-        "h1, h2, h3, h4, h5, h6",
-      )[pendingRenderedHeadingIndex];
+      const target =
+        container.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")[
+          pendingRenderedHeadingIndex
+        ];
       if (!target) return false;
       target.scrollIntoView({ behavior: "smooth", block: "start" });
       setPendingRenderedHeadingIndex(null);
@@ -1521,19 +1532,26 @@ export function MarkdownView(props: {
     let updateDeadline: number | null = null;
     const recompute = async () => {
       if (cancelled || !serialize) return;
-      if (inFlight) {trailing = true; return;}
+      if (inFlight) {
+        trailing = true;
+        return;
+      }
       inFlight = true;
       try {
         const markdown = await serialize(doc);
         if (cancelled) return;
         setSourceProjection({ documentKey, doc, markdown });
       } catch (error) {
-        if (!cancelled) props.onButtonError?.(
-          'dohc could not open the Markdown source.', error, () => {void recompute();},
-        );
+        if (!cancelled)
+          props.onButtonError?.("dohc could not open the Markdown source.", error, () => {
+            void recompute();
+          });
       } finally {
         inFlight = false;
-        if (trailing && !cancelled) {trailing = false; void recompute();}
+        if (trailing && !cancelled) {
+          trailing = false;
+          void recompute();
+        }
       }
     };
     const runScheduledRecompute = () => {
@@ -1543,9 +1561,10 @@ export function MarkdownView(props: {
     };
     void loadImportExport().then((mod) => {
       // A failed witness proof shows canonical Markdown, as Copy does.
-      serialize = (current) => canPreserveMarkdownSource(current.getMap('meta').get('dohcMarkdownSource'))
-        ? projectArtifactSource(current).catch(() => mod.yDocToMarkdown(current))
-        : mod.yDocToMarkdown(current);
+      serialize = (current) =>
+        canPreserveMarkdownSource(current.getMap("meta").get("dohcMarkdownSource"))
+          ? projectArtifactSource(current).catch(() => mod.yDocToMarkdown(current))
+          : mod.yDocToMarkdown(current);
       if (updateTimer !== null) {
         clearTimeout(updateTimer);
         updateTimer = null;
@@ -1563,10 +1582,7 @@ export function MarkdownView(props: {
       if (updateTimer !== null) clearTimeout(updateTimer);
       updateTimer = setTimeout(
         runScheduledRecompute,
-        Math.max(
-          0,
-          Math.min(SOURCE_VIEW_UPDATE_DELAY_MS, updateDeadline - now),
-        ),
+        Math.max(0, Math.min(SOURCE_VIEW_UPDATE_DELAY_MS, updateDeadline - now)),
       );
     };
     doc.on("update", scheduleRecompute);
@@ -1697,7 +1713,8 @@ export function MarkdownView(props: {
           captureLatestConflictDraft(options.textSnapshot);
           if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         }
-        if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
+        if (!unmounted.current)
+          setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         return;
       }
       // Mounted edits publish when they happen. Re-reading this pane's editor
@@ -1706,11 +1723,7 @@ export function MarkdownView(props: {
       // unmount snapshot is allowed to publish here because its editor is gone
       // and it has no earlier publish seam.
       if (options.textSnapshot !== undefined) {
-        publishOwnedUnmountDraft(
-          props.localBuffer,
-          options.textSnapshot,
-          localSource.current,
-        );
+        publishOwnedUnmountDraft(props.localBuffer, options.textSnapshot, localSource.current);
       }
       const issuedBaseRequestId = baseContentRequestId.current;
       // Serialized here, not at enqueue: a writer that waited reads the
@@ -1755,7 +1768,8 @@ export function MarkdownView(props: {
           if (options.captureOnFailure && options.textSnapshot !== undefined) {
             captureLatestConflictDraft(options.textSnapshot);
           }
-          if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
+          if (!unmounted.current)
+            setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
           if (options.rejectOnError) {
             throw new Error("dohc cannot save this draft without a content hash.");
           }
@@ -1786,10 +1800,7 @@ export function MarkdownView(props: {
           return;
         }
         baseContentHash.current = result.contentHash;
-        acceptedRequestFloor.current = Math.max(
-          acceptedRequestFloor.current,
-          issuedBaseRequestId,
-        );
+        acceptedRequestFloor.current = Math.max(acceptedRequestFloor.current, issuedBaseRequestId);
         if (latestContentRequestId.current > issuedBaseRequestId) {
           verifyAfterRequestId.current = latestContentRequestId.current;
           if (!unmounted.current) {
@@ -1824,7 +1835,8 @@ export function MarkdownView(props: {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
-        if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
+        if (!unmounted.current)
+          setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         if (options.rejectOnError) throw error;
       }
     };
@@ -1835,12 +1847,10 @@ export function MarkdownView(props: {
     // Only a writer that must actually wait is deferred.
     const runsNow = writersLive.current === 0;
     writersLive.current += 1;
-    const queued = (runsNow ? run() : writeChain.current.then(run)).finally(
-      () => {
-        writersLive.current -= 1;
-        if (!unmounted.current) setWriterSettledEpoch((epoch) => epoch + 1);
-      },
-    );
+    const queued = (runsNow ? run() : writeChain.current.then(run)).finally(() => {
+      writersLive.current -= 1;
+      if (!unmounted.current) setWriterSettledEpoch((epoch) => epoch + 1);
+    });
     writeChain.current = queued.then(
       () => undefined,
       () => undefined,
@@ -1863,29 +1873,22 @@ export function MarkdownView(props: {
   function onPropertiesDraft(next: string) {
     if (readOnly) return;
     const pending = props.localBuffer.materializePendingDraft();
-    const combined = pending !== null
-      ? mergeMarkdownEditorBody(next, markdownEditorBody(pending))
-      : next;
+    const combined =
+      pending !== null ? mergeMarkdownEditorBody(next, markdownEditorBody(pending)) : next;
     setDraft(combined);
     latestDraft.current = combined;
     if (mode === "read") setSavedBody(combined);
     scheduleSave("complete");
   }
 
-  function scheduleSave(
-    kind: "complete" | "wysiwyg",
-    materializeWysiwyg?: () => string,
-  ) {
+  function scheduleSave(kind: "complete" | "wysiwyg", materializeWysiwyg?: () => string) {
     if (readOnly) return;
     if (kind === "wysiwyg") {
       const pending = {
         source: localSource.current,
         materialize: () => {
           const serialized = materializeWysiwyg
-            ? mergeMarkdownEditorBody(
-                latestDraft.current,
-                materializeWysiwyg(),
-              )
+            ? mergeMarkdownEditorBody(latestDraft.current, materializeWysiwyg())
             : serializeDraftRef.current();
           latestDraft.current = serialized;
           return serialized;
@@ -1949,9 +1952,7 @@ export function MarkdownView(props: {
       // expensive. Keep that performance boundary when editing starts: source
       // mode handles the full draft without building a ProseMirror document.
       switchMode(
-        exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES)
-          ? "source"
-          : "wysiwyg",
+        exceedsUtf8Bytes(props.body, WYSIWYG_MARKDOWN_THRESHOLD_BYTES) ? "source" : "wysiwyg",
       );
       return;
     }
@@ -1967,7 +1968,12 @@ export function MarkdownView(props: {
       if (!hasPrimaryModifier(event, window.dohcDesktop?.platform) || event.key !== "/") return;
       // A file's view takes the shortcut in the active editor group. A record's body never takes focus by
       // itself, so it takes the shortcut only while focus is in it.
-      if (props.recordBody ? !(event.target instanceof Node && viewRef.current?.contains(event.target)) : props.autoFocus === false) return;
+      if (
+        props.recordBody
+          ? !(event.target instanceof Node && viewRef.current?.contains(event.target))
+          : props.autoFocus === false
+      )
+        return;
       event.preventDefault();
       // Engine mode: the same keystroke drives the source-view toggle (the
       // legacy mode cycle is meaningless there — the CRDT editor is the only
@@ -2045,9 +2051,7 @@ export function MarkdownView(props: {
         return;
       }
       unsavedDraft.current = false;
-      const text =
-        localBuffer.materializePendingDraft() ??
-        serializeDraftRef.current();
+      const text = localBuffer.materializePendingDraft() ?? serializeDraftRef.current();
       // Same invariant as the plain-text hook:
       // a draft this unmount may not write is set aside rather than dropped.
       // The render-phase capture normally runs first, but it cannot when the
@@ -2055,13 +2059,13 @@ export function MarkdownView(props: {
       // `opening` — and this cleanup is already willing to write this exact
       // value, so keeping it can only be safer than losing it.
       //
-      // Declared unpinned, and it stays that way after #564. No test enters
-      // this branch with a draft the render-phase capture did not already
-      // take: reaching it needs the engine open and the file read to land in
-      // the same batch. Both conditions are conservative on purpose —
-      // `openingRef` holds the last rendered value and `writesBlocked` reads
-      // the parent's ref, so neither depends on this view living long enough
-      // to observe the refusal. Kept as a backstop, not as covered code.
+      // Declared unpinned. No test enters this branch with a draft the
+      // render-phase capture did not already take: reaching it needs the
+      // engine open and the file read to land in the same batch. Both
+      // conditions are conservative on purpose: `openingRef` holds the last
+      // rendered value and `writesBlocked` reads the parent's ref, so neither
+      // depends on this view living long enough to observe the refusal. Kept
+      // as a backstop, not as covered code.
       const current = localBuffer.getSnapshot();
       if (
         activeLocalBuffer.current === localBuffer &&
@@ -2088,10 +2092,7 @@ export function MarkdownView(props: {
         releaseUnusedDraft: true,
       }).then(() => {
         if (operationSettlement) {
-          void operationSettlement.then(
-            retireAfterSettlement,
-            retireAfterSettlement,
-          );
+          void operationSettlement.then(retireAfterSettlement, retireAfterSettlement);
         } else {
           retireAfterSettlement();
         }
@@ -2182,20 +2183,25 @@ export function MarkdownView(props: {
     return () => registerDraftFlush?.(null);
     // writeDraftNow and this flush read mutable state through refs plus
     // per-mount-stable props, so the first closure stays correct for the mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
 
-  useEffect(() => registerPendingEditorDraft(
-    () => !engineModeRef.current && (unsavedDraft.current || writersLive.current > 0) &&
-      (exitCapturedDraft.current?.revision !== draftRevision.current ||
-        exitCapturedDraft.current.text !== latestDraft.current),
-    options => exitFlush.current(options),
-    () => captureStalledExit.current(),
-  ), []);
+  useEffect(
+    () =>
+      registerPendingEditorDraft(
+        () =>
+          !engineModeRef.current &&
+          (unsavedDraft.current || writersLive.current > 0) &&
+          (exitCapturedDraft.current?.revision !== draftRevision.current ||
+            exitCapturedDraft.current.text !== latestDraft.current),
+        (options) => exitFlush.current(options),
+        () => captureStalledExit.current(),
+      ),
+    [],
+  );
 
-  // The restore half of #567: each set-aside draft stays copyable until the
-  // user takes it or dismisses it. Rendered in both branches below — the
-  // reopen can resolve into either editor.
+  // Each set-aside draft stays copyable until the user takes it or dismisses
+  // it. Rendered in both branches below, because the reopen can resolve into
+  // either editor.
   // The read-only view that follows an ended share closes the live session,
   // so the draft that turn set aside is remembered here to keep its words.
   const readOnlyDraftId = useRef<number | null>(null);
@@ -2206,18 +2212,21 @@ export function MarkdownView(props: {
         <ChangedOutsideNotice onReload={reloadChangedOutside} />
       ) : null}
       {engine.deletedWhileEditing ? (
-        <DeletedWhileEditingNotice
-          cause={engine.goneCause}
-          hasSetAsideEdit={hasSetAsideEdit}
-        />
+        <DeletedWhileEditingNotice cause={engine.goneCause} hasSetAsideEdit={hasSetAsideEdit} />
       ) : null}
       <OrphanedDraftNotices
         workspaceId={props.workspaceId}
         path={props.path}
-        message={engine.permanentFailureWhileEditing
-          ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
-          : "This document became read-only. Copy your edits to keep them."}
-        messageDraftId={engine.permanentFailureWhileEditing ? engine.permanentFailureDraftId : readOnlyDraftId.current}
+        message={
+          engine.permanentFailureWhileEditing
+            ? DOCUMENT_NOT_SAVED_DRAFT_NOTICE
+            : "This document became read-only. Copy your edits to keep them."
+        }
+        messageDraftId={
+          engine.permanentFailureWhileEditing
+            ? engine.permanentFailureDraftId
+            : readOnlyDraftId.current
+        }
         replacedDraftIds={engine.replacedDraftIds}
       />
     </>
@@ -2241,24 +2250,40 @@ export function MarkdownView(props: {
               testId="markdown-save-state"
               truncate
               quietWhenCalm
-              state={engine.readOnlyWhileEditing || readOnlyCopy || props.liveEditingPaused ? "read-only" : engineChipState}
-              shown={engine.readOnlyWhileEditing || readOnlyCopy || props.liveEditingPaused
-                ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
-                : engineChipState}
+              state={
+                engine.readOnlyWhileEditing || readOnlyCopy || props.liveEditingPaused
+                  ? "read-only"
+                  : engineChipState
+              }
+              shown={
+                engine.readOnlyWhileEditing || readOnlyCopy || props.liveEditingPaused
+                  ? orphanedDrafts.length > 0
+                    ? "read-only-transition"
+                    : engine.readOnlyCause === "access-ended"
+                      ? "read-only"
+                      : "read-only-unavailable"
+                  : engineChipState
+              }
               title={
                 readOnly
                   ? readOnlyWords
-                  : engine.changedOutside === "unsaved" && engineChipState === engine.saveState &&
-                    engine.saveState.kind === "changed-on-disk"
+                  : engine.changedOutside === "unsaved" &&
+                      engineChipState === engine.saveState &&
+                      engine.saveState.kind === "changed-on-disk"
                     ? CHANGED_OUTSIDE_NOTICE
                     : undefined
               }
-              action={engine.retryReplacement
-                ? { label: "Try again", run: engine.retryReplacement }
-                // Waiting edits end by themselves; a refused pause ends in Live documents.
-                : props.liveEditingPaused === "refused" && props.onOpenLiveDocuments
-                  ? { label: "Open Live documents", run: () => props.onOpenLiveDocuments?.(props.path) }
-                  : undefined}
+              action={
+                engine.retryReplacement
+                  ? { label: "Try again", run: engine.retryReplacement }
+                  : // Waiting edits end by themselves; a refused pause ends in Live documents.
+                    props.liveEditingPaused === "refused" && props.onOpenLiveDocuments
+                    ? {
+                        label: "Open Live documents",
+                        run: () => props.onOpenLiveDocuments?.(props.path),
+                      }
+                    : undefined
+              }
             />
           }
           actions={
@@ -2291,7 +2316,11 @@ export function MarkdownView(props: {
           // steps aside, like the legacy editor's source mode.
           <div data-testid="view-markdown-source" className="flex min-h-0 flex-1 flex-col">
             <MarkdownSourceStrip
-              words={readOnly ? readOnlyWords : "Read-only markdown source — switch back to Editor to make changes."}
+              words={
+                readOnly
+                  ? readOnlyWords
+                  : "Read-only markdown source — switch back to Editor to make changes."
+              }
               getText={() => sourceMarkdown}
             />
             {sourceMarkdown === null ? (
@@ -2344,7 +2373,14 @@ export function MarkdownView(props: {
             />
             {recordButtons}
             <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
-              <LazyPropertiesPanel ydoc={displayDoc} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} file={noteFile} onShowSource={toggleSourceView} />
+              <LazyPropertiesPanel
+                ydoc={displayDoc}
+                fieldMarks={fieldMarks}
+                readOnly={readOnly}
+                recordId={recordId}
+                file={noteFile}
+                onShowSource={toggleSourceView}
+              />
             </Suspense>
           </TopMatter>
           <EditorErrorBoundary
@@ -2403,14 +2439,22 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate quietWhenCalm state={chipState} shown={chipState} title={readOnly ? readOnlyWords : undefined} />
+              <StateMark
+                testId="markdown-save-state"
+                truncate
+                quietWhenCalm
+                state={chipState}
+                shown={chipState}
+                title={readOnly ? readOnlyWords : undefined}
+              />
             ) : null}
           </>
         }
         actions={
           <DocumentControls
             toggle={{
-              label: surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
+              label:
+                surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
               testId: "markdown-edit-toggle",
               disabled: readOnly || opening,
               title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
@@ -2439,20 +2483,18 @@ export function MarkdownView(props: {
                     // document, or refuse. This branch shows the disk, and until
                     // the engine open answers there is no telling whether the
                     // disk is the document — a session that binds a moment later
-                    // may hold replicated updates the file has never seen (#564,
-                    // codex r19/r21). Refuse for the whole unresolved window,
-                    // which the editor beside this menu already spends read-only
-                    // or opening. The refusal reads "Document not open", and the
-                    // notice below offers the retry that resolves it.
+                    // may hold replicated updates the file has never seen.
+                    // Refuse for the whole unresolved window, which the editor
+                    // beside this menu already spends read-only or opening. The
+                    // refusal reads "Document not open", and the notice below
+                    // offers the retry that resolves it.
                     //
                     // `opening` is the wait and `engineMayHoldDocument` is the
                     // wait giving up; both mean the same thing to an export. Once
                     // the open answers "not engine-backed", the file IS the
                     // document and this lifts.
                     getMarkdown: () =>
-                      opening || engine.engineMayHoldDocument
-                        ? null
-                        : serializeDraftRef.current(),
+                      opening || engine.engineMayHoldDocument ? null : serializeDraftRef.current(),
                   }
             }
           />
@@ -2465,14 +2507,35 @@ export function MarkdownView(props: {
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
       {props.lossyNote === "lossy" && props.onRetryHeldCapture ? (
-        <EngineMayHoldDocumentNotice onRetry={props.onRetryHeldCapture} contentShown message={captureHeldLiveMessage(props.path)}>
-          <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} />
+        <EngineMayHoldDocumentNotice
+          onRetry={props.onRetryHeldCapture}
+          contentShown
+          message={captureHeldLiveMessage(props.path)}
+        >
+          <OpenExternallyLink
+            workspaceId={props.workspaceId}
+            path={props.path}
+            onError={props.onButtonError}
+          />
         </EngineMayHoldDocumentNotice>
       ) : props.lossyNote === "lossy" ? (
-        <LossyNoteNotice workspaceId={props.workspaceId} path={props.path} contentHash={props.contentHash} held={props.changeHeld} tooLarge={tooLarge} onError={props.onButtonError} onNotice={props.onButtonNotice} onEditAnyway={props.onEditAnyway} />
+        <LossyNoteNotice
+          workspaceId={props.workspaceId}
+          path={props.path}
+          contentHash={props.contentHash}
+          held={props.changeHeld}
+          tooLarge={tooLarge}
+          onError={props.onButtonError}
+          onNotice={props.onButtonNotice}
+          onEditAnyway={props.onEditAnyway}
+        />
       ) : null}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
-        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />
+        <EngineMayHoldDocumentNotice
+          onRetry={props.onRetryEngineOpen}
+          contentShown
+          message={engine.openRefusal ?? engine.sharedWaiting?.message}
+        />
       ) : null}
       {engine.removalInProgress ? (
         <EngineRemovalInProgressNotice
@@ -2523,7 +2586,15 @@ export function MarkdownView(props: {
             />
             {recordButtons}
             <Suspense fallback={readOnly ? null : <PropertiesFallback />}>
-              <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} readOnly={readOnly} recordId={recordId} file={noteFile} onShowSource={toggleSourceView} />
+              <LazyPropertiesPanel
+                body={draft}
+                onChange={onPropertiesDraft}
+                fieldMarks={fieldMarks}
+                readOnly={readOnly}
+                recordId={recordId}
+                file={noteFile}
+                onShowSource={toggleSourceView}
+              />
             </Suspense>
           </TopMatter>
           <EditorErrorBoundary
@@ -2533,9 +2604,7 @@ export function MarkdownView(props: {
               key={wysiwygResyncEpoch}
               ref={attachEditor}
               value={markdownEditorBody(draft)}
-              onDirty={(materialize) =>
-                scheduleSave("wysiwyg", materialize)
-              }
+              onDirty={(materialize) => scheduleSave("wysiwyg", materialize)}
               onFocus={onLocalEditorFocus}
               workspaceId={props.workspaceId}
               path={props.path}
@@ -2554,9 +2623,9 @@ export function MarkdownView(props: {
         </div>
       ) : props.truncated ? (
         // A truncated read is already a bounded prefix and is permanently
-        // read-only. Rendering that prefix as rich Markdown used to schedule
-        // every remaining block for idle backfill, growing a 3 MiB document
-        // past 136,000 DOM nodes after the first window painted. CodeMirror
+        // read-only. Rendering that prefix as rich Markdown would schedule
+        // every remaining block for idle backfill and grow a 3 MiB document
+        // past 136,000 DOM nodes after the first window paints. CodeMirror
         // keeps the source readable with a viewport-bounded DOM and makes the
         // partial-file boundary explicit instead of presenting it as a whole
         // rich document. Keep view-markdown: callers use it as the mounted

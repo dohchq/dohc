@@ -81,7 +81,7 @@ export function findWorkspace(workspaceId: string): RegistryEntry | null {
   return store().find(workspaceId);
 }
 
-// Failed-join rollback (0P-C gate fix): unregister a workspace this process
+// Failed-join rollback: unregister a workspace this process
 // just created. No-op for unknown ids.
 export function removeWorkspace(workspaceId: string): void {
   store().remove(workspaceId);
@@ -98,7 +98,10 @@ export async function setWorkspaceRemote(
   store().setRemote(workspaceId, remote);
 }
 
-export function pauseWorkspaceRemote(workspaceId: string, syncPause?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause): void {
+export function pauseWorkspaceRemote(
+  workspaceId: string,
+  syncPause?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause,
+): void {
   store().pauseRemote(workspaceId, syncPause);
 }
 
@@ -122,11 +125,13 @@ export function acknowledgeWorkspaceShareSkips(
 
 // The relay's latest answer for which computer runs the workspace's
 // schedules. See registryStore.setAutomationHost.
-export function setWorkspaceAutomationHost(workspaceId: string, host: RelayAutomationHost | null): void {
+export function setWorkspaceAutomationHost(
+  workspaceId: string,
+  host: RelayAutomationHost | null,
+): void {
   store().setAutomationHost(workspaceId, host);
 }
 
-// A new listing of the workspace's grants. See registryStore.setShareRoster.
 export function setWorkspaceShareRoster(
   workspaceId: string,
   listing: RosterListing,
@@ -165,22 +170,25 @@ export function reconcileWorkspaceRecipientShares(
   return store().reconcileRecipientShares(workspaceId, reconcile);
 }
 
-// MU-C4: change the workspace's joined shared channels. See updateReceived.
 export function updateWorkspaceSharedChannels(
   workspaceId: string,
   update: (current: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
 ): Promise<void> {
-  return updateReceived(workspaceId, entry => entry.sharedChannels ?? [], update,
-    next => store().setSharedChannels(workspaceId, next));
+  return updateReceived(
+    workspaceId,
+    (entry) => entry.sharedChannels ?? [],
+    update,
+    (next) => store().setSharedChannels(workspaceId, next),
+  );
 }
 
-// Share mounts: change the workspace's mounted shares. See updateReceived.
 export function updateWorkspaceShareMounts(
   workspaceId: string,
   update: (current: readonly ShareMountRecord[]) => readonly ShareMountRecord[],
 ): Promise<void> {
-  return updateReceived(workspaceId, storedShareMounts, update,
-    next => store().setShareMounts(workspaceId, next));
+  return updateReceived(workspaceId, storedShareMounts, update, (next) =>
+    store().setShareMounts(workspaceId, next),
+  );
 }
 
 // The folder keeps that a share came in before the registry does, so leaving

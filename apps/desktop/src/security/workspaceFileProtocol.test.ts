@@ -6,8 +6,13 @@ afterEach(() => vi.unstubAllEnvs());
 
 function harness() {
   const workspace = { workspaceId: "workspace-a" };
-  const findWorkspace = vi.fn((id: string) => id === workspace.workspaceId ? workspace : null);
-  const readOwnedWorkspaceAsset = vi.fn(async (): Promise<{ bytes: Buffer; mediaType: string }> => ({ bytes: Buffer.from("file"), mediaType: "text/plain" }));
+  const findWorkspace = vi.fn((id: string) => (id === workspace.workspaceId ? workspace : null));
+  const readOwnedWorkspaceAsset = vi.fn(
+    async (): Promise<{ bytes: Buffer; mediaType: string }> => ({
+      bytes: Buffer.from("file"),
+      mediaType: "text/plain",
+    }),
+  );
   const handle = createWorkspaceFileProtocolHandler({ findWorkspace, readOwnedWorkspaceAsset });
   return { workspace, findWorkspace, readOwnedWorkspaceAsset, handle };
 }
@@ -17,7 +22,9 @@ describe("workspace file protocol", () => {
     const h = harness();
     const current = { workspaceId: "workspace-a" };
     h.findWorkspace.mockReturnValue(current);
-    const response = await h.handle(new Request("dohc-file://workspace-a/folder/a%20b.txt?ignored=1"));
+    const response = await h.handle(
+      new Request("dohc-file://workspace-a/folder/a%20b.txt?ignored=1"),
+    );
     expect(h.findWorkspace).toHaveBeenCalledExactlyOnceWith("workspace-a");
     expect(h.readOwnedWorkspaceAsset).toHaveBeenCalledExactlyOnceWith(current, "folder/a b.txt");
     expect(response.status).toBe(200);
@@ -29,7 +36,10 @@ describe("workspace file protocol", () => {
   it("serves only the selected buffer view", async () => {
     const h = harness();
     const backing = Buffer.from([99, 0, 128, 255, 88]);
-    h.readOwnedWorkspaceAsset.mockResolvedValue({ bytes: backing.subarray(1, 4), mediaType: "application/octet-stream" });
+    h.readOwnedWorkspaceAsset.mockResolvedValue({
+      bytes: backing.subarray(1, 4),
+      mediaType: "application/octet-stream",
+    });
     const response = await h.handle(new Request("dohc-file://workspace-a/data.bin"));
     expect([...new Uint8Array(await response.arrayBuffer())]).toEqual([0, 128, 255]);
     expect(response.headers.get("content-type")).toBe("application/octet-stream");
@@ -82,9 +92,11 @@ describe("workspace file protocol", () => {
   ])("selects CORS for renderer URL %s and origin %s", async (rendererUrl, origin, allowed) => {
     vi.stubEnv("ELECTRON_RENDERER_URL", rendererUrl);
     const h = harness();
-    const response = await h.handle(new Request("dohc-file://workspace-a/file.txt", {
-      headers: origin ? { origin } : undefined,
-    }));
+    const response = await h.handle(
+      new Request("dohc-file://workspace-a/file.txt", {
+        headers: origin ? { origin } : undefined,
+      }),
+    );
     expect(response.headers.get("access-control-allow-origin")).toBe(allowed);
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await response.text()).toBe("file");

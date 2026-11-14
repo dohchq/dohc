@@ -69,8 +69,8 @@ export interface RelayFilePeerOptions {
 }
 
 /**
- * A test-only relay peer that writes protocol operations without the retired
- * TypeScript engine. It models one remote machine and one ordered origin.
+ * A test-only relay peer that writes protocol operations itself, with no
+ * engine. It models one remote machine and one ordered origin.
  */
 export class RelayFilePeer {
   readonly originId: string;
@@ -95,8 +95,7 @@ export class RelayFilePeer {
     this.identity = options.identity;
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.nowMs ?? Date.now;
-    this.mintId =
-      options.newId ?? ((kind) => `relay-file-peer-${kind}-${randomUUID()}`);
+    this.mintId = options.newId ?? ((kind) => `relay-file-peer-${kind}-${randomUUID()}`);
   }
 
   async initialize(): Promise<void> {
@@ -105,14 +104,9 @@ export class RelayFilePeer {
 
   async writeText(path: string, text: string): Promise<RelayFileHead>;
   async writeText(input: RelayTextWrite): Promise<RelayFileHead>;
-  async writeText(
-    pathOrInput: string | RelayTextWrite,
-    text?: string,
-  ): Promise<RelayFileHead> {
+  async writeText(pathOrInput: string | RelayTextWrite, text?: string): Promise<RelayFileHead> {
     const input =
-      typeof pathOrInput === "string"
-        ? { path: pathOrInput, text: text ?? "" }
-        : pathOrInput;
+      typeof pathOrInput === "string" ? { path: pathOrInput, text: text ?? "" } : pathOrInput;
     const [head] = await this.writeTextFiles([input]);
     return head!;
   }
@@ -125,11 +119,7 @@ export class RelayFilePeer {
         const batch = writes.slice(offset, offset + MAX_OPS_PER_APPEND);
         const stagedHeads = new Map(this.heads);
         const prepared = batch.map((write, index) => {
-          const item = this.prepareWrite(
-            write,
-            this.nextOriginSeq + index,
-            stagedHeads,
-          );
+          const item = this.prepareWrite(write, this.nextOriginSeq + index, stagedHeads);
           stagedHeads.set(item.head.path, item.head);
           return item;
         });
@@ -199,10 +189,9 @@ export class RelayFilePeer {
     const blobSha256 = createHash("sha256").update(bytes).digest("hex");
     const blobBytes = Uint8Array.from(bytes).buffer;
     const trackedBefore = knownHeads.get(input.path);
-    const before =
-      Object.prototype.hasOwnProperty.call(input, "beforeOverride")
-        ? input.beforeOverride
-        : trackedBefore;
+    const before = Object.prototype.hasOwnProperty.call(input, "beforeOverride")
+      ? input.beforeOverride
+      : trackedBefore;
     const recordedAtMs = this.recordedAtMs();
     const metadata = input.metadata ?? { origin: "local-file" };
     const objectId = before?.objectId ?? trackedBefore?.objectId ?? this.mintId("object");
@@ -269,9 +258,7 @@ export class RelayFilePeer {
     return this.lastRecordedAtMs;
   }
 
-  private async uploadBlobs(
-    blobs: Array<{ sha256: string; bytes: ArrayBuffer }>,
-  ): Promise<void> {
+  private async uploadBlobs(blobs: Array<{ sha256: string; bytes: ArrayBuffer }>): Promise<void> {
     const unique = new Map(blobs.map((blob) => [blob.sha256, blob]));
     if (unique.size === 0) return;
     const have = await this.request("blobs/have", {
@@ -350,10 +337,7 @@ export class RelayFilePeer {
     return value as Record<string, unknown>;
   }
 
-  private async requireOk(
-    relayResponse: RelayResponse,
-    operation: string,
-  ): Promise<void> {
+  private async requireOk(relayResponse: RelayResponse, operation: string): Promise<void> {
     const { response } = relayResponse;
     if (response.ok) return;
     const body = await this.withTimeoutContext(
@@ -361,9 +345,7 @@ export class RelayFilePeer {
       relayResponse.timeoutSignal,
       async () => await response.text(),
     );
-    throw new Error(
-      `Relay ${operation} failed with status ${response.status}: ${body}`,
-    );
+    throw new Error(`Relay ${operation} failed with status ${response.status}: ${body}`);
   }
 
   private async withTimeoutContext<T>(
@@ -376,13 +358,11 @@ export class RelayFilePeer {
     } catch (error) {
       if (
         timeoutSignal.aborted ||
-        (error instanceof Error &&
-          (error.name === "TimeoutError" || error.name === "AbortError"))
+        (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
       ) {
-        throw new Error(
-          `Relay request ${requestPath} timed out after ${REQUEST_TIMEOUT_MS} ms.`,
-          { cause: error },
-        );
+        throw new Error(`Relay request ${requestPath} timed out after ${REQUEST_TIMEOUT_MS} ms.`, {
+          cause: error,
+        });
       }
       throw error;
     }

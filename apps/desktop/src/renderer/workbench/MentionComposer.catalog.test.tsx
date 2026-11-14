@@ -15,7 +15,13 @@ import {
 } from "./chatPoll";
 
 const candidates: MentionCandidate[] = [
-  { id: "agent:default", kind: "agent", handle: "agent", label: "Your agent", description: "your agent" },
+  {
+    id: "agent:default",
+    kind: "agent",
+    handle: "agent",
+    label: "Your agent",
+    description: "your agent",
+  },
   { id: "user:you", kind: "user", handle: "you", label: "You", description: "you" },
 ];
 
@@ -48,7 +54,6 @@ function Harness(props: {
         {...(props.onEscape ? { onEscape: props.onEscape } : {})}
         {...(props.offersPoll === false ? {} : { poll, onPollChange: setPoll })}
       />
-      {/* The open poll's choices, the ones Send would ask. */}
       <output data-testid="poll-state">{JSON.stringify(openPollChoices(poll))}</output>
     </>
   );
@@ -60,7 +65,8 @@ const rows = () =>
     .getAllByTestId("chats-catalog-option")
     .map((row) => row.getAttribute("data-row"));
 const choices = () => screen.getAllByTestId("chats-poll-choice") as HTMLInputElement[];
-const pollState = () => JSON.parse(screen.getByTestId("poll-state").textContent ?? "null") as string[] | null;
+const pollState = () =>
+  JSON.parse(screen.getByTestId("poll-state").textContent ?? "null") as string[] | null;
 const send = () => screen.getByTestId("chats-send") as HTMLButtonElement;
 
 afterEach(() => {
@@ -119,7 +125,9 @@ describe("the / catalog", () => {
     expect(within(catalog).getByText("@").tagName).toBe("KBD");
     // `[[` does not work in the composer, so File or heading shows no key.
     expect(within(catalog).queryByText("[[")).toBeNull();
-    expect(composer().getAttribute("aria-activedescendant")).toBe("chats-composer-mentions-catalog-poll");
+    expect(composer().getAttribute("aria-activedescendant")).toBe(
+      "chats-composer-mentions-catalog-poll",
+    );
   });
 
   it.each([
@@ -156,7 +164,6 @@ describe("the / catalog", () => {
     expect(composer().value).toBe("Lunch where? ");
     expect(pollState()).toEqual(["", ""]);
     expect(screen.queryByTestId("chats-catalog")).toBeNull();
-    // The question is written, so the first choice takes focus.
     expect(document.activeElement).toBe(choices()[0]);
   });
 
@@ -176,7 +183,9 @@ describe("the / catalog", () => {
     expect(composer().value).toBe("ask @");
     const menu = await screen.findByTestId("chats-mention-menu");
     expect(within(menu).getAllByTestId("chats-mention-option")).toHaveLength(2);
-    expect(composer().getAttribute("aria-activedescendant")).toBe("chats-composer-mentions-agent:default");
+    expect(composer().getAttribute("aria-activedescendant")).toBe(
+      "chats-composer-mentions-agent:default",
+    );
   });
 
   it("File or heading turns the / into @ with the files active", async () => {
@@ -193,9 +202,13 @@ describe("the / catalog", () => {
     render(<Harness onEscape={onEscape} />);
     await userEvent.type(composer(), "/");
     await userEvent.keyboard("{ArrowDown}");
-    expect(composer().getAttribute("aria-activedescendant")).toBe("chats-composer-mentions-catalog-mention");
+    expect(composer().getAttribute("aria-activedescendant")).toBe(
+      "chats-composer-mentions-catalog-mention",
+    );
     await userEvent.keyboard("{ArrowUp}{ArrowUp}");
-    expect(composer().getAttribute("aria-activedescendant")).toBe("chats-composer-mentions-catalog-file");
+    expect(composer().getAttribute("aria-activedescendant")).toBe(
+      "chats-composer-mentions-catalog-file",
+    );
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByTestId("chats-catalog")).toBeNull();
     expect(onEscape).not.toHaveBeenCalled();
@@ -239,13 +252,24 @@ describe("the poll block", () => {
     expect(pollState()).toBeNull();
   });
 
-  it.each(["stream", "post"] as const)("puts a %s poll's choices under its question, in the box", (surface) => {
-    render(<Harness surface={surface === "post" ? surface : undefined} initialValue="Lunch?" initialPoll={["Soup", "Salad"]} />);
-    const question = screen.getByTestId("chats-composer");
-    const poll = screen.getByTestId("chats-poll");
-    expect(question.closest("form")!.contains(poll)).toBe(true);
-    expect(question.compareDocumentPosition(poll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
+  it.each(["stream", "post"] as const)(
+    "puts a %s poll's choices under its question, in the box",
+    (surface) => {
+      render(
+        <Harness
+          surface={surface === "post" ? surface : undefined}
+          initialValue="Lunch?"
+          initialPoll={["Soup", "Salad"]}
+        />,
+      );
+      const question = screen.getByTestId("chats-composer");
+      const poll = screen.getByTestId("chats-poll");
+      expect(question.closest("form")!.contains(poll)).toBe(true);
+      expect(
+        question.compareDocumentPosition(poll) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    },
+  );
 
   it("Enter moves to the next choice and adds one at the end", async () => {
     const onSend = vi.fn();
@@ -261,7 +285,14 @@ describe("the poll block", () => {
 
   it("Enter in a choice never posts, even with a poll ready to send", async () => {
     const onSend = vi.fn();
-    render(<Harness surface="post" initialValue="Lunch?" initialPoll={["Soup", "Salad"]} onSend={onSend} />);
+    render(
+      <Harness
+        surface="post"
+        initialValue="Lunch?"
+        initialPoll={["Soup", "Salad"]}
+        onSend={onSend}
+      />,
+    );
     expect(send().disabled).toBe(false);
     choices()[1]!.focus();
     await userEvent.keyboard("{Enter}");
@@ -296,13 +327,28 @@ describe("the poll block", () => {
     const order: (string | null)[] = [];
     for (let step = 0; step < 5; step += 1) {
       await userEvent.tab();
-      order.push(document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.textContent ?? null);
+      order.push(
+        document.activeElement?.getAttribute("aria-label") ??
+          document.activeElement?.textContent ??
+          null,
+      );
     }
-    expect(order).toEqual(["Remove choice 1", "Choice 2", "Remove choice 2", "Add a choice", "Remove poll"]);
+    expect(order).toEqual([
+      "Remove choice 1",
+      "Choice 2",
+      "Remove choice 2",
+      "Add a choice",
+      "Remove poll",
+    ]);
   });
 
   it("adds up to twelve choices, removes one, and removes the poll", () => {
-    render(<Harness initialValue="Lunch?" initialPoll={Array.from({ length: 11 }, (_, index) => `Dish ${index}`)} />);
+    render(
+      <Harness
+        initialValue="Lunch?"
+        initialPoll={Array.from({ length: 11 }, (_, index) => `Dish ${index}`)}
+      />,
+    );
     fireEvent.click(screen.getByTestId("chats-poll-add"));
     expect(choices()).toHaveLength(12);
     expect(screen.queryByTestId("chats-poll-add")).toBeNull();
@@ -319,8 +365,18 @@ describe("the poll block", () => {
     { name: "one choice", value: "Lunch?", poll: ["Soup", " "], enabled: false },
     { name: "two choices", value: "Lunch?", poll: ["Soup", "Salad", ""], enabled: true },
     { name: "a repeat once trimmed", value: "Lunch?", poll: ["Soup", "Soup "], enabled: false },
-    { name: "a choice over 200 characters", value: "Lunch?", poll: ["Soup", "x".repeat(201)], enabled: false },
-    { name: "a choice of 200 characters", value: "Lunch?", poll: ["Soup", "x".repeat(200)], enabled: true },
+    {
+      name: "a choice over 200 characters",
+      value: "Lunch?",
+      poll: ["Soup", "x".repeat(201)],
+      enabled: false,
+    },
+    {
+      name: "a choice of 200 characters",
+      value: "Lunch?",
+      poll: ["Soup", "x".repeat(200)],
+      enabled: true,
+    },
   ])("Send with $name is enabled: $enabled", ({ value, poll, enabled }) => {
     render(<Harness initialValue={value} initialPoll={poll} />);
     expect(send().disabled).toBe(!enabled);
@@ -334,7 +390,6 @@ describe("the poll block", () => {
     expect(error.textContent).toBe("Soup is already a choice.");
     expect(choices()[1]!.getAttribute("aria-invalid")).toBe("true");
     expect(error.id).toBe(choices()[1]!.getAttribute("aria-describedby"));
-    // Under the repeated row, before the choices that follow it.
     expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(error);
     expect(choices()[1]!.className).toContain("focus:border-danger");
     expect(choices()[1]!.className).toContain("focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]");
@@ -345,16 +400,29 @@ describe("the poll block", () => {
   it("names each repeated choice once, under its first repeat", () => {
     render(<Harness initialValue="Lunch?" initialPoll={["Soup", "Soup", "Pie", "Pie", "Pie"]} />);
     const errors = screen.getAllByTestId("chats-poll-error");
-    expect(errors.map((error) => error.textContent)).toEqual(["Soup is already a choice.", "Pie is already a choice."]);
+    expect(errors.map((error) => error.textContent)).toEqual([
+      "Soup is already a choice.",
+      "Pie is already a choice.",
+    ]);
     expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(errors[0]);
     expect(choices()[3]!.closest("div")!.nextElementSibling).toBe(errors[1]);
-    // Each message has its own id, and every repeat of a choice points at
-    // that choice's message; the first of each choice points at none.
     const ids = errors.map((error) => error.id);
     expect(ids.every(Boolean)).toBe(true);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(choices().map((input) => input.getAttribute("aria-describedby"))).toEqual([null, ids[0], null, ids[1], ids[1]]);
-    expect(choices().map((input) => input.getAttribute("aria-invalid"))).toEqual([null, "true", null, "true", "true"]);
+    expect(choices().map((input) => input.getAttribute("aria-describedby"))).toEqual([
+      null,
+      ids[0],
+      null,
+      ids[1],
+      ids[1],
+    ]);
+    expect(choices().map((input) => input.getAttribute("aria-invalid"))).toEqual([
+      null,
+      "true",
+      null,
+      "true",
+      "true",
+    ]);
   });
 
   it("brings back a removed poll's choices when a poll is opened again, by either door", () => {
@@ -363,10 +431,11 @@ describe("the poll block", () => {
     expect(pollState()).toBeNull();
     fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
     expect(choices().map((input) => input.value)).toEqual(["Soup", "Salad"]);
-    // The pressed Poll button removes it too, and the catalog brings it back.
     fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
     expect(pollState()).toBeNull();
-    fireEvent.change(composer(), { target: { value: "Lunch? /poll", selectionStart: 12, selectionEnd: 12 } });
+    fireEvent.change(composer(), {
+      target: { value: "Lunch? /poll", selectionStart: 12, selectionEnd: 12 },
+    });
     fireEvent.keyDown(composer(), { key: "Enter" });
     expect(pollState()).toEqual(["Soup", "Salad"]);
   });

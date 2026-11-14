@@ -1,40 +1,82 @@
 import { expect, it } from "vitest";
-import { DaemonRefusalError, isTransientEngineRefusal, isYdocAuthorCapacityRefusal, isYdocUpdateAdmissionRefusal } from "./daemonLiveAdapter";
+import {
+  DaemonRefusalError,
+  isTransientEngineRefusal,
+  isYdocAuthorCapacityRefusal,
+  isYdocUpdateAdmissionRefusal,
+} from "./daemonLiveAdapter";
 
 it("retries only the author-capacity limit refusal", () => {
-  const capacity = new DaemonRefusalError({code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no"}, null);
-  const oversized = new DaemonRefusalError({code: "LIMIT_EXCEEDED", message: "author details too large", retry: "no"}, null);
+  const capacity = new DaemonRefusalError(
+    { code: "LIMIT_EXCEEDED", message: "ydoc-author-capacity", retry: "no" },
+    null,
+  );
+  const oversized = new DaemonRefusalError(
+    { code: "LIMIT_EXCEEDED", message: "author details too large", retry: "no" },
+    null,
+  );
   expect(isYdocAuthorCapacityRefusal(capacity)).toBe(true);
   expect(isTransientEngineRefusal(capacity)).toBe(true);
   expect(isTransientEngineRefusal(oversized)).toBe(false);
 });
 
-it.each(["CANCELLED", "INTERNAL", "DEADLINE_EXCEEDED", "OVERLOADED", "RELAY_INVALID_RESPONSE"] as const)(
-  "does not infer non-admission from %s with retry no", code => {
-    expect(isYdocUpdateAdmissionRefusal(new DaemonRefusalError({ code, message: "uncertain", retry: "no" }, null))).toBe(false);
+it.each([
+  "CANCELLED",
+  "INTERNAL",
+  "DEADLINE_EXCEEDED",
+  "OVERLOADED",
+  "RELAY_INVALID_RESPONSE",
+] as const)("does not infer non-admission from %s with retry no", (code) => {
+  expect(
+    isYdocUpdateAdmissionRefusal(
+      new DaemonRefusalError({ code, message: "uncertain", retry: "no" }, null),
+    ),
+  ).toBe(false);
+});
+
+it.each(["INVALID_PARAMS", "LIMIT_EXCEEDED"] as const)(
+  "retires unknown %s input refusals",
+  (code) => {
+    expect(
+      isYdocUpdateAdmissionRefusal(
+        new DaemonRefusalError({ code, message: "future-refusal", retry: "no" }, null),
+      ),
+    ).toBe(true);
   },
 );
 
-it.each(["INVALID_PARAMS", "LIMIT_EXCEEDED"] as const)("retires unknown %s input refusals", code => {
-  expect(isYdocUpdateAdmissionRefusal(new DaemonRefusalError({ code, message: "future-refusal", retry: "no" }, null))).toBe(true);
+it.each([
+  "ydoc-lineage-stale",
+  "lineage-write-stale",
+  "lineage-epoch-changed",
+  "lineage-predecessor-mismatch",
+  "lineage-state-vector-mismatch",
+])("does not retire an edit on a %s refusal", (message) => {
+  expect(
+    isYdocUpdateAdmissionRefusal(
+      new DaemonRefusalError({ code: "INVALID_PARAMS", message, retry: "no" }, null),
+    ),
+  ).toBe(false);
 });
 
-// The engine names these collaboration refusals by their code words. A
-// lineage that moved does not prove the edit itself was refused.
-it.each(["ydoc-lineage-stale", "lineage-write-stale", "lineage-epoch-changed", "lineage-predecessor-mismatch",
-  "lineage-state-vector-mismatch"])("does not retire an edit on a %s refusal", message => {
-  expect(isYdocUpdateAdmissionRefusal(new DaemonRefusalError({ code: "INVALID_PARAMS", message, retry: "no" }, null))).toBe(false);
+it.each([
+  "update-too-large",
+  "content-kind-mismatch",
+  "malformed-update",
+  "workspace operation failed",
+])("retires an edit on a %s refusal", (message) => {
+  expect(
+    isYdocUpdateAdmissionRefusal(
+      new DaemonRefusalError({ code: "INVALID_PARAMS", message, retry: "no" }, null),
+    ),
+  ).toBe(true);
 });
-
-it.each(["update-too-large", "content-kind-mismatch", "malformed-update", "workspace operation failed"])(
-  "retires an edit on a %s refusal", message => {
-    expect(isYdocUpdateAdmissionRefusal(new DaemonRefusalError({ code: "INVALID_PARAMS", message, retry: "no" }, null))).toBe(true);
-  },
-);
 
 it("keeps an oversized reply ambiguous after execution", () => {
   const wireError = {
-    code: "INTERNAL", message: "response-wire-limit-exceeded", retry: "afterBackoff",
+    code: "INTERNAL",
+    message: "response-wire-limit-exceeded",
+    retry: "afterBackoff",
   } as const;
   const refusal = new DaemonRefusalError(wireError, null);
   expect(refusal.disposition).toBe("afterBackoff");
@@ -43,15 +85,27 @@ it("keeps an oversized reply ambiguous after execution", () => {
 });
 
 it("retries only the pending settlement discriminator", () => {
-  const pending = new DaemonRefusalError({code: "OVERLOADED", message: "settlement-materialization-pending", retry: "afterBackoff"}, null);
-  const other = new DaemonRefusalError({code: "OVERLOADED", message: "another failure", retry: "no"}, null);
+  const pending = new DaemonRefusalError(
+    { code: "OVERLOADED", message: "settlement-materialization-pending", retry: "afterBackoff" },
+    null,
+  );
+  const other = new DaemonRefusalError(
+    { code: "OVERLOADED", message: "another failure", retry: "no" },
+    null,
+  );
   expect(isTransientEngineRefusal(pending)).toBe(true);
   expect(isTransientEngineRefusal(other)).toBe(false);
 });
 
 it("retries a reader with retries left and not one the engine gave up on", () => {
-  const retryable = new DaemonRefusalError({code: "OVERLOADED", message: "markdown-reader-retryable", retry: "afterBackoff"}, null);
-  const exhausted = new DaemonRefusalError({code: "INTERNAL", message: "workspace operation failed", retry: "no"}, null);
+  const retryable = new DaemonRefusalError(
+    { code: "OVERLOADED", message: "markdown-reader-retryable", retry: "afterBackoff" },
+    null,
+  );
+  const exhausted = new DaemonRefusalError(
+    { code: "INTERNAL", message: "workspace operation failed", retry: "no" },
+    null,
+  );
   expect(isTransientEngineRefusal(retryable)).toBe(true);
   expect(isTransientEngineRefusal(exhausted)).toBe(false);
 });

@@ -26,10 +26,18 @@ export function SampleAgentCard() {
       <View style={styles.lines}>
         <Text style={[styles.name, { color: theme.ink }]}>
           {card.name}
-          {card.nameAsReported ? <Text style={[styles.line, { color: theme.muted }]}>{` ${noBreak(AS_REPORTED)}`}</Text> : null}
+          {card.nameAsReported ? (
+            <Text style={[styles.line, { color: theme.muted }]}>{` ${noBreak(AS_REPORTED)}`}</Text>
+          ) : null}
         </Text>
-        {card.kindLine ? <Text style={[styles.line, { color: theme.muted }]}>{card.kindLine}</Text> : null}
-        {card.reported ? <Text style={[styles.line, { color: theme.muted }]}>{`${card.reported} ${noBreak(AS_REPORTED)}`}</Text> : null}
+        {card.kindLine ? (
+          <Text style={[styles.line, { color: theme.muted }]}>{card.kindLine}</Text>
+        ) : null}
+        {card.reported ? (
+          <Text
+            style={[styles.line, { color: theme.muted }]}
+          >{`${card.reported} ${noBreak(AS_REPORTED)}`}</Text>
+        ) : null}
       </View>
     </View>
   );
@@ -41,9 +49,15 @@ function noBreak(text: string): string {
 }
 
 const styles = StyleSheet.create({
-  sheet: { flexDirection: "row", alignItems: "flex-start", gap: 12, paddingHorizontal: 20, paddingTop: 24, paddingBottom: 12 },
+  sheet: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    paddingHorizontal: 20,
+    paddingTop: 24,
+    paddingBottom: 12,
+  },
   lines: { flex: 1, gap: 4 },
   name: { fontSize: 17, fontWeight: "600", lineHeight: 22 },
   line: { fontSize: 15, fontWeight: "400", lineHeight: 20 },
 });
-

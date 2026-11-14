@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import { sendCliRequest } from "@dohc/cli/client";
-import { CLI_PROTOCOL_VERSION, type CliRequestWithoutToken, type CliResultByVerb, type CliVerb } from "@dohc/cli/protocol";
+import {
+  CLI_PROTOCOL_VERSION,
+  type CliRequestWithoutToken,
+  type CliResultByVerb,
+  type CliVerb,
+} from "@dohc/cli/protocol";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -69,9 +74,7 @@ async function agentCli<Verb extends CliVerb>(
 }
 
 async function waitForCliEndpoint(homeDir: string): Promise<void> {
-  const endpointFile = process.platform === "win32"
-    ? "dohc-cli-endpoint"
-    : "dohc-cli.sock";
+  const endpointFile = process.platform === "win32" ? "dohc-cli-endpoint" : "dohc-cli.sock";
   await expect
     .poll(
       async () => {
@@ -90,8 +93,6 @@ async function waitForCliEndpoint(homeDir: string): Promise<void> {
     .toBe(true);
 }
 
-// The agent's collection lands as a live view: the tree row carries
-// data-collection once the engine adopts the folder, and one click opens it.
 async function openCollectionFromTree(page: Page): Promise<void> {
   const tasksRow = page.locator('[data-testid="tree-row"][data-path="tasks"]');
   await expect(tasksRow).toHaveAttribute("data-collection", "true", {
@@ -104,9 +105,7 @@ async function openCollectionFromTree(page: Page): Promise<void> {
 }
 
 function boardCard(page: Page, column: string, title: string) {
-  return page.locator(
-    `section[aria-label="${column}"] [role="listitem"][aria-label="${title}"]`,
-  );
+  return page.locator(`section[aria-label="${column}"] [role="listitem"][aria-label="${title}"]`);
 }
 
 test("an agent's file-written collection opens live and answers its MCP queries", async () => {
@@ -120,8 +119,6 @@ test("an agent's file-written collection opens live and answers its MCP queries"
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // --- The agent creates the collection with ordinary file writes: a
-    // schema and one record. The open app's watcher captures them.
     await mkdir(join(temp.rootPath, "tasks"), { recursive: true });
     await writeFile(join(temp.rootPath, "tasks", "collection.yaml"), SCHEMA_YAML);
     await writeFile(
@@ -133,8 +130,6 @@ test("an agent's file-written collection opens live and answers its MCP queries"
       timeout: 30_000,
     });
 
-    // --- A second record written while the board is open appears live: no
-    // refresh, no UI action.
     await writeFile(
       join(temp.rootPath, "tasks", "zephyr.md"),
       recordMd(ZEPHYR_ID, "Zephyr", "Doing"),
@@ -146,14 +141,16 @@ test("an agent's file-written collection opens live and answers its MCP queries"
     // --- The desktop offers this workspace's MCP config as the writable
     // local profile: no --share-access narrows the agent's tools here.
     const mcpArgs = await page.evaluate(async () => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          getWorkspaceRegistry(): Promise<{
-            workspaces: Array<{ workspaceId: string }>;
-          }>;
-          getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
-        };
-      }).dohcDesktop;
+      const api = (
+        window as unknown as {
+          dohcDesktop: {
+            getWorkspaceRegistry(): Promise<{
+              workspaces: Array<{ workspaceId: string }>;
+            }>;
+            getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
+          };
+        }
+      ).dohcDesktop;
       const registry = await api.getWorkspaceRegistry();
       const config = await api.getMcpConfig({
         workspaceId: registry.workspaces[0]!.workspaceId,
@@ -162,23 +159,16 @@ test("an agent's file-written collection opens live and answers its MCP queries"
     });
     expect(mcpArgs).not.toContain("--share-access");
 
-    // --- The agent queries its collection back through the CLI hop its MCP
-    // tools use: both records, with the indexed field values.
     await waitForCliEndpoint(temp.homeDir);
     const query = await agentCli(temp, "collectionQuery", {
       collectionPath: "tasks",
     });
     if (!query.ok) throw new Error(`collectionQuery failed: ${query.reason}`);
-    expect(query.records.map((entry) => entry.id).sort()).toEqual(
-      [APOLLO_ID, ZEPHYR_ID].sort(),
-    );
+    expect(query.records.map((entry) => entry.id).sort()).toEqual([APOLLO_ID, ZEPHYR_ID].sort());
     const apollo = query.records.find((entry) => entry.id === APOLLO_ID);
     expect(apollo?.path).toBe("tasks/apollo.md");
-    expect(
-      apollo?.values.find((value) => value.field === "Status")?.value,
-    ).toBe("Todo");
+    expect(apollo?.values.find((value) => value.field === "Status")?.value).toBe("Todo");
 
-    // A filtered query narrows to the one Doing record.
     const filtered = await agentCli(temp, "collectionQuery", {
       collectionPath: "tasks",
       filter: { field: "Status", operator: "equals", value: "Doing" },
@@ -186,7 +176,6 @@ test("an agent's file-written collection opens live and answers its MCP queries"
     if (!filtered.ok) throw new Error(`filtered query failed: ${filtered.reason}`);
     expect(filtered.records.map((entry) => entry.id)).toEqual([ZEPHYR_ID]);
 
-    // --- One record read returns the record plus its bounded history page.
     const detail = await agentCli(temp, "collectionRecord", {
       collectionPath: "tasks",
       recordId: APOLLO_ID,
@@ -199,8 +188,6 @@ test("an agent's file-written collection opens live and answers its MCP queries"
   }
 });
 
-// The write half of the gate: MCP field sets and record creates ride the
-// desktop's one collection write seam, attributed to the agent.
 test("an agent's MCP field set and record create land live with agent attribution", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
@@ -224,9 +211,6 @@ test("an agent's MCP field set and record create land live with agent attributio
     });
     await waitForCliEndpoint(temp.homeDir);
 
-    // --- The agent sets a field through its MCP write tool: the card moves
-    // columns on the open board with no refresh, and the write settles into
-    // the record's file.
     const set = await agentCli(temp, "collectionSetFields", {
       recordPath: "tasks/apollo.md",
       fields: { Status: "Doing" },
@@ -251,9 +235,6 @@ test("an agent's MCP field set and record create land live with agent attributio
       )
       .toBe(true);
 
-    // --- Record history attributes the change to the agent: the CLI hop's
-    // derived author is agent `dohc-mcp`, and the engine stamps that origin
-    // on the field's history row.
     const detail = await agentCli(temp, "collectionRecord", {
       collectionPath: "tasks",
       recordId: APOLLO_ID,
@@ -266,8 +247,6 @@ test("an agent's MCP field set and record create land live with agent attributio
     expect(statusChange).toBeDefined();
     expect(statusChange?.authorOriginId).toBe("dohc-mcp");
 
-    // --- The agent creates a record through MCP: it gets a record id,
-    // the open board shows the new card live, and a query returns both.
     const created = await agentCli(temp, "collectionCreateRecord", {
       collectionPath: "tasks",
       name: "hermes",

@@ -82,9 +82,7 @@ Its `context.ts` implements host callbacks through QuickJS handles.
 This package uses an explicit runtime and context for those controls, and instantiates the release build's Wasm with its own memory for each operation.
 
 Focused tests cover candidate isolation, changesets, SQL access, read-only calls, loops, allocation pressure, serialization getters, native SQL timeouts, refusal, attachment scope, and cancellation.
-The initial implementation passed on Windows Node 24.16.0.
-A Linux Node 24.20.0 container also initialized a database, executed an operation, and returned the expected changeset.
-These checks do not establish shared commit, publication, or packaged desktop behavior.
+These tests do not establish shared commit, publication, or packaged desktop behavior.
 
 ## Packaging
 
@@ -249,55 +247,38 @@ It removes `SharedArrayBuffer` before authored code runs, because its `grow` ret
 A worker thread is enough because evaluation runs only JavaScript and WebAssembly. The dataset guest uses a child process because it also runs SQLite.
 The worker compiles QuickJS once and gives each request a fresh instance with its own WebAssembly memory, so no request reads memory that another request used.
 That memory is capped at 24 MiB. QuickJS uses about 7 MiB of it, so one formula or code step can use about 17 MiB, less its scope.
-QuickJS's own memory limit cannot measure allocations in this build, so the cap is the bound. The worker adds about 23 MB to its process when idle and about 38 MB at the cap.
-The worker exits after 30 seconds without work, which returns that memory. The next request starts a new one.
+QuickJS's own memory limit cannot measure allocations in this build, so the cap is the bound.
+The worker exits after 30 seconds without work, which returns its memory. The next request starts a new one.
 Electron hosts stage `dist/automation-worker.mjs` beside its `quickjs-emscripten` dependency and pass that file as `entryPath`.
 
-| Limit | Value | Dataset guest |
-|---|---|---|
-| Time to read the scope into one formula or code step's context | 1 s | none |
-| Time for one formula | 100 ms | none |
-| Time for one code step | 1 s | 1 s for one operation |
-| Time one request's formulas and code steps run, not counting reading the scope | 8 s | 8 s for one operation |
-| Time one request reads the scope, over all its formulas | 8 s | none |
-| Memory for one formula or code step | about 17 MiB, from a 24 MiB cap | 16 MiB for one operation |
-| Stack | 256 KiB | 256 KiB |
-| Source of one formula or code step | 64 KiB | 256 KiB |
-| Parts of one message text | 1,024 | none |
-| Result of one formula or code step, as JSON | 64 KiB, nested at most 64 levels | 256 KiB |
-| Scope, as JSON | 256 KiB, and each value in it nested at most 64 levels | 256 KiB of query results |
-| Formulas in one request | 64 | none |
-| Requests waiting or running | 16 | 8 operations running |
+`AUTOMATION_LIMITS` in [`src/automation-protocol.ts`](src/automation-protocol.ts) sets the evaluator's time, memory, size, nesting, and count limits.
+Each is no looser than its dataset guest counterpart in `DEFAULT_LIMITS` in [`src/protocol.ts`](src/protocol.ts).
 
 The time limits count wall time, as the dataset guest's limits do. A formula's time starts once its scope is ready, so a large scope does not use it up.
-Windows counts a thread's processor time by clock ticks, and on a busy machine it counted 47 ms for 570 ms of work, so processor time cannot bound a formula.
+Windows counts a thread's processor time by clock ticks and can undercount it on a busy machine, so processor time cannot bound a formula.
 The worker evaluates one formula as it starts, so a cold worker's first formula does not spend its time compiling QuickJS's code paths.
 QuickJS checks the limits between bytecodes, so native work such as converting a huge BigInt to text can run past them.
 A result or a read scope that arrives after its limit is a timeout. A watchdog replaces the worker when a formula runs 2 seconds past its limits.
 That formula times out and a new worker evaluates the ones after it.
-When an item breaks a worker's QuickJS instance, that item's own result asks for a new worker, which evaluates the items after it. A worker that fails before it finishes any item makes the items sent to it fail with `runtime` instead of starting another worker.
+If an item breaks the worker's QuickJS instance, that item fails. The evaluator replaces the worker, and the new worker evaluates the items after it.
+If a worker fails before it finishes any item, the items sent to it fail with `runtime`. The evaluator does not start another worker for them.
 A request keeps two totals: the time its formulas run, and the time it spends reading the scope.
 A run that sends several requests, as a run with code steps does, passes the same `spent` record to each, so the two totals cover the whole run.
-Reading a 256 KiB scope takes 15 to 25 ms on a desktop, so 64 formulas can spend several seconds reading it. That time never cuts off a formula's run time.
+The totals are separate, so the time a request spends reading a large scope never cuts off a formula's run time.
 Formulas that start after either total passes 8 seconds time out without running. Each total passes 8 seconds only by the item running when it did, so one request takes at most about 21 seconds.
 When 16 requests are waiting or running, a new request returns `busy` for every item at once. The evaluator does this before it reads the scope or the formulas, so it returns `busy` even for input it would reject. The caller runs the automation again later.
 
 The scope and formulas must be plain JSON data: no bigints, functions, symbols, or class instances such as dates, maps, and `Array` subclasses.
 Before the caller's thread copies anything to the worker, the evaluator rejects a scope with such a value. It refuses an oversized source or message text, and an oversized or deeply nested scope, as `too_large`.
-It counts the UTF-8 bytes `JSON.stringify` would write for the scope, including escapes, and stops at the limits, so a cycle is `too_large`.
+The evaluator counts the scope's JSON-encoded UTF-8 bytes, including escapes. It stops at the limits, so it reports a cycle as `too_large`.
 Values in the scope, such as a field value or a bound step result, can nest 64 levels deep, as a result can. The scope and its `record` or `bindings` object add two levels.
 The worker measures size and nesting again from the JSON, and it refuses a scope it cannot turn into JSON.
 
 ### Scope
 
-| Name | Contents |
-|---|---|
-| `record` | The triggering record's field values, by field name. It is `null` when the trigger has no record, such as a schedule |
-| `previous` | The field values before the change. It is empty when the trigger has no earlier values, such as a new record or a button |
-| `trigger` | The trigger's `kind` and its facts |
-| `person` | `{ id, name }` of the person who made the change, or `null` |
-| `message` | The Group message that triggered the run, or `null` |
-| `now` | The host passes the run's time as ISO 8601 with the running computer's UTC offset. Formulas read it through `now()` and `today()` |
+`AutomationScope` in [`src/automation-protocol.ts`](src/automation-protocol.ts) defines what the host passes: the triggering `record`, its `previous` field values, the `trigger`, the `person` who made the change, the Group `message`, and `now`.
+Its comments say what a formula reads when the trigger has no such value. `record` is `null` on a schedule, and `previous` is empty for a new record or a button.
+Formulas read `now` through `now()` and `today()`.
 
 The host also passes `bindings`: earlier step results, each under the name its step binds with `as`.
 A formula reads each one as a name of its own, such as `tasks.length`. A binding cannot use a name in `AUTOMATION_SCOPE_NAMES` or a QuickJS global, such as `Math`.

@@ -165,7 +165,6 @@ fn prepare_pending_exports(
     Ok(declined)
 }
 
-/// Journal one stream's next record, or finish the stream.
 fn export_next(
     tx: &Transaction<'_>,
     p: [&str; 5],

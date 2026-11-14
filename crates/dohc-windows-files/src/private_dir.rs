@@ -105,13 +105,13 @@ pub fn not_private(err: &io::Error) -> Option<&NotPrivate> {
 }
 
 /// Create the folder `relative` in `base`, and any missing folder between
-/// them, or take the one already there, and make it private: give it the
-/// DACL of a user's profile folder, full control for SYSTEM, Administrators
-/// and this user and nothing inherited from the folders above, and give
-/// everything in it only what it inherits from that. Windows lets anyone a
-/// file's own DACL admits open it by its full path, even in a folder they
-/// can't list, so what is in the folder needs the change as much as the
-/// folder does. A folder this call creates gets the DACL as it is created.
+/// them, or take the one already there, and make it private. The folder gets
+/// the DACL of a user's profile folder: full control for SYSTEM,
+/// Administrators and this user, and nothing inherited from the folders
+/// above. A folder this call creates gets the DACL as it is created.
+/// Everything in the folder gets only what it inherits from that DACL,
+/// because Windows lets anyone a file's own DACL admits open it by its full
+/// path, even in a folder they can't list.
 ///
 /// `base` may be or lie under a link. A link at any part of `relative`, or
 /// anything that is not a folder, is refused as [`NotPrivate`] before
@@ -119,10 +119,9 @@ pub fn not_private(err: &io::Error) -> Option<&NotPrivate> {
 /// since an owner can always read an item and change its DACL. Only this
 /// user, Administrators and SYSTEM may own the folders and what is in them.
 ///
-/// Each folder on the way to it, such as `.dohc`, gets the same DACL on
-/// itself alone, and nothing in it changes: an item already in it keeps its
-/// own entries. With that DACL, no other account may add anything to the
-/// folder on the way.
+/// Each folder on the way, such as `.dohc`, gets the same DACL on itself
+/// alone, so no other account may add anything to it. An item already in it
+/// keeps its own entries.
 ///
 /// After the folder's DACL changes, everything in it is checked. An item
 /// with entries of its own, or a protected DACL, is given only what the
@@ -220,7 +219,6 @@ fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result
             }
         }
     }
-    // The folders above stay held until this returns the last one.
     let (path, shown) = (held.path.clone(), held.shown.clone());
     let folder = held.folders.pop().ok_or(io::ErrorKind::InvalidInput)?;
     let (Some(private), Some(security)) = (private, security) else {

@@ -10,7 +10,7 @@ export const forgedSources = [
   "Approve <!note text here> the invoice",
   "Approve <![CDATA[wire the deposit]]> the invoice",
   "a <x hidden>secret</x> b",
-  "<x-y style=\"background:url(https://evil.example/p)\">",
+  '<x-y style="background:url(https://evil.example/p)">',
   "<x onmouseover=alert(1)>hover</x>",
   "<x hidden>\nsecret",
   "invoice&#x202E;fdp.exe",
@@ -19,5 +19,5 @@ export const forgedSources = [
   "&#49;&#48;&#48;",
   "a&nbsp;b",
   "Hello <b>hidden</b> world",
-  "<img src=https://evil.example/p>"
-] as const
+  "<img src=https://evil.example/p>",
+] as const;

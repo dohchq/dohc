@@ -25,15 +25,11 @@ describe("resolveDocumentTitle", () => {
   });
 
   it("falls back to the caller-provided title when frontmatter has none", () => {
-    expect(resolveDocumentTitle("# Just a heading, no frontmatter", "untitled")).toBe(
-      "untitled",
-    );
+    expect(resolveDocumentTitle("# Just a heading, no frontmatter", "untitled")).toBe("untitled");
   });
 
   it("falls back when the frontmatter title is blank", () => {
-    expect(
-      resolveDocumentTitle("---\ntitle: \"\"\n---\nbody", "untitled"),
-    ).toBe("untitled");
+    expect(resolveDocumentTitle('---\ntitle: ""\n---\nbody', "untitled")).toBe("untitled");
   });
 });
 
@@ -94,22 +90,11 @@ describe("buildStandaloneDocumentHtml", () => {
     expect(malicious).toContain("&lt;script&gt;evil()&lt;/script&gt;");
   });
 
-  // EXPORT IMAGE CONTRACT (documentExport.ts): an exported document may only
-  // reference images at or below its own folder. The editor can serve a
-  // workspace-relative src over dohc-file:// because it knows the document's
-  // place in the workspace; an export has no such base — it is opened from
-  // wherever the user saved it, or (for PDF) from a throwaway temp dir that
-  // printToPDF loads over file://. So a `../` src, which is legitimate inside
-  // the workspace (global-folder attachments), must not survive into the
-  // exported artifact, where it would point at the real filesystem.
   describe("image srcs", () => {
-    const bodyOf = (markdown: string) =>
-      buildStandaloneDocumentHtml(markdown, "fallback");
+    const bodyOf = (markdown: string) => buildStandaloneDocumentHtml(markdown, "fallback");
 
     it("keeps a plain relative src (it still resolves beside the exported file)", () => {
-      expect(bodyOf("![shot](assets/pic.png)")).toContain(
-        'src="assets/pic.png"',
-      );
+      expect(bodyOf("![shot](assets/pic.png)")).toContain('src="assets/pic.png"');
     });
 
     it("keeps remote http(s) images", () => {
@@ -126,33 +111,23 @@ describe("buildStandaloneDocumentHtml", () => {
     });
 
     it("emits NO src for a single-level `..` (a global-folder attachment src)", () => {
-      expect(bodyOf("![att](../assets/pic.png)")).not.toContain(
-        "../assets/pic.png",
-      );
+      expect(bodyOf("![att](../assets/pic.png)")).not.toContain("../assets/pic.png");
     });
 
     it("emits NO src for absolute and protocol-relative paths", () => {
       expect(bodyOf("![abs](/etc/passwd.png)")).not.toContain("/etc/passwd.png");
-      expect(bodyOf("![pr](//evil.example.com/x.png)")).not.toContain(
-        "//evil.example.com/x.png",
-      );
+      expect(bodyOf("![pr](//evil.example.com/x.png)")).not.toContain("//evil.example.com/x.png");
     });
 
     it("never emits an empty src (which browsers re-request as the page itself)", () => {
       // `data:` is already stripped to '' by the markdown sanitizer; the export
       // pass must drop the attribute rather than leave src="".
-      expect(bodyOf("![data](data:image/svg+xml;base64,PHN2Zz4=)")).not.toContain(
-        'src=""',
-      );
+      expect(bodyOf("![data](data:image/svg+xml;base64,PHN2Zz4=)")).not.toContain('src=""');
     });
   });
 
   it("typesets inline math with KaTeX instead of emitting raw TeX", () => {
-    const withMath = buildStandaloneDocumentHtml(
-      "Euler: $x^2$ done.",
-      "fallback",
-    );
-    // Rendered KaTeX markup, not the literal `$x^2$` source.
+    const withMath = buildStandaloneDocumentHtml("Euler: $x^2$ done.", "fallback");
     expect(withMath).toContain('class="katex"');
     expect(withMath).not.toContain("$x^2$");
     // The KaTeX layout CSS is inlined (self-contained, no <link>/font url()).
@@ -162,24 +137,17 @@ describe("buildStandaloneDocumentHtml", () => {
   });
 
   it("typesets block math with KaTeX in display mode", () => {
-    const withBlock = buildStandaloneDocumentHtml(
-      "$$\n\\frac{a}{b}\n$$",
-      "fallback",
-    );
+    const withBlock = buildStandaloneDocumentHtml("$$\n\\frac{a}{b}\n$$", "fallback");
     expect(withBlock).toContain('class="katex');
     expect(withBlock).toContain("katex-display");
     expect(withBlock).not.toContain("$$");
   });
 
   it("omits the KaTeX stylesheet when the document has no math", () => {
-    // The base fixture carries no math — the large KaTeX CSS must not be shipped.
     expect(html).not.toContain(".katex");
     expect(html).not.toContain("katex-display");
   });
 
-  // The export reads Markdown with the projection's parser, which keeps the
-  // lines Tiptap's own reader drops, so the exported page shows what the file
-  // holds.
   it("exports raw HTML as the text the file holds, never as elements", () => {
     const exported = buildStandaloneDocumentHtml(
       '<script>alert(1)</script>\n\nText <b onclick="steal()">bold</b> <!-- note -->',
@@ -202,8 +170,6 @@ describe("buildStandaloneDocumentHtml", () => {
 });
 
 describe("markdownBodyToHtml", () => {
-  // Counting newline splits alone missed the block-marker searches, which read
-  // the rest of the document for every paragraph.
   it("reads a linear amount of text when rejecting block tokenizers for paragraphs", async () => {
     const measure = (paragraphs: number) =>
       measureParseWork(() => {
@@ -213,7 +179,11 @@ describe("markdownBodyToHtml", () => {
     const small = await measure(64);
     const large = await measure(128);
     expect(small.search).toBeGreaterThan(0);
-    expect(large.split, `newline split characters: ${small.split} -> ${large.split}`).toBeLessThan(small.split * 2.2);
-    expect(large.search, `searched characters: ${small.search} -> ${large.search}`).toBeLessThan(small.search * 2.2);
+    expect(large.split, `newline split characters: ${small.split} -> ${large.split}`).toBeLessThan(
+      small.split * 2.2,
+    );
+    expect(large.search, `searched characters: ${small.search} -> ${large.search}`).toBeLessThan(
+      small.search * 2.2,
+    );
   });
 });

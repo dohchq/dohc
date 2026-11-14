@@ -7,7 +7,7 @@
 //! would leak it into `engine.db`, its `-wal`, or its `-shm`. The only proof is
 //! to read those files as bytes and look.
 //!
-//! Two rules make the scan a proof instead of a ritual:
+//! These rules make the scan a proof instead of a ritual:
 //!
 //! 1. **A scan that read nothing passes every absence assertion.** [`EngineDbScan::read`]
 //!    fails when the main database is missing or empty, and every absence
@@ -80,12 +80,6 @@ impl EngineDbScan {
             db_path.display()
         );
         let mut files = vec![(db_path.to_path_buf(), main)];
-        // The sidecars are present only while the WAL is live. Their absence is
-        // normal after a clean close; any other read error is not, and must not
-        // be swallowed. `if let Ok(..)` treated a permissions failure, an I/O
-        // error or a Windows sharing violation as "no such file", so a leak
-        // living only in an unreadable WAL would produce a passing security test
-        // while the positive control still succeeded from the main database.
         for sidecar in [wal_sidecar(db_path), shm_sidecar(db_path)] {
             match std::fs::read(&sidecar) {
                 Ok(bytes) => files.push((sidecar, bytes)),

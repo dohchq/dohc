@@ -6,26 +6,48 @@ import { join } from "node:path";
 import { mintLocalhostCa } from "../../../services/share-web/src/testing/localhostCa";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { resolveEngineBinary } from "../src/testing/engineBinary";
-import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
+import {
+  assertDesktopEngineHealthy,
+  launchDesktopApp,
+  type LaunchedDesktopApp,
+} from "./helpers/desktopApp";
 import { readHistoryMoments } from "./helpers/history";
 import { relayJson } from "./helpers/relayPeer";
-import { startServerProxy, type ProxiedCollectionWriteResponse } from "./helpers/selfHostOnboarding";
+import {
+  startServerProxy,
+  type ProxiedCollectionWriteResponse,
+} from "./helpers/selfHostOnboarding";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
-import { createTempWorkspace, openRecordAsPage, openWorkspaceFromFirstRun, seedCloudCredentials,
-  seedWorkspaceManifest, seedWorkspaceRegistry, showExplorerFiles, writeWorkspaceFiles } from "./helpers/workspace";
+import {
+  createTempWorkspace,
+  openRecordAsPage,
+  openWorkspaceFromFirstRun,
+  seedCloudCredentials,
+  seedWorkspaceManifest,
+  seedWorkspaceRegistry,
+  showExplorerFiles,
+  writeWorkspaceFiles,
+} from "./helpers/workspace";
 
 type Api = DohcDesktopBridge;
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
-const COLLECTION = "trip/Tasks", OWNER_ID = "record-create-owner";
-const OWNER_TOKEN = "test:e2e-granter", RECIPIENT_TOKEN = "test:e2e-recipient";
-const OWNER_EMAIL = "e2e-granter@dohc.test", RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
-// The Collection opens on a board. These specs follow a record with nothing typed in it through the relay, and in a
-// table New record starts a row that makes no record until it holds a value. Beside a board it makes the record at once.
-// Its second view is a table, where one step types a record in the new row.
-const SCHEMA = "name: Tasks\nfields:\n  Task:\n    type: text\n  Status:\n    type: text\nviews:\n  - name: Board\n    kind: board\n    groupBy: Status\n  - name: Table\n    kind: table\n";
+const { DatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as typeof import("node:sqlite");
+const COLLECTION = "trip/Tasks",
+  OWNER_ID = "record-create-owner";
+const OWNER_TOKEN = "test:e2e-granter",
+  RECIPIENT_TOKEN = "test:e2e-recipient";
+const OWNER_EMAIL = "e2e-granter@dohc.test",
+  RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
+const SCHEMA =
+  "name: Tasks\nfields:\n  Task:\n    type: text\n  Status:\n    type: text\nviews:\n  - name: Board\n    kind: board\n    groupBy: Status\n  - name: Table\n    kind: table\n";
 type Op = { originId: string; opKind: string; payload: Record<string, unknown> };
 async function log(relay: SyncRelayHandle): Promise<Op[]> {
-  const query = new URLSearchParams({ since: "0", limit: "1000", ...(relayAdoptedIdentity(relay.dbPath, OWNER_ID) ?? {}) });
+  const query = new URLSearchParams({
+    since: "0",
+    limit: "1000",
+    ...relayAdoptedIdentity(relay.dbPath, OWNER_ID),
+  });
   const result = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${OWNER_ID}/log?${query}`);
   expect(result.status, result.body).toBe(200);
   return (JSON.parse(result.body) as { ops: Op[] }).ops;
@@ -35,8 +57,10 @@ async function openCollection(page: Page) {
   for (const path of ["trip", COLLECTION]) {
     const row = page.locator(`[data-testid="tree-row"][data-path="${path}"]`);
     await expect(row).toBeVisible({ timeout: 120_000 });
-    if (path === COLLECTION) await expect(row).toHaveAttribute("data-collection", "true", { timeout: 120_000 });
-    if (path === COLLECTION || await row.getAttribute("aria-expanded") !== "true") await row.click({ timeout: 120_000 });
+    if (path === COLLECTION)
+      await expect(row).toHaveAttribute("data-collection", "true", { timeout: 120_000 });
+    if (path === COLLECTION || (await row.getAttribute("aria-expanded")) !== "true")
+      await row.click({ timeout: 120_000 });
   }
   await expect(page.getByTestId("collection-new-record")).toBeVisible({ timeout: 120_000 });
 }
@@ -48,8 +72,8 @@ async function openCollection(page: Page) {
  * is named for its record, which this Collection names by its file, so the helper waits for the new record's panel
  * before it presses Open as page. Pressed sooner, it opens the page of the record before.
  *
- * It ends with the record's page showing in its tab, which is where New record used to leave these specs. The panel
- * is not on screen then: it belongs to the Collection's tab, and shows again when a spec goes back to the Collection.
+ * It ends with the record's page showing in its tab. The panel is not on screen then: it belongs to the Collection's
+ * tab, and shows again when a spec goes back to the Collection.
  */
 async function newRecordPage(page: Page, file = "Untitled") {
   await page.getByTestId("collection-new-record").click();
@@ -65,12 +89,12 @@ async function newRecordPage(page: Page, file = "Untitled") {
  */
 async function closeRecordPanel(page: Page) {
   const panel = page.getByTestId("collection-record-panel");
-  if (await panel.count() === 0) return;
+  if ((await panel.count()) === 0) return;
   await panel.getByRole("button", { name: "Close record", exact: true }).click();
   await expect(panel).toHaveCount(0);
 }
 async function records(page: Page) {
-  return page.evaluate(async collectionPath => {
+  return page.evaluate(async (collectionPath) => {
     const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
     const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
     return (await api.queryCollectionRecords({ workspaceId, collectionPath, limit: 100 })).records;
@@ -79,8 +103,16 @@ async function records(page: Page) {
 // A creation keeps its status until its receipt arrives, even after a refresh swaps in the relay's copy. A sent record
 // shows as accepted or with no status, and has no draft row.
 async function expectSent(page: Page, id: string) {
-  await expect.poll(async () => (await records(page)).map(record => ({ id: record.id,
-    sent: record.creationDelivery === undefined || record.creationDelivery === "accepted" })), { timeout: 120_000 }).toEqual([{ id, sent: true }]);
+  await expect
+    .poll(
+      async () =>
+        (await records(page)).map((record) => ({
+          id: record.id,
+          sent: record.creationDelivery === undefined || record.creationDelivery === "accepted",
+        })),
+      { timeout: 120_000 },
+    )
+    .toEqual([{ id, sent: true }]);
   await expect(page.getByTestId("collection-record-drafts")).toHaveCount(0);
 }
 async function expectWaitingDraft(page: Page) {
@@ -88,42 +120,73 @@ async function expectWaitingDraft(page: Page) {
   await expect(drafts).toContainText("Saved on this computer. Waiting to send");
   await expect(drafts.getByRole("button", { name: "Try again", exact: true })).toBeVisible();
 }
-const creationOps = (ops: Op[]) => ops.filter(op => op.originId.startsWith("relay:collection-file:") && op.opKind === "moment.append");
+const creationOps = (ops: Op[]) =>
+  ops.filter(
+    (op) => op.originId.startsWith("relay:collection-file:") && op.opKind === "moment.append",
+  );
 function acceptedLiveEdits(relay: SyncRelayHandle, path: string) {
   const db = new DatabaseSync(relay.dbPath, { readOnly: true });
   try {
-    return db.prepare(`SELECT author_context_json AS context, author_snapshot_json AS authors FROM sync_relay_live_update_journal
+    return db
+      .prepare(`SELECT author_context_json AS context, author_snapshot_json AS authors FROM sync_relay_live_update_journal
       WHERE workspace_id=? AND current_path=? AND principal_kind='named' AND principal_id='e2e-recipient'
-        AND accepted_event_count>0 ORDER BY journal_cursor`).all(OWNER_ID, path).map(row => ({
-      context: row.context === null ? null : JSON.parse(String(row.context)),
-      authors: row.authors === null ? null : JSON.parse(String(row.authors)),
-    }));
-  } finally { db.close(); }
+        AND accepted_event_count>0 ORDER BY journal_cursor`)
+      .all(OWNER_ID, path)
+      .map((row) => ({
+        context: row.context === null ? null : JSON.parse(String(row.context)),
+        authors: row.authors === null ? null : JSON.parse(String(row.authors)),
+      }));
+  } finally {
+    db.close();
+  }
 }
 async function ownerRecordHistory(page: Page, path: string) {
   const moments = await readHistoryMoments(page, OWNER_ID, path);
   if (moments === null) throw new Error("Owner History is unavailable.");
-  return page.evaluate(async ({ workspaceId, moments }) => {
-    const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-    const details = await Promise.all(moments
-      .map(moment => api.readEngineMoment({ workspaceId, momentId: moment.id })));
-    return details.flatMap(result => result.moment === null ? [] : [result.moment]);
-  }, { workspaceId: OWNER_ID, moments });
+  return page.evaluate(
+    async ({ workspaceId, moments }) => {
+      const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
+      const details = await Promise.all(
+        moments.map((moment) => api.readEngineMoment({ workspaceId, momentId: moment.id })),
+      );
+      return details.flatMap((result) => (result.moment === null ? [] : [result.moment]));
+    },
+    { workspaceId: OWNER_ID, moments },
+  );
 }
 function stopAndRestoreRecipient(page: Page) {
-  return page.evaluate(async workspaceId => (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopAndRestore({ workspaceId,
-    target: { kind: "person", userId: "e2e-recipient" } }), OWNER_ID);
+  return page.evaluate(
+    async (workspaceId) =>
+      (window as unknown as { dohcDesktop: Api }).dohcDesktop.stopAndRestore({
+        workspaceId,
+        target: { kind: "person", userId: "e2e-recipient" },
+      }),
+    OWNER_ID,
+  );
 }
 // Stop and restore removes a recipient's record only when every version that
 // changed it names the relay-confirmed recipient.
 async function expectOnlyRecipientChanged(page: Page, path: string) {
   await expect(async () => {
-    const changes = (await ownerRecordHistory(page, path)).filter(moment => moment.beforeText !== moment.afterText);
-    expect(changes.some(moment => moment.afterText?.includes("Status: Ready"))).toBe(true);
-    expect(changes.filter(moment => !moment.authors?.length || !moment.authors.every(author => author.kind === "named"
-      ? author.userId === "e2e-recipient"
-      : author.kind === "human" && author.humanId === "e2e-recipient" && "relayConfirmed" in author && author.relayConfirmed === true)),
-    "versions that don't name the recipient; one with no authors is #2942").toEqual([]);
+    const changes = (await ownerRecordHistory(page, path)).filter(
+      (moment) => moment.beforeText !== moment.afterText,
+    );
+    expect(changes.some((moment) => moment.afterText?.includes("Status: Ready"))).toBe(true);
+    expect(
+      changes.filter(
+        (moment) =>
+          !moment.authors?.length ||
+          !moment.authors.every((author) =>
+            author.kind === "named"
+              ? author.userId === "e2e-recipient"
+              : author.kind === "human" &&
+                author.humanId === "e2e-recipient" &&
+                "relayConfirmed" in author &&
+                author.relayConfirmed === true,
+          ),
+      ),
+      "versions that don't name the recipient; one with no authors is #2942",
+    ).toEqual([]);
   }).toPass({ timeout: 120_000 });
 }
 
@@ -141,9 +204,13 @@ async function withSharedCollection(
     ownerLiveState(path: string): Record<string, unknown>;
     ownerEngineRows(paths: string[]): Promise<Record<string, unknown>>;
   }) => Promise<void>,
-  { ownerEnv = {}, refuse }: { ownerEnv?: Record<string, string>; refuse?(method: string, path: string): boolean } = {},
+  {
+    ownerEnv = {},
+    refuse,
+  }: { ownerEnv?: Record<string, string>; refuse?(method: string, path: string): boolean } = {},
 ) {
-  const ownerTemp = await createTempWorkspace(), recipientTemp = await createTempWorkspace();
+  const ownerTemp = await createTempWorkspace(),
+    recipientTemp = await createTempWorkspace();
   let relay: SyncRelayHandle | undefined;
   let proxy: Awaited<ReturnType<typeof startServerProxy>> | undefined;
   let owner: LaunchedDesktopApp | undefined, recipient: LaunchedDesktopApp | undefined;
@@ -152,114 +219,222 @@ async function withSharedCollection(
   let primaryFailure: unknown;
   try {
     const ca = await mintLocalhostCa(ownerTemp.baseDir);
-    const env = { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
-      DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath, DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0",
-      DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
+    const env = {
+      NODE_EXTRA_CA_CERTS: ca.caPath,
+      DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
+      DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath,
+      DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0",
+      DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
+      DOHC_TEST_SYNC_BACKOFF_MS: "250",
+    };
     proxy = await startServerProxy(ca, { collectionWriteResponse: response, refuse });
-    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
-      editLinks: { engineExecutable: resolveEngineBinary(), publicOrigin: proxy.origin, trustEnv: env },
-      linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: randomBytes(32).toString("base64url"),
-        publicViewerOrigin: proxy.origin } });
+    relay = await spawnSyncRelay({
+      dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
+      editLinks: {
+        engineExecutable: resolveEngineBinary(),
+        publicOrigin: proxy.origin,
+        trustEnv: env,
+      },
+      linkBoundary: {
+        linkKey: randomBytes(32).toString("base64url"),
+        relayExchangeKey: randomBytes(32).toString("base64url"),
+        publicViewerOrigin: proxy.origin,
+      },
+    });
     proxy.routeRelayTo(relay.baseUrl);
     await seedWorkspaceManifest(ownerTemp, OWNER_ID);
-    await writeWorkspaceFiles(ownerTemp, [{ path: `${COLLECTION}/collection.yaml`, contents: SCHEMA }]);
-    await seedWorkspaceRegistry(ownerTemp, [{ workspaceId: OWNER_ID, rootPath: ownerTemp.rootPath }]);
-    await seedCloudCredentials(ownerTemp, { serverUrl: proxy.origin, relayUrl: proxy.origin,
-      email: OWNER_EMAIL, userId: "e2e-granter", token: OWNER_TOKEN });
+    await writeWorkspaceFiles(ownerTemp, [
+      { path: `${COLLECTION}/collection.yaml`, contents: SCHEMA },
+    ]);
+    await seedWorkspaceRegistry(ownerTemp, [
+      { workspaceId: OWNER_ID, rootPath: ownerTemp.rootPath },
+    ]);
+    await seedCloudCredentials(ownerTemp, {
+      serverUrl: proxy.origin,
+      relayUrl: proxy.origin,
+      email: OWNER_EMAIL,
+      userId: "e2e-granter",
+      token: OWNER_TOKEN,
+    });
     owner = await launchDesktopApp({ workspace: ownerTemp, env: { ...env, ...ownerEnv } });
     launches.push(owner);
     await openWorkspaceFromFirstRun(owner.page, ownerTemp);
-    await owner.page.evaluate(async workspaceId => {
-      await (window as unknown as { dohcDesktop: Api }).dohcDesktop.cloudEnableSync({ workspaceId });
+    await owner.page.evaluate(async (workspaceId) => {
+      await (window as unknown as { dohcDesktop: Api }).dohcDesktop.cloudEnableSync({
+        workspaceId,
+      });
     }, OWNER_ID);
-    await expect.poll(async () => (await log(relay!)).some(op => op.payload.path === `${COLLECTION}/collection.yaml`),
-      { timeout: 120_000, intervals: [1000] }).toBe(true);
-    const { shareId } = await owner.page.evaluate(async ({ workspaceId, recipientEmail }) =>
-      (window as unknown as { dohcDesktop: Api }).dohcDesktop.createRelayShare({ workspaceId, recipientEmail, paths: ["trip"], access: "edit" }),
-    { workspaceId: OWNER_ID, recipientEmail: RECIPIENT_EMAIL });
-    await seedCloudCredentials(recipientTemp, { serverUrl: proxy.origin, relayUrl: proxy.origin,
-      email: RECIPIENT_EMAIL, userId: "e2e-recipient", token: RECIPIENT_TOKEN });
+    await expect
+      .poll(
+        async () =>
+          (await log(relay!)).some((op) => op.payload.path === `${COLLECTION}/collection.yaml`),
+        { timeout: 120_000, intervals: [1000] },
+      )
+      .toBe(true);
+    const { shareId } = await owner.page.evaluate(
+      async ({ workspaceId, recipientEmail }) =>
+        (window as unknown as { dohcDesktop: Api }).dohcDesktop.createRelayShare({
+          workspaceId,
+          recipientEmail,
+          paths: ["trip"],
+          access: "edit",
+        }),
+      { workspaceId: OWNER_ID, recipientEmail: RECIPIENT_EMAIL },
+    );
+    await seedCloudCredentials(recipientTemp, {
+      serverUrl: proxy.origin,
+      relayUrl: proxy.origin,
+      email: RECIPIENT_EMAIL,
+      userId: "e2e-recipient",
+      token: RECIPIENT_TOKEN,
+    });
     recipient = await launchDesktopApp({ workspace: recipientTemp, env });
     launches.push(recipient);
     await recipient.page.getByTestId("first-run-open-share").click();
-    await recipient.page.getByTestId("open-share-code").fill(`dohc-share:${shareId}:${proxy.origin}`);
+    await recipient.page
+      .getByTestId("open-share-code")
+      .fill(`dohc-share:${shareId}:${proxy.origin}`);
     await recipient.page.getByTestId("open-share-choose-folder").click();
     await recipient.page.getByTestId("open-share-start").click();
-    await expect(recipient.page.getByTestId("shared-view-banner")).toBeVisible({ timeout: 120_000 });
+    await expect(recipient.page.getByTestId("shared-view-banner")).toBeVisible({
+      timeout: 120_000,
+    });
     await openCollection(recipient.page);
-    await run({ get owner() { return owner!; }, recipient: () => recipient!, relay,
-      stopOwner: async () => { await owner!.close(); owner = undefined; },
+    await run({
+      get owner() {
+        return owner!;
+      },
+      recipient: () => recipient!,
+      relay,
+      stopOwner: async () => {
+        await owner!.close();
+        owner = undefined;
+      },
       restartOwner: async () => {
-        owner = await launchDesktopApp({workspace: ownerTemp, env: { ...env, ...ownerEnv }});
+        owner = await launchDesktopApp({ workspace: ownerTemp, env: { ...env, ...ownerEnv } });
         launches.push(owner);
         return owner;
       },
-      restartRecipient: async closed => {
-        await recipient!.close(); recipient = undefined;
+      restartRecipient: async (closed) => {
+        await recipient!.close();
+        recipient = undefined;
         closed?.();
         recipient = await launchDesktopApp({ workspace: recipientTemp, env });
         launches.push(recipient);
         await openCollection(recipient.page);
         return recipient;
       },
-      ownerText: async path => {
+      ownerText: async (path) => {
         await writeFile(join(ownerTemp.rootPath, `nudge-${++nudge}.txt`), `${nudge}\n`);
-        try { return await readFile(join(ownerTemp.rootPath, path), "utf8"); } catch { return "missing"; }
+        try {
+          return await readFile(join(ownerTemp.rootPath, path), "utf8");
+        } catch {
+          return "missing";
+        }
       },
-      recipientText: async path => {
-        try { return await readFile(join(recipientTemp.rootPath, path), "utf8"); } catch { return "missing"; }
+      recipientText: async (path) => {
+        try {
+          return await readFile(join(recipientTemp.rootPath, path), "utf8");
+        } catch {
+          return "missing";
+        }
       },
-      ownerLiveState: path => {
-        const db = new DatabaseSync(join(ownerTemp.rootPath, ".dohc/engine/engine.db"), { readOnly: true });
+      ownerLiveState: (path) => {
+        const db = new DatabaseSync(join(ownerTemp.rootPath, ".dohc/engine/engine.db"), {
+          readOnly: true,
+        });
         try {
           return {
             documents: db.prepare("SELECT * FROM ydoc_docs WHERE path=?").all(path),
             snapshots: db.prepare("SELECT * FROM snapshots WHERE path=?").all(path),
             drafts: db.prepare("SELECT * FROM owner_ydoc_outboxes WHERE current_path=?").all(path),
-            moments: db.prepare("SELECT moment_id,operation,sync_record_only,payload_after_blob_sha256 FROM moments WHERE path=? ORDER BY moment_order DESC").all(path),
+            moments: db
+              .prepare(
+                "SELECT moment_id,operation,sync_record_only,payload_after_blob_sha256 FROM moments WHERE path=? ORDER BY moment_order DESC",
+              )
+              .all(path),
           };
-        } finally { db.close(); }
+        } finally {
+          db.close();
+        }
       },
       // Read only when a test fails: every engine row that shows where an owner edit went.
-      ownerEngineRows: async paths => {
-        const db = new DatabaseSync(join(ownerTemp.rootPath, ".dohc/engine/engine.db"), { readOnly: true });
+      ownerEngineRows: async (paths) => {
+        const db = new DatabaseSync(join(ownerTemp.rootPath, ".dohc/engine/engine.db"), {
+          readOnly: true,
+        });
         try {
           const marks = (values: unknown[]) => values.map(() => "?").join(",");
-          const objects = db.prepare(`SELECT object_id FROM snapshots WHERE path IN (${marks(paths)})
-            UNION SELECT object_id FROM ydoc_docs WHERE path IN (${marks(paths)})`).all(...paths, ...paths).map(row => String(row.object_id));
-          const byObject = (table: string) => db.prepare(`SELECT * FROM ${table} WHERE object_id IN (${marks(objects)})`).all(...objects);
-          const byOutbox = (table: string) => db.prepare(`SELECT t.* FROM ${table} t JOIN owner_ydoc_outboxes o USING (outbox_id)
-            WHERE o.object_id IN (${marks(objects)})`).all(...objects);
+          const objects = db
+            .prepare(`SELECT object_id FROM snapshots WHERE path IN (${marks(paths)})
+            UNION SELECT object_id FROM ydoc_docs WHERE path IN (${marks(paths)})`)
+            .all(...paths, ...paths)
+            .map((row) => String(row.object_id));
+          const byObject = (table: string) =>
+            db
+              .prepare(`SELECT * FROM ${table} WHERE object_id IN (${marks(objects)})`)
+              .all(...objects);
+          const byOutbox = (table: string) =>
+            db
+              .prepare(`SELECT t.* FROM ${table} t JOIN owner_ydoc_outboxes o USING (outbox_id)
+            WHERE o.object_id IN (${marks(objects)})`)
+              .all(...objects);
           return {
-            disk: Object.fromEntries(await Promise.all(paths.map(async path =>
-              [path, await readFile(join(ownerTemp.rootPath, path), "utf8").catch(() => "missing")]))),
-            snapshots: byObject("snapshots"), documents: byObject("ydoc_docs"), bindings: byObject("ydoc_owner_bindings"),
-            appliedFrames: byObject("ydoc_owner_applied_frames"), outboxes: byObject("owner_ydoc_outboxes"),
-            outboxEntries: byOutbox("owner_ydoc_outbox_entries"), outboxRefusals: byOutbox("owner_ydoc_outbox_refusals"),
-            pendingSettlements: byObject("owner_pending_settlements"), liveStops: byObject("owner_live_stops"),
-            moments: db.prepare(`SELECT moment_id,path,operation,sync_record_only,payload_after_blob_sha256 FROM moments
-              WHERE path IN (${marks(paths)}) ORDER BY moment_order DESC`).all(...paths),
+            disk: Object.fromEntries(
+              await Promise.all(
+                paths.map(async (path) => [
+                  path,
+                  await readFile(join(ownerTemp.rootPath, path), "utf8").catch(() => "missing"),
+                ]),
+              ),
+            ),
+            snapshots: byObject("snapshots"),
+            documents: byObject("ydoc_docs"),
+            bindings: byObject("ydoc_owner_bindings"),
+            appliedFrames: byObject("ydoc_owner_applied_frames"),
+            outboxes: byObject("owner_ydoc_outboxes"),
+            outboxEntries: byOutbox("owner_ydoc_outbox_entries"),
+            outboxRefusals: byOutbox("owner_ydoc_outbox_refusals"),
+            pendingSettlements: byObject("owner_pending_settlements"),
+            liveStops: byObject("owner_live_stops"),
+            moments: db
+              .prepare(`SELECT moment_id,path,operation,sync_record_only,payload_after_blob_sha256 FROM moments
+              WHERE path IN (${marks(paths)}) ORDER BY moment_order DESC`)
+              .all(...paths),
           };
-        } finally { db.close(); }
+        } finally {
+          db.close();
+        }
       },
     });
     for (const app of launches) {
-      expect(app.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
+      expect(app.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
       assertDesktopEngineHealthy(app.logs);
     }
   } catch (error) {
     primaryFailure = error;
     throw error;
   } finally {
-    await test.info().attach("relay output", { contentType: "application/json", body: JSON.stringify(relay?.diagnostics() ?? {}) });
+    await test.info().attach("relay output", {
+      contentType: "application/json",
+      body: JSON.stringify(relay?.diagnostics() ?? {}),
+    });
     const cleanup = await Promise.allSettled([recipient?.close(), owner?.close()]);
-    cleanup.push(...await Promise.allSettled([proxy?.close(), relay?.stop()]));
-    cleanup.push(...await Promise.allSettled([recipientTemp.cleanup(), ownerTemp.cleanup()]));
-    const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    cleanup.push(...(await Promise.allSettled([proxy?.close(), relay?.stop()])));
+    cleanup.push(...(await Promise.allSettled([recipientTemp.cleanup(), ownerTemp.cleanup()])));
+    const failures = cleanup.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
     if (failures.length) {
-      await test.info().attach("cleanup failures", { contentType: "text/plain",
-        body: failures.map(result => String(result.reason)).join("\n") });
-      if (primaryFailure === undefined) throw new AggregateError(failures.map(result => result.reason), "Recipient record test cleanup failed.");
+      await test.info().attach("cleanup failures", {
+        contentType: "text/plain",
+        body: failures.map((result) => String(result.reason)).join("\n"),
+      });
+      if (primaryFailure === undefined)
+        throw new AggregateError(
+          failures.map((result) => result.reason),
+          "Recipient record test cleanup failed.",
+        );
     }
   }
 }
@@ -267,230 +442,445 @@ async function withSharedCollection(
 test("@two-client an Edit recipient's new record opens immediately, becomes editable, and Stop and restore removes it while it has live editing on", async () => {
   test.setTimeout(420_000);
   let release: (() => void) | undefined;
-  const acknowledged = new Promise<void>(resolve => { release = resolve; });
+  const acknowledged = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   try {
-    await withSharedCollection(async result => {
-      if (result.status === 200) await acknowledged;
-    }, async fixture => {
-      const page = fixture.recipient().page;
-      // The record must open in the panel, and its page from there, while the relay answer is still withheld.
-      await newRecordPage(page);
-      await expect(page.getByTestId("view-markdown")).toBeVisible({ timeout: 30_000 });
-      await expect.poll(async () => (await records(page)).length, { timeout: 30_000 }).toBe(1);
-      const [created] = await records(page);
-      expect(created!.id).toMatch(/^rec_[a-z2-7]{26}$/);
-      expect(created!.creationDelivery).toBe("pending");
-      release!();
-      // No tab close, collection navigation, or manual retry: readiness changes this view.
-      await expect(page.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
-      for (const [field, value] of [["Task", "Book the ferry"], ["Status", "Ready"]]) {
-        await page.getByTestId("property-add").click();
-        await page.getByTestId("property-key").last().fill(field!);
-        await page.getByLabel(`Property ${field} value`, { exact: true }).fill(value!);
-      }
-      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved-to-host", { timeout: 120_000 });
-      await expect.poll(() => acceptedLiveEdits(fixture.relay, created!.path).length, { timeout: 120_000 }).toBeGreaterThan(0);
-      await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] }).toContain("Task: Book the ferry");
-      await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] }).toContain("Status: Ready");
-      await expect.poll(async () => creationOps(await log(fixture.relay)).length, { timeout: 120_000 }).toBe(1);
-      expect(creationOps(await log(fixture.relay))[0]!.payload.authors).toMatchObject([{ kind: "named", userId: "e2e-recipient" }]);
-      await expect.poll(async () => (await readHistoryMoments(fixture.owner.page, OWNER_ID, created!.path))
-        ?.find(moment => moment.namedAuthor)?.namedAuthor?.label ?? null, { timeout: 120_000 }).toBe(`${RECIPIENT_EMAIL} (Edit)`);
-      await openCollection(fixture.owner.page);
-      await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
-      await page.emulateMedia({ reducedMotion: "reduce" });
-      for (const theme of ["light", "dark"]) {
-        await page.evaluate(theme => document.documentElement.setAttribute("data-theme", theme), theme);
-        await page.getByTestId("property-key").last().focus();
-        await page.keyboard.press("Tab");
-        await expect(page.getByLabel("Property Status value", { exact: true })).toBeFocused();
-        await page.screenshot({ path: test.info().outputPath(`editable-${theme}.png`) });
-      }
-      const restarted = await fixture.restartRecipient();
-      await expect.poll(async () => (await records(restarted.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
-      const liveAuthor = { kind: "human", humanId: "e2e-recipient", humanName: "e2e-recipient" };
-      const liveEdits = acceptedLiveEdits(fixture.relay, created!.path);
-      expect(liveEdits.length).toBeGreaterThan(0);
-      for (const edit of liveEdits) {
-        expect(edit.context).toEqual({ kind: "account", accountId: "e2e-recipient" });
-        expect(edit.authors).toEqual([liveAuthor]);
-      }
-      const changedFieldHistory = async () => (await ownerRecordHistory(fixture.owner.page, created!.path))
-        .filter(moment => (moment.origin === "ydoc" || moment.origin === "local-file")
-          && moment.beforeText !== moment.afterText && /^(Task|Status):/mu.test(moment.afterText ?? ""));
-      let liveHistory: Awaited<ReturnType<typeof changedFieldHistory>> = [];
-      await expect(async () => {
-        liveHistory = await changedFieldHistory();
-        expect(liveHistory.length).toBeGreaterThan(0);
-      }).toPass({ timeout: 120_000 });
-      await test.info().attach("recipient live attribution", { contentType: "application/json",
-        body: JSON.stringify({ liveEdits, liveHistory }, null, 2) });
-      // History records the relay-admitted author; the relay's live-edit list above does not.
-      for (const moment of liveHistory) expect(moment.authors).toEqual([{ ...liveAuthor, relayConfirmed: true }]);
-      await test.info().attach("recipient-only restore state", {contentType: "application/json",
-        body: JSON.stringify({live: fixture.ownerLiveState(created!.path), disk: await fixture.ownerText(created!.path)}, null, 2)});
-      // One run stops live editing for the page, then removes it.
-      const restored = await stopAndRestoreRecipient(fixture.owner.page);
-      await test.info().attach("recipient-only after restore state", {contentType: "application/json", body: JSON.stringify(fixture.ownerLiveState(created!.path), null, 2)});
-      expect(restored).toMatchObject({ status: "restored", restored: [{ path: created!.path, removed: true }], review: [], unfinished: null });
-      await expect.poll(async () => (await records(fixture.owner.page)).length, { timeout: 120_000 }).toBe(0);
-      expect(await fixture.ownerText(created!.path)).toBe("missing");
-      expect(await fixture.ownerText(`${COLLECTION}/collection.yaml`)).toBe(SCHEMA);
-    });
-  } finally { release!(); }
+    await withSharedCollection(
+      async (result) => {
+        if (result.status === 200) await acknowledged;
+      },
+      async (fixture) => {
+        const page = fixture.recipient().page;
+        // The record must open in the panel, and its page from there, while the relay answer is still withheld.
+        await newRecordPage(page);
+        await expect(page.getByTestId("view-markdown")).toBeVisible({ timeout: 30_000 });
+        await expect.poll(async () => (await records(page)).length, { timeout: 30_000 }).toBe(1);
+        const [created] = await records(page);
+        expect(created!.id).toMatch(/^rec_[a-z2-7]{26}$/);
+        expect(created!.creationDelivery).toBe("pending");
+        release!();
+        // No tab close, collection navigation, or manual retry: readiness changes this view.
+        await expect(page.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
+        for (const [field, value] of [
+          ["Task", "Book the ferry"],
+          ["Status", "Ready"],
+        ]) {
+          await page.getByTestId("property-add").click();
+          await page.getByTestId("property-key").last().fill(field!);
+          await page.getByLabel(`Property ${field} value`, { exact: true }).fill(value!);
+        }
+        await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+          "data-state",
+          "saved-to-host",
+          { timeout: 120_000 },
+        );
+        await expect
+          .poll(() => acceptedLiveEdits(fixture.relay, created!.path).length, { timeout: 120_000 })
+          .toBeGreaterThan(0);
+        await expect
+          .poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] })
+          .toContain("Task: Book the ferry");
+        await expect
+          .poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] })
+          .toContain("Status: Ready");
+        await expect
+          .poll(async () => creationOps(await log(fixture.relay)).length, { timeout: 120_000 })
+          .toBe(1);
+        expect(creationOps(await log(fixture.relay))[0]!.payload.authors).toMatchObject([
+          { kind: "named", userId: "e2e-recipient" },
+        ]);
+        await expect
+          .poll(
+            async () =>
+              (await readHistoryMoments(fixture.owner.page, OWNER_ID, created!.path))?.find(
+                (moment) => moment.namedAuthor,
+              )?.namedAuthor?.label ?? null,
+            { timeout: 120_000 },
+          )
+          .toBe(`${RECIPIENT_EMAIL} (Edit)`);
+        await openCollection(fixture.owner.page);
+        await expect
+          .poll(async () => (await records(fixture.owner.page)).map((record) => record.id), {
+            timeout: 120_000,
+          })
+          .toEqual([created!.id]);
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        for (const theme of ["light", "dark"]) {
+          await page.evaluate(
+            (theme) => document.documentElement.setAttribute("data-theme", theme),
+            theme,
+          );
+          await page.getByTestId("property-key").last().focus();
+          await page.keyboard.press("Tab");
+          await expect(page.getByLabel("Property Status value", { exact: true })).toBeFocused();
+          await page.screenshot({ path: test.info().outputPath(`editable-${theme}.png`) });
+        }
+        const restarted = await fixture.restartRecipient();
+        await expect
+          .poll(async () => (await records(restarted.page)).map((record) => record.id), {
+            timeout: 120_000,
+          })
+          .toEqual([created!.id]);
+        const liveAuthor = { kind: "human", humanId: "e2e-recipient", humanName: "e2e-recipient" };
+        const liveEdits = acceptedLiveEdits(fixture.relay, created!.path);
+        expect(liveEdits.length).toBeGreaterThan(0);
+        for (const edit of liveEdits) {
+          expect(edit.context).toEqual({ kind: "account", accountId: "e2e-recipient" });
+          expect(edit.authors).toEqual([liveAuthor]);
+        }
+        const changedFieldHistory = async () =>
+          (await ownerRecordHistory(fixture.owner.page, created!.path)).filter(
+            (moment) =>
+              (moment.origin === "ydoc" || moment.origin === "local-file") &&
+              moment.beforeText !== moment.afterText &&
+              /^(Task|Status):/mu.test(moment.afterText ?? ""),
+          );
+        let liveHistory: Awaited<ReturnType<typeof changedFieldHistory>> = [];
+        await expect(async () => {
+          liveHistory = await changedFieldHistory();
+          expect(liveHistory.length).toBeGreaterThan(0);
+        }).toPass({ timeout: 120_000 });
+        await test.info().attach("recipient live attribution", {
+          contentType: "application/json",
+          body: JSON.stringify({ liveEdits, liveHistory }, null, 2),
+        });
+        // History records the relay-admitted author; the relay's live-edit list above does not.
+        for (const moment of liveHistory)
+          expect(moment.authors).toEqual([{ ...liveAuthor, relayConfirmed: true }]);
+        await test.info().attach("recipient-only restore state", {
+          contentType: "application/json",
+          body: JSON.stringify(
+            {
+              live: fixture.ownerLiveState(created!.path),
+              disk: await fixture.ownerText(created!.path),
+            },
+            null,
+            2,
+          ),
+        });
+        const restored = await stopAndRestoreRecipient(fixture.owner.page);
+        await test.info().attach("recipient-only after restore state", {
+          contentType: "application/json",
+          body: JSON.stringify(fixture.ownerLiveState(created!.path), null, 2),
+        });
+        expect(restored).toMatchObject({
+          status: "restored",
+          restored: [{ path: created!.path, removed: true }],
+          review: [],
+          unfinished: null,
+        });
+        await expect
+          .poll(async () => (await records(fixture.owner.page)).length, { timeout: 120_000 })
+          .toBe(0);
+        expect(await fixture.ownerText(created!.path)).toBe("missing");
+        expect(await fixture.ownerText(`${COLLECTION}/collection.yaml`)).toBe(SCHEMA);
+      },
+    );
+  } finally {
+    release!();
+  }
 });
 
 for (const restartBeforeRestore of [false, true]) {
-test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore ? "after the owner restarts" : "with the document open"}`, async () => {
-  test.setTimeout(600_000);
-  await withSharedCollection(() => undefined, async fixture => {
-    const recipient = fixture.recipient().page;
-    const created: { id: string; path: string }[] = [];
-    for (const [label, file] of [["Owner review", "Untitled"], ["Recipient only", "Untitled 2"]]) {
-      await openCollection(recipient);
-      await newRecordPage(recipient, file);
-      await expect(recipient.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
-      for (const [field, value] of [["Task", label], ["Status", "Ready"]]) {
-        await recipient.getByTestId("property-add").click();
-        await recipient.getByTestId("property-key").last().fill(field!);
-        await recipient.getByLabel(`Property ${field} value`, { exact: true }).fill(value!);
-      }
-      await expect(recipient.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved-to-host", { timeout: 120_000 });
-      const record = (await records(recipient)).find(record => !created.some(previous => previous.id === record.id))!;
-      created.push({ id: record.id, path: record.path });
-      await expect.poll(() => fixture.ownerText(record.path), { timeout: 120_000, intervals: [1000] }).toContain(`Task: ${label}`);
-    }
-    await openCollection(fixture.owner.page);
-    await expect.poll(async () => (await records(fixture.owner.page)).length, { timeout: 120_000 }).toBe(2);
-    for (const record of created) await expectOnlyRecipientChanged(fixture.owner.page, record.path);
-    await openRecordAsPage(fixture.owner.page, "Untitled");
-    const status = fixture.owner.page.getByLabel("Property Status value", { exact: true });
-    await expect(status).toBeEnabled({ timeout: 120_000 });
-    // The Source button shows only on the engine's live document or an ended share's read-only copy. File editing shows Edit.
-    await expect(fixture.owner.page.getByTestId("markdown-source-toggle"), "the owner's record isn't in live editing before the owner types")
-      .toBeVisible({ timeout: 120_000 });
-    await expect(status, "the owner's record is read-only before the owner types").toBeEditable();
-    await status.fill("Owner text KEEP");
-    await expect(status).toHaveValue("Owner text KEEP");
-    try {
-      await expect.poll(() => {
-        const documents = fixture.ownerLiveState(created[0]!.path).documents as {head_update_seq: number; settled_update_seq: number | null}[];
-        return documents.some(doc => doc.head_update_seq !== doc.settled_update_seq);
-      }, {message: "the owner's typing never showed as an unsettled live edit", timeout: 120_000}).toBe(true);
-    } catch (error) {
-      await test.info().attach("owner engine rows after the wait for unsettled typing failed", { contentType: "application/json",
-        body: await fixture.ownerEngineRows(created.map(record => record.path))
-          .then(rows => JSON.stringify(rows, null, 2), (dumpError: unknown) => `The engine rows couldn't be read: ${String(dumpError)}`) });
-      throw error;
-    }
-    await expect(async () => {
-      expect((await ownerRecordHistory(fixture.owner.page, created[0]!.path))
-        .some(moment => moment.afterText?.includes("Owner text KEEP"))).toBe(false);
-    }).toPass({ timeout: 120_000 });
-    if (restartBeforeRestore) {
-      await fixture.stopOwner();
-      await fixture.restartOwner();
-      await openCollection(fixture.owner.page);
-      await expect.poll(async () => JSON.stringify(await records(fixture.owner.page)), {timeout: 120_000}).toContain("Owner text KEEP");
-      await test.info().attach("owner state after restart before restore", {contentType: "application/json", body: JSON.stringify(fixture.ownerLiveState(created[0]!.path), null, 2)});
-    }
-    await expectOnlyRecipientChanged(fixture.owner.page, created[1]!.path);
-    await test.info().attach("owner History before restore", { contentType: "application/json",
-      body: JSON.stringify(await Promise.all(created.map(record => readHistoryMoments(fixture.owner.page, OWNER_ID, record.path))), null, 2) });
-    // Owner settlement is held by the existing debounce seam. History still
-    // attributes the file to the recipient when this destructive action runs.
-    // One run stops live editing for the recipient-only page and removes it.
-    // The owner's typing keeps the other page.
-    const result = await stopAndRestoreRecipient(fixture.owner.page);
-    expect(result).toMatchObject({ status: "restored", restored: [{ path: created[1]!.path, removed: true }],
-      review: [{ path: created[0]!.path }], unfinished: null });
-    expect(result.status === "restored" && result.review[0]?.reason).toMatch(/^(changed-since|restore-refused)$/);
-    if (!restartBeforeRestore) await expect(status).toHaveValue("Owner text KEEP");
-    expect(await fixture.ownerText(created[0]!.path)).not.toBe("missing");
-    expect(await fixture.ownerText(created[1]!.path)).toBe("missing");
-    await fixture.stopOwner();
-    await fixture.restartOwner();
-    await openCollection(fixture.owner.page);
-    await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created[0]!.id]);
-    await openRecordAsPage(fixture.owner.page, "Untitled");
-    await expect(fixture.owner.page.getByLabel("Property Status value", { exact: true })).toHaveValue("Owner text KEEP", { timeout: 120_000 });
-    const undo = await fixture.owner.page.evaluate(async ({ workspaceId, ids }) =>
-      (window as unknown as { dohcDesktop: Api }).dohcDesktop.undoStopAndRestore({ workspaceId, restoredMomentIds: ids }),
-    { workspaceId: OWNER_ID, ids: result.status === "restored" ? result.restored.map(file => file.restoredMomentId) : [] });
-    expect(undo.files).toMatchObject([{ kind: "restored" }]);
-    await expect.poll(() => fixture.ownerText(created[1]!.path), { timeout: 120_000 }).toContain("Recipient only");
-  }, { ownerEnv: { DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS: "600000" } });
-});
-
+  test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore ? "after the owner restarts" : "with the document open"}`, async () => {
+    test.setTimeout(600_000);
+    await withSharedCollection(
+      () => undefined,
+      async (fixture) => {
+        const recipient = fixture.recipient().page;
+        const created: { id: string; path: string }[] = [];
+        for (const [label, file] of [
+          ["Owner review", "Untitled"],
+          ["Recipient only", "Untitled 2"],
+        ]) {
+          await openCollection(recipient);
+          await newRecordPage(recipient, file);
+          await expect(recipient.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
+          for (const [field, value] of [
+            ["Task", label],
+            ["Status", "Ready"],
+          ]) {
+            await recipient.getByTestId("property-add").click();
+            await recipient.getByTestId("property-key").last().fill(field!);
+            await recipient.getByLabel(`Property ${field} value`, { exact: true }).fill(value!);
+          }
+          await expect(recipient.getByTestId("markdown-save-state")).toHaveAttribute(
+            "data-state",
+            "saved-to-host",
+            { timeout: 120_000 },
+          );
+          const record = (await records(recipient)).find(
+            (record) => !created.some((previous) => previous.id === record.id),
+          )!;
+          created.push({ id: record.id, path: record.path });
+          await expect
+            .poll(() => fixture.ownerText(record.path), { timeout: 120_000, intervals: [1000] })
+            .toContain(`Task: ${label}`);
+        }
+        await openCollection(fixture.owner.page);
+        await expect
+          .poll(async () => (await records(fixture.owner.page)).length, { timeout: 120_000 })
+          .toBe(2);
+        for (const record of created)
+          await expectOnlyRecipientChanged(fixture.owner.page, record.path);
+        await openRecordAsPage(fixture.owner.page, "Untitled");
+        const status = fixture.owner.page.getByLabel("Property Status value", { exact: true });
+        await expect(status).toBeEnabled({ timeout: 120_000 });
+        // The Source button shows only on the engine's live document or an ended share's read-only copy. File editing shows Edit.
+        await expect(
+          fixture.owner.page.getByTestId("markdown-source-toggle"),
+          "the owner's record isn't in live editing before the owner types",
+        ).toBeVisible({ timeout: 120_000 });
+        await expect(
+          status,
+          "the owner's record is read-only before the owner types",
+        ).toBeEditable();
+        await status.fill("Owner text KEEP");
+        await expect(status).toHaveValue("Owner text KEEP");
+        try {
+          await expect
+            .poll(
+              () => {
+                const documents = fixture.ownerLiveState(created[0]!.path).documents as {
+                  head_update_seq: number;
+                  settled_update_seq: number | null;
+                }[];
+                return documents.some((doc) => doc.head_update_seq !== doc.settled_update_seq);
+              },
+              {
+                message: "the owner's typing never showed as an unsettled live edit",
+                timeout: 120_000,
+              },
+            )
+            .toBe(true);
+        } catch (error) {
+          await test.info().attach("owner engine rows after the wait for unsettled typing failed", {
+            contentType: "application/json",
+            body: await fixture.ownerEngineRows(created.map((record) => record.path)).then(
+              (rows) => JSON.stringify(rows, null, 2),
+              (dumpError: unknown) => `The engine rows couldn't be read: ${String(dumpError)}`,
+            ),
+          });
+          throw error;
+        }
+        await expect(async () => {
+          expect(
+            (await ownerRecordHistory(fixture.owner.page, created[0]!.path)).some((moment) =>
+              moment.afterText?.includes("Owner text KEEP"),
+            ),
+          ).toBe(false);
+        }).toPass({ timeout: 120_000 });
+        if (restartBeforeRestore) {
+          await fixture.stopOwner();
+          await fixture.restartOwner();
+          await openCollection(fixture.owner.page);
+          await expect
+            .poll(async () => JSON.stringify(await records(fixture.owner.page)), {
+              timeout: 120_000,
+            })
+            .toContain("Owner text KEEP");
+          await test.info().attach("owner state after restart before restore", {
+            contentType: "application/json",
+            body: JSON.stringify(fixture.ownerLiveState(created[0]!.path), null, 2),
+          });
+        }
+        await expectOnlyRecipientChanged(fixture.owner.page, created[1]!.path);
+        await test.info().attach("owner History before restore", {
+          contentType: "application/json",
+          body: JSON.stringify(
+            await Promise.all(
+              created.map((record) =>
+                readHistoryMoments(fixture.owner.page, OWNER_ID, record.path),
+              ),
+            ),
+            null,
+            2,
+          ),
+        });
+        // Owner settlement is held by the existing debounce seam. History still
+        // attributes the file to the recipient when this destructive action runs.
+        // One run stops live editing for the recipient-only page and removes it.
+        // The owner's typing keeps the other page.
+        const result = await stopAndRestoreRecipient(fixture.owner.page);
+        expect(result).toMatchObject({
+          status: "restored",
+          restored: [{ path: created[1]!.path, removed: true }],
+          review: [{ path: created[0]!.path }],
+          unfinished: null,
+        });
+        expect(result.status === "restored" && result.review[0]?.reason).toMatch(
+          /^(changed-since|restore-refused)$/,
+        );
+        if (!restartBeforeRestore) await expect(status).toHaveValue("Owner text KEEP");
+        expect(await fixture.ownerText(created[0]!.path)).not.toBe("missing");
+        expect(await fixture.ownerText(created[1]!.path)).toBe("missing");
+        await fixture.stopOwner();
+        await fixture.restartOwner();
+        await openCollection(fixture.owner.page);
+        await expect
+          .poll(async () => (await records(fixture.owner.page)).map((record) => record.id), {
+            timeout: 120_000,
+          })
+          .toEqual([created[0]!.id]);
+        await openRecordAsPage(fixture.owner.page, "Untitled");
+        await expect(
+          fixture.owner.page.getByLabel("Property Status value", { exact: true }),
+        ).toHaveValue("Owner text KEEP", { timeout: 120_000 });
+        const undo = await fixture.owner.page.evaluate(
+          async ({ workspaceId, ids }) =>
+            (window as unknown as { dohcDesktop: Api }).dohcDesktop.undoStopAndRestore({
+              workspaceId,
+              restoredMomentIds: ids,
+            }),
+          {
+            workspaceId: OWNER_ID,
+            ids:
+              result.status === "restored"
+                ? result.restored.map((file) => file.restoredMomentId)
+                : [],
+          },
+        );
+        expect(undo.files).toMatchObject([{ kind: "restored" }]);
+        await expect
+          .poll(() => fixture.ownerText(created[1]!.path), { timeout: 120_000 })
+          .toContain("Recipient only");
+      },
+      { ownerEnv: { DOHC_TEST_YDOC_SETTLE_DEBOUNCE_MS: "600000" } },
+    );
+  });
 }
 
 test("@two-client a recipient restarts after a lost creation acknowledgement and retries the same relay submission", async () => {
   test.setTimeout(420_000);
   let drop = true;
-  const responses: { request: Record<string, unknown>; receipt: Record<string, unknown>; dropped: boolean }[] = [];
-  await withSharedCollection(result => {
-    if (result.status !== 200) return;
-    responses.push({ request: JSON.parse(result.requestBody), receipt: JSON.parse(result.body), dropped: drop });
-    return drop ? "drop" : undefined;
-  }, async fixture => {
-    let page = fixture.recipient().page;
-    await newRecordPage(page);
-    await expect.poll(() => responses.some(response => response.dropped && response.receipt.created === true),
-      { timeout: 120_000 }).toBe(true);
-    const original = responses.find(response => response.receipt.created === true)!;
-    const [created] = await records(page);
-    expect(created).toMatchObject({ creationDelivery: "pending" });
-    expect(original.request.submitId).toEqual(expect.any(String));
-    await expect.poll(async () => creationOps(await log(fixture.relay)).length, { timeout: 120_000 }).toBe(1);
-    await openCollection(page);
-    await closeRecordPanel(page);
-    await expect(page.getByTestId("collection-record-drafts")).toContainText("Saved on this computer. Waiting to send");
-    await expect(page.getByTestId("collection-record-drafts").getByRole("button", { name: "Discard draft", exact: true })).toHaveCount(0);
-    let beforeRelaunch = 0;
-    // Only the first receipt is lost. The relaunched app's replay gets its receipt.
-    page = (await fixture.restartRecipient(() => { beforeRelaunch = responses.length; drop = false; })).page;
-    // The restart's refresh can swap in the relay's copy first. The creation keeps its status until the replay's receipt.
-    await expect.poll(async () => (await records(page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
-    expect(["pending", "accepted"]).toContain((await records(page))[0]!.creationDelivery);
-    const relaunched = () => responses.slice(beforeRelaunch);
-    await expect.poll(() => relaunched().some(response => response.receipt.created === false), { timeout: 120_000 }).toBe(true);
-    const replay = relaunched().find(response => response.receipt.created === false)!;
-    expect(replay.request).toEqual(original.request);
-    expect(replay.receipt).toEqual({ ...original.receipt, created: false });
-    await expectSent(page, created!.id);
-    await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] }).toContain(`id: ${created!.id}`);
-    expect(await fixture.ownerText(created!.path)).toBe(await fixture.recipientText(created!.path));
-    await openCollection(fixture.owner.page);
-    await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
-    expect(creationOps(await log(fixture.relay))).toHaveLength(1);
-    expect(responses.filter(response => response.receipt.created === true)).toHaveLength(1);
-    await openRecordAsPage(page, "Untitled");
-    await expect(page.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
-    await page.getByTestId("property-add").click();
-    await page.getByTestId("property-key").last().fill("Task");
-    await page.getByLabel("Property Task value", { exact: true }).fill("Edited after restart");
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved-to-host", { timeout: 120_000 });
-    await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] }).toContain("Task: Edited after restart");
-    await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
-    expect(creationOps(await log(fixture.relay))).toHaveLength(1);
-    await test.info().attach("lost acknowledgement and relay replay", { contentType: "application/json", body: JSON.stringify(responses, null, 2) });
+  const responses: {
+    request: Record<string, unknown>;
+    receipt: Record<string, unknown>;
+    dropped: boolean;
+  }[] = [];
+  await withSharedCollection(
+    (result) => {
+      if (result.status !== 200) return;
+      responses.push({
+        request: JSON.parse(result.requestBody),
+        receipt: JSON.parse(result.body),
+        dropped: drop,
+      });
+      return drop ? "drop" : undefined;
+    },
+    async (fixture) => {
+      let page = fixture.recipient().page;
+      await newRecordPage(page);
+      await expect
+        .poll(
+          () => responses.some((response) => response.dropped && response.receipt.created === true),
+          { timeout: 120_000 },
+        )
+        .toBe(true);
+      const original = responses.find((response) => response.receipt.created === true)!;
+      const [created] = await records(page);
+      expect(created).toMatchObject({ creationDelivery: "pending" });
+      expect(original.request.submitId).toEqual(expect.any(String));
+      await expect
+        .poll(async () => creationOps(await log(fixture.relay)).length, { timeout: 120_000 })
+        .toBe(1);
+      await openCollection(page);
+      await closeRecordPanel(page);
+      await expect(page.getByTestId("collection-record-drafts")).toContainText(
+        "Saved on this computer. Waiting to send",
+      );
+      await expect(
+        page
+          .getByTestId("collection-record-drafts")
+          .getByRole("button", { name: "Discard draft", exact: true }),
+      ).toHaveCount(0);
+      let beforeRelaunch = 0;
+      // Only the first receipt is lost. The relaunched app's replay gets its receipt.
+      page = (
+        await fixture.restartRecipient(() => {
+          beforeRelaunch = responses.length;
+          drop = false;
+        })
+      ).page;
+      // The restart's refresh can swap in the relay's copy first. The creation keeps its status until the replay's receipt.
+      await expect
+        .poll(async () => (await records(page)).map((record) => record.id), { timeout: 120_000 })
+        .toEqual([created!.id]);
+      expect(["pending", "accepted"]).toContain((await records(page))[0]!.creationDelivery);
+      const relaunched = () => responses.slice(beforeRelaunch);
+      await expect
+        .poll(() => relaunched().some((response) => response.receipt.created === false), {
+          timeout: 120_000,
+        })
+        .toBe(true);
+      const replay = relaunched().find((response) => response.receipt.created === false)!;
+      expect(replay.request).toEqual(original.request);
+      expect(replay.receipt).toEqual({ ...original.receipt, created: false });
+      await expectSent(page, created!.id);
+      await expect
+        .poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] })
+        .toContain(`id: ${created!.id}`);
+      expect(await fixture.ownerText(created!.path)).toBe(
+        await fixture.recipientText(created!.path),
+      );
+      await openCollection(fixture.owner.page);
+      await expect
+        .poll(async () => (await records(fixture.owner.page)).map((record) => record.id), {
+          timeout: 120_000,
+        })
+        .toEqual([created!.id]);
+      expect(creationOps(await log(fixture.relay))).toHaveLength(1);
+      expect(responses.filter((response) => response.receipt.created === true)).toHaveLength(1);
+      await openRecordAsPage(page, "Untitled");
+      await expect(page.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
+      await page.getByTestId("property-add").click();
+      await page.getByTestId("property-key").last().fill("Task");
+      await page.getByLabel("Property Task value", { exact: true }).fill("Edited after restart");
+      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+        "data-state",
+        "saved-to-host",
+        { timeout: 120_000 },
+      );
+      await expect
+        .poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] })
+        .toContain("Task: Edited after restart");
+      await expect
+        .poll(async () => (await records(fixture.owner.page)).map((record) => record.id), {
+          timeout: 120_000,
+        })
+        .toEqual([created!.id]);
+      expect(creationOps(await log(fixture.relay))).toHaveLength(1);
+      await test.info().attach("lost acknowledgement and relay replay", {
+        contentType: "application/json",
+        body: JSON.stringify(responses, null, 2),
+      });
 
-    // A recipient's new row, through the relay: the task typed in the table's row makes a record on Enter, and both
-    // the creation and the field write of what was typed reach the owner.
-    await openCollection(page);
-    await page.getByTestId("collection-view-switcher").getByRole("button", { name: "Table", exact: true }).click();
-    await page.getByTestId("collection-new-record").click();
-    const rowEditor = page.locator("[data-cell-editor] input");
-    await rowEditor.fill("Typed in the new row");
-    await rowEditor.press("Enter");
-    await expect.poll(async () => (await records(page)).length, { timeout: 120_000 }).toBe(2);
-    const typed = (await records(page)).find(record => record.id !== created!.id)!;
-    await expect.poll(() => fixture.ownerText(typed.path), { timeout: 120_000, intervals: [1000] }).toContain("Task: Typed in the new row");
-    await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id).sort(), { timeout: 120_000 }).toEqual([created!.id, typed.id].sort());
-    // The row saved, so its record has a row in the table, and no file tab opened for it.
-    await expect(page.getByRole("grid").getByRole("button", { name: "Open Untitled 2", exact: true })).toBeVisible({ timeout: 120_000 });
-    await expect(page.getByTestId(`tab-${typed.path}`)).toHaveCount(0);
-  });
+      await openCollection(page);
+      await page
+        .getByTestId("collection-view-switcher")
+        .getByRole("button", { name: "Table", exact: true })
+        .click();
+      await page.getByTestId("collection-new-record").click();
+      const rowEditor = page.locator("[data-cell-editor] input");
+      await rowEditor.fill("Typed in the new row");
+      await rowEditor.press("Enter");
+      await expect.poll(async () => (await records(page)).length, { timeout: 120_000 }).toBe(2);
+      const typed = (await records(page)).find((record) => record.id !== created!.id)!;
+      await expect
+        .poll(() => fixture.ownerText(typed.path), { timeout: 120_000, intervals: [1000] })
+        .toContain("Task: Typed in the new row");
+      await expect
+        .poll(async () => (await records(fixture.owner.page)).map((record) => record.id).sort(), {
+          timeout: 120_000,
+        })
+        .toEqual([created!.id, typed.id].sort());
+      await expect(
+        page.getByRole("grid").getByRole("button", { name: "Open Untitled 2", exact: true }),
+      ).toBeVisible({ timeout: 120_000 });
+      await expect(page.getByTestId(`tab-${typed.path}`)).toHaveCount(0);
+    },
+  );
 });
 
 test("@two-client a recipient's record survives a restart while the relay is unreachable, and Try again sends it once", async () => {
@@ -498,74 +888,128 @@ test("@two-client a recipient's record survives a restart while the relay is unr
   let unreachable = true;
   let refusedWrites = 0;
   const receipts: Record<string, unknown>[] = [];
-  await withSharedCollection(result => {
-    if (result.status === 200) receipts.push(JSON.parse(result.body) as Record<string, unknown>);
-  }, async fixture => {
-    let page = fixture.recipient().page;
-    await newRecordPage(page);
-    await expect.poll(() => refusedWrites, { timeout: 120_000 }).toBeGreaterThan(0);
-    const [created] = await records(page);
-    expect(created).toMatchObject({ creationDelivery: "pending" });
-    await openCollection(page);
-    await closeRecordPanel(page);
-    await expectWaitingDraft(page);
-    let refusedBeforeRelaunch = 0;
-    page = (await fixture.restartRecipient(() => { refusedBeforeRelaunch = refusedWrites; })).page;
-    // The restarted app tries to send the draft once its view is ready. The draft stays after that try fails.
-    await expect.poll(() => refusedWrites, { timeout: 120_000 }).toBeGreaterThan(refusedBeforeRelaunch);
-    await expect.poll(async () => (await records(page)).map(record => ({ id: record.id, delivery: record.creationDelivery })),
-      { timeout: 120_000 }).toEqual([{ id: created!.id, delivery: "pending" }]);
-    await expectWaitingDraft(page);
-    expect(receipts).toEqual([]);
-    expect(creationOps(await log(fixture.relay))).toHaveLength(0);
-    unreachable = false;
-    await page.getByTestId("collection-record-drafts").getByRole("button", { name: "Try again", exact: true }).click();
-    await expect.poll(() => receipts.some(receipt => receipt.created === true), { timeout: 120_000 }).toBe(true);
-    expect(receipts.find(receipt => receipt.created === true)).toMatchObject({ paths: [created!.path] });
-    await expectSent(page, created!.id);
-    await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] }).toContain(`id: ${created!.id}`);
-    expect(await fixture.ownerText(created!.path)).toBe(await fixture.recipientText(created!.path));
-    await openCollection(fixture.owner.page);
-    await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
-    expect(creationOps(await log(fixture.relay))).toHaveLength(1);
-    expect(receipts.filter(receipt => receipt.created === true)).toHaveLength(1);
-  }, {
-    refuse: (method, path) => {
-      const refused = unreachable && method === "POST" && /^\/sync\/shares\/[^/?]+\/collection-writes(?:\?|$)/u.test(path);
-      if (refused) refusedWrites++;
-      return refused;
+  await withSharedCollection(
+    (result) => {
+      if (result.status === 200) receipts.push(JSON.parse(result.body) as Record<string, unknown>);
     },
-  });
+    async (fixture) => {
+      let page = fixture.recipient().page;
+      await newRecordPage(page);
+      await expect.poll(() => refusedWrites, { timeout: 120_000 }).toBeGreaterThan(0);
+      const [created] = await records(page);
+      expect(created).toMatchObject({ creationDelivery: "pending" });
+      await openCollection(page);
+      await closeRecordPanel(page);
+      await expectWaitingDraft(page);
+      let refusedBeforeRelaunch = 0;
+      page = (
+        await fixture.restartRecipient(() => {
+          refusedBeforeRelaunch = refusedWrites;
+        })
+      ).page;
+      await expect
+        .poll(() => refusedWrites, { timeout: 120_000 })
+        .toBeGreaterThan(refusedBeforeRelaunch);
+      await expect
+        .poll(
+          async () =>
+            (await records(page)).map((record) => ({
+              id: record.id,
+              delivery: record.creationDelivery,
+            })),
+          { timeout: 120_000 },
+        )
+        .toEqual([{ id: created!.id, delivery: "pending" }]);
+      await expectWaitingDraft(page);
+      expect(receipts).toEqual([]);
+      expect(creationOps(await log(fixture.relay))).toHaveLength(0);
+      unreachable = false;
+      await page
+        .getByTestId("collection-record-drafts")
+        .getByRole("button", { name: "Try again", exact: true })
+        .click();
+      await expect
+        .poll(() => receipts.some((receipt) => receipt.created === true), { timeout: 120_000 })
+        .toBe(true);
+      expect(receipts.find((receipt) => receipt.created === true)).toMatchObject({
+        paths: [created!.path],
+      });
+      await expectSent(page, created!.id);
+      await expect
+        .poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] })
+        .toContain(`id: ${created!.id}`);
+      expect(await fixture.ownerText(created!.path)).toBe(
+        await fixture.recipientText(created!.path),
+      );
+      await openCollection(fixture.owner.page);
+      await expect
+        .poll(async () => (await records(fixture.owner.page)).map((record) => record.id), {
+          timeout: 120_000,
+        })
+        .toEqual([created!.id]);
+      expect(creationOps(await log(fixture.relay))).toHaveLength(1);
+      expect(receipts.filter((receipt) => receipt.created === true)).toHaveLength(1);
+    },
+    {
+      refuse: (method, path) => {
+        const refused =
+          unreachable &&
+          method === "POST" &&
+          /^\/sync\/shares\/[^/?]+\/collection-writes(?:\?|$)/u.test(path);
+        if (refused) refusedWrites++;
+        return refused;
+      },
+    },
+  );
 });
-
 
 test("@two-client a waiting editor becomes editable when the owner's computer returns after admission timed out", async () => {
   test.setTimeout(420_000);
   let release!: () => void;
   let creationWritten!: () => void;
-  const acknowledgement = new Promise<void>(resolve => { release = resolve; });
-  const written = new Promise<void>(resolve => { creationWritten = resolve; });
+  const acknowledgement = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const written = new Promise<void>((resolve) => {
+    creationWritten = resolve;
+  });
   try {
-    await withSharedCollection(async result => {
-      if (result.status === 200) { creationWritten(); await acknowledgement; }
-    }, async fixture => {
-      const page = fixture.recipient().page;
-      // The record's page is the editor that waits, so it is open before the owner's computer stops.
-      await newRecordPage(page);
-      await written;
-      await fixture.stopOwner();
-      release();
-      await expect(page.getByText("dohc could not open this file for editing.", {exact: true})).toBeVisible({timeout: 120_000});
-      await expect(page.getByTestId("property-add")).toHaveCount(0);
-      await expect(page.locator('[contenteditable="true"]')).toHaveCount(0);
-      await expect(page.getByRole("button", { name: "Edit", exact: true })).toBeDisabled();
-      await fixture.restartOwner();
-      // The host signal alone reopens this same tab, without file writes or a manual retry.
-      await expect(page.getByTestId("property-add")).toBeEnabled({timeout: 120_000});
-      await page.getByTestId("property-add").click();
-      await page.getByTestId("property-key").last().fill("Task");
-      await page.getByLabel("Property Task value", {exact: true}).fill("Continue after the owner returns");
-      await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved-to-host", {timeout: 120_000});
-    });
-  } finally { release(); }
+    await withSharedCollection(
+      async (result) => {
+        if (result.status === 200) {
+          creationWritten();
+          await acknowledgement;
+        }
+      },
+      async (fixture) => {
+        const page = fixture.recipient().page;
+        // The record's page is the editor that waits, so it is open before the owner's computer stops.
+        await newRecordPage(page);
+        await written;
+        await fixture.stopOwner();
+        release();
+        await expect(
+          page.getByText("dohc could not open this file for editing.", { exact: true }),
+        ).toBeVisible({ timeout: 120_000 });
+        await expect(page.getByTestId("property-add")).toHaveCount(0);
+        await expect(page.locator('[contenteditable="true"]')).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "Edit", exact: true })).toBeDisabled();
+        await fixture.restartOwner();
+        // The host signal alone reopens this same tab, without file writes or a manual retry.
+        await expect(page.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
+        await page.getByTestId("property-add").click();
+        await page.getByTestId("property-key").last().fill("Task");
+        await page
+          .getByLabel("Property Task value", { exact: true })
+          .fill("Continue after the owner returns");
+        await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
+          "data-state",
+          "saved-to-host",
+          { timeout: 120_000 },
+        );
+      },
+    );
+  } finally {
+    release();
+  }
 });

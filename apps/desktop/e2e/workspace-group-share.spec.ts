@@ -49,7 +49,11 @@ test("@two-client a group shares its channel and folder together, and both sides
 
     // The owner's synced workspace, signed in as the granter. The relay
     // only issues shares for a workspace the owner has claimed.
-    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER_TOKEN, workspaceId: ownerWorkspaceId });
+    await claimRelayWorkspace({
+      baseUrl: relay.baseUrl,
+      token: OWNER_TOKEN,
+      workspaceId: ownerWorkspaceId,
+    });
     await seedWorkspaceManifest(ownerTemp, ownerWorkspaceId);
     await seedWorkspaceRegistry(ownerTemp, [
       {
@@ -65,7 +69,6 @@ test("@two-client a group shares its channel and folder together, and both sides
       userId: OWNER_USER,
       token: OWNER_TOKEN,
     });
-    // The member's own local workspace, signed in as the recipient.
     await seedWorkspaceManifest(memberTemp, memberWorkspaceId);
     await writeWorkspaceFiles(memberTemp, [
       { path: "notes/mine.md", contents: "# Mine\n\nThe member's own file.\n" },
@@ -84,7 +87,6 @@ test("@two-client a group shares its channel and folder together, and both sides
     owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
     await openWorkspaceFromFirstRun(owner.page, ownerTemp);
 
-    // --- The owner creates a group that holds posts and chat -------------
     await openChatsView(owner.page);
     await owner.page.getByTestId("chats-new-channel").click();
     await owner.page.getByTestId("chats-new-channel-name").fill("Launch team");
@@ -93,10 +95,8 @@ test("@two-client a group shares its channel and folder together, and both sides
     await owner.page.getByTestId("chats-new-channel-submit").click();
     await expect(owner.page.getByTestId("chats-channel-view")).toBeVisible();
     await expect(owner.page.getByTestId("chats-channel-title")).toHaveText("Launch team");
-    // The group's folder exists the moment the group does.
     await waitForWorkspaceFile(owner.page, ownerWorkspaceId, "launch-team");
 
-    // A file in the group's folder and one outside it, then a post.
     await writeWorkspaceFiles(ownerTemp, [
       { path: "launch-team/plan.md", contents: "# Plan\n\nThe lighthouse memo.\n" },
       { path: "private/ledger.md", contents: "The kraken ledger stays private.\n" },
@@ -105,11 +105,12 @@ test("@two-client a group shares its channel and folder together, and both sides
     await owner.page.getByTestId("chats-new-thread-composer").fill("Kickoff: read the plan.");
     await owner.page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(owner.page.getByTestId("chats-thread-view")).toBeVisible();
-    await expect(owner.page.getByTestId("chats-message-body")).toContainText("Kickoff: read the plan.");
+    await expect(owner.page.getByTestId("chats-message-body")).toContainText(
+      "Kickoff: read the plan.",
+    );
     await owner.page.getByTestId("chats-thread-back").click();
     await expect(owner.page.getByTestId("chats-channel-view")).toBeVisible();
 
-    // --- The owner shares the group by email ----------------------------
     await owner.page.getByTestId("chats-share-channel").click();
     await expect(owner.page.getByTestId("chats-share-panel")).toBeVisible();
     await owner.page.getByTestId("chats-share-email").fill(MEMBER_EMAIL);
@@ -118,14 +119,19 @@ test("@two-client a group shares its channel and folder together, and both sides
     await owner.page.getByTestId("chats-share-close").click();
     await expect(owner.page.getByTestId("chats-share-panel")).toHaveCount(0);
 
-    // The relay holds one grant, a group naming the channel and its folder.
     const listing = await fetch(`${relay.baseUrl}/sync/shares`, {
       headers: { authorization: `Bearer ${OWNER_TOKEN}` },
     });
     expect(listing.status).toBe(200);
-    const granted = ((await listing.json()) as {
-      granted: Array<{ shareId: string; selector: { kind?: string; paths?: string[] }; revokedAtMs: number | null }>;
-    }).granted.filter((row) => row.revokedAtMs === null);
+    const granted = (
+      (await listing.json()) as {
+        granted: Array<{
+          shareId: string;
+          selector: { kind?: string; paths?: string[] };
+          revokedAtMs: number | null;
+        }>;
+      }
+    ).granted.filter((row) => row.revokedAtMs === null);
     expect(granted).toHaveLength(1);
     expect(granted[0]!.selector).toMatchObject({ kind: "group", paths: ["launch-team"] });
     const shareId = granted[0]!.shareId;
@@ -141,17 +147,22 @@ test("@two-client a group shares its channel and folder together, and both sides
             { headers: { authorization: `Bearer ${MEMBER_TOKEN}` } },
           );
           if (page.status !== 200) return `status:${page.status}`;
-          const ops = ((await page.json()) as {
-            ops: Array<{ opKind: string; payload: Record<string, unknown> }>;
-          }).ops;
-          const kinds = ops.map((op) => `${op.opKind}:${String(op.payload.payloadAfterPath ?? op.payload.path ?? "")}`);
-          return kinds.some((kind) => kind === "moment.append:launch-team/plan.md") ? "served" : kinds.join(",");
+          const ops = (
+            (await page.json()) as {
+              ops: Array<{ opKind: string; payload: Record<string, unknown> }>;
+            }
+          ).ops;
+          const kinds = ops.map(
+            (op) => `${op.opKind}:${String(op.payload.payloadAfterPath ?? op.payload.path ?? "")}`,
+          );
+          return kinds.some((kind) => kind === "moment.append:launch-team/plan.md")
+            ? "served"
+            : kinds.join(",");
         },
         { timeout: 60_000, intervals: [1_000] },
       )
       .toBe("served");
 
-    // --- The member joins from Shared with you ---------------------------
     member = await launchDesktopApp({ workspace: memberTemp, env: syncEnv });
     expect(member.app.process().pid).not.toBe(owner.app.process().pid);
     await openWorkspaceFromFirstRun(member.page, memberTemp);
@@ -159,37 +170,41 @@ test("@two-client a group shares its channel and folder together, and both sides
     await expect(member.page.getByTestId("chats-shared-with-you")).toBeVisible({ timeout: 60_000 });
     await member.page.getByTestId("chats-join-shared").click();
 
-    // The channel arrives with the owner's post.
-    const joinedChannel = member.page.getByTestId("chats-channel").filter({ hasText: "Launch team" });
+    const joinedChannel = member.page
+      .getByTestId("chats-channel")
+      .filter({ hasText: "Launch team" });
     await expect(joinedChannel).toBeVisible({ timeout: 60_000 });
     await joinedChannel.click();
     await expect(member.page.getByTestId("chats-channel-view")).toBeVisible();
-    await expect(member.page.getByTestId("chats-thread").first()).toContainText("Kickoff: read the plan.", {
-      timeout: 60_000,
-    });
+    await expect(member.page.getByTestId("chats-thread").first()).toContainText(
+      "Kickoff: read the plan.",
+      {
+        timeout: 60_000,
+      },
+    );
 
-    // The folder arrives beside the member's own files, labeled by the
-    // group's name; the owner's private file never crosses.
     await revealExplorerPath(member.page, "shared-with-me/launch-team/launch-team/plan.md");
     await expect(explorerRow(member.page, "shared-with-me/launch-team/private")).toHaveCount(0);
     await revealExplorerPath(member.page, "notes/mine.md");
     await explorerRow(member.page, "shared-with-me/launch-team/launch-team/plan.md").click();
     await expect(member.page.getByText("The lighthouse memo.")).toBeVisible();
 
-    // --- The member posts back in the group's chat lane ------------------
-    // The Chats tab comes back where it was left: inside the group.
     await openChatsView(member.page);
     if (!(await member.page.getByTestId("chats-channel-view").isVisible())) {
       await joinedChannel.click();
     }
     await expect(member.page.getByTestId("chats-channel-title")).toHaveText("Launch team");
-    // The group's type crossed with the channel: both lanes are here.
-    await expect(member.page.getByTestId("chats-channel-view")).toHaveAttribute("data-group-type", "both");
+    await expect(member.page.getByTestId("chats-channel-view")).toHaveAttribute(
+      "data-group-type",
+      "both",
+    );
     await member.page.getByTestId("chats-group-lane-chat").click();
     await expect(member.page.getByTestId("chats-lane")).toBeVisible();
     await member.page.getByTestId("chats-lane-composer").fill("Read it. Count me in.");
     await member.page.getByTestId("chats-lane-composer").press("Enter");
-    await expect(member.page.getByTestId("chats-lane-message-body")).toContainText("Read it. Count me in.");
+    await expect(member.page.getByTestId("chats-lane-message-body")).toContainText(
+      "Read it. Count me in.",
+    );
 
     // --- The owner sees the reply -----------------------------------------
     // An idle owner pulls on its own sync cadence; a throwaway write wakes
@@ -200,11 +215,19 @@ test("@two-client a group shares its channel and folder together, and both sides
         async () => {
           nudge += 1;
           await writeFile(join(ownerTemp.rootPath, `sync-nudge-${nudge}.md`), `nudge ${nudge}\n`);
-          await owner!.page.getByTestId("chats-group-lane-posts").click().catch(() => undefined);
-          await owner!.page.getByTestId("chats-group-lane-chat").click().catch(() => undefined);
+          await owner!.page
+            .getByTestId("chats-group-lane-posts")
+            .click()
+            .catch(() => undefined);
+          await owner!.page
+            .getByTestId("chats-group-lane-chat")
+            .click()
+            .catch(() => undefined);
           // The lane paints its messages after the click returns, and its
           // composer stays disabled until then. Count once it is enabled.
-          await expect(owner!.page.getByTestId("chats-lane-composer")).toBeEnabled({ timeout: 10_000 }).catch(() => undefined);
+          await expect(owner!.page.getByTestId("chats-lane-composer"))
+            .toBeEnabled({ timeout: 10_000 })
+            .catch(() => undefined);
           return await owner!.page
             .getByTestId("chats-lane-message-body")
             .filter({ hasText: "Count me in" })
@@ -214,10 +237,30 @@ test("@two-client a group shares its channel and folder together, and both sides
       )
       .toBeGreaterThan(0);
   } finally {
-    try { await member?.close(); } catch (error) { console.error("Member cleanup failed:", error); }
-    try { await owner?.close(); } catch (error) { console.error("Owner cleanup failed:", error); }
-    try { await relay?.stop(); } catch (error) { console.error("Relay cleanup failed:", error); }
-    try { await memberTemp.cleanup(); } catch (error) { console.error("Member workspace cleanup failed:", error); }
-    try { await ownerTemp.cleanup(); } catch (error) { console.error("Owner workspace cleanup failed:", error); }
+    try {
+      await member?.close();
+    } catch (error) {
+      console.error("Member cleanup failed:", error);
+    }
+    try {
+      await owner?.close();
+    } catch (error) {
+      console.error("Owner cleanup failed:", error);
+    }
+    try {
+      await relay?.stop();
+    } catch (error) {
+      console.error("Relay cleanup failed:", error);
+    }
+    try {
+      await memberTemp.cleanup();
+    } catch (error) {
+      console.error("Member workspace cleanup failed:", error);
+    }
+    try {
+      await ownerTemp.cleanup();
+    } catch (error) {
+      console.error("Owner workspace cleanup failed:", error);
+    }
   }
 });

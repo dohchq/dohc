@@ -23,7 +23,7 @@ const WS: &str = "ws-base-conflict";
 const PATH: &str = "notes/plan.md";
 
 /// Seed a local plain-file head, then apply a peer's divergent base so the
-/// #546 conflict opens. Returns (doc key, winner base bytes, winner doc).
+/// conflict opens. Returns (doc key, winner base bytes, winner doc).
 fn seed_divergent_base(
     store: &mut EngineStore,
 ) -> (DocKey, Vec<u8>, dohc_engine_collab::Ydoc, String) {
@@ -367,8 +367,6 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
         )
         .await
         .expect("merged resolution");
-    // The resolution's materialization job is still pending (nothing ran
-    // it): the disk holds the pre-resolution bytes.
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("disk"),
         "local truth"
@@ -416,10 +414,6 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_open_base_conflict_freezes_the_open_too() {
-    // Refusing only the settle left the open serving the
-    // claimed sender lineage - the editor displayed and accepted edits
-    // against the unreviewed side while the head froze. The gate covers
-    // open and settle symmetrically.
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     {
@@ -679,7 +673,6 @@ async fn a_resolution_refuses_while_a_session_holds_the_document() {
         "unexpected resolve outcome: {refused:?}"
     );
 
-    // The conflict is untouched: still open, still awaiting review.
     supervisor.close(&db).expect("close actor");
     let store = EngineStore::open(&db, 12).expect("inspect");
     let open_conflicts: i64 = store
@@ -951,7 +944,6 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
         .expect("the deletion resolves after the deferred row clears");
     supervisor.close(&db).expect("close actor after retry");
 
-    // Nothing is left that could project the deleted content back.
     let store = EngineStore::open(&db, 12).expect("inspect");
     let (updates, snapshots, markers, deferred): (i64, i64, i64, i64) = store
         .read_with(|conn| {
@@ -1229,13 +1221,6 @@ async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_su
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_idempotent_retry_survives_a_live_session() {
-    // The live-lease guard must not outrank the idempotency contract. A
-    // resolution commits, its response is lost, the user opens the resolved
-    // document, and the client retries the same request_id. The request
-    // ledger replays the recorded result and rewrites nothing — so refusing
-    // that retry for a live lease would turn a lost response into a
-    // different answer.
-    //
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {
@@ -1275,16 +1260,13 @@ async fn an_idempotent_retry_survives_a_live_session() {
         }
     };
 
-    // The first attempt commits; imagine its response never arrived.
     resolve(dohc_engine_collab::LeaseRegistry::new())
         .await
         .expect("the resolution commits");
 
-    // The user reopens the resolved document, so a session now holds it.
     let leases = dohc_engine_collab::LeaseRegistry::new();
     let _held = leases.acquire(&key).expect("hold the document live");
 
-    // The exact retry must replay, not refuse.
     resolve(leases)
         .await
         .expect("an idempotent retry must survive a live session");

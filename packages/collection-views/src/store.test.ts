@@ -47,10 +47,7 @@ describe("createCollectionStore", () => {
   it("drops a stale response that resolves after a newer one", async () => {
     const stale = deferred<CollectionQueryResult>();
     const fresh = deferred<CollectionQueryResult>();
-    const executor = vi
-      .fn()
-      .mockReturnValueOnce(stale.promise)
-      .mockReturnValueOnce(fresh.promise);
+    const executor = vi.fn().mockReturnValueOnce(stale.promise).mockReturnValueOnce(fresh.promise);
     const store = createCollectionStore({ collectionPath: "tasks", executor });
 
     const first = store.refresh();
@@ -82,9 +79,7 @@ describe("createCollectionStore", () => {
   it("loadMore passes the cursor and appends the next page", async () => {
     const executor = vi
       .fn()
-      .mockResolvedValueOnce(
-        makeQueryResult([makeRecord("rec-1")], { nextCursor: CURSOR }),
-      )
+      .mockResolvedValueOnce(makeQueryResult([makeRecord("rec-1")], { nextCursor: CURSOR }))
       .mockResolvedValueOnce(makeQueryResult([makeRecord("rec-2")]));
     const store = createCollectionStore({ collectionPath: "tasks", executor });
 
@@ -123,9 +118,11 @@ describe("createCollectionStore", () => {
     await store.refresh();
     while (store.getState().nextCursor !== null) await store.loadMore();
 
-    expect(
-      executor.mock.calls.map(([params]) => params.cursor?.recordId),
-    ).toEqual([undefined, "rec-1", "rec-2"]);
+    expect(executor.mock.calls.map(([params]) => params.cursor?.recordId)).toEqual([
+      undefined,
+      "rec-1",
+      "rec-2",
+    ]);
     expect(store.getState().records.map((record) => record.id)).toEqual([
       "rec-1",
       "rec-2",
@@ -137,9 +134,7 @@ describe("createCollectionStore", () => {
     const page = deferred<CollectionQueryResult>();
     const executor = vi
       .fn()
-      .mockResolvedValueOnce(
-        makeQueryResult([makeRecord("rec-1")], { nextCursor: CURSOR }),
-      )
+      .mockResolvedValueOnce(makeQueryResult([makeRecord("rec-1")], { nextCursor: CURSOR }))
       .mockReturnValueOnce(page.promise);
     const store = createCollectionStore({ collectionPath: "tasks", executor });
 
@@ -150,10 +145,7 @@ describe("createCollectionStore", () => {
     await Promise.all([first, overlapping]);
 
     expect(executor).toHaveBeenCalledTimes(2);
-    expect(store.getState().records.map((record) => record.id)).toEqual([
-      "rec-1",
-      "rec-2",
-    ]);
+    expect(store.getState().records.map((record) => record.id)).toEqual(["rec-1", "rec-2"]);
   });
 
   it("stores grouped results and merges groups across pages", async () => {

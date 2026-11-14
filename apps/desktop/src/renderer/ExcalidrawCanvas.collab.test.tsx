@@ -66,9 +66,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
     excalidraw.props = props;
     excalidraw.beginRender();
     try {
-      excalidraw.receiveApiCallback(
-        props.excalidrawAPI as ((api: unknown) => void) | undefined,
-      );
+      excalidraw.receiveApiCallback(props.excalidrawAPI as ((api: unknown) => void) | undefined);
     } finally {
       excalidraw.endRender();
     }
@@ -172,9 +170,9 @@ it("adopts an API whose ready microtask drains before commit", async () => {
   declareSceneRoots(doc);
   insertElementRevision(doc, rectangle(1, 10, 20));
   const presence = trackedPresenceTransport();
-  const hydrateAssets = vi.fn(async () => [
-    { id: "image", dataURL: "data:image/png;base64,QQ==" },
-  ] as never);
+  const hydrateAssets = vi.fn(
+    async () => [{ id: "image", dataURL: "data:image/png;base64,QQ==" }] as never,
+  );
   vi.stubGlobal("queueMicrotask", (callback: VoidFunction) => callback());
 
   render(
@@ -208,9 +206,9 @@ it("adopts an API whose ready microtask drains before commit", async () => {
 it("keeps asset installation best-effort when Excalidraw rejects the files", async () => {
   const doc = new Y.Doc();
   declareSceneRoots(doc);
-  const hydrateAssets = vi.fn(async () => [
-    { id: "image", dataURL: "data:image/png;base64,QQ==" },
-  ] as never);
+  const hydrateAssets = vi.fn(
+    async () => [{ id: "image", dataURL: "data:image/png;base64,QQ==" }] as never,
+  );
   excalidraw.addFiles.mockImplementationOnce(() => {
     throw new Error("asset install failed");
   });
@@ -262,16 +260,12 @@ it("rejects hydration once Excalidraw replaces its imperative API", async () => 
     addFiles: replacementAddFiles,
   };
   excalidraw.replaceApi(replacementApi);
-  const replaceApi = excalidraw.props?.excalidrawAPI as (
-    api: typeof replacementApi,
-  ) => void;
+  const replaceApi = excalidraw.props?.excalidrawAPI as (api: typeof replacementApi) => void;
   await act(async () => {
     // Resolve first so its continuation is already queued when the callback
     // replaces apiRef. The readyApi state update has not committed yet, so
     // only the exact imperative-API identity check can reject these files.
-    resolveRetired([
-      { id: "retired", dataURL: "data:image/png;base64,QQ==" },
-    ] as never);
+    resolveRetired([{ id: "retired", dataURL: "data:image/png;base64,QQ==" }] as never);
     replaceApi(replacementApi);
     await retired;
   });
@@ -310,9 +304,7 @@ it("ignores hydration failure from a replaced Excalidraw API", async () => {
     addFiles: vi.fn(),
   };
   excalidraw.replaceApi(replacementApi);
-  const replaceApi = excalidraw.props?.excalidrawAPI as (
-    api: typeof replacementApi,
-  ) => void;
+  const replaceApi = excalidraw.props?.excalidrawAPI as (api: typeof replacementApi) => void;
   await act(async () => {
     rejectRetired(new Error("retired hydration failed"));
     replaceApi(replacementApi);
@@ -340,11 +332,7 @@ it("binds the initial scene after a production-scheduled mount", async () => {
     />,
   );
   try {
-    for (
-      let turn = 0;
-      turn < 10 && !excalidraw.updateScene.mock.calls.length;
-      turn += 1
-    ) {
+    for (let turn = 0; turn < 10 && !excalidraw.updateScene.mock.calls.length; turn += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     expect(excalidraw.updateScene).toHaveBeenCalledWith(
@@ -363,9 +351,9 @@ it("starts the scene, hydration, and presence after a delayed API callback", asy
   declareSceneRoots(doc);
   insertElementRevision(doc, rectangle(1, 10, 20));
   const presence = trackedPresenceTransport();
-  const hydrateAssets = vi.fn(async () => [
-    { id: "image", dataURL: "data:image/png;base64,QQ==" },
-  ] as never);
+  const hydrateAssets = vi.fn(
+    async () => [{ id: "image", dataURL: "data:image/png;base64,QQ==" }] as never,
+  );
   excalidraw.holdApi();
 
   render(
@@ -408,9 +396,9 @@ it("keeps one scene, hydration, and presence binding through Strict Mode replay"
   const doc = new Y.Doc();
   declareSceneRoots(doc);
   const presence = trackedPresenceTransport();
-  const hydrateAssets = vi.fn(async () => [
-    { id: "image", dataURL: "data:image/png;base64,QQ==" },
-  ] as never);
+  const hydrateAssets = vi.fn(
+    async () => [{ id: "image", dataURL: "data:image/png;base64,QQ==" }] as never,
+  );
 
   render(
     <StrictMode>
@@ -578,12 +566,7 @@ it("blocks a stale canvas callback as soon as the scene becomes read-only", asyn
   expect(animationFrames.size).toBe(1);
 
   view.rerender(
-    <ExcalidrawCanvas
-      document={document}
-      readOnly
-      sceneDoc={doc}
-      presence={collaboration}
-    />,
+    <ExcalidrawCanvas document={document} readOnly sceneDoc={doc} presence={collaboration} />,
   );
 
   expect(excalidraw.props?.viewModeEnabled).toBe(true);
@@ -618,11 +601,9 @@ it("reports collaboration only after presence binds", async () => {
           async leave() {},
           poll: ({ signal }) =>
             new Promise((resolve) => {
-              signal.addEventListener(
-                "abort",
-                () => resolve({ version: 1, peers: [] }),
-                { once: true },
-              );
+              signal.addEventListener("abort", () => resolve({ version: 1, peers: [] }), {
+                once: true,
+              });
             }),
         },
       }}
@@ -744,14 +725,17 @@ it("hydrates an engine-bound image outside the Y.Doc", async () => {
   const doc = new Y.Doc();
   declareSceneRoots(doc);
   const payload = `data:image/png;base64,${"A".repeat(50 * 1024)}`;
-  const hydrateAssets = vi.fn(async () => [
-    {
-      id: "large-image",
-      mimeType: "image/png",
-      dataURL: payload,
-      created: 1,
-    },
-  ] as never);
+  const hydrateAssets = vi.fn(
+    async () =>
+      [
+        {
+          id: "large-image",
+          mimeType: "image/png",
+          dataURL: payload,
+          created: 1,
+        },
+      ] as never,
+  );
 
   render(
     <ExcalidrawCanvas
@@ -767,9 +751,7 @@ it("hydrates an engine-bound image outside the Y.Doc", async () => {
     expect.objectContaining({ id: "large-image", dataURL: payload }),
   ]);
   expect(Y.encodeStateAsUpdate(doc).byteLength).toBeLessThan(1024);
-  expect(new TextDecoder().decode(Y.encodeStateAsUpdate(doc))).not.toContain(
-    payload.slice(-1024),
-  );
+  expect(new TextDecoder().decode(Y.encodeStateAsUpdate(doc))).not.toContain(payload.slice(-1024));
 });
 
 it("hydrates a tombstoned image before a remote undo revives it", async () => {
@@ -784,14 +766,17 @@ it("hydrates a tombstoned image before a remote undo revives it", async () => {
     index: "a0",
     fileId: "image-file",
   });
-  const hydrateAssets = vi.fn(async () => [
-    {
-      id: "image-file",
-      mimeType: "image/png",
-      dataURL: "data:image/png;base64,AQID",
-      created: 1,
-    },
-  ] as never);
+  const hydrateAssets = vi.fn(
+    async () =>
+      [
+        {
+          id: "image-file",
+          mimeType: "image/png",
+          dataURL: "data:image/png;base64,AQID",
+          created: 1,
+        },
+      ] as never,
+  );
 
   render(
     <ExcalidrawCanvas
@@ -862,22 +847,19 @@ it("drops asset hydration that resolves after the scene changes", async () => {
   );
 
   await act(async () => {
-    resolveSecond([
-      { id: "current", dataURL: "data:image/png;base64,Qg==" },
-    ] as never);
+    resolveSecond([{ id: "current", dataURL: "data:image/png;base64,Qg==" }] as never);
     await second;
   });
   await act(async () => {
-    resolveFirst([
-      { id: "stale", dataURL: "data:image/png;base64,QQ==" },
-    ] as never);
+    resolveFirst([{ id: "stale", dataURL: "data:image/png;base64,QQ==" }] as never);
     await first;
   });
 
-  expect(excalidraw.addFiles, "omit the response guard's cleanup invalidation. The retired scene's asset reaches the current Excalidraw API as a second addFiles.").toHaveBeenCalledTimes(1);
-  expect(excalidraw.addFiles).toHaveBeenCalledWith([
-    expect.objectContaining({ id: "current" }),
-  ]);
+  expect(
+    excalidraw.addFiles,
+    "omit the response guard's cleanup invalidation. The retired scene's asset reaches the current Excalidraw API as a second addFiles.",
+  ).toHaveBeenCalledTimes(1);
+  expect(excalidraw.addFiles).toHaveBeenCalledWith([expect.objectContaining({ id: "current" })]);
 });
 
 it("reports only the current asset hydration failure", async () => {

@@ -3,10 +3,9 @@
 //! Identity discipline: a [`VersionRecord`] is a named line of history; a
 //! [`SnapshotView`]/[`TextSnapshot`]/[`MomentRecord`] carries a stable
 //! `object_id` that is the
-//! durable identity, and a `path` that is only an alias onto it (plan §Target
-//! architecture). Ids that carry identity (`version_id`, `object_id`,
-//! `moment_id`) are caller-supplied so operation traces are deterministic
-//! (`plan §Behavioral oracle and determinism`).
+//! durable identity, and a `path` that is only an alias onto it. Ids that
+//! carry identity (`version_id`, `object_id`, `moment_id`) are
+//! caller-supplied so operation traces are deterministic.
 
 use crate::error::DomainError;
 

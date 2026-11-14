@@ -1,39 +1,93 @@
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
-import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure, ShareMountStatusRow } from "./bridgeContract";
+import {
+  activityPathsAffectWorkspaceListing,
+  WorkspacePathOpenFailure,
+  ShareMountStatusRow,
+} from "./bridgeContract";
 import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
 import { ImportWorkspaceFilesResult, NoticeTargetShape } from "./bridgeContract";
 import { OwnerLiveDocumentsResult } from "./bridgeContract";
 
 it("bounds recovery replies with room for the capped restore queues", () => {
-  const rows = Array.from({length: 384}, (_, index) => ({objectId: "object", path: "note.md", reason: "restore-fenced",
-    storedOn: "this-computer", incident: `queue-${index}:delivery:0`, recovery: "paused", saveOnly: true}));
-  const status = {state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
-    historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveQuarantines: rows};
+  const rows = Array.from({ length: 384 }, (_, index) => ({
+    objectId: "object",
+    path: "note.md",
+    reason: "restore-fenced",
+    storedOn: "this-computer",
+    incident: `queue-${index}:delivery:0`,
+    recovery: "paused",
+    saveOnly: true,
+  }));
+  const status = {
+    state: "synced",
+    pendingChangeCount: 0,
+    lastSyncedAtMs: null,
+    historyRecordingUnavailable: false,
+    historyShareView: false,
+    liveSessionsGeneration: 0,
+    ownerLiveQuarantines: rows,
+  };
   expect(SyncStatusResult.parse(status).ownerLiveQuarantines).toEqual(rows);
-  expect(SyncStatusResult.safeParse({...status, ownerLiveQuarantines: [...rows, rows[0]]}).success).toBe(false);
-  const documents = rows.slice(0, 256).map(({reason: _reason, recovery, ...row}) => ({...row, status: "ready", canResume: false, quarantine: recovery}));
-  expect(OwnerLiveDocumentsResult.parse({documents, nextCursor: null}).documents).toEqual(documents);
-  expect(OwnerLiveDocumentsResult.safeParse({documents: [...documents, documents[0]], nextCursor: null}).success).toBe(false);
+  expect(
+    SyncStatusResult.safeParse({ ...status, ownerLiveQuarantines: [...rows, rows[0]] }).success,
+  ).toBe(false);
+  const documents = rows.slice(0, 256).map(({ reason: _reason, recovery, ...row }) => ({
+    ...row,
+    status: "ready",
+    canResume: false,
+    quarantine: recovery,
+  }));
+  expect(OwnerLiveDocumentsResult.parse({ documents, nextCursor: null }).documents).toEqual(
+    documents,
+  );
+  expect(
+    OwnerLiveDocumentsResult.safeParse({
+      documents: [...documents, documents[0]],
+      nextCursor: null,
+    }).success,
+  ).toBe(false);
 });
 
 describe("live draft recovery replies", () => {
-  const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};
+  const record = {
+    recordId: "a".repeat(64),
+    path: "notes/a.md",
+    objectId: "object",
+    text: "Unseen copy",
+    updateBase64: "AAA=",
+  };
   it("declares all remaining recovery records on both list and dismiss", () => {
-    for (const operation of [liveDraftRecoveryOperations.listLiveDraftRecovery, liveDraftRecoveryOperations.discardLiveDraftRecovery]) {
+    for (const operation of [
+      liveDraftRecoveryOperations.listLiveDraftRecovery,
+      liveDraftRecoveryOperations.discardLiveDraftRecovery,
+    ]) {
       expect(operation.result.parse([record])).toEqual([record]);
-      expect(operation.result.safeParse([{...record, recordId: "../draft"}]).success).toBe(false);
-      expect(operation.result.safeParse([{...record, path: "../outside.md"}]).success).toBe(false);
-      expect(operation.result.safeParse([{...record, text: undefined}]).success).toBe(false);
+      expect(operation.result.safeParse([{ ...record, recordId: "../draft" }]).success).toBe(false);
+      expect(operation.result.safeParse([{ ...record, path: "../outside.md" }]).success).toBe(
+        false,
+      );
+      expect(operation.result.safeParse([{ ...record, text: undefined }]).success).toBe(false);
       expect(operation.guard).toBe("active-workspace");
     }
   });
   it("requires the reviewed snapshot even when naming an exact recovery record", () => {
-    const input = {workspaceId: "workspace", path: record.path, objectId: record.objectId, snapshotSha256: "b".repeat(64), discardedAtMs: 1, recordId: record.recordId};
+    const input = {
+      workspaceId: "workspace",
+      path: record.path,
+      objectId: record.objectId,
+      snapshotSha256: "b".repeat(64),
+      discardedAtMs: 1,
+      recordId: record.recordId,
+    };
     expect(DiscardLiveDraftRecoveryPayload.parse(input)).toEqual(input);
-    expect(DiscardLiveDraftRecoveryPayload.safeParse({...input, snapshotSha256: undefined}).success).toBe(false);
-    expect(DiscardLiveDraftRecoveryPayload.safeParse({...input, recordId: "../draft"}).success).toBe(false);
+    expect(
+      DiscardLiveDraftRecoveryPayload.safeParse({ ...input, snapshotSha256: undefined }).success,
+    ).toBe(false);
+    expect(
+      DiscardLiveDraftRecoveryPayload.safeParse({ ...input, recordId: "../draft" }).success,
+    ).toBe(false);
   });
 });
 
@@ -47,7 +101,6 @@ import { UPDATE_STATUSES } from "../updates/updateMachine";
 import {
   ListChatChannelsResult,
   ListPersonalChatFeedResult,
-  ChatFileMentionsPageResult,
   ChatChannelRecord,
   ChatFeedItemRecord,
   ChatFileMentionRecord,
@@ -185,7 +238,6 @@ import {
   RetuneRelayShareLinkResult,
   UnblockRelayShareDiscussionPrincipalPayload,
   UnblockRelayShareDiscussionPrincipalResult,
-  ReadShareProposalFileContentPayload,
   ReadShareProposalFileContentResult,
   ListShareProposalsPayload,
   ListShareProposalsResult,
@@ -217,12 +269,17 @@ import {
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
 
-it.each(["linux", "darwin", "win32"] as const)("ignores reserved activity paths on %s", (platform) => {
-  for (const name of [".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES"]) {
-    expect(activityPathsAffectWorkspaceListing([`${name}/engine/private.md`], platform)).toBe(false);
-  }
-  expect(activityPathsAffectWorkspaceListing(["my-dohc/notes.md"], platform)).toBe(true);
-});
+it.each(["linux", "darwin", "win32"] as const)(
+  "ignores reserved activity paths on %s",
+  (platform) => {
+    for (const name of [".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES"]) {
+      expect(activityPathsAffectWorkspaceListing([`${name}/engine/private.md`], platform)).toBe(
+        false,
+      );
+    }
+    expect(activityPathsAffectWorkspaceListing(["my-dohc/notes.md"], platform)).toBe(true);
+  },
+);
 
 const shareUndoReceipt = { undoId: "undo-1", expiresAtMs: 600_020 };
 const malformedShareUndoReceipts = [
@@ -251,11 +308,10 @@ describe("owner relay share removal IPC contract", () => {
         expect(schema.safeParse({ ...base, undo }).success).toBe(false);
       }
     }
+    expect(RelayShareRevokeResponse.parse({ ok: true, shareId: "share-1" })).toEqual({ ok: true });
     expect(
-      RelayShareRevokeResponse.parse({ ok: true, shareId: "share-1" }),
-    ).toEqual({ ok: true });
-    expect(
-      RevokeRelayShareResult.safeParse({ undo: shareUndoReceipt, credential: "must-not-cross" }).success,
+      RevokeRelayShareResult.safeParse({ undo: shareUndoReceipt, credential: "must-not-cross" })
+        .success,
     ).toBe(false);
   });
 });
@@ -512,10 +568,9 @@ describe("owner relay share link IPC contract", () => {
           grantId: "grant-1",
         }).success,
       ).toBe(false);
-      expect(
-        schema.safeParse({ ...payload, expectedDependentGrantIds: "grant-2" })
-          .success,
-      ).toBe(false);
+      expect(schema.safeParse({ ...payload, expectedDependentGrantIds: "grant-2" }).success).toBe(
+        false,
+      );
       expect(schema.safeParse({ ...payload, access: "view" }).success).toBe(false);
     }
   });
@@ -600,7 +655,11 @@ describe("owner relay share link IPC contract", () => {
       { outcome: "widened", url: "https://share.example.test/s/#new", access: "comment" },
       { outcome: "narrowed", url: "https://share.example.test/s/#must-not-cross" },
       { outcome: "narrowed", dependents: [] },
-      { outcome: "dependents-changed", dependents: [], url: "https://share.example.test/s/#must-not-cross" },
+      {
+        outcome: "dependents-changed",
+        dependents: [],
+        url: "https://share.example.test/s/#must-not-cross",
+      },
     ]) {
       expect(RetuneRelayShareLinkResult.safeParse(malformed).success).toBe(false);
     }
@@ -717,9 +776,7 @@ describe("owner relay share discussion IPC contract", () => {
         credential: "must-not-cross",
       }).success,
     ).toBe(false);
-    expect(
-      ListRelayShareDiscussionResult.safeParse({ ok: true, ...result }).success,
-    ).toBe(false);
+    expect(ListRelayShareDiscussionResult.safeParse({ ok: true, ...result }).success).toBe(false);
 
     for (const malformed of [
       { ...result, ownerUserId: "must-not-cross" },
@@ -738,9 +795,7 @@ describe("owner relay share discussion IPC contract", () => {
       { ...result, messages: [{ ...namedLive, body: "" }] },
       {
         ...result,
-        messages: [
-          { ...namedLive, author: { ...namedAuthor, displayName: "x".repeat(513) } },
-        ],
+        messages: [{ ...namedLive, author: { ...namedAuthor, displayName: "x".repeat(513) } }],
       },
       { ...result, messages: [{ ...namedLive, messageId: "x".repeat(513) }] },
     ]) {
@@ -843,9 +898,9 @@ describe("owner relay share discussion IPC contract", () => {
       pollId: "2cdeeb8f-f0ba-4d72-bd4a-b8f3f279ea18",
     };
     expect(PollRelayShareDiscussionActivityPayload.parse(poll)).toEqual(poll);
-    expect(
-      CancelRelayShareDiscussionActivityPayload.parse({ pollId: poll.pollId }),
-    ).toEqual({ pollId: poll.pollId });
+    expect(CancelRelayShareDiscussionActivityPayload.parse({ pollId: poll.pollId })).toEqual({
+      pollId: poll.pollId,
+    });
 
     for (const malformed of [
       { ...poll, since: -1 },
@@ -855,9 +910,7 @@ describe("owner relay share discussion IPC contract", () => {
       { ...poll, pollId: "not-a-uuid" },
       { ...poll, cursor: "must-not-cross" },
     ]) {
-      expect(PollRelayShareDiscussionActivityPayload.safeParse(malformed).success).toBe(
-        false,
-      );
+      expect(PollRelayShareDiscussionActivityPayload.safeParse(malformed).success).toBe(false);
     }
     expect(
       CancelRelayShareDiscussionActivityPayload.safeParse({
@@ -875,9 +928,10 @@ describe("owner relay share discussion IPC contract", () => {
       linkCommentsPaused: true,
     };
     expect(PollRelayShareDiscussionActivityResult.parse(activity)).toEqual(activity);
-    expect(
-      RelayShareDiscussionActivityResponse.parse({ ok: true, ...activity }),
-    ).toEqual({ ok: true, ...activity });
+    expect(RelayShareDiscussionActivityResponse.parse({ ok: true, ...activity })).toEqual({
+      ok: true,
+      ...activity,
+    });
 
     const malformedActivity = [
       { ...activity, latestRevision: -1 },
@@ -914,9 +968,10 @@ describe("owner relay share discussion IPC contract", () => {
     expect(AppendRelayShareDiscussionResult.parse({ message: linkLive })).toEqual({
       message: linkLive,
     });
-    expect(
-      RelayShareDiscussionAppendResponse.parse({ ok: true, message: namedLive }),
-    ).toEqual({ ok: true, message: namedLive });
+    expect(RelayShareDiscussionAppendResponse.parse({ ok: true, message: namedLive })).toEqual({
+      ok: true,
+      message: namedLive,
+    });
     expect(
       RelayShareDiscussionAppendResponse.safeParse({
         ok: true,
@@ -1059,9 +1114,10 @@ describe("owner relay share discussion IPC contract", () => {
       { ...revoke, dependentGrantIds: [] },
       { ...revoke, actor: { id: "must-not-cross" } },
     ]) {
-      const schema = "expectedParentGrantId" in malformed
-        ? PromoteRelayShareGrantPayload
-        : RevokeRelayShareGrantPayload;
+      const schema =
+        "expectedParentGrantId" in malformed
+          ? PromoteRelayShareGrantPayload
+          : RevokeRelayShareGrantPayload;
       expect(schema.safeParse(malformed).success).toBe(false);
     }
 
@@ -1190,9 +1246,7 @@ describe("relay share listing IPC contract", () => {
       shareCode: `dohc-share:share-granted-${index}:https://relay.test`,
     }));
 
-    expect(ListRelaySharesResult.safeParse({ granted, received }).success).toBe(
-      true,
-    );
+    expect(ListRelaySharesResult.safeParse({ granted, received }).success).toBe(true);
     expect(
       ListRelaySharesResult.safeParse({
         granted: [...granted, granted[0]],
@@ -1335,9 +1389,9 @@ describe("exact received relay share IPC contract", () => {
   };
 
   it("accepts one strict share id and an explicit missing result", () => {
-    expect(
-      GetRelayReceivedSharePayload.parse({ shareId: "share-exact" }),
-    ).toEqual({ shareId: "share-exact" });
+    expect(GetRelayReceivedSharePayload.parse({ shareId: "share-exact" })).toEqual({
+      shareId: "share-exact",
+    });
     expect(GetRelayReceivedShareResult.parse({ found: false })).toEqual({
       found: false,
     });
@@ -1360,7 +1414,10 @@ describe("exact received relay share IPC contract", () => {
   });
 
   it("answers a Group or message request as opening in Chats, with nothing else", () => {
-    expect(GetRelayReceivedShareResult.parse({ found: true, chats: true })).toEqual({ found: true, chats: true });
+    expect(GetRelayReceivedShareResult.parse({ found: true, chats: true })).toEqual({
+      found: true,
+      chats: true,
+    });
     for (const result of [
       { found: false, chats: true },
       { found: true, chats: false },
@@ -1464,16 +1521,39 @@ describe("shared view refresh IPC contract", () => {
 
 describe("share mount refresh IPC contract", () => {
   it("carries the paths kept apart by a mount", () => {
-    const row = { shareId: "share-1", label: "alex", status: "unchanged", changedPaths: 0,
-      unjournalablePaths: [{ path: "docs/a.md", reason: "local-collision" }] };
+    const row = {
+      shareId: "share-1",
+      label: "alex",
+      status: "unchanged",
+      changedPaths: 0,
+      unjournalablePaths: [{ path: "docs/a.md", reason: "local-collision" }],
+    };
     expect(ShareMountStatusRow.parse(row)).toEqual(row);
-    expect(ShareMountStatusRow.safeParse({ ...row, unjournalablePaths: [{ path: "docs/a.md", reason: "unknown" }] }).success).toBe(false);
-    expect(ShareMountStatusRow.safeParse({ ...row, unjournalablePaths: [{ path: 1, reason: "local-collision" }] }).success).toBe(false);
+    expect(
+      ShareMountStatusRow.safeParse({
+        ...row,
+        unjournalablePaths: [{ path: "docs/a.md", reason: "unknown" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ShareMountStatusRow.safeParse({
+        ...row,
+        unjournalablePaths: [{ path: 1, reason: "local-collision" }],
+      }).success,
+    ).toBe(false);
   });
 
   it("carries the rows of a refresh that stopped, with why it stopped", () => {
     const stopped = {
-      results: [{ shareId: "share-1", label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true }],
+      results: [
+        {
+          shareId: "share-1",
+          label: "alex",
+          status: "failed",
+          changedPaths: 0,
+          collisionRecordQuarantined: true,
+        },
+      ],
       abortMessage: "Your server session expired. Sign in again, then refresh shares.",
     };
     expect(RefreshShareMountsResult.parse(stopped)).toEqual(stopped);
@@ -1496,9 +1576,7 @@ describe("workbench menu IPC contract", () => {
       }),
     ).toEqual({ ...payload, groupId: "primary", canCloseEditorGroup: true });
     expect(ShowWorkbenchMenuPayload.parse(payload)).toEqual(payload);
-    expect(
-      ShowWorkbenchMenuPayload.safeParse({ ...payload, groupId: "" }).success,
-    ).toBe(false);
+    expect(ShowWorkbenchMenuPayload.safeParse({ ...payload, groupId: "" }).success).toBe(false);
     expect(
       ShowWorkbenchMenuPayload.safeParse({
         ...payload,
@@ -1613,9 +1691,10 @@ describe("workspace text IPC contract", () => {
       }).success,
     ).toBe(false);
 
-    expect(
-      WriteWorkspaceTextResult.parse({ status: "written", contentHash: hash }),
-    ).toEqual({ status: "written", contentHash: hash });
+    expect(WriteWorkspaceTextResult.parse({ status: "written", contentHash: hash })).toEqual({
+      status: "written",
+      contentHash: hash,
+    });
     expect(
       WriteWorkspaceTextResult.parse({
         status: "conflict",
@@ -1643,9 +1722,10 @@ describe("chat IPC contract", () => {
         failed: false,
       }),
     ).toMatchObject({ pending: [request], failed: false });
-    expect(
-      AcceptDmPayload.parse({ workspaceId: "workspace-a", shareId: "share-1" }),
-    ).toEqual({ workspaceId: "workspace-a", shareId: "share-1" });
+    expect(AcceptDmPayload.parse({ workspaceId: "workspace-a", shareId: "share-1" })).toEqual({
+      workspaceId: "workspace-a",
+      shareId: "share-1",
+    });
     expect(DeclineDmPayload.parse({ shareId: "share-1" })).toEqual({
       shareId: "share-1",
     });
@@ -1772,18 +1852,38 @@ describe("chat IPC contract", () => {
 
   it("carries an automation author and its local automation on a post preview", () => {
     const preview = {
-      id: "thread-1", title: "Launch", createdAtMs: 1, updatedAtMs: 2, channelId: "channel-1",
-      messageCount: 1, lastReadSequence: 0, unreadCount: 1,
-      openingMessage: { presentation: { group: "fixture", hue: null, self: false },
-        id: "message-1", authorKind: "automation", authorDisplayName: "Stamp the finish date",
-        authorOwnerDisplayName: "Ice", createdAtMs: 1, bodySnippet: "Finished Book hotel", reactions: [],
+      id: "thread-1",
+      title: "Launch",
+      createdAtMs: 1,
+      updatedAtMs: 2,
+      channelId: "channel-1",
+      messageCount: 1,
+      lastReadSequence: 0,
+      unreadCount: 1,
+      openingMessage: {
+        presentation: { group: "fixture", hue: null, self: false },
+        id: "message-1",
+        authorKind: "automation",
+        authorDisplayName: "Stamp the finish date",
+        authorOwnerDisplayName: "Ice",
+        createdAtMs: 1,
+        bodySnippet: "Finished Book hotel",
+        reactions: [],
         automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
       },
     };
-    expect(ChannelThreadRecord.parse(preview).openingMessage?.automation?.collectionPath).toBe("Trip/Tasks");
-    expect(ChannelThreadRecord.safeParse({
-      ...preview, openingMessage: { ...preview.openingMessage, automation: { automationId: "x", collectionPath: "../escape" } },
-    }).success).toBe(false);
+    expect(ChannelThreadRecord.parse(preview).openingMessage?.automation?.collectionPath).toBe(
+      "Trip/Tasks",
+    );
+    expect(
+      ChannelThreadRecord.safeParse({
+        ...preview,
+        openingMessage: {
+          ...preview.openingMessage,
+          automation: { automationId: "x", collectionPath: "../escape" },
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts additive channel-feed previews and batched run records", () => {
@@ -1797,7 +1897,8 @@ describe("chat IPC contract", () => {
         messageCount: 2,
         lastReadSequence: 1,
         unreadCount: 1,
-        openingMessage: { presentation: { group: "fixture", hue: null, self: false },
+        openingMessage: {
+          presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           authorKind: "agent",
           authorDisplayName: "Sam",
@@ -1833,8 +1934,6 @@ describe("chat IPC contract", () => {
     ).toBe("run-1");
   });
 });
-
-
 
 describe("collection IPC contracts", () => {
   it("round-trips a queried record with a bigint value and a flagged validation", () => {
@@ -1949,9 +2048,7 @@ describe("collection IPC contracts", () => {
   it("rejects a query payload outside the contract's bounds", () => {
     const base = { workspaceId: "workspace-1", collectionPath: "tasks" };
     expect(QueryCollectionRecordsPayload.parse(base)).toEqual(base);
-    expect(() =>
-      QueryCollectionRecordsPayload.parse({ ...base, limit: 0 }),
-    ).toThrow();
+    expect(() => QueryCollectionRecordsPayload.parse({ ...base, limit: 0 })).toThrow();
     expect(() =>
       QueryCollectionRecordsPayload.parse({
         ...base,
@@ -2117,8 +2214,8 @@ describe("record IPC contracts", () => {
 describe("settings IPC contract", () => {
   it("accepts bounded user and workspace settings payloads", () => {
     expect(
-      SetUserSettingsPayload.parse({ settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SETTINGS }).settings
-        .appearance.themeMode,
+      SetUserSettingsPayload.parse({ settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SETTINGS })
+        .settings.appearance.themeMode,
     ).toBe("system");
     // A save carries only the changed controls: main merges them onto the
     // file, so a whole-settings body is not what this channel takes.
@@ -2209,9 +2306,10 @@ describe("settings IPC contract", () => {
         command: "untrusted command",
       }).success,
     ).toBe(false);
-    expect(
-      RunnerSelfTestResult.parse({ ok: true, detail: "self-test ok" }),
-    ).toEqual({ ok: true, detail: "self-test ok" });
+    expect(RunnerSelfTestResult.parse({ ok: true, detail: "self-test ok" })).toEqual({
+      ok: true,
+      detail: "self-test ok",
+    });
     expect(
       RunnerSelfTestResult.parse({ ok: false, detail: "Runner timed out.", logPath: "/tmp/log" }),
     ).toEqual({ ok: false, detail: "Runner timed out.", logPath: "/tmp/log" });
@@ -2222,9 +2320,7 @@ describe("settings IPC contract", () => {
         command: "untrusted command",
       }).success,
     ).toBe(false);
-    expect(
-      RunnerSelfTestResult.safeParse({ ok: false, detail: "" }).success,
-    ).toBe(false);
+    expect(RunnerSelfTestResult.safeParse({ ok: false, detail: "" }).success).toBe(false);
   });
 
   it("keeps chat-run stop and resume controls workspace scoped", () => {
@@ -2261,14 +2357,16 @@ describe("settings IPC contract", () => {
     ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
     expect(
       ChatDispatchStateForThreadResult.parse({
-        liveRunId: "run-1", liveTriggerMessageId: null,
+        liveRunId: "run-1",
+        liveTriggerMessageId: null,
         pendingCount: 2,
         paused: false,
       }),
     ).toEqual({ liveRunId: "run-1", liveTriggerMessageId: null, pendingCount: 2, paused: false });
     expect(
       ChatDispatchStateForThreadResult.safeParse({
-        liveRunId: null, liveTriggerMessageId: null,
+        liveRunId: null,
+        liveTriggerMessageId: null,
         pendingCount: -1,
         paused: true,
       }).success,
@@ -2315,9 +2413,7 @@ describe("workspace UI state IPC contract", () => {
     ["a removed plugin view", "plugin-view:dohc-sites/sites"],
     ["the removed plugins view", "plugins"],
   ])("falls back to Explorer for %s", (_case, activeView) => {
-    expect(
-      WorkspaceUiState.parse({ ...validState, activeView }).activeView,
-    ).toBe("explorer");
+    expect(WorkspaceUiState.parse({ ...validState, activeView }).activeView).toBe("explorer");
   });
 
   it("rejects the replaced version-1 flat-tab contract", () => {
@@ -2394,37 +2490,38 @@ describe("workspace UI state IPC contract", () => {
     }
   });
 
-  it.each([
-    ["site preview", siteTabPath("client-portal"), "tab://app/%63lient-portal"],
-  ])("rejects one %s path in several editor groups", (_label, path, alias) => {
-    const result = WorkspaceUiState.safeParse({
-      ...validState,
-      editorGroups: [
-        {
-          id: "left",
-          tabs: [path, "notes/a.md"],
-          activeTab: path,
-          size: 0.5,
-        },
-        {
-          id: "right",
-          tabs: ["notes/a.md", alias],
-          activeTab: alias,
-          size: 0.5,
-        },
-      ],
-      activeEditorGroup: "left",
-    });
+  it.each([["site preview", siteTabPath("client-portal"), "tab://app/%63lient-portal"]])(
+    "rejects one %s path in several editor groups",
+    (_label, path, alias) => {
+      const result = WorkspaceUiState.safeParse({
+        ...validState,
+        editorGroups: [
+          {
+            id: "left",
+            tabs: [path, "notes/a.md"],
+            activeTab: path,
+            size: 0.5,
+          },
+          {
+            id: "right",
+            tabs: ["notes/a.md", alias],
+            activeTab: alias,
+            size: 0.5,
+          },
+        ],
+        activeEditorGroup: "left",
+      });
 
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues).toContainEqual(
-        expect.objectContaining({
-          path: ["editorGroups", 1, "tabs", 1],
-        }),
-      );
-    }
-  });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues).toContainEqual(
+          expect.objectContaining({
+            path: ["editorGroups", 1, "tabs", 1],
+          }),
+        );
+      }
+    },
+  );
 
   it("requires valid focus and normalized sizes", () => {
     expect(
@@ -2454,10 +2551,7 @@ describe("workspace UI state IPC contract", () => {
       expect(
         WorkspaceUiState.safeParse({
           ...validState,
-          editorGroups: [
-            { ...validState.editorGroups[0], size: 0.5 },
-            right,
-          ],
+          editorGroups: [{ ...validState.editorGroups[0], size: 0.5 }, right],
           activeEditorGroup: "right",
         }).success,
       ).toBe(true);
@@ -2466,23 +2560,23 @@ describe("workspace UI state IPC contract", () => {
 
   it("enforces the total open-tab cap across editor groups", () => {
     const result = WorkspaceUiState.safeParse({
-        ...validState,
-        editorGroups: [
-          {
-            id: "left",
-            tabs: Array.from({ length: 60 }, (_, index) => `left-${index}.md`),
-            activeTab: "left-0.md",
-            size: 0.5,
-          },
-          {
-            id: "right",
-            tabs: Array.from({ length: 41 }, (_, index) => `right-${index}.md`),
-            activeTab: "right-0.md",
-            size: 0.5,
-          },
-        ],
-        activeEditorGroup: "right",
-      });
+      ...validState,
+      editorGroups: [
+        {
+          id: "left",
+          tabs: Array.from({ length: 60 }, (_, index) => `left-${index}.md`),
+          activeTab: "left-0.md",
+          size: 0.5,
+        },
+        {
+          id: "right",
+          tabs: Array.from({ length: 41 }, (_, index) => `right-${index}.md`),
+          activeTab: "right-0.md",
+          size: 0.5,
+        },
+      ],
+      activeEditorGroup: "right",
+    });
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues.map((issue) => issue.message)).toContain(
@@ -2495,8 +2589,7 @@ describe("workspace UI state IPC contract", () => {
     const groups = Array.from({ length: MAX_EDITOR_GROUPS }, (_, index) => ({
       id: `group-${index}`,
       tabs: index === MAX_EDITOR_GROUPS - 1 ? [] : [`file-${index}.md`],
-      activeTab:
-        index === MAX_EDITOR_GROUPS - 1 ? null : `file-${index}.md`,
+      activeTab: index === MAX_EDITOR_GROUPS - 1 ? null : `file-${index}.md`,
       size: 1 / MAX_EDITOR_GROUPS,
     }));
     expect(
@@ -2524,19 +2617,13 @@ describe("workspace UI state IPC contract", () => {
   it("preserves stale stored focus for the tolerant renderer parser", () => {
     const stale = {
       ...validState,
-      editorGroups: [
-        { ...validState.editorGroups[0], activeTab: "missing.md" },
-      ],
+      editorGroups: [{ ...validState.editorGroups[0], activeTab: "missing.md" }],
       activeEditorGroup: "missing",
     };
     expect(GetWorkspaceUiStateResult.parse(stale)).toEqual(stale);
   });
 });
 
-// The preload boundary for main→renderer events. These cases are the review
-// attack set: a schema must accept only exact primitive members of its closed
-// set — not String objects, toString tricks, case variants, or lookalikes —
-// because the parse is all that stands between an ipc payload and renderer code.
 describe("menu command boundaries", () => {
   it("accept every member of their closed tuples", () => {
     for (const command of MENU_COMMANDS) expect(MenuCommand.parse(command)).toBe(command);
@@ -2588,13 +2675,11 @@ describe("workspace activated event boundary", () => {
   });
 
   it("rejects malformed ids, kinds, modes, and impostors", () => {
-    expect(WorkspaceSummary.safeParse({ ...activated, workspaceId: "WS-123" }).success).toBe(
+    expect(WorkspaceSummary.safeParse({ ...activated, workspaceId: "WS-123" }).success).toBe(false);
+    expect(WorkspaceSummary.safeParse({ ...activated, kind: "admin" }).success).toBe(false);
+    expect(WorkspaceSummary.safeParse({ ...activated, mode: "remote-code-exec" }).success).toBe(
       false,
     );
-    expect(WorkspaceSummary.safeParse({ ...activated, kind: "admin" }).success).toBe(false);
-    expect(
-      WorkspaceSummary.safeParse({ ...activated, mode: "remote-code-exec" }).success,
-    ).toBe(false);
     expect(WorkspaceSummary.safeParse(["ws-123"]).success).toBe(false);
     expect(WorkspaceSummary.safeParse(new String("ws-123")).success).toBe(false);
   });
@@ -2620,9 +2705,9 @@ describe("update state event boundary", () => {
   it("rejects missing, empty, oversized, or non-string messages", () => {
     expect(UpdateStateEvent.safeParse({ status: "ready" }).success).toBe(false);
     expect(UpdateStateEvent.safeParse({ status: "ready", message: "" }).success).toBe(false);
-    expect(
-      UpdateStateEvent.safeParse({ status: "ready", message: "x".repeat(501) }).success,
-    ).toBe(false);
+    expect(UpdateStateEvent.safeParse({ status: "ready", message: "x".repeat(501) }).success).toBe(
+      false,
+    );
     expect(UpdateStateEvent.safeParse({ status: "ready", message: 42 }).success).toBe(false);
   });
 
@@ -2689,7 +2774,12 @@ describe("search results event boundary", () => {
       objectId: "object-1",
       title: "Planning chat",
     };
-    const engineBatch = { searchId: "s-engine", entries: [engineEntry], done: true, limitHit: false };
+    const engineBatch = {
+      searchId: "s-engine",
+      entries: [engineEntry],
+      done: true,
+      limitHit: false,
+    };
     expect(SearchResultsEvent.parse(engineBatch)).toEqual(engineBatch);
   });
 
@@ -2702,9 +2792,7 @@ describe("search results event boundary", () => {
     const noticed = { ...batch, entries: [], done: true, notice: "Search paused: policy error" };
     expect(SearchResultsEvent.parse(noticed)).toEqual(noticed);
     expect(SearchResultsEvent.safeParse({ ...batch, notice: "" }).success).toBe(false);
-    expect(SearchResultsEvent.safeParse({ ...batch, notice: "x".repeat(501) }).success).toBe(
-      false,
-    );
+    expect(SearchResultsEvent.safeParse({ ...batch, notice: "x".repeat(501) }).success).toBe(false);
     expect(SearchResultsEvent.safeParse({ ...batch, notice: 7 }).success).toBe(false);
   });
 
@@ -2790,16 +2878,40 @@ describe("engine Y.Doc event boundaries", () => {
 
   it("carry the head an update's state was read with, or an empty head when it is unknown", () => {
     const update = new Uint8Array([0, 0]);
-    for (const head of [{ sha256: "a".repeat(64) }, { sha256: null }, { sha256: "b".repeat(64), committed: true }, {}]) {
-      expect(EngineYDocRemoteUpdateEvent.parse({ sessionId: "s", update, head, lineageGeneration: 1 }).head).toEqual(head);
+    for (const head of [
+      { sha256: "a".repeat(64) },
+      { sha256: null },
+      { sha256: "b".repeat(64), committed: true },
+      {},
+    ]) {
+      expect(
+        EngineYDocRemoteUpdateEvent.parse({ sessionId: "s", update, head, lineageGeneration: 1 })
+          .head,
+      ).toEqual(head);
     }
-    for (const head of [{ sha256: "" }, { sha256: "a", committed: false }, { sha256: "a", extra: 1 }, { extra: 1 },
-      { committed: true }, { sha256: null, committed: true }]) {
-      expect(EngineYDocRemoteUpdateEvent.safeParse({ sessionId: "s", update, head, lineageGeneration: 1 }).success).toBe(false);
+    for (const head of [
+      { sha256: "" },
+      { sha256: "a", committed: false },
+      { sha256: "a", extra: 1 },
+      { extra: 1 },
+      { committed: true },
+      { sha256: null, committed: true },
+    ]) {
+      expect(
+        EngineYDocRemoteUpdateEvent.safeParse({
+          sessionId: "s",
+          update,
+          head,
+          lineageGeneration: 1,
+        }).success,
+      ).toBe(false);
     }
-    expect(AcknowledgeEngineYDocLineageReplacementResult.parse({
-      accepted: true, updates: [{ update, head: { sha256: null } }, { update }],
-    })).toEqual({ accepted: true, updates: [{ update, head: { sha256: null } }, { update }] });
+    expect(
+      AcknowledgeEngineYDocLineageReplacementResult.parse({
+        accepted: true,
+        updates: [{ update, head: { sha256: null } }, { update }],
+      }),
+    ).toEqual({ accepted: true, updates: [{ update, head: { sha256: null } }, { update }] });
   });
 
   it("reject a missing field, a bad sessionId, and a non-Uint8Array update", () => {
@@ -2828,8 +2940,22 @@ describe("engine Y.Doc event boundaries", () => {
 
   it("accept the deleted state that turns a live editor read-only", () => {
     expect(
-      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", workspaceId: "ws-1", path: "notes/a.md", state: { kind: "unknown" }, access: "deleted", seq: 4 }),
-    ).toEqual({ sessionId: "session-1", workspaceId: "ws-1", path: "notes/a.md", state: { kind: "unknown" }, access: "deleted", seq: 4 });
+      EngineYDocSaveStateEvent.parse({
+        sessionId: "session-1",
+        workspaceId: "ws-1",
+        path: "notes/a.md",
+        state: { kind: "unknown" },
+        access: "deleted",
+        seq: 4,
+      }),
+    ).toEqual({
+      sessionId: "session-1",
+      workspaceId: "ws-1",
+      path: "notes/a.md",
+      state: { kind: "unknown" },
+      access: "deleted",
+      seq: 4,
+    });
   });
 });
 
@@ -2846,9 +2972,9 @@ describe("update IPC contract", () => {
 
   it("accepts public update state and action results", () => {
     expect(UpdateStateEvent.parse(readyState)).toEqual(readyState);
-    expect(
-      UpdateCheckResult.parse({ checked: false, state: readyState }).state,
-    ).toEqual(readyState);
+    expect(UpdateCheckResult.parse({ checked: false, state: readyState }).state).toEqual(
+      readyState,
+    );
     expect(
       UpdateActionResult.parse({
         accepted: true,
@@ -2860,12 +2986,8 @@ describe("update IPC contract", () => {
   it("strips feed/config fields and rejects malformed progress", () => {
     const parsed = UpdateStateEvent.parse({ ...readyState, feedUrl: "https://x" });
     expect(parsed).not.toHaveProperty("feedUrl");
-    expect(UpdateStateEvent.safeParse({ ...readyState, percent: 101 }).success).toBe(
-      false,
-    );
-    expect(UpdateStateEvent.safeParse({ ...readyState, channel: "beta" }).success).toBe(
-      false,
-    );
+    expect(UpdateStateEvent.safeParse({ ...readyState, percent: 101 }).success).toBe(false);
+    expect(UpdateStateEvent.safeParse({ ...readyState, channel: "beta" }).success).toBe(false);
   });
 });
 
@@ -2876,14 +2998,23 @@ describe("site IPC contract", () => {
       siteRoot: "report",
       holderId: "tab",
       generation: 3,
-      preview: { siteRoot: "report", mode: "build", url: "http://127.0.0.1:4173/", logs: [], exited: false, generation: 3 },
+      preview: {
+        siteRoot: "report",
+        mode: "build",
+        url: "http://127.0.0.1:4173/",
+        logs: [],
+        exited: false,
+        generation: 3,
+      },
     };
     expect(SitePreviewReplacedEvent.parse(event)).toEqual(event);
     expect(SitePreviewReplacedEvent.parse({ ...event, preview: null }).preview).toBeNull();
-    expect(SitePreviewReplacedEvent.safeParse({
-      ...event,
-      preview: { ...event.preview, url: "https://example.com/" },
-    }).success).toBe(false);
+    expect(
+      SitePreviewReplacedEvent.safeParse({
+        ...event,
+        preview: { ...event.preview, url: "https://example.com/" },
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts detected normal website metadata", () => {
@@ -2944,10 +3075,7 @@ describe("site IPC contract", () => {
   });
 
   it("accepts a site with more than 1000 discovered source files", () => {
-    const sourceFiles = Array.from(
-      { length: 1001 },
-      (_, index) => `large-site/assets/${index}.js`,
-    );
+    const sourceFiles = Array.from({ length: 1001 }, (_, index) => `large-site/assets/${index}.js`);
 
     expect(
       ListSitesResult.parse({
@@ -3114,9 +3242,13 @@ describe("site IPC contract", () => {
       holderId: "tab",
       restart: false,
     });
-    // A start names the surface that shows the preview.
     expect(
-      StartSitePreviewPayload.safeParse({ workspaceId: "ws-sites", siteRoot: ".", mode: "static", restart: false }).success,
+      StartSitePreviewPayload.safeParse({
+        workspaceId: "ws-sites",
+        siteRoot: ".",
+        mode: "static",
+        restart: false,
+      }).success,
     ).toBe(false);
 
     expect(
@@ -3318,7 +3450,6 @@ describe("workspace versions IPC contract", () => {
         resolution: { kind: "keep-combined", text: "combined\n" },
       }).resolution.kind,
     ).toBe("keep-combined");
-    // Conflict sides may be null (file only exists on one side).
     expect(
       WorkspaceVersionConflict.parse({
         conflictId: "conflict-1",
@@ -3377,25 +3508,69 @@ describe("workspace versions IPC contract", () => {
 
 describe("sync status IPC contract", () => {
   it("preserves file-read failure separately from history availability", () => {
-    const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
-      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0 };
+    const status = {
+      state: "synced",
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      historyRecordingUnavailable: false,
+      historyShareView: false,
+      liveSessionsGeneration: 0,
+    };
     for (const reason of ["read-failed", "unavailable"] as const) {
       expect(SyncStatusResult.parse({ ...status, fileObservationFailure: reason })).toMatchObject({
-        historyRecordingUnavailable: false, fileObservationFailure: reason,
+        historyRecordingUnavailable: false,
+        fileObservationFailure: reason,
       });
     }
-    expect(SyncStatusResult.safeParse({ ...status, fileObservationFailure: "history-off" }).success).toBe(false);
+    expect(
+      SyncStatusResult.safeParse({ ...status, fileObservationFailure: "history-off" }).success,
+    ).toBe(false);
   });
   it("carries a document the server refused or whose server copy diverged to the status and the live documents list", () => {
-    const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
-      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveDelivery: "retrying" };
+    const status = {
+      state: "synced",
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      historyRecordingUnavailable: false,
+      historyShareView: false,
+      liveSessionsGeneration: 0,
+      ownerLiveDelivery: "retrying",
+    };
     const row = { path: "docs/a.md", objectId: "object", status: "unavailable", canResume: true };
-    for (const reason of ["session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "live-history-over-budget"] as const) {
-      expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason }).ownerLiveDeliveryReason).toBe(reason);
+    for (const reason of [
+      "session-host-refused",
+      "session-host-diverged",
+      "live-document-without-lineage",
+      "live-edit-unadmitted",
+      "live-history-over-budget",
+      "live-start-failing",
+    ] as const) {
+      expect(
+        SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason })
+          .ownerLiveDeliveryReason,
+      ).toBe(reason);
       expect(OwnerLiveDocument.parse({ ...row, reason }).reason).toBe(reason);
     }
-    expect(SyncStatusResult.safeParse({ ...status, ownerLiveDeliveryReason: "session-host-blocked" }).success).toBe(false);
-    expect(OwnerLiveDocument.safeParse({ ...row, reason: "session-host-blocked" }).success).toBe(false);
+    const failure = { word: "engine-refused", since: "2026-11-13T01:00:00.000Z" };
+    expect(
+      OwnerLiveDocument.parse({ ...row, reason: "live-start-failing", failure }).failure,
+    ).toEqual(failure);
+    for (const bad of [
+      { ...failure, word: "docs/a.md: occupied" },
+      { ...failure, since: "yesterday" },
+      { ...failure, detail: "x" },
+    ]) {
+      expect(
+        OwnerLiveDocument.safeParse({ ...row, reason: "live-start-failing", failure: bad }).success,
+      ).toBe(false);
+    }
+    expect(
+      SyncStatusResult.safeParse({ ...status, ownerLiveDeliveryReason: "session-host-blocked" })
+        .success,
+    ).toBe(false);
+    expect(OwnerLiveDocument.safeParse({ ...row, reason: "session-host-blocked" }).success).toBe(
+      false,
+    );
   });
   it("refuses a status that cannot say why history is off", () => {
     const status = {
@@ -3410,16 +3585,15 @@ describe("sync status IPC contract", () => {
           path: "notes/large.md",
           objectId: "notes/large.md",
           versionId: "main",
-          lineagePruned: false, headBlobSha256: null,
+          lineagePruned: false,
+          headBlobSha256: null,
           constraint: "MAX_YDOC_UPDATE_BYTES",
           limitBytes: 262_144,
           observedBytes: 280_001,
         },
       ],
     };
-    expect(SyncStatusResult.parse(status).sharingDeclined).toEqual(
-      status.sharingDeclined,
-    );
+    expect(SyncStatusResult.parse(status).sharingDeclined).toEqual(status.sharingDeclined);
     const pendingProjection = {
       state: "pending" as const,
       pendingPathCount: 2,
@@ -3437,15 +3611,12 @@ describe("sync status IPC contract", () => {
     expect(statusWithPendingProjection.liveSessionsGeneration).toBe(0);
     expect(statusWithPendingProjection.shareProjection).toEqual(pendingProjection);
     expect(
-      SyncStatusResult.parse({ ...status, liveSessionsGeneration: 3 })
-        .liveSessionsGeneration,
+      SyncStatusResult.parse({ ...status, liveSessionsGeneration: 3 }).liveSessionsGeneration,
     ).toBe(3);
-    expect(
-      SyncStatusResult.safeParse({ ...status, liveSessionsGeneration: -1 })
-        .success,
-    ).toBe(false);
-    const { liveSessionsGeneration: _generationDropped, ...withoutGeneration } =
-      status;
+    expect(SyncStatusResult.safeParse({ ...status, liveSessionsGeneration: -1 }).success).toBe(
+      false,
+    );
+    const { liveSessionsGeneration: _generationDropped, ...withoutGeneration } = status;
     expect(SyncStatusResult.safeParse(withoutGeneration).success).toBe(false);
     // The recorder cause fields are required because omission would claim the
     // user chose the failure or that this is not a shared view.
@@ -3458,20 +3629,14 @@ describe("sync status IPC contract", () => {
       historyCaptureFailed: true as const,
       engineStoreRefused: null,
     };
-    const { engineStoreRefused: _refusalDropped, ...withoutRefusalCause } =
-      failedStatus;
+    const { engineStoreRefused: _refusalDropped, ...withoutRefusalCause } = failedStatus;
     expect(SyncStatusResult.safeParse(withoutRefusalCause).success).toBe(false);
-    expect(
-      SyncStatusResult.safeParse({ ...status, engineStoreRefused: null }).success,
-    ).toBe(false);
-    expect(
-      SyncStatusResult.safeParse({ ...status, engineStoreRefused: undefined })
-        .success,
-    ).toBe(false);
+    expect(SyncStatusResult.safeParse({ ...status, engineStoreRefused: null }).success).toBe(false);
+    expect(SyncStatusResult.safeParse({ ...status, engineStoreRefused: undefined }).success).toBe(
+      false,
+    );
   });
 
-  // The engine refuses a store a newer build migrated and leaves it intact.
-  // Rebuild would move that store aside, so the only recovery is an update.
   it("asks for an update when a newer build migrated the store", () => {
     const refused = SyncStatusResult.parse({
       state: "synced",
@@ -3606,7 +3771,8 @@ describe("engine history and linked Chats IPC contract", () => {
 
   it("round-trips a sent chat message with main-derived authorship", () => {
     const result = SendChatMessageResult.parse({
-      message: { presentation: { group: "fixture", hue: null, self: false },
+      message: {
+        presentation: { group: "fixture", hue: null, self: false },
         id: "message-1",
         threadId: "thread-1",
         authorKind: "human",
@@ -3616,11 +3782,10 @@ describe("engine history and linked Chats IPC contract", () => {
       },
     });
     expect(result).toMatchObject({ message: { authorKind: "human" } });
-    // The agent author kind is a first-class wire value (rendered as
-    // "the agent name" in the UI).
     expect(
       SendChatMessageResult.parse({
-        message: { presentation: { group: "fixture", hue: null, self: false },
+        message: {
+          presentation: { group: "fixture", hue: null, self: false },
           id: "message-2",
           threadId: "thread-1",
           authorKind: "agent",
@@ -3633,15 +3798,30 @@ describe("engine history and linked Chats IPC contract", () => {
   });
 
   it("carries only a saved message's ids and what failed after the save", () => {
-    const saved = { message: { id: "message-1", threadId: "thread-1", body: "First message", authorDisplayName: "You" },
-      failure: "Error: Chats stopped because this window changed workspaces.", waitsForTrust: true,
-      decision: { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1 } };
-    expect(SendChatMessageResult.parse({ ...saved, resolveFailure: "Error: Your server session changed. Try again." })).toEqual({
-      message: { id: "message-1", threadId: "thread-1" }, failure: saved.failure,
+    const saved = {
+      message: {
+        id: "message-1",
+        threadId: "thread-1",
+        body: "First message",
+        authorDisplayName: "You",
+      },
+      failure: "Error: Chats stopped because this window changed workspaces.",
+      waitsForTrust: true,
+      decision: { threadId: "thread-1", messageId: "message-1", state: "open", atMs: 1 },
+    };
+    expect(
+      SendChatMessageResult.parse({
+        ...saved,
+        resolveFailure: "Error: Your server session changed. Try again.",
+      }),
+    ).toEqual({
+      message: { id: "message-1", threadId: "thread-1" },
+      failure: saved.failure,
       resolveFailure: "Error: Your server session changed. Try again.",
     });
     expect(StartChannelThreadResult.parse({ ...saved, viewerAuthorId: "owner" })).toEqual({
-      message: { id: "message-1", threadId: "thread-1" }, failure: saved.failure,
+      message: { id: "message-1", threadId: "thread-1" },
+      failure: saved.failure,
     });
   });
 });
@@ -3660,7 +3840,17 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
   it("accepts real emoji graphemes, including multi-codepoint ones", () => {
     // Simple pictographic, variation-selector, skin-tone modifier, a flag (two
     // regional indicators), and a ZWJ sequence — all one grapheme cluster.
-    for (const emoji of ["👍", "❤️", "👍🏽", "🇺🇸", "👨‍👩‍👧", "🏳️‍🌈", "1️⃣", "#️⃣", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"]) {
+    for (const emoji of [
+      "👍",
+      "❤️",
+      "👍🏽",
+      "🇺🇸",
+      "👨‍👩‍👧",
+      "🏳️‍🌈",
+      "1️⃣",
+      "#️⃣",
+      "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+    ]) {
       expect(setPayload(emoji).success, emoji).toBe(true);
     }
   });
@@ -3671,10 +3861,6 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
   });
 
   it("rejects non-emoji strings the length bound alone would let through", () => {
-    // A URL, plain text, a bare letter/digit, whitespace-padded emoji, and an
-    // oversized string must all be refused — this schema is the trust boundary
-    // for replicated reaction writes, so arbitrary strings must never render as
-    // pills.
     for (const bad of [
       "hello",
       "http://evil.com",
@@ -3714,12 +3900,10 @@ describe("renderer document request identity", () => {
         rendererDocumentId,
       }),
     ).toEqual({ workspaceId: "ws-1", rendererDocumentId });
-    expect(
-      ReloadRendererRequestPayload.parse({ rendererDocumentId }),
-    ).toEqual({ rendererDocumentId });
-    expect(
-      OpenWorkspaceRequestPayload.safeParse({ workspaceId: "ws-1" }).success,
-    ).toBe(false);
+    expect(ReloadRendererRequestPayload.parse({ rendererDocumentId })).toEqual({
+      rendererDocumentId,
+    });
+    expect(OpenWorkspaceRequestPayload.safeParse({ workspaceId: "ws-1" }).success).toBe(false);
     expect(ReloadRendererRequestPayload.safeParse({}).success).toBe(false);
   });
 });
@@ -3811,7 +3995,6 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
     // bigint isn't JSON-serializable.
     expect(presenceStateWithinCap({ n: 1n })).toBe(false);
 
-    // Pathologically deep nesting is rejected without a full walk to the leaf.
     let deep: unknown = 0;
     for (let i = 0; i < 200; i += 1) deep = { deep };
     expect(presenceStateWithinCap(deep)).toBe(false);
@@ -3859,15 +4042,15 @@ describe("document export IPC contract", () => {
     expect(
       ExportDocumentFilePayload.safeParse({ ...validPayload, suggestedName: "" }).success,
     ).toBe(false);
-    expect(
-      ExportDocumentFilePayload.safeParse({ ...validPayload, content: "" }).success,
-    ).toBe(false);
+    expect(ExportDocumentFilePayload.safeParse({ ...validPayload, content: "" }).success).toBe(
+      false,
+    );
   });
 
   it("rejects a kind outside the closed html/pdf set", () => {
-    expect(
-      ExportDocumentFilePayload.safeParse({ ...validPayload, kind: "docx" }).success,
-    ).toBe(false);
+    expect(ExportDocumentFilePayload.safeParse({ ...validPayload, kind: "docx" }).success).toBe(
+      false,
+    );
   });
 
   it("resolves a cancelled save dialog as a null path", () => {
@@ -3967,7 +4150,8 @@ describe("engine Y.Doc update IPC contract", () => {
     const parsed = ApplyEngineYDocUpdatePayload.parse({
       sessionId: "shared-view-bypass",
       update: new Uint8Array([1, 2, 3]),
-      lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
+      lineageGeneration: 1,
+      requestId: "11111111-1111-4111-8111-111111111111",
     });
     expect(parsed.seq).toBe(0);
     expect(() =>
@@ -4127,14 +4311,13 @@ describe("partial-freshness marker on aggregate chat reads", () => {
     });
     expect(parsed.sharedChannelRowsUncovered).toBe(24);
     expect(
-      ListChatChannelsResult.parse(RESULTS.ListChatChannelsResult())
-        .sharedChannelRowsUncovered,
+      ListChatChannelsResult.parse(RESULTS.ListChatChannelsResult()).sharedChannelRowsUncovered,
     ).toBeUndefined();
   });
 
   it("refuses a zero remainder, on every surface that reports one", () => {
     for (const [name, base] of Object.entries(RESULTS)) {
-      const schema = { ListChatChannelsResult, ListPersonalChatFeedResult, ChatFileMentionsPageResult }[
+      const schema = { ListChatChannelsResult, ListPersonalChatFeedResult }[
         name as keyof typeof RESULTS
       ];
       expect(
@@ -4183,10 +4366,6 @@ describe("joined workspace passphrase boundary", () => {
   });
 });
 
-// The share-changes channels cross a boundary between two
-// accounts: one side's relay body becomes the other side's review screen, and
-// accepting writes into the reviewer's own workspace. Every field is checked
-// rather than coerced, and a malformed one is refused whole.
 describe("share changes IPC contract", () => {
   const proposal = () => ({
     proposalId: "proposal-1",
@@ -4196,8 +4375,6 @@ describe("share changes IPC contract", () => {
     ops: 2,
   });
 
-  // The listing a timer polls. It says who and how many; the file rows come
-  // from the one proposal a granter opens.
   it("carries a granter's review listing as counts, with no file rows", () => {
     const parsed = ListShareProposalsResult.parse({ proposals: [proposal()] });
     expect(parsed.proposals[0]?.ops).toBe(2);
@@ -4344,7 +4521,6 @@ describe("share changes IPC contract", () => {
     ).toEqual(["proposalId", "workspaceId"]);
   });
 
-  // Zero is the honest answer for "nothing was pending", not an error.
   it("carries an empty submit", () => {
     const empty = {
       ok: true as const,
@@ -4357,12 +4533,8 @@ describe("share changes IPC contract", () => {
       submitted: 0,
       capturedLocalChanges: 0,
     });
-    expect(() =>
-      SubmitShareChangesResult.parse({ ...empty, submitted: -1 }),
-    ).toThrow();
-    expect(() =>
-      SubmitShareChangesResult.parse({ ...empty, capturedLocalChanges: -1 }),
-    ).toThrow();
+    expect(() => SubmitShareChangesResult.parse({ ...empty, submitted: -1 })).toThrow();
+    expect(() => SubmitShareChangesResult.parse({ ...empty, capturedLocalChanges: -1 })).toThrow();
     expect(() =>
       SubmitShareChangesResult.parse({
         ok: true,
@@ -4403,18 +4575,15 @@ describe("share changes IPC contract", () => {
       "guarding at a LARGER bound sends a body this schema refuses",
     ).toThrow();
     expect(
-      ReadShareProposalFileContentResult.parse(
-        row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)),
-      ).incomingText?.length,
+      ReadShareProposalFileContentResult.parse(row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)))
+        .incomingText?.length,
     ).toBe(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
     // Bytes, not characters. One "é" is two bytes in UTF-8, so a string of
     // exactly the bound in characters is twice the bound in bytes — and a
     // guard that counted characters would admit a body the relay then refuses.
     expect(
       () =>
-        ReadShareProposalFileContentResult.parse(
-          row("é".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)),
-        ),
+        ReadShareProposalFileContentResult.parse(row("é".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES))),
       "counting characters instead of bytes doubles the real bound",
     ).toThrow();
   });
@@ -4438,12 +4607,8 @@ describe("share changes IPC contract", () => {
     ).toThrow();
   });
 
-  // Withdraw has exactly one successful outcome. A result that could carry
-  // `accepted` would let the reverse path report the forward one.
   it("refuses any withdraw result but withdrawn", () => {
-    expect(WithdrawShareChangesResult.parse({ state: "withdrawn" }).state).toBe(
-      "withdrawn",
-    );
+    expect(WithdrawShareChangesResult.parse({ state: "withdrawn" }).state).toBe("withdrawn");
     expect(
       () => WithdrawShareChangesResult.parse({ state: "accepted" }),
       "a widened withdraw result tells the sender their changes are back when the granter has them",
@@ -4472,7 +4637,16 @@ describe("share changes IPC contract", () => {
 });
 
 it("accepts expanded Unicode slugs up to 200 UTF-8 bytes", () => {
-  const record = { id: "channel-unicode", name: "İ".repeat(60), slug: "i\u0307".repeat(60), kind: "channel", createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0 };
+  const record = {
+    id: "channel-unicode",
+    name: "İ".repeat(60),
+    slug: "i\u0307".repeat(60),
+    kind: "channel",
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    threadCount: 0,
+    unreadCount: 0,
+  };
   expect(ChatChannelRecord.safeParse(record).success).toBe(true);
   expect(ChatChannelRecord.safeParse({ ...record, slug: "界".repeat(67) }).success).toBe(false);
 });
@@ -4480,30 +4654,47 @@ it("accepts expanded Unicode slugs up to 200 UTF-8 bytes", () => {
 it("uses the engine slug byte bound in feed and mentions", () => {
   const feedChannel = ChatFeedItemRecord.shape.channel.unwrap();
   const mentionChannel = ChatFileMentionRecord.pick({ channelSlug: true });
-  for (const [slug, valid] of [["i\u0307".repeat(60), true], ["a".repeat(200), true], ["界".repeat(67), false]] as const) {
-    expect(feedChannel.safeParse({ id: "channel", name: "Group", slug, kind: "channel" }).success).toBe(valid);
+  for (const [slug, valid] of [
+    ["i\u0307".repeat(60), true],
+    ["a".repeat(200), true],
+    ["界".repeat(67), false],
+  ] as const) {
+    expect(
+      feedChannel.safeParse({ id: "channel", name: "Group", slug, kind: "channel" }).success,
+    ).toBe(valid);
     expect(mentionChannel.safeParse({ channelSlug: slug }).success).toBe(valid);
   }
 });
 
 describe("launch path failure event", () => {
-  it.each([null, "selected"])("retains the attempt, path, and cause for workspace %j", (workspaceId) => {
-    const event = { attemptId: "attempt-1", path: "C:\\work\\attempted",
-      cause: "ReservedWorkspaceIdError: refused", workspaceId };
-    expect(WorkspacePathOpenFailure.parse({ ...event, authority: "ignored" })).toEqual(event);
-  });
+  it.each([null, "selected"])(
+    "retains the attempt, path, and cause for workspace %j",
+    (workspaceId) => {
+      const event = {
+        attemptId: "attempt-1",
+        path: "C:\\work\\attempted",
+        cause: "ReservedWorkspaceIdError: refused",
+        workspaceId,
+      };
+      expect(WorkspacePathOpenFailure.parse({ ...event, authority: "ignored" })).toEqual(event);
+    },
+  );
 
-  it.each([
-    { attemptId: "" },
-    { workspaceId: "" },
-    { cause: null },
-    { path: "" },
-  ])("rejects malformed failure packets %j", (change) => {
-    expect(WorkspacePathOpenFailure.safeParse({ attemptId: "attempt-1", path: "attempted", cause: "refused",
-      workspaceId: null, ...change }).success).toBe(false);
-  });
+  it.each([{ attemptId: "" }, { workspaceId: "" }, { cause: null }, { path: "" }])(
+    "rejects malformed failure packets %j",
+    (change) => {
+      expect(
+        WorkspacePathOpenFailure.safeParse({
+          attemptId: "attempt-1",
+          path: "attempted",
+          cause: "refused",
+          workspaceId: null,
+          ...change,
+        }).success,
+      ).toBe(false);
+    },
+  );
 });
-
 
 describe("exclusive app creation IPC contract", () => {
   const path = { workspaceId: "workspace", relativePath: "app" };
@@ -4518,16 +4709,25 @@ describe("exclusive app creation IPC contract", () => {
     }
   });
   it("retains the empty-only folder rollback constraint and rejects non-booleans", () => {
-    expect(DeleteWorkspacePathPayload.parse({ ...path, emptyFolderOnly: true }))
-      .toEqual({ ...path, emptyFolderOnly: true });
-    expect(DeleteWorkspacePathPayload.safeParse({ ...path, emptyFolderOnly: "true" }).success).toBe(false);
+    expect(DeleteWorkspacePathPayload.parse({ ...path, emptyFolderOnly: true })).toEqual({
+      ...path,
+      emptyFolderOnly: true,
+    });
+    expect(DeleteWorkspacePathPayload.safeParse({ ...path, emptyFolderOnly: "true" }).success).toBe(
+      false,
+    );
   });
 });
 
- it("refreshes only visibility.toml among internal metadata paths", () => {
+it("refreshes only visibility.toml among internal metadata paths", () => {
   expect(activityPathsAffectWorkspaceListing([".dohc/visibility.toml"], "linux")).toBe(true);
   expect(activityPathsAffectWorkspaceListing([".DOHC/VISIBILITY.TOML"], "win32")).toBe(true);
-  expect(activityPathsAffectWorkspaceListing([".dohc/files.toml", ".dohc/ui-state.json", ".dohc/engine"], "win32")).toBe(false);
+  expect(
+    activityPathsAffectWorkspaceListing(
+      [".dohc/files.toml", ".dohc/ui-state.json", ".dohc/engine"],
+      "win32",
+    ),
+  ).toBe(false);
 });
 
 describe("poll send payloads", () => {
@@ -4536,9 +4736,19 @@ describe("poll send payloads", () => {
     { name: "start", schema: StartChannelThreadPayload, target: { channelId: "channel" } },
   ];
   it.each(doors)("keeps poll fields on $name without normalizing choices", ({ schema, target }) => {
-    const payload = { workspaceId: "workspace", ...target, body: "When?", needsDecision: true, options: [" Monday ", "Monday", " ", "two\nlines"] };
+    const payload = {
+      workspaceId: "workspace",
+      ...target,
+      body: "When?",
+      needsDecision: true,
+      options: [" Monday ", "Monday", " ", "two\nlines"],
+    };
     expect(schema.parse(payload)).toEqual(payload);
-    expect(schema.parse({ ...payload, needsDecision: false, options: [] })).toEqual({ ...payload, needsDecision: false, options: [] });
+    expect(schema.parse({ ...payload, needsDecision: false, options: [] })).toEqual({
+      ...payload,
+      needsDecision: false,
+      options: [],
+    });
     const { needsDecision: _decision, ...implied } = payload;
     expect(schema.parse(implied)).toEqual(implied);
   });
@@ -4549,7 +4759,9 @@ describe("poll send payloads", () => {
   for (const { name, schema, target } of doors) {
     it("accepts the poll choice limits on " + name, () => {
       const payload = { workspaceId: "workspace", ...target, body: "When?" };
-      expect(schema.parse({ ...payload, options: Array.from({ length: 12 }, (_, i) => String(i)) })).toHaveProperty("options");
+      expect(
+        schema.parse({ ...payload, options: Array.from({ length: 12 }, (_, i) => String(i)) }),
+      ).toHaveProperty("options");
       expect(schema.parse({ ...payload, options: ["x".repeat(200)] })).toHaveProperty("options");
     });
     it.each([
@@ -4557,7 +4769,9 @@ describe("poll send payloads", () => {
       { reason: "a 201-character choice", options: ["x".repeat(201)] },
       { reason: "a non-string choice", options: [42] },
     ])("refuses $reason on " + name, ({ options }) => {
-      expect(schema.safeParse({ workspaceId: "workspace", ...target, body: "When?", options }).success).toBe(false);
+      expect(
+        schema.safeParse({ workspaceId: "workspace", ...target, body: "When?", options }).success,
+      ).toBe(false);
     });
   }
 });
@@ -4567,18 +4781,23 @@ describe("ImportWorkspaceFilesResult", () => {
   // a landed path keeps to.
   it("takes a skipped path longer than a landed one", () => {
     const path = `${"deep/".repeat(1000)}key.txt`;
-    expect(ImportWorkspaceFilesResult.safeParse({
-      imported: ["ok.md"],
-      skipped: 1,
-      skippedSources: [{ path, reason: "link" }],
-    }).success).toBe(true);
+    expect(
+      ImportWorkspaceFilesResult.safeParse({
+        imported: ["ok.md"],
+        skipped: 1,
+        skippedSources: [{ path, reason: "link" }],
+      }).success,
+    ).toBe(true);
   });
 });
 
 describe("NoticeTargetShape", () => {
   it("keeps the personal agent a sign-in notice opens, and only with Settings › Agents", () => {
     const agent = `p-${"g".repeat(26)}`;
-    expect(NoticeTargetShape.parse({ settings: "agents", agent })).toEqual({ settings: "agents", agent });
+    expect(NoticeTargetShape.parse({ settings: "agents", agent })).toEqual({
+      settings: "agents",
+      agent,
+    });
     expect(NoticeTargetShape.safeParse({ agent }).success).toBe(false);
   });
 });

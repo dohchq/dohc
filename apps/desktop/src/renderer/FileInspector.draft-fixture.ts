@@ -21,9 +21,7 @@ import { orphanedDraftStoreVersionForTests, resetOrphanedDrafts } from "./orphan
 // covers both: bridge calls and draft-store mutations.
 export async function settleAfterUnmount(): Promise<void> {
   const activity = () => {
-    const stubbed = window.dohcDesktop as unknown as
-      | Record<string, unknown>
-      | undefined;
+    const stubbed = window.dohcDesktop as unknown as Record<string, unknown> | undefined;
     const calls = stubbed
       ? Object.values(stubbed).reduce(
           (total: number, value) =>

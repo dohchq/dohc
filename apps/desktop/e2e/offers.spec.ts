@@ -10,12 +10,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// Offers show up after a person acts, in space already there. Each one is
-// driven here the way a person reaches it.
-
-// A folder becomes an app when its entry file appears, written by anything:
-// an agent, a script, another editor. The folder's row says so, and the
-// entry file's tab row offers Run, which opens the local preview.
 test("@offers an outside write makes a folder an app, and Run opens it", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -25,7 +19,6 @@ test("@offers an outside write makes a folder an app, and Run opens it", async (
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Expanding the folder asks main about it.
     const folder = explorerRow(page, "site");
     await folder.click();
     await expect(folder).toHaveAttribute("aria-expanded", "true");
@@ -34,13 +27,17 @@ test("@offers an outside write makes a folder an app, and Run opens it", async (
 
     const sentinel = "Written from outside dohc.";
     await writeWorkspaceFiles(temp, [
-      { path: "site/index.html", contents: `<!doctype html><title>Site</title><main>${sentinel}</main>` },
+      {
+        path: "site/index.html",
+        contents: `<!doctype html><title>Site</title><main>${sentinel}</main>`,
+      },
     ]);
     await expect(folder).toHaveAttribute("data-app", "true");
-    // Still a tree row: it keeps its name and its expansion.
-    await expect(page.getByRole("treeitem", { name: "site" })).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByRole("treeitem", { name: "site" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
 
-    // Only the entry file offers Run.
     await explorerRow(page, "site/notes.md").click();
     await expect(page.getByTestId("markdown-editor")).toBeVisible();
     await expect(page.getByTestId("file-run-app")).toHaveCount(0);
@@ -55,11 +52,6 @@ test("@offers an outside write makes a folder an app, and Run opens it", async (
   }
 });
 
-// A URL pasted on its own line raises one row under it. A pasted URL is
-// already a link, so Link is the current form: choosing it closes the row and
-// changes nothing. Plain text is one edit, which the row's Undo takes back.
-// All of it is the keyboard: Mod+K reaches the row, and focus returns to the
-// editor each time the row closes.
 test("@offers a pasted URL offers Link and Plain text, and Undo, from the keyboard", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -88,7 +80,6 @@ test("@offers a pasted URL offers Link and Plain text, and Undo, from the keyboa
       });
     };
 
-    // Plain text, then Undo.
     await pasteOnNewLine();
     await expect(link).toHaveCount(1);
     await expect(page.getByTestId("url-paste-link")).toHaveAttribute("aria-pressed", "true");
@@ -105,7 +96,6 @@ test("@offers a pasted URL offers Link and Plain text, and Undo, from the keyboa
     await expect(row).toHaveCount(0);
     await expect(editor).toBeFocused();
 
-    // Link, the current form: the row closes and nothing changes.
     await pasteOnNewLine();
     await expect(link).toHaveCount(2);
     await page.keyboard.press("ControlOrMeta+K");
@@ -115,7 +105,6 @@ test("@offers a pasted URL offers Link and Plain text, and Undo, from the keyboa
     await expect(link).toHaveCount(2);
     await expect(editor).toBeFocused();
 
-    // Typing dismisses it, and the keys land in the document.
     await pasteOnNewLine();
     await page.keyboard.type(" ok");
     await expect(row).toHaveCount(0);

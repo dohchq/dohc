@@ -3,7 +3,9 @@ import { classifyEngineFilePath } from "./enginePathFloor";
 
 const preparedPaths = new WeakSet<PreparedSharePath>();
 class PreparedSharePath {
-  private constructor(readonly path: string) { Object.freeze(this); }
+  private constructor(readonly path: string) {
+    Object.freeze(this);
+  }
   static prepare(path: string): PreparedSharePath | null {
     const validated = validateUserWritePath(path);
     if (!validated.ok) return null;
@@ -18,14 +20,32 @@ class PreparedSharePath {
 export const prepareSharePath = (path: string) => PreparedSharePath.prepare(path);
 
 /** The normalized tracked path selected by a file scope, or null. Versions are checked by the caller. */
-export function visibleSharePath(selector: { paths: readonly string[]; versionId: string | null }, path: string | PreparedSharePath): string | null {
-  const prepared = typeof path === "string" ? prepareSharePath(path) : preparedPaths.has(path) ? path : null;
+export function visibleSharePath(
+  selector: { paths: readonly string[]; versionId: string | null },
+  path: string | PreparedSharePath,
+): string | null {
+  const prepared =
+    typeof path === "string" ? prepareSharePath(path) : preparedPaths.has(path) ? path : null;
   if (!prepared) return null;
   const normalized = prepared.path;
-  const selected = selector.paths.length === 0
-    ? selector.versionId !== null
-    : selector.paths.some(granted => normalized === granted || normalized.startsWith(`${granted}/`));
+  const selected =
+    selector.paths.length === 0
+      ? selector.versionId !== null
+      : selector.paths.some(
+          (granted) => normalized === granted || normalized.startsWith(`${granted}/`),
+        );
   return selected ? normalized : null;
+}
+
+/** Whether a chat link's path names a file the scope covers, spelled exactly as the scope reads it. No scope covers nothing. */
+export function shareCoversLinkPath(
+  selector: { paths: readonly string[]; versionId: string | null } | null,
+  path: string,
+): boolean {
+  const prepared = selector ? prepareSharePath(path) : null;
+  return (
+    prepared !== null && prepared.path === path && visibleSharePath(selector!, prepared) !== null
+  );
 }
 
 // The share selector's VERSION and ACCESS dimensions, as one rule in one
@@ -69,23 +89,6 @@ export function isValidShareVersionId(value: unknown): value is string {
 }
 
 /**
- * Whether `value` is a path the relay could have issued in a share selector.
- *
- * The relay accepts a path only if it is a non-empty string that validates,
- * normalizes to itself, and classifies as tracked — it stores the NORMALIZED
- * form, so anything else is a path it never wrote (`validateShareSelector` in
- * `services/sync-relay/src/shareFilter.ts`, which expands the same rule into
- * separate branches because it owes distinct error codes at create time).
- *
- * The length cap lives here too, so the minting side and every reading side
- * agree on one number instead of two that can drift.
- *
- * Every surface that reads a selector back applies this, for the same reason
- * the version rule lives here: a reader that accepts more than the writer
- * issues will accept damage, and `""` is the path-shaped version of the empty
- * version id that got through once already.
- */
-/**
  * How many paths one selector may carry, and how long each may be.
  *
  * Both live here so the minting side and every reading side agree on one
@@ -106,12 +109,25 @@ export function isShareablePathList(paths: readonly unknown[]): boolean {
   return paths.length <= MAX_SHARE_PATHS && paths.every(isShareablePath);
 }
 
+/**
+ * Whether `value` is a path the relay could have issued in a share selector.
+ *
+ * The relay accepts a path only if it is a non-empty string that validates,
+ * normalizes to itself, and classifies as tracked — it stores the NORMALIZED
+ * form, so anything else is a path it never wrote (`validateShareSelector` in
+ * `services/sync-relay/src/shareFilter.ts`, which expands the same rule into
+ * separate branches because it owes distinct error codes at create time).
+ *
+ * The length cap lives here too, so the minting side and every reading side
+ * agree on one number instead of two that can drift.
+ *
+ * Every surface that reads a selector back applies this, for the same reason
+ * the version rule lives here: a reader that accepts more than the writer
+ * issues will accept damage, and `""` is the path-shaped version of the empty
+ * version id that got through once already.
+ */
 export function isShareablePath(value: unknown): value is string {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > MAX_SHARE_PATH_CHARS
-  ) {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_SHARE_PATH_CHARS) {
     return false;
   }
   const validated = validateUserWritePath(value);
@@ -145,8 +161,5 @@ export function shareAccessRank(access: string): number {
  * `crates/dohc-engine-sync/tests/security_contract.rs`.
  */
 export function isShareAccessValue(value: unknown): value is ShareAccess {
-  return (
-    typeof value === "string" &&
-    (SHARE_ACCESS_VALUES as readonly string[]).includes(value)
-  );
+  return typeof value === "string" && (SHARE_ACCESS_VALUES as readonly string[]).includes(value);
 }

@@ -1,10 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAccount, type StoredSignIn } from "./account";
-import { CACHE_FORMAT, createCacheFiles, fileName, leastJsonBytes, SCOPE_MAX_BYTES, WRITE_DELAY_MS, WRITE_INTERVAL_MS, WRITE_MAX_DELAY_MS, type CacheFiles, type SavedView } from "./cacheFiles";
+import {
+  CACHE_FORMAT,
+  createCacheFiles,
+  fileName,
+  leastJsonBytes,
+  SCOPE_MAX_BYTES,
+  WRITE_DELAY_MS,
+  WRITE_INTERVAL_MS,
+  WRITE_MAX_DELAY_MS,
+  type CacheFiles,
+  type SavedView,
+} from "./cacheFiles";
 import { createServerClient } from "./client";
 import { createOpenWorkspace } from "./openWorkspace";
 import { memoryStore, testServer, type Answer } from "./testServer";
-import { cacheScope, createReadCache, createWorkspaceData, views, type ReadCache } from "./workspaceData";
+import {
+  cacheScope,
+  createReadCache,
+  createWorkspaceData,
+  views,
+  type ReadCache,
+} from "./workspaceData";
 import { createWorkspaceList } from "./workspaceList";
 import { FEED_HOLD_MS } from "./workspaceReads";
 
@@ -22,15 +39,26 @@ const disk = vi.hoisted(() => ({
 }));
 vi.mock("expo-file-system", () => {
   type Part = string | { readonly uri: string };
-  const uriOf = (parts: readonly Part[]) => parts.map(part => typeof part === "string" ? part : part.uri).join("/");
+  const uriOf = (parts: readonly Part[]) =>
+    parts.map((part) => (typeof part === "string" ? part : part.uri)).join("/");
   const parentOf = (uri: string) => uri.slice(0, uri.lastIndexOf("/"));
   class File {
     readonly uri: string;
-    constructor(...parts: Part[]) { this.uri = uriOf(parts); }
-    get name() { return this.uri.slice(this.uri.lastIndexOf("/") + 1); }
-    get exists() { return disk.files.has(this.uri); }
-    get size() { return Buffer.byteLength(disk.files.get(this.uri)?.text ?? "", "utf8"); }
-    get modificationTime() { return disk.files.get(this.uri)?.mtime ?? null; }
+    constructor(...parts: Part[]) {
+      this.uri = uriOf(parts);
+    }
+    get name() {
+      return this.uri.slice(this.uri.lastIndexOf("/") + 1);
+    }
+    get exists() {
+      return disk.files.has(this.uri);
+    }
+    get size() {
+      return Buffer.byteLength(disk.files.get(this.uri)?.text ?? "", "utf8");
+    }
+    get modificationTime() {
+      return disk.files.get(this.uri)?.mtime ?? null;
+    }
     async text() {
       disk.log.push(`read ${this.name}`);
       if (disk.heldReads) await disk.heldReads;
@@ -42,7 +70,10 @@ vi.mock("expo-file-system", () => {
     async write(text: string) {
       if (!disk.folders.has(parentOf(this.uri))) throw new Error("The folder doesn't exist.");
       disk.log.push(`write ${this.name}`);
-      disk.files.set(this.uri, { text: text.slice(0, Math.floor(text.length / 2)), mtime: ++disk.clock });
+      disk.files.set(this.uri, {
+        text: text.slice(0, Math.floor(text.length / 2)),
+        mtime: ++disk.clock,
+      });
       if (disk.heldWrites) await disk.heldWrites;
       if (disk.failWrites) throw new Error("No space left on device");
       disk.files.set(this.uri, { text, mtime: disk.clock });
@@ -61,29 +92,44 @@ vi.mock("expo-file-system", () => {
   }
   class Directory {
     readonly uri: string;
-    constructor(...parts: Part[]) { this.uri = uriOf(parts); }
-    get exists() { return disk.folders.has(this.uri); }
-    create() { disk.folders.add(this.uri); }
+    constructor(...parts: Part[]) {
+      this.uri = uriOf(parts);
+    }
+    get exists() {
+      return disk.folders.has(this.uri);
+    }
+    create() {
+      disk.folders.add(this.uri);
+    }
     delete() {
       if (!disk.folders.delete(this.uri)) throw new Error("path does not exist");
-      for (const path of [...disk.files.keys()]) if (path.startsWith(`${this.uri}/`)) disk.files.delete(path);
+      for (const path of [...disk.files.keys()])
+        if (path.startsWith(`${this.uri}/`)) disk.files.delete(path);
     }
-    list() { return [...disk.files.keys()].filter(path => parentOf(path) === this.uri).map(path => new File(path)); }
+    list() {
+      return [...disk.files.keys()]
+        .filter((path) => parentOf(path) === this.uri)
+        .map((path) => new File(path));
+    }
   }
   return { Directory, File, Paths: { cache: "cache" } };
 });
 
 const FOLDER = "cache/dohc-read-cache";
 const pathOf = (scope: string, extension = "json") => `${FOLDER}/${fileName(scope)}.${extension}`;
-const names = () => [...disk.files.keys()].map(path => path.slice(FOLDER.length + 1)).sort();
+const names = () => [...disk.files.keys()].map((path) => path.slice(FOLDER.length + 1)).sort();
 const hold = (which: "heldReads" | "heldWrites") => {
   let release!: () => void;
-  disk[which] = new Promise<void>(done => { release = done; });
-  return () => { disk[which] = null; release(); };
+  disk[which] = new Promise<void>((done) => {
+    release = done;
+  });
+  return () => {
+    disk[which] = null;
+    release();
+  };
 };
 
 const made: CacheFiles[] = [];
-/** The cache's files as one launch of the app makes them, over the same folder as every other launch. */
 function launch(options: { totalMaxBytes?: number; now?: () => number } = {}) {
   const files = createCacheFiles({ now: () => ++disk.clock, ...options });
   made.push(files);
@@ -105,8 +151,14 @@ afterEach(async () => {
 
 const SCOPE_A = JSON.stringify(["https://dohc.example.com", "u-1", "ws-a"]);
 const SCOPE_B = JSON.stringify(["https://dohc.example.com", "u-1", "ws-b"]);
-const saved = (id: string, value: unknown, cursor = "0.5.2", stale = false): SavedView => ({ id, value, cursor, stale });
-const fileText = (scope: string, views: readonly SavedView[], format = CACHE_FORMAT) => JSON.stringify({ format, scope, views });
+const saved = (id: string, value: unknown, cursor = "0.5.2", stale = false): SavedView => ({
+  id,
+  value,
+  cursor,
+  stale,
+});
+const fileText = (scope: string, views: readonly SavedView[], format = CACHE_FORMAT) =>
+  JSON.stringify({ format, scope, views });
 function place(path: string, text: string) {
   disk.folders.add(FOLDER);
   disk.files.set(path, { text, mtime: ++disk.clock });
@@ -115,16 +167,24 @@ function place(path: string, text: string) {
 describe("a scope's file", () => {
   it("keeps each view's value, cursor and staleness, under a name that holds no account detail", async () => {
     const { files } = launch();
-    const views = [saved("files", [{ path: "a.md", objectId: "object-a", page: true }]), saved("page:a.md", { kind: "page", markdown: "# A" }, "0.6.1", true)];
+    const views = [
+      saved("files", [{ path: "a.md", objectId: "object-a", page: true }]),
+      saved("page:a.md", { kind: "page", markdown: "# A" }, "0.6.1", true),
+    ];
     files.write(SCOPE_A, () => views);
     await files.flush();
 
     expect(names()).toEqual([`${fileName(SCOPE_A)}.json`]);
     expect(fileName(SCOPE_A)).toMatch(/^[0-9a-f]{16}$/);
-    expect(fileName(SCOPE_A)).toBe(fileName(JSON.stringify(["https://dohc.example.com", "u-1", "ws-a"])));
+    expect(fileName(SCOPE_A)).toBe(
+      fileName(JSON.stringify(["https://dohc.example.com", "u-1", "ws-a"])),
+    );
     expect(fileName(SCOPE_A)).not.toBe(fileName(SCOPE_B));
-    expect(JSON.parse(disk.files.get(pathOf(SCOPE_A))!.text)).toEqual({ format: CACHE_FORMAT, scope: SCOPE_A, views });
-    // Another launch reads the same file.
+    expect(JSON.parse(disk.files.get(pathOf(SCOPE_A))!.text)).toEqual({
+      format: CACHE_FORMAT,
+      scope: SCOPE_A,
+      views,
+    });
     await expect(launch().files.read(SCOPE_A)).resolves.toEqual(views);
   });
 
@@ -138,8 +198,15 @@ describe("a scope's file", () => {
 
   it("is deleted when it doesn't parse, is of another format, or can't be read", async () => {
     const { files } = launch();
-    for (const text of ["{\"format\":1,\"scope\":", fileText(SCOPE_A, [saved("files", [])], CACHE_FORMAT + 1),
-      JSON.stringify({ format: CACHE_FORMAT, scope: SCOPE_A, views: [{ id: "files", cursor: "0.5.2" }] })]) {
+    for (const text of [
+      '{"format":1,"scope":',
+      fileText(SCOPE_A, [saved("files", [])], CACHE_FORMAT + 1),
+      JSON.stringify({
+        format: CACHE_FORMAT,
+        scope: SCOPE_A,
+        views: [{ id: "files", cursor: "0.5.2" }],
+      }),
+    ]) {
       place(pathOf(SCOPE_A), text);
       await expect(files.read(SCOPE_A)).resolves.toEqual([]);
       await files.flush();
@@ -163,13 +230,16 @@ describe("a scope's file", () => {
     files.write(SCOPE_A, () => after);
     const writing = files.flush();
     await vi.waitFor(() => expect(names()).toContain(`${fileName(SCOPE_A)}.json.tmp`));
-    // Half the new file is on disk, and a read finds only the whole last one.
     await expect(launch().files.read(SCOPE_A)).resolves.toEqual(before);
     release();
     await writing;
     expect(names()).toEqual([`${fileName(SCOPE_A)}.json`]);
-    expect(disk.log.filter(line => line.startsWith("write") || line.startsWith("move")).slice(-2))
-      .toEqual([`write ${fileName(SCOPE_A)}.json.tmp`, `move ${fileName(SCOPE_A)}.json.tmp ${fileName(SCOPE_A)}.json`]);
+    expect(
+      disk.log.filter((line) => line.startsWith("write") || line.startsWith("move")).slice(-2),
+    ).toEqual([
+      `write ${fileName(SCOPE_A)}.json.tmp`,
+      `move ${fileName(SCOPE_A)}.json.tmp ${fileName(SCOPE_A)}.json`,
+    ]);
     await expect(launch().files.read(SCOPE_A)).resolves.toEqual(after);
   });
 
@@ -179,12 +249,13 @@ describe("a scope's file", () => {
     files.write(SCOPE_A, () => before);
     await files.flush();
     disk.failWrites = true;
-    files.write(SCOPE_A, () => [saved("files", [{ path: "b.md", objectId: "object-b", page: true }])]);
+    files.write(SCOPE_A, () => [
+      saved("files", [{ path: "b.md", objectId: "object-b", page: true }]),
+    ]);
     await expect(files.flush()).resolves.toBeUndefined();
     expect(names()).toEqual([`${fileName(SCOPE_A)}.json`]);
     await expect(files.read(SCOPE_A)).resolves.toEqual(before);
 
-    // A partial file a closed app left, for a scope with no whole file: no read finds it, and the next write deletes it.
     disk.failWrites = false;
     place(pathOf(SCOPE_B, "json.tmp"), fileText(SCOPE_B, [saved("files", [])]).slice(0, 20));
     await expect(files.read(SCOPE_B)).resolves.toEqual([]);
@@ -199,7 +270,7 @@ describe("writing the files", () => {
     vi.useFakeTimers();
     try {
       const { files } = launch({ now: Date.now });
-      const writes = () => disk.log.filter(line => line.startsWith("write")).length;
+      const writes = () => disk.log.filter((line) => line.startsWith("write")).length;
       files.write(SCOPE_A, () => [saved("files", [])]);
       files.write(SCOPE_B, () => [saved("files", [])]);
       await vi.advanceTimersByTimeAsync(WRITE_DELAY_MS - 1);
@@ -225,13 +296,20 @@ describe("writing the files", () => {
     vi.useFakeTimers();
     try {
       const { files } = launch({ now: Date.now });
-      const writes = () => disk.log.filter(line => line.startsWith("write")).length;
-      const reply = (length: number) => [saved("thread:t-1", { kind: "thread", id: "t-1", title: "", messages: [], body: "x".repeat(length) })];
+      const writes = () => disk.log.filter((line) => line.startsWith("write")).length;
+      const reply = (length: number) => [
+        saved("thread:t-1", {
+          kind: "thread",
+          id: "t-1",
+          title: "",
+          messages: [],
+          body: "x".repeat(length),
+        }),
+      ];
       files.write(SCOPE_A, () => reply(0));
       await vi.advanceTimersByTimeAsync(WRITE_DELAY_MS);
       expect(writes()).toBe(1);
 
-      // A reply streams in: a change every 250 ms for most of the next 30 s writes nothing more.
       let length = 0;
       for (let elapsed = 0; elapsed < WRITE_INTERVAL_MS - 2 * WRITE_DELAY_MS; elapsed += 250) {
         const now = ++length;
@@ -246,7 +324,6 @@ describe("writing the files", () => {
       files.write(SCOPE_A, () => reply(length + 1));
       await vi.advanceTimersByTimeAsync(WRITE_DELAY_MS);
       expect(writes()).toBe(2);
-      // Going to the background saves at once.
       await files.flush();
       expect(writes()).toBe(3);
       await expect(files.read(SCOPE_A)).resolves.toEqual(reply(length + 1));
@@ -257,8 +334,12 @@ describe("writing the files", () => {
 
   it("keeps a 2 MiB page, and leaves out the views past a scope's cap, keeping the listings", async () => {
     const { files } = launch();
-    const page = (n: number) => saved(`page:${n}.md`, { kind: "page", markdown: `${n}`.repeat(2 * 1024 * 1024) });
-    const listings = [saved("files", [{ path: "0.md", objectId: "object-0", page: true }]), saved("chats", [])];
+    const page = (n: number) =>
+      saved(`page:${n}.md`, { kind: "page", markdown: `${n}`.repeat(2 * 1024 * 1024) });
+    const listings = [
+      saved("files", [{ path: "0.md", objectId: "object-0", page: true }]),
+      saved("chats", []),
+    ];
     files.write(SCOPE_A, () => [...listings, page(1)]);
     await files.flush();
     await expect(files.read(SCOPE_A)).resolves.toEqual([...listings, page(1)]);
@@ -267,30 +348,35 @@ describe("writing the files", () => {
     await files.flush();
     const kept = await files.read(SCOPE_A);
     expect(disk.files.get(pathOf(SCOPE_A))!.text.length).toBeLessThanOrEqual(SCOPE_MAX_BYTES);
-    expect(kept.map(view => view.id)).toEqual(["files", "chats", "page:1.md", "page:2.md", "page:3.md", "page:4.md"]);
+    expect(kept.map((view) => view.id)).toEqual([
+      "files",
+      "chats",
+      "page:1.md",
+      "page:2.md",
+      "page:3.md",
+      "page:4.md",
+    ]);
   });
 
   it("keeps the files under the total cap by deleting the scopes used least recently, across a relaunch", async () => {
     const scope = (n: number) => JSON.stringify(["https://dohc.example.com", "u-1", `ws-${n}`]);
     const views = [saved("page:a.md", { kind: "page", markdown: "x".repeat(1000) })];
-    // Room for three scopes' files, each the same size.
     const totalMaxBytes = 3 * Buffer.byteLength(fileText(scope(1), views));
     const first = launch({ totalMaxBytes }).files;
     for (const n of [1, 2, 3]) {
       first.write(scope(n), () => views);
       await first.flush();
     }
-    // Reading 1 uses it, so 2 is now the one used least recently.
     await first.read(scope(1));
     first.write(scope(4), () => views);
     await first.flush();
-    expect(names()).toEqual([1, 3, 4].map(n => `${fileName(scope(n))}.json`).sort());
+    expect(names()).toEqual([1, 3, 4].map((n) => `${fileName(scope(n))}.json`).sort());
 
     // After a relaunch, the files go by when they were last written: 1, read but not written since, goes first.
     const second = launch({ totalMaxBytes }).files;
     second.write(scope(5), () => views);
     await second.flush();
-    expect(names()).toEqual([3, 4, 5].map(n => `${fileName(scope(n))}.json`).sort());
+    expect(names()).toEqual([3, 4, 5].map((n) => `${fileName(scope(n))}.json`).sort());
   });
 });
 
@@ -338,20 +424,34 @@ describe("deleting the files", () => {
   });
 });
 
-// --- the read cache over the files ----------------------------------------------------------------------------------
-
-const ops = (result: unknown, cursor: string): Answer => ({ status: 200, body: { ok: true, result, cursor } });
-const listing = (...paths: [string, string][]) => ({ ok: true, files: paths.map(([path, objectId]) => ({ path, objectId, contentKind: "text", byteLength: 1 })), folders: [] });
-const feedPath = (workspaceId: string, since: string) => `/sync/${workspaceId}/ops/changes?since=${since}&hold=${FEED_HOLD_MS}`;
-const NOT_FOUND: Answer = { status: 404, body: { ok: false, error: "not found", code: "not_found" } };
+const ops = (result: unknown, cursor: string): Answer => ({
+  status: 200,
+  body: { ok: true, result, cursor },
+});
+const listing = (...paths: [string, string][]) => ({
+  ok: true,
+  files: paths.map(([path, objectId]) => ({ path, objectId, contentKind: "text", byteLength: 1 })),
+  folders: [],
+});
+const feedPath = (workspaceId: string, since: string) =>
+  `/sync/${workspaceId}/ops/changes?since=${since}&hold=${FEED_HOLD_MS}`;
+const NOT_FOUND: Answer = {
+  status: 404,
+  body: { ok: false, error: "not found", code: "not_found" },
+};
 const held = () => new Promise<Answer>(() => {});
-const count = (server: ReturnType<typeof testServer>, path: string) => server.calls.filter(call => call.path === path).length;
+const count = (server: ReturnType<typeof testServer>, path: string) =>
+  server.calls.filter((call) => call.path === path).length;
 const A_FILES = [{ path: "a.md", objectId: "object-a", page: true }];
 
 function serverWithA() {
   const server = testServer();
   server.on("POST", "/sync/ws-a/ops/listFiles", ops(listing(["a.md", "object-a"]), "0.5.2"));
-  server.on("POST", "/sync/ws-a/ops/documentRead", ops({ ok: true, path: "a.md", markdown: "# A" }, "0.6.2"));
+  server.on(
+    "POST",
+    "/sync/ws-a/ops/documentRead",
+    ops({ ok: true, path: "a.md", markdown: "# A" }, "0.6.2"),
+  );
   server.on("POST", "/sync/ws-b/ops/listFiles", ops(listing(["b.md", "object-b"]), "0.5.2"));
   server.on("GET", feedPath("ws-a", "0.5.2"), held);
   server.on("GET", feedPath("ws-b", "0.5.2"), held);
@@ -360,24 +460,37 @@ function serverWithA() {
 
 function signInTo(server: ReturnType<typeof testServer>) {
   return {
-    client: createServerClient({ origin: server.origin, token: "tok", fetch: server.fetch, signal: new AbortController().signal }),
-    isCurrent: () => true, origin: server.origin, userId: "u-1",
+    client: createServerClient({
+      origin: server.origin,
+      token: "tok",
+      fetch: server.fetch,
+      signal: new AbortController().signal,
+    }),
+    isCurrent: () => true,
+    origin: server.origin,
+    userId: "u-1",
   };
 }
 
-function open(server: ReturnType<typeof testServer>, cache: ReadCache, workspaceId = "ws-a", signIn = signInTo(server)) {
+function open(
+  server: ReturnType<typeof testServer>,
+  cache: ReadCache,
+  workspaceId = "ws-a",
+  signIn = signInTo(server),
+) {
   const data = createWorkspaceData({ signIn, workspaceId, cache });
   data.resume();
   return data;
 }
 
-/** A first launch that reads A's files and a page, and saves them. */
 async function readBeforeRelaunch(server: ReturnType<typeof testServer>) {
   const { files, cache } = launch();
   const data = open(server, cache);
   data.subscribe(views.files, () => {});
   data.subscribe(views.page("a.md"), () => {});
-  await vi.waitFor(() => expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" }));
+  await vi.waitFor(() =>
+    expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" }),
+  );
   await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
   await files.flush();
   data.stop();
@@ -387,17 +500,18 @@ describe("a relaunch", () => {
   it("shows what was read before, without reading it again, and resumes the feed from its cursor", async () => {
     const server = serverWithA();
     await readBeforeRelaunch(server);
-    const reads = server.calls.filter(call => call.method === "POST").length;
+    const reads = server.calls.filter((call) => call.method === "POST").length;
 
     const { cache } = launch();
     const data = open(server, cache);
     data.subscribe(views.files, () => {});
     data.subscribe(views.page("a.md"), () => {});
-    await vi.waitFor(() => expect(data.state(views.files)).toMatchObject({ value: A_FILES, loading: false }));
+    await vi.waitFor(() =>
+      expect(data.state(views.files)).toMatchObject({ value: A_FILES, loading: false }),
+    );
     expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A" });
-    // The feed starts from the oldest cursor the file held: the listing's 0.5.2, not the page's 0.6.2.
     await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(2));
-    expect(server.calls.filter(call => call.method === "POST")).toHaveLength(reads);
+    expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(reads);
   });
 
   it("paints the loading state before the file is read, and asks the server nothing until it is", async () => {
@@ -411,15 +525,17 @@ describe("a relaunch", () => {
     const data = open(server, cache);
     const painted = vi.fn();
     data.subscribe(views.files, painted);
-    // The first frame: the read has started, hasn't settled, and the screen shows the loading state it shows today.
     disk.log.push("first frame");
     expect(data.state(views.files)).toMatchObject({ value: null, loading: true, problem: null });
     data.retry(views.files);
     expect(server.calls).toHaveLength(calls);
     release();
     await vi.waitFor(() => expect(data.state(views.files).value).toEqual(A_FILES));
-    expect(disk.log.slice(0, 3)).toEqual([`read ${fileName(cacheScope(signInTo(server), "ws-a"))}.json`, "first frame",
-      `read done ${fileName(cacheScope(signInTo(server), "ws-a"))}.json`]);
+    expect(disk.log.slice(0, 3)).toEqual([
+      `read ${fileName(cacheScope(signInTo(server), "ws-a"))}.json`,
+      "first frame",
+      `read done ${fileName(cacheScope(signInTo(server), "ws-a"))}.json`,
+    ]);
     expect(painted).toHaveBeenCalled();
   });
 
@@ -434,16 +550,32 @@ describe("a relaunch", () => {
     await marked.files.flush();
 
     let answer!: (value: Answer) => void;
-    server.on("GET", feedPath("ws-a", "0.5.2"), () => new Promise<Answer>(done => { answer = done; }));
+    server.on(
+      "GET",
+      feedPath("ws-a", "0.5.2"),
+      () =>
+        new Promise<Answer>((done) => {
+          answer = done;
+        }),
+    );
     server.on("GET", feedPath("ws-a", "1.0.0"), held);
-    server.on("POST", "/sync/ws-a/ops/documentRead", ops({ ok: true, path: "a.md", markdown: "# A again" }, "1.0.0"));
-    server.on("POST", "/sync/ws-a/ops/listFiles", ops(listing(["a.md", "object-a"], ["b.md", "object-b"]), "1.0.0"));
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/documentRead",
+      ops({ ok: true, path: "a.md", markdown: "# A again" }, "1.0.0"),
+    );
+    server.on(
+      "POST",
+      "/sync/ws-a/ops/listFiles",
+      ops(listing(["a.md", "object-a"], ["b.md", "object-b"]), "1.0.0"),
+    );
     const { files, cache } = launch();
     const data = open(server, cache);
     data.subscribe(views.page("a.md"), () => {});
     data.subscribe(views.files, () => {});
-    // The stale page reads at once; the fresh listing waits for the feed.
-    await vi.waitFor(() => expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A again" }));
+    await vi.waitFor(() =>
+      expect(data.state(views.page("a.md")).value).toEqual({ kind: "page", markdown: "# A again" }),
+    );
     expect(data.state(views.files).value).toEqual(A_FILES);
     expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(1);
 
@@ -451,16 +583,27 @@ describe("a relaunch", () => {
     answer({ status: 200, body: { ok: true, cursor: "1.0.0", replace: true } });
     await vi.waitFor(() => expect(data.state(views.files).value).toHaveLength(2));
     await files.flush();
-    expect((await launch().files.read(scope)).find(view => view.id === "files")?.cursor).toBe("1.0.0");
+    expect((await launch().files.read(scope)).find((view) => view.id === "files")?.cursor).toBe(
+      "1.0.0",
+    );
   });
 });
 
 describe("wiping the files", () => {
-  const SAVED: StoredSignIn = { origin: "https://dohc.example.com", token: "tok-1", userId: "u-1", email: "ice@example.com" };
+  const SAVED: StoredSignIn = {
+    origin: "https://dohc.example.com",
+    token: "tok-1",
+    userId: "u-1",
+    email: "ice@example.com",
+  };
 
   async function signedIn(server: ReturnType<typeof testServer>) {
     const { files, cache } = launch();
-    const account = createAccount({ store: memoryStore(SAVED).store, fetch: server.fetch, sleep: async () => {} });
+    const account = createAccount({
+      store: memoryStore(SAVED).store,
+      fetch: server.fetch,
+      sleep: async () => {},
+    });
     // The cache follows the account from launch, before the saved sign-in is read, as the app's does.
     cache.follow(account);
     await account.restore();
@@ -497,7 +640,9 @@ describe("wiping the files", () => {
     a.subscribe(views.files, () => {});
     await vi.waitFor(() => expect(a.state(views.files).value).toHaveLength(1));
     const writing = files.flush();
-    await vi.waitFor(() => expect(names()).toContain(`${fileName(cacheScope(signIn, "ws-a"))}.json.tmp`));
+    await vi.waitFor(() =>
+      expect(names()).toContain(`${fileName(cacheScope(signIn, "ws-a"))}.json.tmp`),
+    );
 
     await account.signOut();
     release();
@@ -511,7 +656,14 @@ describe("wiping the files", () => {
     const server = serverWithA();
     const { files, cache, account, signIn } = await signedIn(server);
     let answer!: (value: Answer) => void;
-    server.on("GET", feedPath("ws-a", "0.5.2"), () => new Promise<Answer>(done => { answer = done; }));
+    server.on(
+      "GET",
+      feedPath("ws-a", "0.5.2"),
+      () =>
+        new Promise<Answer>((done) => {
+          answer = done;
+        }),
+    );
     const a = open(server, cache, "ws-a", signIn);
     a.subscribe(views.files, () => {});
     await vi.waitFor(() => expect(count(server, feedPath("ws-a", "0.5.2"))).toBe(1));
@@ -519,7 +671,9 @@ describe("wiping the files", () => {
     expect(names()).toHaveLength(1);
 
     answer({ status: 401 });
-    await vi.waitFor(() => expect(account.state()).toMatchObject({ status: "signed-out", ended: true }));
+    await vi.waitFor(() =>
+      expect(account.state()).toMatchObject({ status: "signed-out", ended: true }),
+    );
     await files.flush();
     expect(names()).toEqual([]);
   });
@@ -532,7 +686,14 @@ describe("wiping the files", () => {
     await vi.waitFor(() => expect(b.state(views.files).value).toHaveLength(1));
     b.stop();
     let answer!: (value: Answer) => void;
-    server.on("GET", feedPath("ws-a", "0.5.2"), () => new Promise<Answer>(done => { answer = done; }));
+    server.on(
+      "GET",
+      feedPath("ws-a", "0.5.2"),
+      () =>
+        new Promise<Answer>((done) => {
+          answer = done;
+        }),
+    );
     const onGone = vi.fn();
     const a = createWorkspaceData({ signIn: signInTo(server), workspaceId: "ws-a", cache, onGone });
     a.resume();
@@ -549,10 +710,17 @@ describe("wiping the files", () => {
 
   it("deletes the file of a workspace hidden on this phone", async () => {
     const server = serverWithA();
-    server.on("GET", "/sync/account/workspaces", { status: 200, body: { ok: true, workspaces: [
-      { workspaceId: "ws-a", name: "Trip", canOpen: true, showOnPhone: true },
-    ] } });
-    server.on("POST", "/sync/account/workspaces/ws-a/show-on-phone", { status: 200, body: { ok: true } });
+    server.on("GET", "/sync/account/workspaces", {
+      status: 200,
+      body: {
+        ok: true,
+        workspaces: [{ workspaceId: "ws-a", name: "Trip", canOpen: true, showOnPhone: true }],
+      },
+    });
+    server.on("POST", "/sync/account/workspaces/ws-a/show-on-phone", {
+      status: 200,
+      body: { ok: true },
+    });
     const { files, cache } = launch();
     const signIn = signInTo(server);
     const list = createWorkspaceList(signIn);
@@ -577,10 +745,18 @@ describe("a restore that a delete overtakes", () => {
   /** Files whose read the test answers; the cache's continuation then runs after anything the test does next. */
   function heldFiles() {
     let answer!: (views: readonly SavedView[]) => void;
-    const read = new Promise<readonly SavedView[]>(done => { answer = done; });
+    const read = new Promise<readonly SavedView[]>((done) => {
+      answer = done;
+    });
     const files: CacheFiles = {
-      read: () => read, write: () => {}, flush: async () => {}, remove: async () => {}, removeAll: async () => {},
-      keep: async () => {}, readList: async () => null, writeList: async () => {},
+      read: () => read,
+      write: () => {},
+      flush: async () => {},
+      remove: async () => {},
+      removeAll: async () => {},
+      keep: async () => {},
+      readList: async () => null,
+      writeList: async () => {},
     };
     return { files, answer };
   }
@@ -609,13 +785,20 @@ describe("a restore that a delete overtakes", () => {
   it("reads a scope's file once for two restores, so a list that drops the scope meanwhile wins over both", async () => {
     const { files, answer } = heldFiles();
     let reads = 0;
-    const counted: CacheFiles = { ...files, read: scope => { reads += 1; return files.read(scope); } };
+    const counted: CacheFiles = {
+      ...files,
+      read: (scope) => {
+        reads += 1;
+        return files.read(scope);
+      },
+    };
     const cache = createReadCache(counted);
     // A, then B, then A again: the second store for A waits on the first one's read.
     const first = cache.restore(SCOPE_A);
     const second = cache.restore(SCOPE_A);
     expect(reads).toBe(1);
-    cache.savedList({ origin: "https://dohc.example.com", userId: "u-1" })!
+    cache
+      .savedList({ origin: "https://dohc.example.com", userId: "u-1" })!
       .listed([{ workspaceId: "ws-b", name: "ws-b", canOpen: true, showOnPhone: true }]);
     answer([SAVED_FILES]);
     await Promise.all([first, second]);
@@ -640,28 +823,53 @@ describe("a view too large for its scope's cap", () => {
     const { files } = launch();
     const body = "x".repeat(1024 * 1024);
     const items = Array.from({ length: 100 }, (_, i) => ({
-      message: { id: `m-${i}`, threadId: "t-1", authorKind: "human", authorName: "Maya Chen", body, createdAtMs: 1 }, replyCount: 0, lastReplyAtMs: null,
+      message: {
+        id: `m-${i}`,
+        threadId: "t-1",
+        authorKind: "human",
+        authorName: "Maya Chen",
+        body,
+        createdAtMs: 1,
+      },
+      replyCount: 0,
+      lastReplyAtMs: null,
     }));
-    const stream = saved("stream:g-1", { kind: "stream", name: "General", groupKind: "group", items });
+    const stream = saved("stream:g-1", {
+      kind: "stream",
+      name: "General",
+      groupKind: "group",
+      items,
+    });
     files.write(SCOPE_A, () => [saved("files", A_FILES), stream]);
     const stringify = vi.spyOn(JSON, "stringify");
     let longest = 0;
     try {
       await files.flush();
-      longest = Math.max(...stringify.mock.results.map(result => typeof result.value === "string" ? result.value.length : 0));
+      longest = Math.max(
+        ...stringify.mock.results.map((result) =>
+          typeof result.value === "string" ? result.value.length : 0,
+        ),
+      );
     } finally {
       stringify.mockRestore();
     }
     expect(longest).toBeLessThan(1024);
-    expect((await files.read(SCOPE_A)).map(view => view.id)).toEqual(["files"]);
+    expect((await files.read(SCOPE_A)).map((view) => view.id)).toEqual(["files"]);
   });
 
   it("is measured by a floor that never passes its real size", () => {
     for (const value of [
-      { kind: "missing", last: undefined }, { kind: "page", markdown: "line\n\"quoted\"\\ \u0001 é 中文 😀" }, [], {}, [null, 1.5, true, "x"],
-      { items: [{ message: { body: "", createdAtMs: 0 }, lastReplyAtMs: null }] }, [undefined],
+      { kind: "missing", last: undefined },
+      { kind: "page", markdown: 'line\n"quoted"\\ \u0001 é 中文 😀' },
+      [],
+      {},
+      [null, 1.5, true, "x"],
+      { items: [{ message: { body: "", createdAtMs: 0 }, lastReplyAtMs: null }] },
+      [undefined],
     ]) {
-      expect(leastJsonBytes(value, Infinity), JSON.stringify(value)).toBeLessThanOrEqual(Buffer.byteLength(JSON.stringify(value), "utf8"));
+      expect(leastJsonBytes(value, Infinity), JSON.stringify(value)).toBeLessThanOrEqual(
+        Buffer.byteLength(JSON.stringify(value), "utf8"),
+      );
     }
   });
 });
@@ -669,10 +877,17 @@ describe("a view too large for its scope's cap", () => {
 describe("the saved workspace list", () => {
   const SIGN_IN_SCOPE = JSON.stringify(["https://dohc.example.com", "u-1"]);
   const LIST_FILE = `${fileName(SIGN_IN_SCOPE)}.list`;
-  const entry = (workspaceId: string, showOnPhone = true) => ({ workspaceId, name: workspaceId, canOpen: true, showOnPhone });
-  const listAnswer = (...workspaces: ReturnType<typeof entry>[]): Answer => ({ status: 200, body: { ok: true, workspaces } });
+  const entry = (workspaceId: string, showOnPhone = true) => ({
+    workspaceId,
+    name: workspaceId,
+    canOpen: true,
+    showOnPhone,
+  });
+  const listAnswer = (...workspaces: ReturnType<typeof entry>[]): Answer => ({
+    status: 200,
+    body: { ok: true, workspaces },
+  });
 
-  /** One launch of the app's account side: the list, with its saved copy, and the open workspace. */
   function launchAccount(server: ReturnType<typeof testServer>, signIn = signInTo(server)) {
     const { files, cache } = launch();
     const list = createWorkspaceList(signIn, cache.savedList(signIn));
@@ -683,20 +898,29 @@ describe("the saved workspace list", () => {
     return { files, cache, list, workspace, signIn };
   }
 
-  /** A first launch that lists A and B, and reads the files of each. */
   async function readBoth(server: ReturnType<typeof testServer>) {
     server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")));
     const first = launchAccount(server);
     await vi.waitFor(() => expect(first.workspace.state().currentWorkspaceId).toBe("ws-a"));
     first.workspace.state().data!.subscribe(views.files, () => {});
-    await vi.waitFor(() => expect(first.cache.entries(cacheScope(first.signIn, "ws-a"))).toHaveLength(1));
+    await vi.waitFor(() =>
+      expect(first.cache.entries(cacheScope(first.signIn, "ws-a"))).toHaveLength(1),
+    );
     first.workspace.choose("ws-b");
     first.workspace.state().data!.subscribe(views.files, () => {});
-    await vi.waitFor(() => expect(first.cache.entries(cacheScope(first.signIn, "ws-b"))).toHaveLength(1));
+    await vi.waitFor(() =>
+      expect(first.cache.entries(cacheScope(first.signIn, "ws-b"))).toHaveLength(1),
+    );
     first.workspace.choose("ws-a");
     await first.files.flush();
     first.workspace.stop();
-    expect(names()).toEqual([`${fileName(cacheScope(first.signIn, "ws-a"))}.json`, `${fileName(cacheScope(first.signIn, "ws-b"))}.json`, LIST_FILE].sort());
+    expect(names()).toEqual(
+      [
+        `${fileName(cacheScope(first.signIn, "ws-a"))}.json`,
+        `${fileName(cacheScope(first.signIn, "ws-b"))}.json`,
+        LIST_FILE,
+      ].sort(),
+    );
   }
 
   it("opens the last workspace from the cache after a relaunch, while the server's list is still on its way", async () => {
@@ -722,7 +946,9 @@ describe("the saved workspace list", () => {
     await readBoth(server);
     server.on("GET", "/sync/account/workspaces", "offline");
     const { list, workspace } = launchAccount(server);
-    await vi.waitFor(() => expect(list.state()).toMatchObject({ status: "ready", problem: "offline" }));
+    await vi.waitFor(() =>
+      expect(list.state()).toMatchObject({ status: "ready", problem: "offline" }),
+    );
     expect(workspace.state().currentWorkspaceId).toBe("ws-a");
     workspace.stop();
   });
@@ -731,35 +957,60 @@ describe("the saved workspace list", () => {
     const server = serverWithA();
     await readBoth(server);
     let answer!: (value: Answer) => void;
-    server.on("GET", "/sync/account/workspaces", () => new Promise<Answer>(done => { answer = done; }));
+    server.on(
+      "GET",
+      "/sync/account/workspaces",
+      () =>
+        new Promise<Answer>((done) => {
+          answer = done;
+        }),
+    );
     const { files, cache, list, workspace, signIn } = launchAccount(server);
     await vi.waitFor(() => expect(workspace.state().currentWorkspaceId).toBe("ws-a"));
     workspace.state().data!.subscribe(views.files, () => {});
     await vi.waitFor(() => expect(cache.entries(cacheScope(signIn, "ws-a"))).toHaveLength(1));
 
-    // A has gone from the account, and B was hidden on the desktop while the phone was closed.
     answer(listAnswer(entry("ws-b", false), entry("ws-c")));
-    await vi.waitFor(() => expect(list.state()).toMatchObject({ status: "ready", workspaces: [{ workspaceId: "ws-b" }, { workspaceId: "ws-c" }] }));
+    await vi.waitFor(() =>
+      expect(list.state()).toMatchObject({
+        status: "ready",
+        workspaces: [{ workspaceId: "ws-b" }, { workspaceId: "ws-c" }],
+      }),
+    );
     expect(workspace.state().currentWorkspaceId).toBe("ws-c");
     expect(cache.entries(cacheScope(signIn, "ws-a"))).toEqual([]);
     await files.flush();
     expect(names()).toEqual([LIST_FILE]);
-    await expect(launch().files.readList(SIGN_IN_SCOPE)).resolves.toEqual([entry("ws-b", false), entry("ws-c")]);
+    await expect(launch().files.readList(SIGN_IN_SCOPE)).resolves.toEqual([
+      entry("ws-b", false),
+      entry("ws-c"),
+    ]);
     workspace.stop();
   });
 
   it("saves a Show on phone change made on this phone", async () => {
     const server = serverWithA();
     await readBoth(server);
-    server.on("PATCH", "/sync/account/workspaces/ws-b", { status: 200, body: { ok: true, workspaceId: "ws-b", showOnPhone: false } });
-    server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a"), entry("ws-b")), listAnswer(entry("ws-a"), entry("ws-b", false)));
+    server.on("PATCH", "/sync/account/workspaces/ws-b", {
+      status: 200,
+      body: { ok: true, workspaceId: "ws-b", showOnPhone: false },
+    });
+    server.on(
+      "GET",
+      "/sync/account/workspaces",
+      listAnswer(entry("ws-a"), entry("ws-b")),
+      listAnswer(entry("ws-a"), entry("ws-b", false)),
+    );
     const { files, list, workspace: open } = launchAccount(server);
     await vi.waitFor(() => expect(list.state()).toMatchObject({ status: "ready" }));
     await vi.waitFor(() => expect(count(server, "/sync/account/workspaces")).toBe(2));
     open.setShowOnPhone("ws-b", false);
     await vi.waitFor(() => expect(list.state()).toMatchObject({ pending: new Set() }));
     await files.flush();
-    await expect(launch().files.readList(SIGN_IN_SCOPE)).resolves.toEqual([entry("ws-a"), entry("ws-b", false)]);
+    await expect(launch().files.readList(SIGN_IN_SCOPE)).resolves.toEqual([
+      entry("ws-a"),
+      entry("ws-b", false),
+    ]);
     expect(names()).not.toContain(`${fileName(SCOPE_B)}.json`);
     open.stop();
   });
@@ -768,7 +1019,15 @@ describe("the saved workspace list", () => {
     const server = serverWithA();
     server.on("GET", "/sync/account/workspaces", listAnswer(entry("ws-a")));
     const { files, cache } = launch();
-    const account = createAccount({ store: memoryStore({ origin: server.origin, token: "tok-1", userId: "u-1", email: "ice@example.com" }).store, fetch: server.fetch });
+    const account = createAccount({
+      store: memoryStore({
+        origin: server.origin,
+        token: "tok-1",
+        userId: "u-1",
+        email: "ice@example.com",
+      }).store,
+      fetch: server.fetch,
+    });
     cache.follow(account);
     await account.restore();
     const state = account.state();

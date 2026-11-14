@@ -5,43 +5,59 @@ import {
   readChatDirectory,
   hasChatMessage,
 } from "@dohc/automation-executor/automation-chat";
-import type {AutomationChatDependencies} from "@dohc/automation-executor/collection-automation-run";
-import type {LinkedChatStore} from "@dohc/workspace-contracts/engine";
-import type {ChatReadStore} from "@dohc/workspace-operations/chats";
-import {isNoticeTarget, type PostNoticeRequest} from "@dohc/workspace-contracts/relay";
-import {ChatsLiveAdapter} from "@dohc/workspace-engine-client";
-import type {TokenBucketLimiter} from "@dohc/service-http";
-import type {AutomationReplica} from "./automationReplicas";
-import {RelayError} from "./errors";
-import {parsePostNotice} from "./noticeRoutes";
-import type {SyncRelayStorage} from "./storage";
+import type { AutomationChatDependencies } from "@dohc/automation-executor/collection-automation-run";
+import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import type { ChatReadStore } from "@dohc/workspace-operations/chats";
+import { isNoticeTarget, type PostNoticeRequest } from "@dohc/workspace-contracts/relay";
+import { ChatsLiveAdapter } from "@dohc/workspace-engine-client";
+import type { TokenBucketLimiter } from "@dohc/service-http";
+import type { AutomationReplica } from "./automationReplicas";
+import { RelayError } from "./errors";
+import { parsePostNotice } from "./noticeRoutes";
+import type { SyncRelayStorage } from "./storage";
 
 /** The chat calls an automation's messages make in this server's replica. */
-export type ReplicaChatStore = Pick<LinkedChatStore, "listChannels" | "getChannelWireId" | "listChannelThreads"> &
-  Pick<ChatsLiveAdapter, "startChannelThread" | "sendMessage" | "getMessage" | "findThreadChannelId">;
+export type ReplicaChatStore = Pick<
+  LinkedChatStore,
+  "listChannels" | "getChannelWireId" | "listChannelThreads"
+> &
+  Pick<
+    ChatsLiveAdapter,
+    "startChannelThread" | "sendMessage" | "getMessage" | "findThreadChannelId"
+  >;
 
 /**
  * The chat store of one open replica, for its automations' messages and an
  * account's reads, with channels named as the chat contract names them.
  */
-export function replicaChatStore(replica: Pick<AutomationReplica, "client" | "workspace" | "workspaceId">): ReplicaChatStore & ChatReadStore {
-  const adapter = new ChatsLiveAdapter(replica.client, replica.workspace, {workspaceId: replica.workspaceId});
+export function replicaChatStore(
+  replica: Pick<AutomationReplica, "client" | "workspace" | "workspaceId">,
+): ReplicaChatStore & ChatReadStore {
+  const adapter = new ChatsLiveAdapter(replica.client, replica.workspace, {
+    workspaceId: replica.workspaceId,
+  });
   return {
     ensureGeneralChannel: async (input) => {
-      const {channelId, ...channel} = await adapter.ensureGeneralChannel(input);
-      return {...channel, id: channelId};
+      const { channelId, ...channel } = await adapter.ensureGeneralChannel(input);
+      return { ...channel, id: channelId };
     },
-    listChannels: async (input) => (await adapter.listChannels(input)).map(({channelId, ...channel}) => ({...channel, id: channelId})),
+    listChannels: async (input) =>
+      (await adapter.listChannels(input)).map(({ channelId, ...channel }) => ({
+        ...channel,
+        id: channelId,
+      })),
     getChannelWireId: (input) => adapter.getChannelWireId(input),
     listChannelThreads: (input) => adapter.listChannelThreads(input),
     listThreadsForFile: (input) => adapter.listThreadsForFile(input),
     listThreads: (input) => adapter.listThreads(input),
     listMessages: (input) => adapter.listMessages(input),
-    listThreadDecisions: (workspaceId, threadId) => adapter.listThreadDecisions(workspaceId, threadId),
+    listThreadDecisions: (workspaceId, threadId) =>
+      adapter.listThreadDecisions(workspaceId, threadId),
     listReactions: (input) => adapter.listReactions(input),
     getThreadProjection: (input) => adapter.getThreadProjection(input),
     listGroupStream: (input) => adapter.listGroupStream(input),
-    listAgentUnreadThreads: (workspaceId, reader) => adapter.listAgentUnreadThreads(workspaceId, reader),
+    listAgentUnreadThreads: (workspaceId, reader) =>
+      adapter.listAgentUnreadThreads(workspaceId, reader),
     startChannelThread: (input) => adapter.startChannelThread(input),
     sendMessage: (input) => adapter.sendMessage(input),
     getMessage: (input) => adapter.getMessage(input),
@@ -72,8 +88,8 @@ export function replicaAutomationChat(input: {
   /** The owner's name, shown beside the automation's messages. */
   ownerName(): Promise<string>;
 }): AutomationChatDependencies {
-  const {replica, store} = input;
-  const {workspaceId} = replica;
+  const { replica, store } = input;
+  const { workspaceId } = replica;
   return {
     hasMessage: (messageId) => hasChatMessage(store, workspaceId, messageId),
     directory: async (roster, needs) =>
@@ -85,38 +101,72 @@ export function replicaAutomationChat(input: {
       run.throwIfAborted();
       if (message.target.kind === "agent") {
         const posted = input.storage.postAutomationWake({
-          workspaceId, ownerUserId: replica.ownerUserId, effectId: message.effectId,
-          claimId: savedRun.claimId, keySeed: savedRun.keySeed,
+          workspaceId,
+          ownerUserId: replica.ownerUserId,
+          effectId: message.effectId,
+          claimId: savedRun.claimId,
+          keySeed: savedRun.keySeed,
           wake: { ...message.automation, body: message.body },
-          senderLabel: authorOwnerDisplayName, nowMs: input.nowMs(), startedAtMs: savedRun.startedAtMs,
+          senderLabel: authorOwnerDisplayName,
+          nowMs: input.nowMs(),
+          startedAtMs: savedRun.startedAtMs,
         });
         for (const older of posted.superseded) {
-          await input.runStore.supersedeWake(message.automation.automationId, older.claimId, older.keySeed, older.noticeId, posted.noticeId);
+          await input.runStore.supersedeWake(
+            message.automation.automationId,
+            older.claimId,
+            older.keySeed,
+            older.noticeId,
+            posted.noticeId,
+          );
         }
-        return new AutomationWakeSent(posted.noticeId, posted.supersededBy
-          ? authorOwnerDisplayName + "; agent wake superseded by a later run" : authorOwnerDisplayName, posted.supersededBy ?? undefined);
+        return new AutomationWakeSent(
+          posted.noticeId,
+          posted.supersededBy
+            ? authorOwnerDisplayName + "; agent wake superseded by a later run"
+            : authorOwnerDisplayName,
+          posted.supersededBy ?? undefined,
+        );
       }
       const fields = {
         workspaceId,
         messageId: message.messageId,
         idempotencyKey: message.effectId,
-        author: {kind: "automation" as const, displayName: message.automation.name},
+        author: { kind: "automation" as const, displayName: message.automation.name },
         authorOwnerDisplayName,
         authorUserId: replica.ownerUserId,
         authorActorKey: null,
-        automation: {automationId: message.automation.automationId, chainDepth: message.automation.depth},
+        automation: {
+          automationId: message.automation.automationId,
+          chainDepth: message.automation.depth,
+        },
         body: message.body,
       };
       try {
         return message.target.kind === "group"
-          ? await store.startChannelThread({...fields, channelId: message.target.channelId, lane: message.target.lane, threadId: message.threadId})
-          : await store.sendMessage({...fields, threadId: message.target.threadId});
+          ? await store.startChannelThread({
+              ...fields,
+              channelId: message.target.channelId,
+              lane: message.target.lane,
+              threadId: message.threadId,
+            })
+          : await store.sendMessage({ ...fields, threadId: message.target.threadId });
       } catch (error) {
-        const sent = await store.getMessage({workspaceId, messageId: message.messageId}).catch(() => null);
-        if (sent === null || sent.author.kind !== "automation" || sent.automation?.automationId !== message.automation.automationId) throw error;
-        const where = message.target.kind === "group"
-          ? await store.findThreadChannelId({workspaceId, threadId: sent.threadId}).catch(() => null) === message.target.channelId
-          : sent.threadId === message.target.threadId;
+        const sent = await store
+          .getMessage({ workspaceId, messageId: message.messageId })
+          .catch(() => null);
+        if (
+          sent === null ||
+          sent.author.kind !== "automation" ||
+          sent.automation?.automationId !== message.automation.automationId
+        )
+          throw error;
+        const where =
+          message.target.kind === "group"
+            ? (await store
+                .findThreadChannelId({ workspaceId, threadId: sent.threadId })
+                .catch(() => null)) === message.target.channelId
+            : sent.threadId === message.target.threadId;
         if (!where) throw error;
         return sent;
       }
@@ -125,7 +175,10 @@ export function replicaAutomationChat(input: {
 }
 
 /** A notice this server sends for a workspace's automations. */
-export type ServerNotice = Pick<PostNoticeRequest, "noticeId" | "kind" | "title" | "body" | "target"> & { recipientUserId: string };
+export type ServerNotice = Pick<
+  PostNoticeRequest,
+  "noticeId" | "kind" | "title" | "body" | "target"
+> & { recipientUserId: string };
 
 /**
  * Sends an automation's notice from this server, in process, as the relay's
@@ -141,15 +194,20 @@ export function replicaNoticePoster(input: {
   ownerName(): Promise<string>;
   nowMs(): number;
 }): (notice: ServerNotice, signal: AbortSignal) => Promise<void> {
-  const {replica, storage} = input;
+  const { replica, storage } = input;
   return async (notice, signal) => {
     const run = AbortSignal.any([signal, replica.signal]);
     run.throwIfAborted();
     const senderLabel = await input.ownerName();
     run.throwIfAborted();
     const nowMs = input.nowMs();
-    if (notice.recipientUserId !== replica.ownerUserId && !input.noticeLimiter.allow(replica.ownerUserId, nowMs)) {
-      throw new NoticeNotSentError("Too many notices went to other people. Wait a minute, then try again.");
+    if (
+      notice.recipientUserId !== replica.ownerUserId &&
+      !input.noticeLimiter.allow(replica.ownerUserId, nowMs)
+    ) {
+      throw new NoticeNotSentError(
+        "Too many notices went to other people. Wait a minute, then try again.",
+      );
     }
     try {
       // The route's own checks, so the list never holds a notice the route would refuse.
@@ -163,17 +221,25 @@ export function replicaNoticePoster(input: {
         target: notice.target,
         originInstallId: "server",
       });
-      storage.postNotice({...posted, recipientUserId: notice.recipientUserId, senderUserId: replica.ownerUserId, senderLabel, nowMs});
+      storage.postNotice({
+        ...posted,
+        recipientUserId: notice.recipientUserId,
+        senderUserId: replica.ownerUserId,
+        senderLabel,
+        nowMs,
+      });
     } catch (error) {
       if (error instanceof RelayError && error.code === "bad_request") {
         // The executor cuts the title and body to fit, so what a person can
         // cause here is a path a notice cannot hold.
         const { path } = notice.target;
-        throw new NoticeNotSentError(isNoticeTarget(notice.target)
-          ? "This server refused the notice."
-          : path !== undefined && path !== path.trim()
-            ? "This notice points to a path that starts or ends with whitespace."
-            : "This notice points to a path too long to send.");
+        throw new NoticeNotSentError(
+          isNoticeTarget(notice.target)
+            ? "This server refused the notice."
+            : path !== undefined && path !== path.trim()
+              ? "This notice points to a path that starts or ends with whitespace."
+              : "This notice points to a path too long to send.",
+        );
       }
       if (error instanceof RelayError && error.code === "notice_refused") {
         throw new NoticeNotSentError("This person can't open what the notice points to.");

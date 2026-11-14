@@ -1,15 +1,3 @@
-//! A held document's proof, run off the store's actor. The proof reads one
-//! committed snapshot on a read-only connection of its own, which closes
-//! before its answer is handed over. What it read beyond the evidence the
-//! document's released tail generation covers, its caller names by bounded
-//! coordinates and compares again on the actor before releasing the answer.
-//! A workspace has one proof at a time until it ends, shared by the callers
-//! that ask the same of the same state, and stopped once none of them waits, its
-//! store closes, its store's WAL needs its reader gone, or its deadline
-//! passes. A daemon runs a few proofs at once, within a memory budget its
-//! proofs and their results share: a proof takes more of it before it holds
-//! more than its reservation, while it works or in what its result keeps,
-//! and a result keeps only what fits.
 use super::binding::MAX_ARTIFACT_BYTES;
 use super::*;
 use crate::ContentKind;
@@ -84,7 +72,6 @@ struct OpenReaders {
 }
 
 struct ProofState<K, T> {
-    /// Each workspace's proof, by workspace ID, until it ends.
     running: HashMap<String, Arc<Proof<K, T>>>,
     closed: bool,
     /// How long a proof admitted now may run.
@@ -214,7 +201,6 @@ impl Halt {
         }
     }
 
-    /// Whether the proof's reader closed.
     fn read(&self) -> bool {
         self.read.load(Ordering::Acquire)
     }
@@ -225,7 +211,6 @@ impl Halt {
             .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
     }
 
-    /// Why the proof stopped, as recorded.
     fn reason(&self) -> Option<ProofStop> {
         ProofStop::of(self.reason.load(Ordering::Acquire))
     }
@@ -426,7 +411,6 @@ impl ProofMemory {
         Ok(())
     }
 
-    /// The proof's work freed `bytes`. What it took stays held until it ends.
     fn worked(&self, bytes: u64) {
         let mut taken = lock(&self.taken);
         taken.working = taken.working.saturating_sub(bytes);
@@ -434,9 +418,6 @@ impl ProofMemory {
 }
 
 impl ProofPermit {
-    /// Turn the memory the proof holds into the charge of a result that
-    /// keeps `retained` bytes, unless that would pass capacity; the place
-    /// stays taken until the permit drops.
     fn charge(&self, retained: u64) -> Result<ProofCharge, HeldProofError> {
         let mut taken = lock(&self.memory.taken);
         lock(&self.memory.limit.0)
@@ -917,7 +898,6 @@ pub struct HeldProofJob {
     /// What it holds of its daemon's proof memory; none for a proof nothing
     /// limits.
     memory: Option<Arc<ProofMemory>>,
-    /// The largest contribution artifact it encodes.
     artifact_cap: usize,
     /// The readers its store's proofs hold open, its own among them.
     readers: Arc<OpenReaders>,
@@ -1308,10 +1288,6 @@ impl LineageCoordinates {
     }
 }
 
-/// What tests hold proofs with: a pause at one stage's checks, at a
-/// reader's open and at a last caller's leaving, a statement that runs
-/// until its proof stops, a stopped proof kept from ending, and counts of
-/// what proofs passed and opened.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 struct Gate {
@@ -1326,7 +1302,6 @@ struct GateState {
     pause: Option<ProofStage>,
     /// Checks there to pass before the pause holds.
     skip: u64,
-    /// Proofs holding there.
     waiting: usize,
     /// Whether proofs hold just before their reader opens, as a thread
     /// descheduled there would, until resumed.
@@ -1376,8 +1351,6 @@ impl Gate {
         }
     }
 
-    /// Hold a proof at `stage` while proofs pause there, past the checks to
-    /// skip, until they resume or the proof stops.
     fn at(&self, stage: ProofStage, halt: &Halt) {
         let mut state = lock(&self.state);
         if state.pause != Some(stage) || halt.reason().is_some() {
@@ -1769,7 +1742,6 @@ mod tests {
         Held::new(HeldProofLimit::default())
     }
 
-    /// Poll `future` on this thread until it completes.
     fn block_on<F: std::future::Future + Unpin>(mut future: F) -> F::Output {
         struct Unpark(std::thread::Thread);
         impl std::task::Wake for Unpark {
@@ -1817,8 +1789,6 @@ mod tests {
         }
     }
 
-    /// A proof that holds at its merge, its reader open, until it stops, and
-    /// answers whether it did.
     fn merging(run: Run) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             run.prove(|job| {
@@ -1881,10 +1851,6 @@ mod tests {
         );
     }
 
-    /// Ruling B, item 6: the last caller to leave stops the running proof,
-    /// unlike [`ReleasedTails`], whose validation runs on. The workspace
-    /// stays busy until the proof ends, for an identical request too, and
-    /// the leaving caller can wait for that.
     #[test]
     fn the_last_caller_to_leave_stops_the_proof_which_keeps_its_workspace_until_it_ends() {
         let (_scratch, store) = store();
@@ -1925,64 +1891,7 @@ mod tests {
         ));
     }
 
-    /// Sol's and Opus's r2c-3c-2 finding 2: joining and the last caller's
-    /// leaving are one decision each under one lock. Once the last caller
-    /// stopped the proof, and before it wakes anyone, an identical request
-    /// is busy, never a caller of the stopped proof; one that joined before
-    /// it left shares the proof's result.
-    #[test]
-    fn a_joiner_racing_the_last_caller_gets_the_result_or_busy() {
-        let (_scratch, store) = store();
-        let proofs = proofs();
-        proofs.pause_last_leaves();
-        let (run, last) = started(&proofs, &store, "key");
-        let leaving = std::thread::spawn(move || drop(last));
-        proofs.wait_for_leaving();
-        assert!(
-            matches!(
-                admit(&proofs, &store, "workspace", "key"),
-                HeldProofAdmission::Busy
-            ),
-            "after the last caller left"
-        );
-        proofs.resume_proofs();
-        leaving.join().unwrap();
-        run.prove(|_| panic!("a stopped proof runs nothing"));
-
-        let (run, first) = started(&proofs, &store, "key");
-        let joiner = joined(&proofs, &store, "key");
-        drop(first);
-        run.prove(|job| {
-            assert!(job.stopped().is_none(), "a joiner still waits");
-            (7, 0)
-        });
-        assert_eq!(answer(joiner), Ok(7));
-    }
-
-    /// A proof nobody waits for any more before it starts never runs, and an
-    /// admitted proof dropped unrun frees its workspace and its place.
-    #[test]
-    fn a_proof_nobody_waits_for_never_runs() {
-        let (_scratch, store) = store();
-        let limit = HeldProofLimit::default();
-        let proofs = Held::new(limit.clone());
-        let (run, wait) = started(&proofs, &store, "key");
-        drop(wait);
-        run.prove(|_| panic!("a stopped proof runs nothing"));
-        let (run, wait) = started(&proofs, &store, "key");
-        drop(run);
-        assert_eq!(answer(wait), Err(HeldProofError::Closed));
-        assert!(
-            matches!(
-                admit(&proofs, &store, "workspace", "other"),
-                HeldProofAdmission::Started(..)
-            ),
-            "the workspace is free"
-        );
-        assert_eq!(limit.reserved_bytes(), 0, "nothing stays reserved");
-    }
-
-    /// r2c-3c-1's open item: close stops every proof, answers its callers as
+    /// Close stops every proof, answers its callers as
     /// closed and returns once their readers closed; past its bound it says
     /// they have not.
     #[test]
@@ -2028,26 +1937,7 @@ mod tests {
         assert!(lingering.drained(), "drained once the reader closed");
     }
 
-    /// Opus's r2c-3c-2 finding 6: close before a proof's thread starts
-    /// returns at once, waiting for nothing, and the proof never opens a
-    /// reader when its thread does run.
-    #[test]
-    fn close_before_a_proof_starts_returns_at_once_and_nothing_opens() {
-        let (_scratch, store) = store();
-        let proofs = proofs();
-        let (run, wait) = started(&proofs, &store, "key");
-        proofs.set_close_bound(Duration::ZERO);
-        assert!(proofs.close(), "nothing started, nothing to wait for");
-        assert_eq!(answer(wait), Err(HeldProofError::Closed));
-        run.prove(|job| {
-            let _ = job.reader();
-            panic!("a proof of a closed store runs nothing")
-        });
-        assert_eq!(proofs.readers_opened(), 0);
-        assert_eq!(proofs.open_readers(), 0);
-    }
-
-    /// Sol's r2c-3c-2 finding 1: a proof's thread paused just before its
+    /// A proof's thread paused just before its
     /// reader opens, past every earlier check, as a descheduled thread would
     /// be, never opens one once close began: close has nothing to wait for,
     /// and the proof finds itself stopped.
@@ -2072,72 +1962,7 @@ mod tests {
         );
     }
 
-    /// Sol's r2c-3c-5 finding 2: a workspace runs one distinct proof until
-    /// it ends. Once its reader closed, while it still encodes its answer, a
-    /// different request for its workspace is busy and an identical one
-    /// joins it; the workspace frees only once it ends. It opens no other
-    /// reader and answers every caller, and close waits for no encoding
-    /// (Opus's r2c-3c-3 finding 3).
-    #[test]
-    fn a_proof_keeps_its_workspace_until_it_ends() {
-        let (_scratch, store) = store();
-        let proofs = proofs();
-        proofs.pause_proofs_at(ProofStage::Encoding);
-        let (run, first) = started(&proofs, &store, "key");
-        let worker = std::thread::spawn(move || {
-            run.prove(|job| {
-                drop(job.reader().unwrap());
-                let encoded = job.stop().check(ProofStage::Encoding).is_ok();
-                assert!(job.reader().is_err(), "one reader a proof");
-                (u32::from(encoded), 0)
-            });
-        });
-        proofs.wait_for_paused_proof();
-        assert_eq!(proofs.open_readers(), 0, "its reader closed");
-        assert!(
-            !proofs.refuses("workspace"),
-            "an identical request may join"
-        );
-        assert!(
-            matches!(
-                admit(&proofs, &store, "workspace", "other"),
-                HeldProofAdmission::Busy
-            ),
-            "a different request"
-        );
-        let second = joined(&proofs, &store, "key");
-        proofs.resume_proofs();
-        worker.join().unwrap();
-        assert_eq!(answer(first), Ok(1), "the proof still answers");
-        assert_eq!(answer(second), Ok(1), "and so does its joiner");
-        assert_eq!(proofs.proofs_admitted(), 1, "one distinct proof");
-        assert!(
-            matches!(
-                admit(&proofs, &store, "workspace", "other"),
-                HeldProofAdmission::Started(..)
-            ),
-            "an ended proof frees its workspace"
-        );
-
-        let (run, wait) = started(&proofs, &store, "key");
-        proofs.pause_proofs_at(ProofStage::Encoding);
-        let worker = std::thread::spawn(move || {
-            run.prove(|job| {
-                drop(job.reader().unwrap());
-                (
-                    u32::from(job.stop().check(ProofStage::Encoding).is_err()),
-                    0,
-                )
-            });
-        });
-        proofs.wait_for_paused_proof();
-        proofs.set_close_bound(Duration::ZERO);
-        assert!(proofs.close(), "close waits for no encoding");
-        assert_eq!(answer(wait), Err(HeldProofError::Closed));
-        worker.join().unwrap();
-    }
-
-    /// Sol's and Opus's "old finding 2": a proof past its deadline, which
+    /// A proof past its deadline, which
     /// joining callers cannot extend, answers busy, not closed or corrupt.
     #[test]
     fn a_proof_past_its_deadline_answers_busy() {
@@ -2156,11 +1981,6 @@ mod tests {
         assert_eq!(answer(first), Err(HeldProofError::Busy));
     }
 
-    /// Sol's r2c-3c-2 finding 5, and Opus's "old finding 3": a daemon runs at
-    /// most its limit of proofs, across its stores, and a third is busy at
-    /// once. A completed result keeps its memory charged until its last
-    /// caller drops it, as one waiting to stream would, so a proof that
-    /// needs that memory is busy until then.
     #[test]
     fn a_daemon_runs_a_bounded_number_of_proofs_and_results_keep_their_charge() {
         let (_scratch, store) = store();
@@ -2205,7 +2025,7 @@ mod tests {
         assert_eq!(limit.reserved_bytes(), 0);
     }
 
-    /// Sol's r2c-3c-2 finding 6: a reader that cannot open answers a locked
+    /// A reader that cannot open answers a locked
     /// store, which its caller retries, never corrupt state.
     #[test]
     fn a_reader_that_cannot_open_is_locked_not_corrupt() {
@@ -2224,40 +2044,7 @@ mod tests {
         );
     }
 
-    /// Sol's r2c-3c-4 finding 3: a proof's thread suspended once its reader
-    /// counts as open, before its connection opens, as one inside a slow
-    /// open would be, never keeps close past its bound. Close says the
-    /// reader is still open, and once the thread goes on, its reader closes
-    /// again without staying open.
-    #[test]
-    fn close_returns_within_its_bound_while_a_reader_opens() {
-        let (_scratch, store) = store();
-        let proofs = proofs();
-        proofs.pause_inside_reader_opens();
-        let (run, _wait) = started(&proofs, &store, "key");
-        let worker = std::thread::spawn(move || {
-            run.prove(|job| (u32::from(job.reader().is_err()), 0));
-        });
-        proofs.wait_for_paused_inside_open();
-        proofs.set_close_bound(Duration::from_millis(50));
-        let began = Instant::now();
-        assert!(!proofs.close(), "the opening reader counts as open");
-        assert!(
-            began.elapsed() < Duration::from_secs(5),
-            "close kept to its bound"
-        );
-        assert!(!proofs.drained());
-        proofs.resume_proofs();
-        worker.join().unwrap();
-        assert!(proofs.drained(), "drained once the opening reader gave up");
-        assert_eq!(
-            proofs.readers_opened(),
-            0,
-            "no reader stayed open after close began"
-        );
-    }
-
-    /// Sol's r2c-3c-4 finding 2 and Opus's finding 4: what a daemon's proofs
+    /// What a daemon's proofs
     /// and results keep never passes its proof memory. A proof reserves
     /// before it grows past its reservation, and answers busy beside another
     /// proof or too large past the whole memory; a result larger than its

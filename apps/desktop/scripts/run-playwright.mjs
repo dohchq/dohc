@@ -32,11 +32,6 @@ export function playwrightRunEnv(baseEnv, cacheDir) {
   return { ...baseEnv, PWTEST_CACHE_DIR: cacheDir };
 }
 
-// Resolves and validates the CLI entry, naming the constraint and the remedy
-// when the package is missing. This must run inside runPlaywright's guarded
-// flow: a default parameter evaluates before any try block, and spawning
-// node with a nonexistent script "succeeds" and exits 1 with node's own
-// message — both paths would bypass the actionable error.
 export function requirePlaywrightCli(cliPath, resolveCli = playwrightCliPath) {
   let resolved = cliPath ?? null;
   if (resolved === null) {
@@ -72,26 +67,29 @@ export function requirePlaywrightCli(cliPath, resolveCli = playwrightCliPath) {
  * }} [options]
  * @returns {Promise<number>}
  */
-export async function runPlaywright(args, {
-  env = process.env,
-  cliPath = undefined,
-  platform = process.platform,
-  spawnImpl = spawn,
-  mkdtempImpl = mkdtempSync,
-  rmImpl = rmSync,
-  onTermination = (forward) => {
-    /** @type {Array<[NodeJS.Signals, () => void]>} */
-    const registered = [];
-    for (const signal of /** @type {NodeJS.Signals[]} */ (["SIGINT", "SIGTERM"])) {
-      const handler = () => forward(signal);
-      registered.push([signal, handler]);
-      process.on(signal, handler);
-    }
-    return () => {
-      for (const [signal, handler] of registered) process.off(signal, handler);
-    };
-  },
-} = {}) {
+export async function runPlaywright(
+  args,
+  {
+    env = process.env,
+    cliPath,
+    platform = process.platform,
+    spawnImpl = spawn,
+    mkdtempImpl = mkdtempSync,
+    rmImpl = rmSync,
+    onTermination = (forward) => {
+      /** @type {Array<[NodeJS.Signals, () => void]>} */
+      const registered = [];
+      for (const signal of /** @type {NodeJS.Signals[]} */ (["SIGINT", "SIGTERM"])) {
+        const handler = () => forward(signal);
+        registered.push([signal, handler]);
+        process.on(signal, handler);
+      }
+      return () => {
+        for (const [signal, handler] of registered) process.off(signal, handler);
+      };
+    },
+  } = {},
+) {
   const cli = requirePlaywrightCli(cliPath);
   const cacheDir = mkdtempImpl(join(tmpdir(), "dohc-playwright-cache-"));
   const child = spawnImpl(process.execPath, [cli, "test", ...args], {
@@ -117,15 +115,8 @@ export async function runPlaywright(args, {
     const signalNumber = osConstants.signals[signal];
     return signalNumber ? 128 + signalNumber : 1;
   } catch (error) {
-    // Only ENOENT means the CLI entry vanished — the missing-install case
-    // the pnpm-install remedy can fix. EACCES, EMFILE, EAGAIN and friends
-    // are permission or resource failures: name the code and keep the
-    // original message, so the entry point (which prints only message)
-    // still shows the OS error.
     const code =
-      error instanceof Error
-        ? /** @type {NodeJS.ErrnoException} */ (error).code
-        : undefined;
+      error instanceof Error ? /** @type {NodeJS.ErrnoException} */ (error).code : undefined;
     if (code === "ENOENT") {
       throw new Error(
         `Could not launch the Playwright CLI at ${cli}. The e2e scripts need the playwright package installed; run pnpm install.`,

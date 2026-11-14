@@ -4,7 +4,9 @@ import { rebuildTables } from "./rebuildTables";
 import type { SqliteDb } from "./types";
 import { RelayWriteOwner } from "./writeOwner";
 
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+const { DatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as typeof import("node:sqlite");
 
 function withTable(run: (db: SqliteDb) => void): void {
   const raw = new DatabaseSync(":memory:");
@@ -20,13 +22,15 @@ function withTable(run: (db: SqliteDb) => void): void {
 const withoutShare = "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)";
 
 it("drops a column only when the caller names it, and keeps every other column's rows", () => {
-  withTable(db => {
-    // The relay's write transaction rolls the refused rebuild back, so the table keeps its row and column.
-    expect(() => new RelayWriteOwner(db).write(() => rebuildTables(db, ["notes"], () => withoutShare)))
-      .toThrow("rebuilding notes would lose share_id");
-    expect(db.prepare("SELECT id, body, share_id FROM notes").all()).toEqual([{ id: 1, body: "kept", share_id: "share" }]);
+  withTable((db) => {
+    expect(() =>
+      new RelayWriteOwner(db).write(() => rebuildTables(db, ["notes"], () => withoutShare)),
+    ).toThrow("rebuilding notes would lose share_id");
+    expect(db.prepare("SELECT id, body, share_id FROM notes").all()).toEqual([
+      { id: 1, body: "kept", share_id: "share" },
+    ]);
   });
-  withTable(db => {
+  withTable((db) => {
     rebuildTables(db, ["notes"], () => withoutShare, ["share_id"]);
     expect(db.prepare("SELECT id, body FROM notes").all()).toEqual([{ id: 1, body: "kept" }]);
   });

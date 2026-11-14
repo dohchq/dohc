@@ -3,8 +3,23 @@ import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
 import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
-import { SourceCreationConflict, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
-import { DatasetRequest, DatasetHistoryRevision, DatasetInvocationResult, DatasetPreparation, DatasetMigrationPreparation, DatasetMigrationPreviewPage , DatasetDeletePreview, DatasetDeleted, type DatasetListElsewhere, type DatasetListRefusal, type DatasetPlace } from "@dohc/cli/dataset";
+import {
+  SourceCreationConflict,
+  type SourceCreationProgress,
+} from "../workspaces/datasetSourceCreation";
+import {
+  DatasetRequest,
+  DatasetHistoryRevision,
+  DatasetInvocationResult,
+  DatasetPreparation,
+  DatasetMigrationPreparation,
+  DatasetMigrationPreviewPage,
+  DatasetDeletePreview,
+  DatasetDeleted,
+  type DatasetListElsewhere,
+  type DatasetListRefusal,
+  type DatasetPlace,
+} from "@dohc/cli/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { LocalDatasetAgent, LocalDatasetHost } from "../workspaces/localDatasetHost";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
@@ -13,35 +28,73 @@ import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { datasetOwnerOnlyError } from "./errorWords";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import { ServerCollectionsUnavailableError, type OwnerDatasetData } from "../workspaces/remoteDataset";
-import { approveLocalDatasetMigration, createLocalDatasetMigrations, type LocalDatasetMigrationPreparation } from "../workspaces/localDatasetMigration";
+import {
+  ServerCollectionsUnavailableError,
+  type OwnerDatasetData,
+} from "../workspaces/remoteDataset";
+import {
+  approveLocalDatasetMigration,
+  createLocalDatasetMigrations,
+  type LocalDatasetMigrationPreparation,
+} from "../workspaces/localDatasetMigration";
 import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryRestore";
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
 import { collectionChangeProposal } from "../workspaces/collectionChange";
-import { DatasetAddressUnavailableError, addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, type ResolvedDatasetRequest } from "../workspaces/datasetAddress";
-import { assertSourcePathsNotHeld, assertSourcePathsNotDeferred, type SourceCaptureStatus } from "../workspaces/datasetSourceCapture";
-
+import {
+  DatasetAddressUnavailableError,
+  addressDatasets,
+  resolveDatasetAddress,
+  invalidateDatasetAddresses,
+  type ResolvedDatasetRequest,
+} from "../workspaces/datasetAddress";
+import {
+  assertSourcePathsNotHeld,
+  assertSourcePathsNotDeferred,
+  type SourceCaptureStatus,
+} from "../workspaces/datasetSourceCapture";
 
 type Workspace = { workspaceId: string; shareView?: unknown };
-type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "resolveFiles" | "workspace">;
-type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; scope?: string; assertCurrent(): void };
+type SourceAdapter = Pick<
+  VersionedLiveAdapter,
+  | "captureSourceMetadata"
+  | "hydrateCapturedSources"
+  | "listTextFileMetadata"
+  | "resolveFiles"
+  | "workspace"
+>;
+type Operation<W extends Workspace> = {
+  workspace: W;
+  signal: AbortSignal;
+  scope?: string;
+  assertCurrent(): void;
+};
 
 /**
  * On a computer that doesn't keep a workspace's Collections, the ones on its
  * signed-in server, and where the others are.
  */
-export interface ServerCollections { data: OwnerDatasetData; elsewhere: DatasetListElsewhere }
+export interface ServerCollections {
+  data: OwnerDatasetData;
+  elsewhere: DatasetListElsewhere;
+}
 
 // Why this computer can't list the Collections, or null for any other error.
 function listRefusalOf(error: unknown): DatasetListRefusal | null {
   if (error instanceof ServerCollectionsUnavailableError) {
     const { elsewhere, failure } = error;
-    return { kind: "server-unavailable", words: elsewhere.message, computer: elsewhere.computerLabel, failure: failure.slice(0, 4096) };
+    return {
+      kind: "server-unavailable",
+      words: elsewhere.message,
+      computer: elsewhere.computerLabel,
+      failure: failure.slice(0, 4096),
+    };
   }
   if (!(error instanceof CollectionsRefusalError)) return null;
   const { refusal, message: words } = error;
-  return refusal.kind === "elsewhere" ? { kind: "elsewhere", words, computer: refusal.computer.label } : { kind: refusal.kind, words };
+  return refusal.kind === "elsewhere"
+    ? { kind: "elsewhere", words, computer: refusal.computer.label }
+    : { kind: refusal.kind, words };
 }
 
 class DatasetScopeError extends Error {
@@ -51,8 +104,16 @@ class DatasetScopeError extends Error {
 }
 
 /** The desktop and owner CLI enter the same workspace authority before using data. */
-export function createDatasetHandler<Caller, W extends Workspace, O extends Operation<W>>(dependencies: {
-  withWorkspaceOperation<T>(caller: Caller, workspaceId: string, work: (operation: O) => Promise<T>): Promise<T>;
+export function createDatasetHandler<
+  Caller,
+  W extends Workspace,
+  O extends Operation<W>,
+>(dependencies: {
+  withWorkspaceOperation<T>(
+    caller: Caller,
+    workspaceId: string,
+    work: (operation: O) => Promise<T>,
+  ): Promise<T>;
   hostForWorkspace(workspace: W, signal: AbortSignal): Promise<LocalDatasetHost>;
   /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
@@ -63,26 +124,54 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
    */
   serverCollectionsFor?(workspace: W, signal: AbortSignal): Promise<ServerCollections | null>;
   currentCredentialGeneration?(): number;
-  namedDataForWorkspace?(workspace: W, signal: AbortSignal): Promise<Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file">>;
+  namedDataForWorkspace?(
+    workspace: W,
+    signal: AbortSignal,
+  ): Promise<
+    Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file">
+  >;
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
-  exportArchive?(workspace: W, request: Extract<ResolvedDatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
+  exportArchive?(
+    workspace: W,
+    request: Extract<ResolvedDatasetRequest, { action: "export" }>,
+    signal: AbortSignal,
+    authorize: () => void,
+  ): Promise<string | null>;
   /** Reconciles disk edits before capturing immutable source for review. */
   flushSourceCapture(workspace: W, signal: AbortSignal): Promise<SourceCaptureStatus>;
   /** Rejects when the workspace engine is unavailable, so work returns a value, never null. */
   withAdapter<T extends {}>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
-  createSources(workspace: W, files: Record<string, string>, signal: AbortSignal, progress?: SourceCreationProgress): Promise<void>;
+  createSources(
+    workspace: W,
+    files: Record<string, string>,
+    signal: AbortSignal,
+    progress?: SourceCreationProgress,
+  ): Promise<void>;
   /** An automation's name in its Collection's automations.yaml now, or null. */
   automationName?(workspace: W, automationId: string): Promise<string | null>;
   /** Where a Collection is: only on this computer, or on the workspace's server. */
   collectionPlace?(workspace: W, datasetId: string, signal: AbortSignal): Promise<DatasetPlace>;
   /** Moves a Collection that is only on this computer to the workspace's server for good. */
   moveToServer?(workspace: W, datasetId: string, signal: AbortSignal): Promise<void>;
-  /** A change to a Collection's fields or rules applied. */
   collectionRulesChanged?(workspaceId: string, datasetId: string): void;
 }) {
-  const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; credentialGeneration?: number; review: LocalDatasetMigrationPreparation; clear(): void }>();
-  const invocations = new Map<string, { caller: Caller; workspaceId: string; controller: AbortController }>();
+  const migrations = new Map<
+    string,
+    {
+      caller: Caller;
+      workspaceId: string;
+      signal: AbortSignal;
+      scope?: string;
+      credentialGeneration?: number;
+      review: LocalDatasetMigrationPreparation;
+      clear(): void;
+    }
+  >();
+  const invocations = new Map<
+    string,
+    { caller: Caller; workspaceId: string; controller: AbortController }
+  >();
   let preparingMigrations = 0;
   /**
    * `agent` is set only by the owner CLI, from the actor main derived for the
@@ -95,15 +184,23 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       // A dialog can unmount after its window switches workspaces. Only signal a request this sender registered.
       const running = invocations.get(request.invocationId);
       if (running && running.caller === caller && running.workspaceId === request.workspaceId) {
-        running.controller.abort(new Error("dohc could not confirm whether this action finished. Try again with the same idempotencyKey."));
+        running.controller.abort(
+          new Error(
+            "dohc could not confirm whether this action finished. Try again with the same idempotencyKey.",
+          ),
+        );
       }
       return { kind: "invoke-cancel-requested" as const, outcome: "unknown" as const };
     }
     const invocationId = request.action === "invoke" ? request.invocationId : undefined;
-    const invocation = invocationId ? { caller, workspaceId: request.workspaceId, controller: new AbortController() } : undefined;
+    const invocation = invocationId
+      ? { caller, workspaceId: request.workspaceId, controller: new AbortController() }
+      : undefined;
     if (invocationId && invocation) {
-      if (invocations.has(invocationId)) throw new Error("This Collection request is already running.");
-      if (invocations.size >= 256) throw new Error("Too many Collection requests are running. Wait for one to finish.");
+      if (invocations.has(invocationId))
+        throw new Error("This Collection request is already running.");
+      if (invocations.size >= 256)
+        throw new Error("Too many Collection requests are running. Wait for one to finish.");
       invocations.set(invocationId, invocation);
     }
     let formFailure: ((error: unknown) => CreationPartial) | undefined;
@@ -111,453 +208,1027 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
     // Preparing a change reads the files as they are now, so it settles disk edits first.
     const capturesFirst = request.action === "prepareMigration" || request.action === "askToApply";
     try {
-      return await dependencies.withWorkspaceOperation(caller, request.workspaceId, async operation => {
-      const current = () => {
-        try { operation.signal.throwIfAborted(); operation.assertCurrent(); }
-        catch (error) { throw new DatasetScopeError(error); }
-      };
-      current();
-      const invokeSignal = invocation ? AbortSignal.any([operation.signal, invocation.controller.signal]) : operation.signal;
-      let sourceCapture: SourceCaptureStatus = { heldFiles: [], deferredWrites: [] };
-      const flushSourceCapture = async () => {
-        sourceCapture = await dependencies.flushSourceCapture(operation.workspace, operation.signal);
-        current();
-      };
-      const withSourceAdapter = <T extends {}>(work: (adapter: SourceAdapter) => Promise<T>) => dependencies.withAdapter(operation.workspace, adapter => work({
-        workspace: adapter.workspace,
-        listTextFileMetadata: adapter.listTextFileMetadata.bind(adapter),
-        resolveFiles: adapter.resolveFiles.bind(adapter),
-        hydrateCapturedSources: adapter.hydrateCapturedSources.bind(adapter),
-        captureSourceMetadata: input => {
+      return await dependencies.withWorkspaceOperation(
+        caller,
+        request.workspaceId,
+        async (operation) => {
+          const current = () => {
+            try {
+              operation.signal.throwIfAborted();
+              operation.assertCurrent();
+            } catch (error) {
+              throw new DatasetScopeError(error);
+            }
+          };
           current();
-          assertSourcePathsNotHeld(sourceCapture.heldFiles, input.paths);
-          assertSourcePathsNotDeferred(sourceCapture.deferredWrites, input.paths);
-          return adapter.captureSourceMetadata(input);
-        },
-      }));
-      let input: ResolvedDatasetRequest;
-      if ("datasetPath" in request) {
-        if (capturesFirst) {
-          await flushSourceCapture();
-          current();
-          invalidateDatasetAddresses({ workspaceId: request.workspaceId });
-        }
-        const resolve = () => withSourceAdapter(adapter => resolveDatasetAddress(adapter, request.workspaceId, request.datasetPath, operation.signal));
-        const datasetId = await resolve().catch(async error => {
-          current();
-          if (!(error instanceof DatasetAddressUnavailableError) || capturesFirst || shareViewIsPresent(operation.workspace.shareView)) throw error;
-          await flushSourceCapture();
-          current();
-          invalidateDatasetAddresses({ workspaceId: request.workspaceId });
-          return resolve();
-        }).catch(error => {
-          current();
-          if (shareViewIsPresent(operation.workspace.shareView) && error instanceof DatasetAddressUnavailableError) {
-            throw new Error(`Collection source unavailable: ${request.datasetPath}. Ask the owner to include its dataset.json file in this share.`);
-          }
-          throw error;
-        });
-        current();
-        if (request.expectedDatasetId && request.expectedDatasetId !== datasetId) throw new Error("This Collection moved. Reopen it.");
-        const { datasetPath: _, expectedDatasetId: _expected, ...fields } = request;
-        input = { ...fields, datasetId };
-      } else input = request;
-      const addressPage = async <T extends import("@dohc/security-contract/dataset").DatasetDescription>(page: { datasets: T[]; nextCursor: string | null }, approvedFolder?: (datasetId: string) => Promise<string>) => {
-        const datasets = await withSourceAdapter(adapter => addressDatasets(adapter, request.workspaceId, page.datasets, operation.signal, approvedFolder));
-        current();
-        return { ...page, datasets };
-      };
-      const addressed = <T extends { dataset: import("@dohc/security-contract/dataset").DatasetDescription }>(result: T) => ({ ...result, dataset: { ...result.dataset, datasetPath: "datasetPath" in request ? request.datasetPath : null } });
-      if (input.action === "export") {
-        if (shareViewIsPresent(operation.workspace.shareView)) throw datasetOwnerOnlyError();
-        if (!dependencies.exportArchive) throw new Error("Collection recovery export is unavailable. Restart dohc and try again.");
-        const savedPath = await dependencies.exportArchive(operation.workspace, input, operation.signal, current);
-        current();
-        return { kind: "exported" as const, savedPath };
-      }
-      if (shareViewIsPresent(operation.workspace.shareView)) {
-        if (!dependencies.namedDataForWorkspace || !["list", "describe", "invoke", "upload", "file"].includes(input.action)) throw datasetOwnerOnlyError();
-        const data = await dependencies.namedDataForWorkspace(operation.workspace, operation.signal);
-        current();
-        if (input.action === "list") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const page = await data.list({ after: input.after, limit: input.limit }); current(); return { kind: "list" as const, ...await addressPage(page) }; }
-        if (input.action === "describe") { if(input.includeArchived)throw new Error("Open the original workspace to restore Collections."); const result = data.inspect ? await data.inspect(input.datasetId) : { dataset: await data.describe(input.datasetId) }; current(); return { kind: "description" as const, ...addressed(result) }; }
-        if (input.action === "upload") { const result = await data.upload(input); current(); return { kind: "uploaded" as const, ...result }; }
-        if (input.action === "file") { const result = await data.file(input); current(); return { kind: "file" as const, ...result }; }
-        if (input.action === "invoke") {
-          try { invokeSignal.throwIfAborted(); const result = await data.invoke({ ...input, signal: invokeSignal }); current(); return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) }; }
-          catch (error) { current(); if (isAppBackendRuntimeError(error)) return { kind: "refused" as const, ...error.refusal }; throw error; }
-        }
-        throw new Error("This Collection action is unavailable.");
-      }
-      if (agent && agent.depth > 0 && (input.action === "approve" || input.action === "approveMigration")) throw new Error("Automations cannot approve Collection rules.");
-      if (agent && agent.depth > 0 && input.action === "setGrant" && input.moveToServer) throw new Error("Automations cannot move a Collection to the server.");
-      const approvalAgent = agent ? agent.approvalAgent ?? {kind:"agent" as const,label:null,labelSource:"agent-declared" as const} : undefined;
-      // The local store opens only for work that uses it. It refuses on a computer that doesn't keep it.
-      let opened: Promise<LocalDatasetHost> | undefined;
-      const localHost = async () => {
-        const host = await (opened ??= dependencies.hostForWorkspace(operation.workspace, operation.signal));
-        current();
-        return host;
-      };
-      if (input.action === "prepareRecovery") {
-        const host = await localHost();
-        const sourcePath = input.sourcePath ?? await dependencies.chooseRecoveryFile?.(operation.workspace,operation.signal);
-        current();
-        if (!sourcePath) return { kind: "recovery-prepared" as const, recovery:null };
-        const recovery = await host.prepareRecovery({sourcePath,signal:operation.signal}); current();
-        return { kind: "recovery-prepared" as const, recovery };
-      }
-      if (input.action === "claimRecovery") {
-        const host = await localHost();
-        if(input.sourceCursor.workspaceId!==input.workspaceId) throw new Error("This recovery belongs to another Collection.");
-        const receipt = await host.claimRecovery(input); current();
-        if (!receipt.targetCursor) throw new Error("Recovery has not activated this Collection. Retry recovery.");
-        let datasetPath: string | null = null;
-        let sourceError: string | undefined;
-        try {
-          await flushSourceCapture(); current();
-          invalidateDatasetAddresses({ workspaceId: input.workspaceId });
-          const approved = await host.approvedArtifacts(receipt.targetCursor.datasetId); current();
-          const description = { datasetId: approved.revision.datasetId, name: approved.revision.definition.name,
-            revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, tables: [], operations: [] };
-          const [address] = await withSourceAdapter(adapter => addressDatasets(adapter, input.workspaceId, [description], operation.signal));
-          current();
-          datasetPath = address?.datasetPath ?? null;
-          if (!datasetPath) {
-            const definition = approved.revision.definition;
-            const folder = datasetBaseFolder(definition);
-            datasetPath = folder === "." ? "dataset.json" : `${folder}/dataset.json`;
-            const files = { [definition.schemaPath]: approved.schemaSql, [definition.operationsPath]: approved.operationSource,
-              [datasetPath]: JSON.stringify(definition, null, 2) + "\n" };
-            const paths = Object.keys(files);
-            const existing = await withSourceAdapter(adapter => adapter.resolveFiles({ workspaceId: input.workspaceId, versionId: "main", targets: paths.map(path => ({ path })), signal: operation.signal }));
+          const invokeSignal = invocation
+            ? AbortSignal.any([operation.signal, invocation.controller.signal])
+            : operation.signal;
+          let sourceCapture: SourceCaptureStatus = { heldFiles: [], deferredWrites: [] };
+          const flushSourceCapture = async () => {
+            sourceCapture = await dependencies.flushSourceCapture(
+              operation.workspace,
+              operation.signal,
+            );
             current();
-            if (existing.results.some(file => file.status === "invalid")) throw new Error("Collection recovery has an invalid source path.");
-            const present = new Set(paths.filter((_path, index) => existing.results[index]?.status === "found"));
-            if (present.has(datasetPath)) throw new Error(`Collection restored, but ${datasetPath} conflicts with its source. Move that file, then retry recovery.`);
-            const missing = Object.fromEntries(Object.entries(files).filter(([path]) => !present.has(path)));
-            await dependencies.createSources(operation.workspace, missing, operation.signal); current();
+          };
+          const withSourceAdapter = <T extends {}>(work: (adapter: SourceAdapter) => Promise<T>) =>
+            dependencies.withAdapter(operation.workspace, (adapter) =>
+              work({
+                workspace: adapter.workspace,
+                listTextFileMetadata: adapter.listTextFileMetadata.bind(adapter),
+                resolveFiles: adapter.resolveFiles.bind(adapter),
+                hydrateCapturedSources: adapter.hydrateCapturedSources.bind(adapter),
+                captureSourceMetadata: (input) => {
+                  current();
+                  assertSourcePathsNotHeld(sourceCapture.heldFiles, input.paths);
+                  assertSourcePathsNotDeferred(sourceCapture.deferredWrites, input.paths);
+                  return adapter.captureSourceMetadata(input);
+                },
+              }),
+            );
+          let input: ResolvedDatasetRequest;
+          if ("datasetPath" in request) {
+            if (capturesFirst) {
+              await flushSourceCapture();
+              current();
+              invalidateDatasetAddresses({ workspaceId: request.workspaceId });
+            }
+            const resolve = () =>
+              withSourceAdapter((adapter) =>
+                resolveDatasetAddress(
+                  adapter,
+                  request.workspaceId,
+                  request.datasetPath,
+                  operation.signal,
+                ),
+              );
+            const datasetId = await resolve()
+              .catch(async (error) => {
+                current();
+                if (
+                  !(error instanceof DatasetAddressUnavailableError) ||
+                  capturesFirst ||
+                  shareViewIsPresent(operation.workspace.shareView)
+                )
+                  throw error;
+                await flushSourceCapture();
+                current();
+                invalidateDatasetAddresses({ workspaceId: request.workspaceId });
+                return resolve();
+              })
+              .catch((error) => {
+                current();
+                if (
+                  shareViewIsPresent(operation.workspace.shareView) &&
+                  error instanceof DatasetAddressUnavailableError
+                ) {
+                  throw new Error(
+                    `Collection source unavailable: ${request.datasetPath}. Ask the owner to include its dataset.json file in this share.`,
+                  );
+                }
+                throw error;
+              });
+            current();
+            if (request.expectedDatasetId && request.expectedDatasetId !== datasetId)
+              throw new Error("This Collection moved. Reopen it.");
+            const { datasetPath: _, expectedDatasetId: _expected, ...fields } = request;
+            input = { ...fields, datasetId };
+          } else input = request;
+          const addressPage = async <
+            T extends import("@dohc/security-contract/dataset").DatasetDescription,
+          >(
+            page: { datasets: T[]; nextCursor: string | null },
+            approvedFolder?: (datasetId: string) => Promise<string>,
+          ) => {
+            const datasets = await withSourceAdapter((adapter) =>
+              addressDatasets(
+                adapter,
+                request.workspaceId,
+                page.datasets,
+                operation.signal,
+                approvedFolder,
+              ),
+            );
+            current();
+            return { ...page, datasets };
+          };
+          const addressed = <
+            T extends { dataset: import("@dohc/security-contract/dataset").DatasetDescription },
+          >(
+            result: T,
+          ) => ({
+            ...result,
+            dataset: {
+              ...result.dataset,
+              datasetPath: "datasetPath" in request ? request.datasetPath : null,
+            },
+          });
+          if (input.action === "export") {
+            if (shareViewIsPresent(operation.workspace.shareView)) throw datasetOwnerOnlyError();
+            if (!dependencies.exportArchive)
+              throw new Error(
+                "Collection recovery export is unavailable. Restart dohc and try again.",
+              );
+            const savedPath = await dependencies.exportArchive(
+              operation.workspace,
+              input,
+              operation.signal,
+              current,
+            );
+            current();
+            return { kind: "exported" as const, savedPath };
           }
-        } catch (error) {
+          if (shareViewIsPresent(operation.workspace.shareView)) {
+            if (
+              !dependencies.namedDataForWorkspace ||
+              !["list", "describe", "invoke", "upload", "file"].includes(input.action)
+            )
+              throw datasetOwnerOnlyError();
+            const data = await dependencies.namedDataForWorkspace(
+              operation.workspace,
+              operation.signal,
+            );
+            current();
+            if (input.action === "list") {
+              if (input.includeArchived)
+                throw new Error("Open the original workspace to restore Collections.");
+              const page = await data.list({ after: input.after, limit: input.limit });
+              current();
+              return { kind: "list" as const, ...(await addressPage(page)) };
+            }
+            if (input.action === "describe") {
+              if (input.includeArchived)
+                throw new Error("Open the original workspace to restore Collections.");
+              const result = data.inspect
+                ? await data.inspect(input.datasetId)
+                : { dataset: await data.describe(input.datasetId) };
+              current();
+              return { kind: "description" as const, ...addressed(result) };
+            }
+            if (input.action === "upload") {
+              const result = await data.upload(input);
+              current();
+              return { kind: "uploaded" as const, ...result };
+            }
+            if (input.action === "file") {
+              const result = await data.file(input);
+              current();
+              return { kind: "file" as const, ...result };
+            }
+            if (input.action === "invoke") {
+              try {
+                invokeSignal.throwIfAborted();
+                const result = await data.invoke({ ...input, signal: invokeSignal });
+                current();
+                return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) };
+              } catch (error) {
+                current();
+                if (isAppBackendRuntimeError(error))
+                  return { kind: "refused" as const, ...error.refusal };
+                throw error;
+              }
+            }
+            throw new Error("This Collection action is unavailable.");
+          }
+          if (
+            agent &&
+            agent.depth > 0 &&
+            (input.action === "approve" || input.action === "approveMigration")
+          )
+            throw new Error("Automations cannot approve Collection rules.");
+          if (agent && agent.depth > 0 && input.action === "setGrant" && input.moveToServer)
+            throw new Error("Automations cannot move a Collection to the server.");
+          const approvalAgent = agent
+            ? (agent.approvalAgent ?? {
+                kind: "agent" as const,
+                label: null,
+                labelSource: "agent-declared" as const,
+              })
+            : undefined;
+          // The local store opens only for work that uses it. It refuses on a computer that doesn't keep it.
+          let opened: Promise<LocalDatasetHost> | undefined;
+          const localHost = async () => {
+            const host = await (opened ??= dependencies.hostForWorkspace(
+              operation.workspace,
+              operation.signal,
+            ));
+            current();
+            return host;
+          };
+          if (input.action === "prepareRecovery") {
+            const host = await localHost();
+            const sourcePath =
+              input.sourcePath ??
+              (await dependencies.chooseRecoveryFile?.(operation.workspace, operation.signal));
+            current();
+            if (!sourcePath) return { kind: "recovery-prepared" as const, recovery: null };
+            const recovery = await host.prepareRecovery({ sourcePath, signal: operation.signal });
+            current();
+            return { kind: "recovery-prepared" as const, recovery };
+          }
+          if (input.action === "claimRecovery") {
+            const host = await localHost();
+            if (input.sourceCursor.workspaceId !== input.workspaceId)
+              throw new Error("This recovery belongs to another Collection.");
+            const receipt = await host.claimRecovery(input);
+            current();
+            if (!receipt.targetCursor)
+              throw new Error("Recovery has not activated this Collection. Retry recovery.");
+            let datasetPath: string | null = null;
+            let sourceError: string | undefined;
+            try {
+              await flushSourceCapture();
+              current();
+              invalidateDatasetAddresses({ workspaceId: input.workspaceId });
+              // oxlint-disable-next-line typescript/await-thenable -- await kept: removing it changes scheduling
+              const approved = await host.approvedArtifacts(receipt.targetCursor.datasetId);
+              current();
+              const description = {
+                datasetId: approved.revision.datasetId,
+                name: approved.revision.definition.name,
+                revision: approved.revision.revision,
+                revisionSha256: approved.revision.revisionSha256,
+                tables: [],
+                operations: [],
+              };
+              const [address] = await withSourceAdapter((adapter) =>
+                addressDatasets(adapter, input.workspaceId, [description], operation.signal),
+              );
+              current();
+              datasetPath = address?.datasetPath ?? null;
+              if (!datasetPath) {
+                const definition = approved.revision.definition;
+                const folder = datasetBaseFolder(definition);
+                datasetPath = folder === "." ? "dataset.json" : `${folder}/dataset.json`;
+                const files = {
+                  [definition.schemaPath]: approved.schemaSql,
+                  [definition.operationsPath]: approved.operationSource,
+                  [datasetPath]: JSON.stringify(definition, null, 2) + "\n",
+                };
+                const paths = Object.keys(files);
+                const existing = await withSourceAdapter((adapter) =>
+                  adapter.resolveFiles({
+                    workspaceId: input.workspaceId,
+                    versionId: "main",
+                    targets: paths.map((path) => ({ path })),
+                    signal: operation.signal,
+                  }),
+                );
+                current();
+                if (existing.results.some((file) => file.status === "invalid"))
+                  throw new Error("Collection recovery has an invalid source path.");
+                const present = new Set(
+                  paths.filter((_path, index) => existing.results[index]?.status === "found"),
+                );
+                if (present.has(datasetPath))
+                  throw new Error(
+                    `Collection restored, but ${datasetPath} conflicts with its source. Move that file, then retry recovery.`,
+                  );
+                const missing = Object.fromEntries(
+                  Object.entries(files).filter(([path]) => !present.has(path)),
+                );
+                await dependencies.createSources(operation.workspace, missing, operation.signal);
+                current();
+              }
+            } catch (error) {
+              current();
+              datasetPath = null;
+              sourceError =
+                error instanceof Error
+                  ? error.message.slice(0, 1024)
+                  : "Restore its dataset.json source file to open the Collection.";
+            }
+            return {
+              kind: "recovery-claimed" as const,
+              ...receipt,
+              targetCursor: receipt.targetCursor,
+              datasetPath,
+              ...(sourceError ? { sourceError } : {}),
+            };
+          }
+          if (input.action === "discardRecovery") {
+            await (await localHost()).discardRecovery(input.transferId);
+            current();
+            return { kind: "recovery-discarded" as const };
+          }
+          const readsData = [
+            "list",
+            "describe",
+            "createForm",
+            "invoke",
+            "upload",
+            "file",
+            "history",
+            "historyRevision",
+            "prepareHistoryRestore",
+            "permissions",
+            "setGrant",
+            "removeGrant",
+            "lifecycle",
+            "archive",
+            "restore",
+            "deletePreview",
+            "delete",
+            "pendingAttempts",
+            "reconcileAttempt",
+            "cancelAttempt",
+            "prepareSchemaChange",
+            "prepareRelationChoices",
+            "prepareMigration",
+            "askToApply",
+            "approveMigration",
+            "discardMigration",
+            "migrationPreviewPage",
+          ].includes(input.action);
+          // Creating, approving and recovering stay with the computer that keeps the Collections.
+          const server =
+            readsData && dependencies.serverCollectionsFor
+              ? await dependencies.serverCollectionsFor(operation.workspace, operation.signal)
+              : null;
           current();
-          datasetPath = null;
-          sourceError = error instanceof Error ? error.message.slice(0, 1024) : "Restore its dataset.json source file to open the Collection.";
-        }
-        return {kind:"recovery-claimed" as const,...receipt,targetCursor:receipt.targetCursor,datasetPath,...(sourceError ? { sourceError } : {})};
-      }
-      if (input.action === "discardRecovery") { await (await localHost()).discardRecovery(input.transferId); current(); return {kind:"recovery-discarded" as const}; }
-      const readsData = ["list", "describe", "createForm", "invoke", "upload", "file", "history", "historyRevision", "prepareHistoryRestore", "permissions", "setGrant", "removeGrant", "lifecycle", "archive", "restore", "deletePreview", "delete", "pendingAttempts", "reconcileAttempt", "cancelAttempt", "prepareSchemaChange", "prepareRelationChoices", "prepareMigration", "askToApply", "approveMigration", "discardMigration", "migrationPreviewPage"].includes(input.action);
-      // Creating, approving and recovering stay with the computer that keeps the Collections.
-      const server = readsData && dependencies.serverCollectionsFor ? await dependencies.serverCollectionsFor(operation.workspace, operation.signal) : null;
-      current();
-      const openData = async () => server?.data ?? (readsData && dependencies.dataForWorkspace ? await dependencies.dataForWorkspace(operation.workspace, operation.signal) : await localHost());
-      if (input.action === "list") {
-        try {
-          const data = await openData(); current();
-          const result = await data.list({ after: input.after, limit: input.limit, includeArchived: input.includeArchived }); current();
-          const approvedFolder = async (datasetId: string) => datasetBaseFolder((await data.approvedArtifacts(datasetId)).revision.definition);
-          return { kind: "list" as const, ...await addressPage(result, approvedFolder), ...(server ? { elsewhere: server.elsewhere } : {}) };
-        } catch (error) {
+          const openData = async () =>
+            server?.data ??
+            (readsData && dependencies.dataForWorkspace
+              ? await dependencies.dataForWorkspace(operation.workspace, operation.signal)
+              : await localHost());
+          if (input.action === "list") {
+            try {
+              const data = await openData();
+              current();
+              const result = await data.list({
+                after: input.after,
+                limit: input.limit,
+                includeArchived: input.includeArchived,
+              });
+              current();
+              const approvedFolder = async (datasetId: string) =>
+                datasetBaseFolder((await data.approvedArtifacts(datasetId)).revision.definition);
+              return {
+                kind: "list" as const,
+                ...(await addressPage(result, approvedFolder)),
+                ...(server ? { elsewhere: server.elsewhere } : {}),
+              };
+            } catch (error) {
+              current();
+              const refusal = listRefusalOf(error);
+              if (refusal === null) throw error;
+              // The Explorer lists after every change. A refusal thrown here would reach Electron's log each time.
+              return { kind: "collections-refused" as const, refusal };
+            }
+          }
+          const data = await openData();
           current();
-          const refusal = listRefusalOf(error);
-          if (refusal === null) throw error;
-          // The Explorer lists after every change. A refusal thrown here would reach Electron's log each time.
-          return { kind: "collections-refused" as const, refusal };
-        }
-      }
-      const data = await openData();
-      current();
-      const credentialGeneration = dependencies.currentCredentialGeneration?.();
-      const migrationAuthority = {
-        workspaceId: input.workspaceId,
-        assertCurrent() {
-          current();
-          if (dependencies.currentCredentialGeneration?.() !== credentialGeneration) throw new Error("Your server session changed. Try again.");
-        },
-        approvedArtifacts: (datasetId: string) => data.approvedArtifacts(datasetId),
-        prepareMigrationCandidate: (value: Parameters<NonNullable<OwnerDatasetData["prepareMigrationCandidate"]>>[0]) => {
-          migrationAuthority.assertCurrent();
-          if (!data.prepareMigrationCandidate) throw new Error("Collection rule changes are unavailable on this host.");
-          return data.prepareMigrationCandidate(value);
-        },
-        approveMigrationCandidate: (value: Parameters<NonNullable<OwnerDatasetData["approveMigrationCandidate"]>>[0]) => {
-          migrationAuthority.assertCurrent();
-          if (!data.approveMigrationCandidate) throw new Error("Collection rule changes are unavailable on this host.");
-          return data.approveMigrationCandidate({...value,approvalAgent});
-        },
-        discardMigrationCandidate: (value: Parameters<NonNullable<OwnerDatasetData["discardMigrationCandidate"]>>[0]) => {
-          migrationAuthority.assertCurrent();
-          if (!data.discardMigrationCandidate) throw new Error("Collection rule changes are unavailable on this host.");
-          return data.discardMigrationCandidate(value);
-        },
-      };
-      if (input.action === "approveMigration" || input.action === "discardMigration" || input.action === "migrationPreviewPage") {
-        const pending = migrations.get(input.preparationId);
-        if (!pending || pending.caller !== caller || pending.workspaceId !== input.workspaceId || pending.signal !== operation.signal || pending.scope !== operation.scope || pending.credentialGeneration !== credentialGeneration) {
-          throw new Error("This Collection review expired. Prepare the change again.");
-        }
-        const candidate = { workspaceId: input.workspaceId, datasetId: pending.review.revision.datasetId, candidateId: pending.review.candidate.candidateId, signal: operation.signal };
-        if (input.action === "migrationPreviewPage") {
-          if (pending.review.expiresAtMs <= Date.now() || !data.migrationPreviewPage) throw new Error("This Collection review expired. Prepare the change again.");
-          const page = await data.migrationPreviewPage({ ...candidate, after: input.after, limit: input.limit });
-          migrationAuthority.assertCurrent();
-          return { kind: "migration-preview-page" as const, ...DatasetMigrationPreviewPage.parse(page) };
-        }
-        // Consume before any authority read or SQL, including an uncertain remote reply.
-        pending.clear();
-        if (input.action === "discardMigration") { await migrationAuthority.discardMigrationCandidate(candidate); migrationAuthority.assertCurrent(); return { kind: "migration-discarded" as const }; }
-        const result = await approveLocalDatasetMigration(migrationAuthority, pending.review, { ...input, signal: operation.signal }); migrationAuthority.assertCurrent();
-        dependencies.collectionRulesChanged?.(input.workspaceId, candidate.datasetId);
-        return { kind: "migrated" as const, ...result };
-      }
-      const prepareMigration = async (selection: { datasetId: string; descriptorPath: string; migrationPath: string }) => {
-        if (migrations.size + preparingMigrations >= 8) throw new Error("Too many Collection changes await approval. Finish or discard a review.");
-        preparingMigrations++;
-        const review = createLocalDatasetMigrations(migrationAuthority);
-        try {
-          if (!capturesFirst) { await flushSourceCapture(); current(); }
-          const prepared = await withSourceAdapter(adapter => review.prepareMigration({ ...selection, adapter, signal: operation.signal }));
-          migrationAuthority.assertCurrent();
-          const { signal } = operation;
-          const preparationId = prepared.preparationId;
-          const clear = () => { migrations.delete(preparationId); signal.removeEventListener("abort", expire); clearTimeout(timer); };
-          const expire = () => { clear(); };
-          const timer = setTimeout(expire, Math.max(0, prepared.expiresAtMs - Date.now())); timer.unref();
-          migrations.set(prepared.preparationId, { caller, workspaceId: input.workspaceId, signal: operation.signal, scope: operation.scope, credentialGeneration, review: structuredClone(prepared), clear });
-          operation.signal.addEventListener("abort", expire, { once: true });
-          return prepared;
-        } finally { review.clear(); preparingMigrations--; }
-      };
-      if (input.action === "deletePreview") {
-        if (!data.deletePreview) throw new Error("Collection deletion is unavailable. Update dohc and try again.");
-        const result = DatasetDeletePreview.parse(await data.deletePreview(input)); current();
-        if (result.cursor.workspaceId !== input.workspaceId || result.cursor.datasetId !== input.datasetId) throw new Error("This deletion review belongs to another Collection.");
-        return { kind: "delete-preview" as const, ...result };
-      }
-      if (input.action === "delete") {
-        if (input.expected.workspaceId !== input.workspaceId || input.expected.datasetId !== input.datasetId) throw new Error("This deletion belongs to another Collection.");
-        if (!data.deleteDataset) throw new Error("Collection deletion is unavailable. Update dohc and try again.");
-        const result = DatasetDeleted.parse(await data.deleteDataset(input)); current();
-        if (result.datasetId !== input.datasetId) throw new Error("dohc did not confirm this Collection deletion. Refresh the Collection.");
-        return { kind: "deleted" as const, ...result };
-      }
-      if(input.action === "lifecycle") { if(!data.lifecycle)throw new Error("Collection archive controls are unavailable."); const result=await data.lifecycle(input);current();return {kind:"lifecycle" as const,...result}; }
-      if(input.action === "archive" || input.action === "restore") { const action=data[input.action];if(!action)throw new Error("Collection archive controls are unavailable.");const result=await action(input);current();return {kind:"lifecycle-updated" as const,...result}; }
-      if(input.action === "pendingAttempts") { if(!data.pendingAttempts)throw new Error("Pending submission review is unavailable."); const result=await data.pendingAttempts(input);current();return {kind:"pending-attempts" as const,...result}; }
-      if(input.action === "reconcileAttempt") { if(!data.reconcileAttempt)throw new Error("Pending submission review is unavailable."); const result=await data.reconcileAttempt(input);current();return {kind:"attempt-reconciled" as const,...result}; }
-      if(input.action === "cancelAttempt") { if(!data.cancelAttempt)throw new Error("Pending submission cancellation is unavailable."); const result=await data.cancelAttempt(input);current();return {kind:"attempt-cancelled" as const,...result}; }
-      if (input.action === "historyRevision") {
-        if (!data.historyRevision) throw new Error("Saved Collection rules are unavailable. Update the host and try again.");
-        const result = DatasetHistoryRevision.parse(await data.historyRevision(input)); current();
-        if (result.revision.datasetId !== input.datasetId || result.revision.revisionSha256 !== input.revisionSha256) throw new Error("This revision belongs to another Collection change.");
-        return { kind: "history-revision" as const, ...result };
-      }
-      if (input.action === "prepareHistoryRestore") {
-        if (!data.historyRevision) throw new Error("Saved Collection rules are unavailable. Update the host and try again.");
-        const approved = await data.approvedArtifacts(input.datasetId); current();
-        if (!approved.active || approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) throw new Error("The Collection changed. Refresh History before restoring rules.");
-        const saved = await data.historyRevision({ datasetId: input.datasetId, revisionSha256: input.targetRevisionSha256 }); current();
-        if (saved.revision.revisionSha256 !== input.targetRevisionSha256) throw new Error("The saved rules differ from this selection. Refresh History.");
-        const changed = await data.historyRevision({ datasetId: input.datasetId, revisionSha256: input.changedRevisionSha256 }); current();
-        if (changed.revision.revisionSha256 !== input.changedRevisionSha256) throw new Error("The selected change differs from History. Refresh History.");
-        const generated = generateDatasetHistoryRestore(approved, saved, changed);
-        const expected = describeDatasetRevision({ definition: generated.definition, revision: approved.revision.revision + 1, schemaSql: generated.schemaSql, operationSource: generated.operationSource });
-        await dependencies.createSources(operation.workspace, generated.files, operation.signal); current();
-        const prepared = await prepareMigration({ datasetId: input.datasetId, descriptorPath: generated.descriptorPath, migrationPath: generated.migrationPath }); current();
-        if (prepared.previousRevision.revisionSha256 !== approved.revision.revisionSha256 || prepared.revision.revisionSha256 !== expected.revisionSha256 || prepared.migrationSql !== generated.migrationSql) {
-          migrations.get(prepared.preparationId)?.clear();
-          await migrationAuthority.discardMigrationCandidate({ workspaceId: input.workspaceId, datasetId: input.datasetId, candidateId: prepared.candidate.candidateId, signal: operation.signal });
-          throw new Error("The Collection changed while preparing this restore. Refresh History and review it again.");
-        }
-        return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
-      }
-      if (input.action === "history") {
-        if (!("history" in data) || !data.history) throw new Error("Collection history is unavailable. Restart dohc and try again.");
-        const result = await data.history(input); current();
-        // History names each automation as its Collection names it now.
-        const names = new Map<string, string | null>();
-        for (const entry of result.entries) {
-          const automationId = entry.automation?.automationId;
-          if (automationId !== undefined && !names.has(automationId)) names.set(automationId, await dependencies.automationName?.(operation.workspace, automationId) ?? null);
-        }
-        current();
-        return { kind: "history" as const, ...result, entries: result.entries.map((entry) => {
-          const name = entry.automation && names.get(entry.automation.automationId);
-          return name && entry.automation ? { ...entry, automation: { ...entry.automation, name } } : entry;
-        }) };
-      }
-      if (input.action === "permissions") {
-        if (!("permissions" in data) || !data.permissions) throw new Error("Collection access is unavailable on this computer.");
-        const result = await data.permissions(input); current();
-        const place = await dependencies.collectionPlace?.(operation.workspace, input.datasetId, operation.signal); current();
-        return { kind: "permissions" as const, ...result, ...(place ? { place } : {}) };
-      }
-      if (input.action === "setGrant" || input.action === "removeGrant") {
-        // A person reaches a Collection through the workspace's server, so it moves there first, once its owner agrees.
-        const place = input.action === "setGrant" ? await dependencies.collectionPlace?.(operation.workspace, input.datasetId, operation.signal) : undefined; current();
-        if (input.action === "setGrant" && place?.kind === "here") {
-          if (!place.server || !dependencies.moveToServer) throw new Error("Sync this workspace with a server before giving a person access.");
-          if (!input.moveToServer) throw new Error(`Giving a person access moves this Collection to ${place.server.host}. It then works only while ${place.server.host} is reachable, and dohc can't move it back. Send moveToServer: true to agree.`);
-          await dependencies.moveToServer(operation.workspace, input.datasetId, operation.signal); current();
-        }
-        if (!("setGrant" in data) || !data.setGrant) throw new Error("Collection access is unavailable on this computer.");
-        await data.setGrant(input); current(); return { kind: "grant-updated" as const };
-      }
-      if (input.action === "describe") {
-        const result = "inspect" in data && data.inspect ? await data.inspect(input.datasetId, { includeArchived: input.includeArchived }) : { dataset: await data.describe(input.datasetId, { includeArchived: input.includeArchived }) };
-        current(); return { kind: "description" as const, ...addressed(result) };
-      }
-      if (input.action === "upload") {
-        const description = await data.describe(input.datasetId);
-        current();
-        if (!description.tables.some(table => table.fields.some(field => field.fieldId === input.fieldId && field.type === "attachment")) ||
-            !description.operations.some(action => !action.readOnly && action.fieldIds.includes(input.fieldId))) throw new Error("Choose an editable Collection file field.");
-        const result = await data.upload({ ...input, signal: operation.signal });
-        current();
-        return { kind: "uploaded" as const, ...result };
-      }
-      if (input.action === "file") {
-        const result = await data.file({ ...input, signal: operation.signal });
-        current();
-        return { kind: "file" as const, ...result };
-      }
-      if (input.action === "createForm") {
-        const approved = await data.approvedArtifacts(input.datasetId);
-        current();
-        if (!approved.active || approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) {
-          throw new Error("Collection rules changed. Reload the Collection before creating a form.");
-        }
-        const generated = generateDatasetFormSources({ ...input, datasetPath: "datasetPath" in request ? request.datasetPath : "", approvedRevision: approved.revision });
-        const files = Object.fromEntries(Object.entries(generated.files).map(([path, source]) => [`${input.appRoot}/${path}`, source]));
-        let created: string[] = [];
-        let failedStage: CreationStage = "write";
-        let rulesChanged = false;
-        formFailure = (error) => {
-          if (created.length === 0) throw error;
-          const remove = rulesChanged || error instanceof SourceCreationConflict || error instanceof CreatedFileWriteError;
-          return formPartial = {
-            kind: "partial", created, failedStage: error instanceof DatasetScopeError ? "scope" : failedStage,
-            reason: error instanceof Error ? error.message : String(error),
-            retry: {
-              mode: remove ? "remove-and-retry" : "resume",
-              instruction: remove
-                ? "Review the listed files in Files, then remove them. Reload the Collection and create the form in an empty folder."
-                : "Try again with the same form settings and folder. dohc keeps matching files and creates only missing files.",
+          const credentialGeneration = dependencies.currentCredentialGeneration?.();
+          const migrationAuthority = {
+            workspaceId: input.workspaceId,
+            assertCurrent() {
+              current();
+              if (dependencies.currentCredentialGeneration?.() !== credentialGeneration)
+                throw new Error("Your server session changed. Try again.");
+            },
+            approvedArtifacts: (datasetId: string) => data.approvedArtifacts(datasetId),
+            prepareMigrationCandidate: (
+              value: Parameters<NonNullable<OwnerDatasetData["prepareMigrationCandidate"]>>[0],
+            ) => {
+              migrationAuthority.assertCurrent();
+              if (!data.prepareMigrationCandidate)
+                throw new Error("Collection rule changes are unavailable on this host.");
+              return data.prepareMigrationCandidate(value);
+            },
+            approveMigrationCandidate: (
+              value: Parameters<NonNullable<OwnerDatasetData["approveMigrationCandidate"]>>[0],
+            ) => {
+              migrationAuthority.assertCurrent();
+              if (!data.approveMigrationCandidate)
+                throw new Error("Collection rule changes are unavailable on this host.");
+              return data.approveMigrationCandidate({ ...value, approvalAgent });
+            },
+            discardMigrationCandidate: (
+              value: Parameters<NonNullable<OwnerDatasetData["discardMigrationCandidate"]>>[0],
+            ) => {
+              migrationAuthority.assertCurrent();
+              if (!data.discardMigrationCandidate)
+                throw new Error("Collection rule changes are unavailable on this host.");
+              return data.discardMigrationCandidate(value);
             },
           };
-        };
-        try {
-          await dependencies.createSources(operation.workspace, files, operation.signal, (stage, paths) => {
-            failedStage = stage;
-            created = [...paths];
-          });
-          created = Object.keys(files);
-          current();
-          failedStage = "revision";
-          const latest = await data.approvedArtifacts(input.datasetId);
-          current();
-          if (!latest.active || latest.revision.revisionSha256 !== input.revisionSha256) {
-            rulesChanged = true;
-            throw new Error("Collection rules changed.");
+          if (
+            input.action === "approveMigration" ||
+            input.action === "discardMigration" ||
+            input.action === "migrationPreviewPage"
+          ) {
+            const pending = migrations.get(input.preparationId);
+            if (
+              !pending ||
+              pending.caller !== caller ||
+              pending.workspaceId !== input.workspaceId ||
+              pending.signal !== operation.signal ||
+              pending.scope !== operation.scope ||
+              pending.credentialGeneration !== credentialGeneration
+            ) {
+              throw new Error("This Collection review expired. Prepare the change again.");
+            }
+            const candidate = {
+              workspaceId: input.workspaceId,
+              datasetId: pending.review.revision.datasetId,
+              candidateId: pending.review.candidate.candidateId,
+              signal: operation.signal,
+            };
+            if (input.action === "migrationPreviewPage") {
+              if (pending.review.expiresAtMs <= Date.now() || !data.migrationPreviewPage)
+                throw new Error("This Collection review expired. Prepare the change again.");
+              const page = await data.migrationPreviewPage({
+                ...candidate,
+                after: input.after,
+                limit: input.limit,
+              });
+              migrationAuthority.assertCurrent();
+              return {
+                kind: "migration-preview-page" as const,
+                ...DatasetMigrationPreviewPage.parse(page),
+              };
+            }
+            // Consume before any authority read or SQL, including an uncertain remote reply.
+            pending.clear();
+            if (input.action === "discardMigration") {
+              await migrationAuthority.discardMigrationCandidate(candidate);
+              migrationAuthority.assertCurrent();
+              return { kind: "migration-discarded" as const };
+            }
+            const result = await approveLocalDatasetMigration(migrationAuthority, pending.review, {
+              ...input,
+              signal: operation.signal,
+            });
+            migrationAuthority.assertCurrent();
+            dependencies.collectionRulesChanged?.(input.workspaceId, candidate.datasetId);
+            return { kind: "migrated" as const, ...result };
           }
-          return { kind: "form-created" as const, appRoot: input.appRoot, paths: created };
-        } catch (error) {
-          return formFailure(error);
-        }
-      }
-      if (input.action === "discard") { (await localHost()).discard(input.preparationId); return { kind: "discarded" as const }; }
-      if (input.action === "prepareSchemaChange" || input.action === "prepareRelationChoices") {
-        const approved = await data.approvedArtifacts(input.datasetId);
-        current();
-        if (!approved.active) throw new Error("This Collection is unavailable. Reconnect to its host and try again.");
-        if (approved.revision.revision !== input.revision || approved.revision.revisionSha256 !== input.revisionSha256) throw new Error("Collection rules changed. Refresh the Collection before changing fields.");
-        const generated = input.action === "prepareSchemaChange"
-          ? generateDatasetSchemaChange({ ...approved, change: input.change })
-          : generateDatasetRelationChoices({ ...approved, tableId: input.tableId, fieldId: input.fieldId, labelFieldId: input.labelFieldId });
-        const expected = describeDatasetRevision({ definition: generated.definition, revision: input.revision + 1,
-          schemaSql: generated.schemaSql, operationSource: generated.operationSource });
-        await dependencies.createSources(operation.workspace, generated.files, operation.signal);
-        current();
-        const prepared = await prepareMigration({ datasetId: input.datasetId, descriptorPath: generated.descriptorPath, migrationPath: generated.migrationPath });
-        current();
-        if (prepared.previousRevision.revisionSha256 !== input.revisionSha256 || prepared.revision.revisionSha256 !== expected.revisionSha256 || prepared.migrationSql !== generated.migrationSql) {
-          migrations.get(prepared.preparationId)?.clear();
-          await migrationAuthority.discardMigrationCandidate({ workspaceId: input.workspaceId, datasetId: input.datasetId, candidateId: prepared.candidate.candidateId, signal: operation.signal });
-          throw new Error("The Collection change differs from this review. Refresh the Collection and prepare it again.");
-        }
-        return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
-      }
-      if (input.action === "prepareMigration") {
-        if (request.action !== "prepareMigration") throw new Error("This Collection review changed. Prepare it again.");
-        const prepared = await prepareMigration({ ...input, descriptorPath: request.datasetPath });
-        current();
-        return { kind: "migration-prepared" as const, ...DatasetMigrationPreparation.parse(prepared) };
-      }
-      if (input.action === "askToApply") {
-        if (request.action !== "askToApply") throw new Error("This Collection request changed. Ask again.");
-        const prepared = await prepareMigration({ datasetId: input.datasetId, descriptorPath: request.datasetPath, migrationPath: input.migrationPath });
-        let proposal: ReturnType<typeof collectionChangeProposal>;
-        // The file records the change; the person who applies it prepares it again.
-        try { proposal = collectionChangeProposal(prepared, { datasetPath: request.datasetPath, migrationPath: input.migrationPath, note: input.note ?? null }); }
-        finally {
-          migrations.get(prepared.preparationId)?.clear();
-          await migrationAuthority.discardMigrationCandidate({ workspaceId: input.workspaceId, datasetId: input.datasetId, candidateId: prepared.candidate.candidateId, signal: operation.signal });
-        }
-        current();
-        const folder = request.datasetPath.includes("/") ? request.datasetPath.slice(0, request.datasetPath.lastIndexOf("/") + 1) : "";
-        const path = `${folder}changes/${randomUUID()}.json`;
-        await dependencies.createSources(operation.workspace, { [path]: `${JSON.stringify(proposal, null, 2)}
-` }, operation.signal); current();
-        return { kind: "change-asked" as const, path, changeSha256: proposal.changeSha256 };
-      }
-      if (input.action === "invoke") {
-        try {
-          invokeSignal.throwIfAborted();
-          const result = await data.invoke({ ...input, signal: invokeSignal, ...(agent === null ? {} : { agent }) });
+          const prepareMigration = async (selection: {
+            datasetId: string;
+            descriptorPath: string;
+            migrationPath: string;
+          }) => {
+            if (migrations.size + preparingMigrations >= 8)
+              throw new Error(
+                "Too many Collection changes await approval. Finish or discard a review.",
+              );
+            preparingMigrations++;
+            const review = createLocalDatasetMigrations(migrationAuthority);
+            try {
+              if (!capturesFirst) {
+                await flushSourceCapture();
+                current();
+              }
+              const prepared = await withSourceAdapter((adapter) =>
+                review.prepareMigration({ ...selection, adapter, signal: operation.signal }),
+              );
+              migrationAuthority.assertCurrent();
+              const { signal } = operation;
+              const preparationId = prepared.preparationId;
+              const clear = () => {
+                migrations.delete(preparationId);
+                signal.removeEventListener("abort", expire);
+                clearTimeout(timer);
+              };
+              const expire = () => {
+                clear();
+              };
+              const timer = setTimeout(expire, Math.max(0, prepared.expiresAtMs - Date.now()));
+              timer.unref();
+              migrations.set(prepared.preparationId, {
+                caller,
+                workspaceId: input.workspaceId,
+                signal: operation.signal,
+                scope: operation.scope,
+                credentialGeneration,
+                review: structuredClone(prepared),
+                clear,
+              });
+              operation.signal.addEventListener("abort", expire, { once: true });
+              return prepared;
+            } finally {
+              review.clear();
+              preparingMigrations--;
+            }
+          };
+          if (input.action === "deletePreview") {
+            if (!data.deletePreview)
+              throw new Error("Collection deletion is unavailable. Update dohc and try again.");
+            const result = DatasetDeletePreview.parse(await data.deletePreview(input));
+            current();
+            if (
+              result.cursor.workspaceId !== input.workspaceId ||
+              result.cursor.datasetId !== input.datasetId
+            )
+              throw new Error("This deletion review belongs to another Collection.");
+            return { kind: "delete-preview" as const, ...result };
+          }
+          if (input.action === "delete") {
+            if (
+              input.expected.workspaceId !== input.workspaceId ||
+              input.expected.datasetId !== input.datasetId
+            )
+              throw new Error("This deletion belongs to another Collection.");
+            if (!data.deleteDataset)
+              throw new Error("Collection deletion is unavailable. Update dohc and try again.");
+            const result = DatasetDeleted.parse(await data.deleteDataset(input));
+            current();
+            if (result.datasetId !== input.datasetId)
+              throw new Error(
+                "dohc did not confirm this Collection deletion. Refresh the Collection.",
+              );
+            return { kind: "deleted" as const, ...result };
+          }
+          if (input.action === "lifecycle") {
+            if (!data.lifecycle) throw new Error("Collection archive controls are unavailable.");
+            const result = await data.lifecycle(input);
+            current();
+            return { kind: "lifecycle" as const, ...result };
+          }
+          if (input.action === "archive" || input.action === "restore") {
+            const action = data[input.action];
+            if (!action) throw new Error("Collection archive controls are unavailable.");
+            const result = await action(input);
+            current();
+            return { kind: "lifecycle-updated" as const, ...result };
+          }
+          if (input.action === "pendingAttempts") {
+            if (!data.pendingAttempts) throw new Error("Pending submission review is unavailable.");
+            const result = await data.pendingAttempts(input);
+            current();
+            return { kind: "pending-attempts" as const, ...result };
+          }
+          if (input.action === "reconcileAttempt") {
+            if (!data.reconcileAttempt)
+              throw new Error("Pending submission review is unavailable.");
+            const result = await data.reconcileAttempt(input);
+            current();
+            return { kind: "attempt-reconciled" as const, ...result };
+          }
+          if (input.action === "cancelAttempt") {
+            if (!data.cancelAttempt)
+              throw new Error("Pending submission cancellation is unavailable.");
+            const result = await data.cancelAttempt(input);
+            current();
+            return { kind: "attempt-cancelled" as const, ...result };
+          }
+          if (input.action === "historyRevision") {
+            if (!data.historyRevision)
+              throw new Error(
+                "Saved Collection rules are unavailable. Update the host and try again.",
+              );
+            const result = DatasetHistoryRevision.parse(await data.historyRevision(input));
+            current();
+            if (
+              result.revision.datasetId !== input.datasetId ||
+              result.revision.revisionSha256 !== input.revisionSha256
+            )
+              throw new Error("This revision belongs to another Collection change.");
+            return { kind: "history-revision" as const, ...result };
+          }
+          if (input.action === "prepareHistoryRestore") {
+            if (!data.historyRevision)
+              throw new Error(
+                "Saved Collection rules are unavailable. Update the host and try again.",
+              );
+            const approved = await data.approvedArtifacts(input.datasetId);
+            current();
+            if (
+              !approved.active ||
+              approved.revision.revision !== input.revision ||
+              approved.revision.revisionSha256 !== input.revisionSha256
+            )
+              throw new Error("The Collection changed. Refresh History before restoring rules.");
+            const saved = await data.historyRevision({
+              datasetId: input.datasetId,
+              revisionSha256: input.targetRevisionSha256,
+            });
+            current();
+            if (saved.revision.revisionSha256 !== input.targetRevisionSha256)
+              throw new Error("The saved rules differ from this selection. Refresh History.");
+            const changed = await data.historyRevision({
+              datasetId: input.datasetId,
+              revisionSha256: input.changedRevisionSha256,
+            });
+            current();
+            if (changed.revision.revisionSha256 !== input.changedRevisionSha256)
+              throw new Error("The selected change differs from History. Refresh History.");
+            const generated = generateDatasetHistoryRestore(approved, saved, changed);
+            const expected = describeDatasetRevision({
+              definition: generated.definition,
+              revision: approved.revision.revision + 1,
+              schemaSql: generated.schemaSql,
+              operationSource: generated.operationSource,
+            });
+            await dependencies.createSources(
+              operation.workspace,
+              generated.files,
+              operation.signal,
+            );
+            current();
+            const prepared = await prepareMigration({
+              datasetId: input.datasetId,
+              descriptorPath: generated.descriptorPath,
+              migrationPath: generated.migrationPath,
+            });
+            current();
+            if (
+              prepared.previousRevision.revisionSha256 !== approved.revision.revisionSha256 ||
+              prepared.revision.revisionSha256 !== expected.revisionSha256 ||
+              prepared.migrationSql !== generated.migrationSql
+            ) {
+              migrations.get(prepared.preparationId)?.clear();
+              await migrationAuthority.discardMigrationCandidate({
+                workspaceId: input.workspaceId,
+                datasetId: input.datasetId,
+                candidateId: prepared.candidate.candidateId,
+                signal: operation.signal,
+              });
+              throw new Error(
+                "The Collection changed while preparing this restore. Refresh History and review it again.",
+              );
+            }
+            return {
+              kind: "migration-prepared" as const,
+              ...DatasetMigrationPreparation.parse(prepared),
+            };
+          }
+          if (input.action === "history") {
+            if (!("history" in data) || !data.history)
+              throw new Error("Collection history is unavailable. Restart dohc and try again.");
+            const result = await data.history(input);
+            current();
+            // History names each automation as its Collection names it now.
+            const names = new Map<string, string | null>();
+            for (const entry of result.entries) {
+              const automationId = entry.automation?.automationId;
+              if (automationId !== undefined && !names.has(automationId))
+                names.set(
+                  automationId,
+                  (await dependencies.automationName?.(operation.workspace, automationId)) ?? null,
+                );
+            }
+            current();
+            return {
+              kind: "history" as const,
+              ...result,
+              entries: result.entries.map((entry) => {
+                const name = entry.automation && names.get(entry.automation.automationId);
+                return name && entry.automation
+                  ? { ...entry, automation: { ...entry.automation, name } }
+                  : entry;
+              }),
+            };
+          }
+          if (input.action === "permissions") {
+            if (!("permissions" in data) || !data.permissions)
+              throw new Error("Collection access is unavailable on this computer.");
+            const result = await data.permissions(input);
+            current();
+            const place = await dependencies.collectionPlace?.(
+              operation.workspace,
+              input.datasetId,
+              operation.signal,
+            );
+            current();
+            return { kind: "permissions" as const, ...result, ...(place ? { place } : {}) };
+          }
+          if (input.action === "setGrant" || input.action === "removeGrant") {
+            // A person reaches a Collection through the workspace's server, so it moves there first, once its owner agrees.
+            const place =
+              input.action === "setGrant"
+                ? await dependencies.collectionPlace?.(
+                    operation.workspace,
+                    input.datasetId,
+                    operation.signal,
+                  )
+                : undefined;
+            current();
+            if (input.action === "setGrant" && place?.kind === "here") {
+              if (!place.server || !dependencies.moveToServer)
+                throw new Error("Sync this workspace with a server before giving a person access.");
+              if (!input.moveToServer)
+                throw new Error(
+                  `Giving a person access moves this Collection to ${place.server.host}. It then works only while ${place.server.host} is reachable, and dohc can't move it back. Send moveToServer: true to agree.`,
+                );
+              await dependencies.moveToServer(
+                operation.workspace,
+                input.datasetId,
+                operation.signal,
+              );
+              current();
+            }
+            if (!("setGrant" in data) || !data.setGrant)
+              throw new Error("Collection access is unavailable on this computer.");
+            await data.setGrant(input);
+            current();
+            return { kind: "grant-updated" as const };
+          }
+          if (input.action === "describe") {
+            const result =
+              "inspect" in data && data.inspect
+                ? await data.inspect(input.datasetId, { includeArchived: input.includeArchived })
+                : {
+                    dataset: await data.describe(input.datasetId, {
+                      includeArchived: input.includeArchived,
+                    }),
+                  };
+            current();
+            return { kind: "description" as const, ...addressed(result) };
+          }
+          if (input.action === "upload") {
+            const description = await data.describe(input.datasetId);
+            current();
+            if (
+              !description.tables.some((table) =>
+                table.fields.some(
+                  (field) => field.fieldId === input.fieldId && field.type === "attachment",
+                ),
+              ) ||
+              !description.operations.some(
+                (action) => !action.readOnly && action.fieldIds.includes(input.fieldId),
+              )
+            )
+              throw new Error("Choose an editable Collection file field.");
+            const result = await data.upload({ ...input, signal: operation.signal });
+            current();
+            return { kind: "uploaded" as const, ...result };
+          }
+          if (input.action === "file") {
+            const result = await data.file({ ...input, signal: operation.signal });
+            current();
+            return { kind: "file" as const, ...result };
+          }
+          if (input.action === "createForm") {
+            const approved = await data.approvedArtifacts(input.datasetId);
+            current();
+            if (
+              !approved.active ||
+              approved.revision.revision !== input.revision ||
+              approved.revision.revisionSha256 !== input.revisionSha256
+            ) {
+              throw new Error(
+                "Collection rules changed. Reload the Collection before creating a form.",
+              );
+            }
+            const generated = generateDatasetFormSources({
+              ...input,
+              datasetPath: "datasetPath" in request ? request.datasetPath : "",
+              approvedRevision: approved.revision,
+            });
+            const files = Object.fromEntries(
+              Object.entries(generated.files).map(([path, source]) => [
+                `${input.appRoot}/${path}`,
+                source,
+              ]),
+            );
+            let created: string[] = [];
+            let failedStage: CreationStage = "write";
+            let rulesChanged = false;
+            formFailure = (error) => {
+              if (created.length === 0) throw error;
+              const remove =
+                rulesChanged ||
+                error instanceof SourceCreationConflict ||
+                error instanceof CreatedFileWriteError;
+              return (formPartial = {
+                kind: "partial",
+                created,
+                failedStage: error instanceof DatasetScopeError ? "scope" : failedStage,
+                reason: error instanceof Error ? error.message : String(error),
+                retry: {
+                  mode: remove ? "remove-and-retry" : "resume",
+                  instruction: remove
+                    ? "Review the listed files in Files, then remove them. Reload the Collection and create the form in an empty folder."
+                    : "Try again with the same form settings and folder. dohc keeps matching files and creates only missing files.",
+                },
+              });
+            };
+            try {
+              await dependencies.createSources(
+                operation.workspace,
+                files,
+                operation.signal,
+                (stage, paths) => {
+                  failedStage = stage;
+                  created = [...paths];
+                },
+              );
+              created = Object.keys(files);
+              current();
+              failedStage = "revision";
+              const latest = await data.approvedArtifacts(input.datasetId);
+              current();
+              if (!latest.active || latest.revision.revisionSha256 !== input.revisionSha256) {
+                rulesChanged = true;
+                throw new Error("Collection rules changed.");
+              }
+              return { kind: "form-created" as const, appRoot: input.appRoot, paths: created };
+            } catch (error) {
+              return formFailure(error);
+            }
+          }
+          if (input.action === "discard") {
+            (await localHost()).discard(input.preparationId);
+            return { kind: "discarded" as const };
+          }
+          if (input.action === "prepareSchemaChange" || input.action === "prepareRelationChoices") {
+            const approved = await data.approvedArtifacts(input.datasetId);
+            current();
+            if (!approved.active)
+              throw new Error(
+                "This Collection is unavailable. Reconnect to its host and try again.",
+              );
+            if (
+              approved.revision.revision !== input.revision ||
+              approved.revision.revisionSha256 !== input.revisionSha256
+            )
+              throw new Error(
+                "Collection rules changed. Refresh the Collection before changing fields.",
+              );
+            const generated =
+              input.action === "prepareSchemaChange"
+                ? generateDatasetSchemaChange({ ...approved, change: input.change })
+                : generateDatasetRelationChoices({
+                    ...approved,
+                    tableId: input.tableId,
+                    fieldId: input.fieldId,
+                    labelFieldId: input.labelFieldId,
+                  });
+            const expected = describeDatasetRevision({
+              definition: generated.definition,
+              revision: input.revision + 1,
+              schemaSql: generated.schemaSql,
+              operationSource: generated.operationSource,
+            });
+            await dependencies.createSources(
+              operation.workspace,
+              generated.files,
+              operation.signal,
+            );
+            current();
+            const prepared = await prepareMigration({
+              datasetId: input.datasetId,
+              descriptorPath: generated.descriptorPath,
+              migrationPath: generated.migrationPath,
+            });
+            current();
+            if (
+              prepared.previousRevision.revisionSha256 !== input.revisionSha256 ||
+              prepared.revision.revisionSha256 !== expected.revisionSha256 ||
+              prepared.migrationSql !== generated.migrationSql
+            ) {
+              migrations.get(prepared.preparationId)?.clear();
+              await migrationAuthority.discardMigrationCandidate({
+                workspaceId: input.workspaceId,
+                datasetId: input.datasetId,
+                candidateId: prepared.candidate.candidateId,
+                signal: operation.signal,
+              });
+              throw new Error(
+                "The Collection change differs from this review. Refresh the Collection and prepare it again.",
+              );
+            }
+            return {
+              kind: "migration-prepared" as const,
+              ...DatasetMigrationPreparation.parse(prepared),
+            };
+          }
+          if (input.action === "prepareMigration") {
+            if (request.action !== "prepareMigration")
+              throw new Error("This Collection review changed. Prepare it again.");
+            const prepared = await prepareMigration({
+              ...input,
+              descriptorPath: request.datasetPath,
+            });
+            current();
+            return {
+              kind: "migration-prepared" as const,
+              ...DatasetMigrationPreparation.parse(prepared),
+            };
+          }
+          if (input.action === "askToApply") {
+            if (request.action !== "askToApply")
+              throw new Error("This Collection request changed. Ask again.");
+            const prepared = await prepareMigration({
+              datasetId: input.datasetId,
+              descriptorPath: request.datasetPath,
+              migrationPath: input.migrationPath,
+            });
+            let proposal: ReturnType<typeof collectionChangeProposal>;
+            // The file records the change; the person who applies it prepares it again.
+            try {
+              proposal = collectionChangeProposal(prepared, {
+                datasetPath: request.datasetPath,
+                migrationPath: input.migrationPath,
+                note: input.note ?? null,
+              });
+            } finally {
+              migrations.get(prepared.preparationId)?.clear();
+              await migrationAuthority.discardMigrationCandidate({
+                workspaceId: input.workspaceId,
+                datasetId: input.datasetId,
+                candidateId: prepared.candidate.candidateId,
+                signal: operation.signal,
+              });
+            }
+            current();
+            const folder = request.datasetPath.includes("/")
+              ? request.datasetPath.slice(0, request.datasetPath.lastIndexOf("/") + 1)
+              : "";
+            const path = `${folder}changes/${randomUUID()}.json`;
+            await dependencies.createSources(
+              operation.workspace,
+              {
+                [path]: `${JSON.stringify(proposal, null, 2)}
+`,
+              },
+              operation.signal,
+            );
+            current();
+            return { kind: "change-asked" as const, path, changeSha256: proposal.changeSha256 };
+          }
+          if (input.action === "invoke") {
+            try {
+              invokeSignal.throwIfAborted();
+              const result = await data.invoke({
+                ...input,
+                signal: invokeSignal,
+                ...(agent === null ? {} : { agent }),
+              });
+              current();
+              return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) };
+            } catch (error) {
+              current();
+              if (isAppBackendRuntimeError(error))
+                return { kind: "refused" as const, ...error.refusal };
+              throw error;
+            }
+          }
+          const host = await localHost();
+          if (input.action === "approve") {
+            const revision = await host.approve({
+              ...input,
+              approvalAgent,
+              signal: operation.signal,
+            });
+            current();
+            return { kind: "approved" as const, revision };
+          }
+          let descriptorPath: string;
+          let expectedRevision: string | undefined;
+          if (input.action === "create") {
+            const generated = generateDatasetSources(input.definition);
+            expectedRevision = describeDatasetRevision({
+              definition: generated.definition,
+              revision: 1,
+              schemaSql: generated.files[generated.definition.schemaPath]!,
+              operationSource: generated.files[generated.definition.operationsPath]!,
+            }).revisionSha256;
+            descriptorPath = Object.keys(generated.files).find(
+              (path) => path === "dataset.json" || path.endsWith("/dataset.json"),
+            )!;
+            await dependencies.createSources(
+              operation.workspace,
+              generated.files,
+              operation.signal,
+            );
+            current();
+          } else {
+            descriptorPath = input.descriptorPath;
+            await flushSourceCapture();
+            current();
+          }
+          const prepared = await withSourceAdapter((adapter) =>
+            host.prepare({ descriptorPath, adapter, signal: operation.signal }),
+          );
           current();
-          return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) };
-        } catch (error) {
+          if (input.action === "prepare")
+            return { kind: "prepared" as const, ...DatasetPreparation.parse(prepared) };
+          if (prepared.revision.revisionSha256 !== expectedRevision) {
+            host.discard(prepared.preparationId);
+            throw new Error(
+              "Collection source differs from these fields. Choose another folder or review the saved source.",
+            );
+          }
+          // The creation control approves the generated fields and actions it just displayed.
+          const revision = await host.approve({
+            preparationId: prepared.preparationId,
+            revisionSha256: prepared.revision.revisionSha256,
+            approvalAgent,
+            signal: operation.signal,
+          });
           current();
-          if (isAppBackendRuntimeError(error)) return { kind: "refused" as const, ...error.refusal };
-          throw error;
-        }
-      }
-      const host = await localHost();
-      if (input.action === "approve") {
-        const revision = await host.approve({ ...input, approvalAgent, signal: operation.signal });
-        current();
-        return { kind: "approved" as const, revision };
-      }
-      let descriptorPath: string;
-      let expectedRevision: string | undefined;
-      if (input.action === "create") {
-        const generated = generateDatasetSources(input.definition);
-        expectedRevision = describeDatasetRevision({ definition: generated.definition, revision: 1,
-          schemaSql: generated.files[generated.definition.schemaPath]!, operationSource: generated.files[generated.definition.operationsPath]!,
-        }).revisionSha256;
-        descriptorPath = Object.keys(generated.files).find(path => path === "dataset.json" || path.endsWith("/dataset.json"))!;
-        await dependencies.createSources(operation.workspace, generated.files, operation.signal);
-        current();
-      } else {
-        descriptorPath = input.descriptorPath;
-        await flushSourceCapture(); current();
-      }
-      const prepared = await withSourceAdapter(adapter => host.prepare({ descriptorPath, adapter, signal: operation.signal }));
-      current();
-      if (input.action === "prepare") return { kind: "prepared" as const, ...DatasetPreparation.parse(prepared) };
-      if (prepared.revision.revisionSha256 !== expectedRevision) {
-        host.discard(prepared.preparationId);
-        throw new Error("Collection source differs from these fields. Choose another folder or review the saved source.");
-      }
-      // The creation control approves the generated fields and actions it just displayed.
-      const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256, approvalAgent, signal: operation.signal });
-      current();
-      return { kind: "approved" as const, revision };
-      });
+          return { kind: "approved" as const, revision };
+        },
+      );
     } catch (error) {
       if (formPartial) return formPartial;
       if (formFailure) return formFailure(new DatasetScopeError(error));
       throw error;
-    } finally { if (invocationId) invocations.delete(invocationId); }
+    } finally {
+      if (invocationId) invocations.delete(invocationId);
+    }
   };
 }

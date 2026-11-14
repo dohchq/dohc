@@ -1,7 +1,12 @@
 import type { Stats } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { notARealFolderRefusal, notOnlyYoursRefusal, outsideWorkspaceRefusal, type DohcPathGuard } from "@dohc/workspace-core";
+import {
+  notARealFolderRefusal,
+  notOnlyYoursRefusal,
+  outsideWorkspaceRefusal,
+  type DohcPathGuard,
+} from "@dohc/workspace-core";
 import { ownedFileRefusal } from "@dohc/workspace-core/owned-file";
 import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
@@ -21,7 +26,6 @@ export interface LocalStateWorkspace {
   readonly attachmentId?: symbol;
 }
 
-/** What the engine's current open of a workspace said about `.dohc/local`. */
 export interface LocalStateBindings {
   currentBinding(workspace: LocalStateWorkspace): { readonly localStateReady: boolean } | null;
   /** The engine open of the workspace already under way, or null. Never starts one. */
@@ -44,7 +48,8 @@ export type LocalStateRefusal = "not-opened" | "not-excluded";
 
 const REFUSAL_WORDS: Record<LocalStateRefusal, string> = {
   "not-opened": "dohc has not finished opening this workspace. Try again when it opens.",
-  "not-excluded": "dohc could not keep this workspace's .dohc/local out of iCloud Drive, so it saves nothing there. Restart dohc to try again.",
+  "not-excluded":
+    "dohc could not keep this workspace's .dohc/local out of iCloud Drive, so it saves nothing there. Restart dohc to try again.",
 };
 
 /**
@@ -52,7 +57,10 @@ const REFUSAL_WORDS: Record<LocalStateRefusal, string> = {
  * refusal a person sees gives words that name what it did not save.
  */
 export class LocalStateUnavailableError extends Error {
-  constructor(readonly refusal: LocalStateRefusal, message = REFUSAL_WORDS[refusal]) {
+  constructor(
+    readonly refusal: LocalStateRefusal,
+    message = REFUSAL_WORDS[refusal],
+  ) {
     super(message);
     this.name = "LocalStateUnavailableError";
   }
@@ -60,7 +68,6 @@ export class LocalStateUnavailableError extends Error {
 
 let bindings: LocalStateBindings | null = null;
 
-/** The engine sessions set this once; readiness lives and ends with their bindings. */
 export function readLocalStateFrom(source: LocalStateBindings | null): void {
   bindings = source;
 }
@@ -98,7 +105,10 @@ export async function localStateDir(workspace: LocalStateWorkspace): Promise<str
  * for runs. Starts no open. Returns at once when no open is under way, and
  * when `signal` aborts.
  */
-export async function localStateOpened(workspace: LocalStateWorkspace, signal?: AbortSignal): Promise<void> {
+export async function localStateOpened(
+  workspace: LocalStateWorkspace,
+  signal?: AbortSignal,
+): Promise<void> {
   let opening: Promise<unknown> | null = null;
   try {
     opening = bindings?.openInProgress?.(workspace) ?? null;
@@ -107,10 +117,18 @@ export async function localStateOpened(workspace: LocalStateWorkspace, signal?: 
   }
   if (opening === null || signal?.aborted) return;
   let stop = () => {};
-  const stopped = new Promise<void>((resolve) => { stop = resolve; });
+  const stopped = new Promise<void>((resolve) => {
+    stop = resolve;
+  });
   signal?.addEventListener("abort", stop, { once: true });
   try {
-    await Promise.race([opening.then(() => undefined, () => undefined), stopped]);
+    await Promise.race([
+      opening.then(
+        () => undefined,
+        () => undefined,
+      ),
+      stopped,
+    ]);
   } finally {
     signal?.removeEventListener("abort", stop);
   }
@@ -134,16 +152,23 @@ export type LocalFolderProblem = "link" | "not-folder" | "other-owner" | "unread
 
 // In the words the engine's open refuses the workspace with. Each names its
 // own way out, because replacing a file in the folder can't fix the folder.
-export const LOCAL_FOLDER_WORDS: Record<LocalFolderProblem, readonly [fact: string, fix: string]> = {
-  link: ["is a link", "Put what it links to in its place, then try again."],
-  "not-folder": ["is not a folder", "Rename or move it, then try again."],
-  "other-owner": ["belongs to another user", "Make it and everything in it yours again, then try again."],
-  unreadable: ["can't be read", "Make sure you can open it, then try again."],
-};
+export const LOCAL_FOLDER_WORDS: Record<LocalFolderProblem, readonly [fact: string, fix: string]> =
+  {
+    link: ["is a link", "Put what it links to in its place, then try again."],
+    "not-folder": ["is not a folder", "Rename or move it, then try again."],
+    "other-owner": [
+      "belongs to another user",
+      "Make it and everything in it yours again, then try again.",
+    ],
+    unreadable: ["can't be read", "Make sure you can open it, then try again."],
+  };
 
 /** `.dohc` or `.dohc/local` is not a folder this user owns, so dohc trusts nothing in it. */
 export class LocalStateFolderError extends Error {
-  constructor(readonly shown: ".dohc" | ".dohc/local", readonly problem: LocalFolderProblem) {
+  constructor(
+    readonly shown: ".dohc" | ".dohc/local",
+    readonly problem: LocalFolderProblem,
+  ) {
     const [fact, fix] = LOCAL_FOLDER_WORDS[problem];
     super(`This workspace's ${shown} ${fact}. ${fix}`);
     this.name = "LocalStateFolderError";
@@ -212,7 +237,10 @@ export function currentLocalStateOpen(workspace: LocalStateWorkspace): LocalStat
  * closed in between, what `read` found is dropped. Otherwise does not wait
  * for the engine. Creates nothing.
  */
-export async function readOwnedLocalState<T>(rootPath: string, read: (dir: string | null) => Promise<T>): Promise<T> {
+export async function readOwnedLocalState<T>(
+  rootPath: string,
+  read: (dir: string | null) => Promise<T>,
+): Promise<T> {
   const dir = await ownedLocalStateDir(rootPath);
   if (process.platform !== "win32" || dir === null) return read(dir);
   // An open that holds the folder now made private the folder at its path,
@@ -224,7 +252,6 @@ export async function readOwnedLocalState<T>(rootPath: string, read: (dir: strin
   return found;
 }
 
-// The folder for readOwnedLocalState.
 async function ownedLocalStateDir(rootPath: string): Promise<string | null> {
   const dohc = await folderProblem(join(rootPath, ".dohc"));
   if (dohc === "missing") return null;
@@ -254,24 +281,33 @@ function changeableByOthers(stats: Stats): boolean {
  * is not a folder in the workspace that only this user can change. Never
  * creates `.dohc/local`.
  */
-export async function localStateFolder(workspace: LocalStateWorkspace, name: string, guard: DohcPathGuard): Promise<string> {
+export async function localStateFolder(
+  workspace: LocalStateWorkspace,
+  name: string,
+  guard: DohcPathGuard,
+): Promise<string> {
   const parts = name.split("/");
   const shown = guard.path.split("/");
   let dir = await localStateDir(workspace);
   for (const [index, part] of parts.entries()) {
     dir = join(dir, part);
-    const partGuard = { ...guard, path: shown.slice(0, shown.length - (parts.length - 1 - index)).join("/") };
+    const partGuard = {
+      ...guard,
+      path: shown.slice(0, shown.length - (parts.length - 1 - index)).join("/"),
+    };
     // Something else at the path fails mkdir with a raw errno, and the checks
     // below name it. Two writers can both find it missing.
     await mkdir(dir, { mode: 0o700 }).catch(async (error: unknown) => {
       if ((await lstat(dir).catch(() => null)) === null) throw error;
     });
     const stats = await lstat(dir);
-    if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(notARealFolderRefusal(partGuard, stats));
+    if (stats.isSymbolicLink() || !stats.isDirectory())
+      throw new Error(notARealFolderRefusal(partGuard, stats));
     if (changeableByOthers(stats)) throw new Error(notOnlyYoursRefusal(partGuard));
   }
   // With `.dohc` and `.dohc/local` real folders, only a mount leads out.
-  if (!isInside(await realpath(workspace.rootPath), await realpath(dir))) throw new Error(outsideWorkspaceRefusal(guard));
+  if (!isInside(await realpath(workspace.rootPath), await realpath(dir)))
+    throw new Error(outsideWorkspaceRefusal(guard));
   return dir;
 }
 
@@ -302,12 +338,20 @@ export async function ownedSqliteFiles(folder: string, name: string): Promise<bo
  * as readOwnedLocalState does. Creates nothing.
  */
 export function readOwnedLocalStateFolder<T>(
-  rootPath: string, name: string, read: (dir: string | null | "unusable") => Promise<T>,
+  rootPath: string,
+  name: string,
+  read: (dir: string | null | "unusable") => Promise<T>,
 ): Promise<T> {
-  return readOwnedLocalState(rootPath, async (local) => read(local === null ? null : await folderIn(rootPath, local, name)));
+  return readOwnedLocalState(rootPath, async (local) =>
+    read(local === null ? null : await folderIn(rootPath, local, name)),
+  );
 }
 
-async function folderIn(rootPath: string, local: string, name: string): Promise<string | null | "unusable"> {
+async function folderIn(
+  rootPath: string,
+  local: string,
+  name: string,
+): Promise<string | null | "unusable"> {
   let dir = local;
   for (const part of name.split("/")) {
     dir = join(dir, part);
@@ -316,7 +360,8 @@ async function folderIn(rootPath: string, local: string, name: string): Promise<
       throw error;
     });
     if (stats === null) return null;
-    if (stats.isSymbolicLink() || !stats.isDirectory() || changeableByOthers(stats)) return "unusable";
+    if (stats.isSymbolicLink() || !stats.isDirectory() || changeableByOthers(stats))
+      return "unusable";
   }
   return isInside(await realpath(rootPath), await realpath(dir)) ? dir : "unusable";
 }

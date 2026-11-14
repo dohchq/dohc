@@ -7,10 +7,26 @@ import { join } from "node:path";
 import { test, expect, type BrowserContext } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
-import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack } from "./helpers/selfHostOnboarding";
-import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, waitForWorkspaceFile, waitForWorkspaceReady, writeWorkspaceFiles } from "./helpers/workspace";
+import {
+  approveDesktop,
+  createVerifiedAccount,
+  openDesktopApproval,
+  startSelfHostOnboardingStack,
+} from "./helpers/selfHostOnboarding";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  explorerRow,
+  openWorkspaceFromFirstRun,
+  waitForWorkspaceFile,
+  waitForWorkspaceReady,
+  writeWorkspaceFiles,
+} from "./helpers/workspace";
 
-test.skip(!process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1", "Run with disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
+test.skip(
+  !process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1",
+  "Run with disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.",
+);
 
 async function readFileIfPresent(path: string): Promise<string> {
   try {
@@ -21,7 +37,10 @@ async function readFileIfPresent(path: string): Promise<string> {
   }
 }
 
-test("@self-host-onboarding a real account connects two fresh desktops and keeps synced work after restart", async ({ browser, request }, testInfo) => {
+test("@self-host-onboarding a real account connects two fresh desktops and keeps synced work after restart", async ({
+  browser,
+  request,
+}, testInfo) => {
   test.setTimeout(240_000);
   const signal = AbortSignal.timeout(testInfo.timeout - 10_000);
   const first = await createTempWorkspace();
@@ -32,27 +51,42 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
   let ownerBrowser: BrowserContext | undefined;
   let otherBrowser: BrowserContext | undefined;
   let bodyFailure: { error: unknown } | undefined;
-  const account = { email: `desktop-${randomUUID()}@example.test`, password: `Desktop-proof-${randomUUID()}` };
+  const account = {
+    email: `desktop-${randomUUID()}@example.test`,
+    password: `Desktop-proof-${randomUUID()}`,
+  };
   try {
     stack = await startSelfHostOnboardingStack(first.baseDir, { signal });
     expect((await request.get(`${stack.account.origin}/ready`)).status()).toBe(200);
-    expect(await (await request.get(`${stack.account.origin}/.well-known/dohc-server`)).json()).toMatchObject({
-      version: 1, authUrl: stack.account.origin, relayUrl: stack.relayUrl,
+    expect(
+      await (await request.get(`${stack.account.origin}/.well-known/dohc-server`)).json(),
+    ).toMatchObject({
+      version: 1,
+      authUrl: stack.account.origin,
+      relayUrl: stack.relayUrl,
     });
     // A fake bearer must fail against this running relay, not merely be absent in our fixture code.
-    expect((await request.post(`${stack.relayUrl}/sync/workspaces`, {
-      headers: { authorization: "Bearer test:must-not-authenticate" },
-      data: { workspaceId: "must-not-be-created" },
-    })).status()).toBe(401);
-    expect((await request.post(`${stack.account.origin}/test/device/approve`, {
-      data: { userCode: "NO-TEST-AUTH", email: account.email },
-    })).status()).toBe(404);
+    expect(
+      (
+        await request.post(`${stack.relayUrl}/sync/workspaces`, {
+          headers: { authorization: "Bearer test:must-not-authenticate" },
+          data: { workspaceId: "must-not-be-created" },
+        })
+      ).status(),
+    ).toBe(401);
+    expect(
+      (
+        await request.post(`${stack.account.origin}/test/device/approve`, {
+          data: { userCode: "NO-TEST-AUTH", email: account.email },
+        })
+      ).status(),
+    ).toBe(404);
 
-    await writeWorkspaceFiles(first, [{ path: "welcome.md", contents: "# Self-hosted workspace\n\nCreated before connecting.\n" }]);
+    await writeWorkspaceFiles(first, [
+      { path: "welcome.md", contents: "# Self-hosted workspace\n\nCreated before connecting.\n" },
+    ]);
     left = await launchDesktopApp({ workspace: first });
     const workspace = await openWorkspaceFromFirstRun(left.page, first);
-    // Sync and sharing lives in Settings. Signed out, it opens the connect
-    // flow; once signed in, the flow hands back to the page and its switch.
     await left.page.getByTestId(activityPin("settings")).click();
     await left.page.getByTestId(settingsNavPin("cloud")).click();
     await left.page.getByTestId("settings-cloud-connect").click();
@@ -69,8 +103,14 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     await expect(left.page.getByTestId("cloud-sync-code")).toBeVisible();
     const syncCode = await holdSystemClipboard(test.info(), async (remainingMs) => {
       await left!.page.getByTestId("cloud-copy-sync-code").click({ timeout: remainingMs() });
-      const syncCode = await left!.page.getByTestId("cloud-sync-code").textContent({ timeout: remainingMs() });
-      await expect.poll(() => left!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toBe(syncCode);
+      const syncCode = await left!.page
+        .getByTestId("cloud-sync-code")
+        .textContent({ timeout: remainingMs() });
+      await expect
+        .poll(() => left!.app.evaluate(({ clipboard }) => clipboard.readText()), {
+          timeout: remainingMs(),
+        })
+        .toBe(syncCode);
       return await left!.app.evaluate(({ clipboard }) => clipboard.readText());
     });
     expect(syncCode).toBe(await left.page.getByTestId("cloud-sync-code").textContent());
@@ -89,16 +129,27 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     await right.page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(right.page);
     await waitForWorkspaceFile(right.page, workspace.workspaceId, "welcome.md");
-    await expect.poll(() => readFileIfPresent(join(second.rootPath, "welcome.md"))).toContain("Created before connecting.");
+    await expect
+      .poll(() => readFileIfPresent(join(second.rootPath, "welcome.md")))
+      .toContain("Created before connecting.");
 
     await explorerRow(left.page, "welcome.md").click();
-    await expect(left.page.getByTestId("markdown-editor")).toContainText("Created before connecting.");
+    await expect(left.page.getByTestId("markdown-editor")).toContainText(
+      "Created before connecting.",
+    );
     await left.page.getByTestId("markdown-editor").click();
     await left.page.keyboard.press(DOCUMENT_END);
     await left.page.keyboard.type(" Edited through the connected desktop.");
-    await expect(left.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
-    await expect.poll(() => readFileIfPresent(join(first.rootPath, "welcome.md"))).toContain("Edited through the connected desktop.");
-    await expect.poll(() => readFileIfPresent(join(second.rootPath, "welcome.md")), { timeout: 90_000 }).toContain("Edited through the connected desktop.");
+    await expect(left.page.getByTestId("markdown-save-state")).toHaveAttribute(
+      "data-state",
+      "saved",
+    );
+    await expect
+      .poll(() => readFileIfPresent(join(first.rootPath, "welcome.md")))
+      .toContain("Edited through the connected desktop.");
+    await expect
+      .poll(() => readFileIfPresent(join(second.rootPath, "welcome.md")), { timeout: 90_000 })
+      .toContain("Edited through the connected desktop.");
     const joinedLogs = [...right.logs];
     await right.close();
     right = undefined;
@@ -106,10 +157,21 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     await openWorkspaceFromFirstRun(right.page, second);
     await waitForWorkspaceFile(right.page, workspace.workspaceId, "welcome.md");
     await explorerRow(right.page, "welcome.md").click();
-    await expect(right.page.getByTestId("markdown-editor")).toContainText("Edited through the connected desktop.");
-    const status = await right.page.evaluate(() => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.cloudStatus({}));
-    expect(status).toMatchObject({ connected: true, email: account.email, serverUrl: stack.account.origin, relayUrl: stack.relayUrl });
-    expect(left.logs.concat(joinedLogs, right.logs).filter(entry => entry.level === "pageerror")).toEqual([]);
+    await expect(right.page.getByTestId("markdown-editor")).toContainText(
+      "Edited through the connected desktop.",
+    );
+    const status = await right.page.evaluate(() =>
+      (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.cloudStatus({}),
+    );
+    expect(status).toMatchObject({
+      connected: true,
+      email: account.email,
+      serverUrl: stack.account.origin,
+      relayUrl: stack.relayUrl,
+    });
+    expect(
+      left.logs.concat(joinedLogs, right.logs).filter((entry) => entry.level === "pageerror"),
+    ).toEqual([]);
     await right.close();
     right = undefined;
     await left.close();
@@ -119,17 +181,23 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     throw error;
   } finally {
     const cleanup = await Promise.allSettled([
-      otherBrowser?.close(), ownerBrowser?.close(),
-      cleanupDesktopWorkspace(right, second), left?.close(),
+      otherBrowser?.close(),
+      ownerBrowser?.close(),
+      cleanupDesktopWorkspace(right, second),
+      left?.close(),
     ]);
-    cleanup.push(...await Promise.allSettled([stack?.close()]));
-    cleanup.push(...await Promise.allSettled([first.cleanup()]));
-    const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    cleanup.push(...(await Promise.allSettled([stack?.close()])));
+    cleanup.push(...(await Promise.allSettled([first.cleanup()])));
+    const failures = cleanup.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
     if (failures.length) {
-      const errors = [...new Set([
-        ...(bodyFailure ? [bodyFailure.error] : []),
-        ...failures.map(result => result.reason),
-      ])];
+      const errors = [
+        ...new Set([
+          ...(bodyFailure ? [bodyFailure.error] : []),
+          ...failures.map((result) => result.reason),
+        ]),
+      ];
       if (bodyFailure && errors.length === 1) throw bodyFailure.error;
       throw new AggregateError(errors, "Self-host onboarding cleanup failed.");
     }

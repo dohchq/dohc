@@ -16,21 +16,36 @@ async function migrate(pool: Pool): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("select pg_advisory_lock(hashtext('dohc_migrations'))");
-    try { await applyMigrations(client); }
-    finally { await client.query("select pg_advisory_unlock(hashtext('dohc_migrations'))"); }
-  } finally { client.release(); }
+    try {
+      await applyMigrations(client);
+    } finally {
+      await client.query("select pg_advisory_unlock(hashtext('dohc_migrations'))");
+    }
+  } finally {
+    client.release();
+  }
 }
 
-export async function startAccountServer(options: { relayUrl?: string; shareUrl?: string; port?: number; publicOrigin?: string; signal?: AbortSignal } = {}) {
+export async function startAccountServer(
+  options: {
+    relayUrl?: string;
+    shareUrl?: string;
+    port?: number;
+    publicOrigin?: string;
+    signal?: AbortSignal;
+  } = {},
+) {
   const connectionString = process.env.POSTGRES_URL;
   if (!connectionString || process.env.DOHC_REQUIRE_POSTGRES !== "1") {
-    throw new Error("Account browser acceptance requires an explicit disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
+    throw new Error(
+      "Account browser acceptance requires an explicit disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.",
+    );
   }
   // Under the full JS gate a 2 s connect bound timed out against a healthy
   // database; a refused connection still fails at once.
   const pool = new Pool({ connectionString, connectionTimeoutMillis: 30_000 });
   await migrate(pool);
-  const port = options.port ?? await availablePort();
+  const port = options.port ?? (await availablePort());
   const listenOrigin = `http://127.0.0.1:${port}`;
   const origin = options.publicOrigin ?? listenOrigin;
   const mail = await startSmtpCapture();
@@ -57,22 +72,38 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
     stdio: ["ignore", "pipe", "pipe"],
   });
   let logs = "";
-  child.stdout.on("data", chunk => { logs = (logs + String(chunk)).slice(-16_384); });
-  child.stderr.on("data", chunk => { logs = (logs + String(chunk)).slice(-16_384); });
+  child.stdout.on("data", (chunk) => {
+    logs = (logs + String(chunk)).slice(-16_384);
+  });
+  child.stderr.on("data", (chunk) => {
+    logs = (logs + String(chunk)).slice(-16_384);
+  });
   let exited = false;
-  const killOnExit = () => { child.kill(); };
+  const killOnExit = () => {
+    child.kill();
+  };
   process.once("exit", killOnExit);
-  const exit = new Promise<void>(resolve => child.once("close", () => {
-    exited = true;
-    process.off("exit", killOnExit);
-    resolve();
-  }));
+  const exit = new Promise<void>((resolve) =>
+    child.once("close", () => {
+      exited = true;
+      process.off("exit", killOnExit);
+      resolve();
+    }),
+  );
   const controller = new AbortController();
-  const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
   let lastReadyBody = "No HTTP response.";
   let childError: Error | undefined;
-  const onError = (error: Error) => { childError = error; controller.abort(error); };
-  const onExit = (code: number | null, exitSignal: NodeJS.Signals | null) => controller.abort(new Error(`Account server exited before readiness (code ${code}, signal ${exitSignal}).`));
+  const onError = (error: Error) => {
+    childError = error;
+    controller.abort(error);
+  };
+  const onExit = (code: number | null, exitSignal: NodeJS.Signals | null) =>
+    controller.abort(
+      new Error(`Account server exited before readiness (code ${code}, signal ${exitSignal}).`),
+    );
   child.on("error", onError);
   child.once("exit", onExit);
   try {
@@ -96,12 +127,19 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
     await pool.end();
     const failure = signal.aborted ? signal.reason : error;
     const reason = failure instanceof Error ? failure.message : String(failure);
-    throw new Error(`Account server startup failed: ${reason}\nLast /ready body: ${lastReadyBody}\nLogs:\n${logs}`, { cause: failure });
+    throw new Error(
+      `Account server startup failed: ${reason}\nLast /ready body: ${lastReadyBody}\nLogs:\n${logs}`,
+      { cause: failure },
+    );
   } finally {
     child.off("exit", onExit);
   }
   return {
-    origin, listenOrigin, mail, pool, pid: child.pid,
+    origin,
+    listenOrigin,
+    mail,
+    pool,
+    pid: child.pid,
     logs: () => logs,
     async close() {
       try {
@@ -124,6 +162,6 @@ async function availablePort(): Promise<number> {
   });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("No account server port.");
-  await new Promise<void>(resolve => server.close(() => resolve()));
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   return address.port;
 }

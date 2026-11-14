@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  // oxfmt's defaults, with no style options. This file only says what stays unformatted.
+  "ignorePatterns": [
+    // JavaScript and TypeScript only. Other file types include fixtures and hashed inputs.
+    "**/*.{json,jsonc,json5,md,mdx,css,scss,less,html,vue,yml,yaml,toml,graphql,orig}",
+    "pnpm-lock.yaml",
+    "vendor/**",
+    "**/dist/**",
+    "**/out/**",
+    // The Rust crates own their scripts, generators, and fixtures. Some are pinned by hash.
+    "crates/**",
+    // An example app's source is hashed into its pinned revision, so its text stays as published.
+    "examples/**",
+    // scripts/capabilities/generation.main.json pins this generator's SHA-256.
+    "scripts/capabilities/generate-main-inventories.ts"
+  ]
+}

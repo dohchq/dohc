@@ -10,7 +10,6 @@ export interface OpenPathFileSystem {
   hasManifest(folder: string): boolean;
   // Which folder this is on disk, or null when the disk cannot say.
   folderIdentity(realPath: string): FolderIdentity | null;
-  // The names a folder lists, or null when it cannot be read.
   folderNames(realPath: string): readonly string[] | null;
 }
 
@@ -62,12 +61,21 @@ export function resolveOpenPathTarget<Workspace extends { rootPath: string }>(
   });
   // The file's place comes from the folder that matched, in the opened path's
   // capitals, so it holds under the registered root's own spelling.
-  const registered = deepestRootSync(folder, roots, (at) => deps.fs.folderIdentity(at), (at) => deps.fs.folderNames(at));
-  if (registered) return { kind: "workspace", workspace: registered.entry, file: fileIn(registered.anchor) };
+  const registered = deepestRootSync(
+    folder,
+    roots,
+    (at) => deps.fs.folderIdentity(at),
+    (at) => deps.fs.folderNames(at),
+  );
+  if (registered)
+    return { kind: "workspace", workspace: registered.entry, file: fileIn(registered.anchor) };
 
   // A manifest at a root dohc cannot use, such as the home folder, is passed over.
   for (let current = folder; ; current = dirname(current)) {
-    if (deps.fs.hasManifest(current) && validateWorkspaceRootChoice(current, home, deps.platform).ok) {
+    if (
+      deps.fs.hasManifest(current) &&
+      validateWorkspaceRootChoice(current, home, deps.platform).ok
+    ) {
       return { kind: "folder", rootPath: current, hasManifest: true, file: fileIn(current) };
     }
     if (dirname(current) === current) break;
@@ -75,9 +83,13 @@ export function resolveOpenPathTarget<Workspace extends { rootPath: string }>(
 
   if (!validateWorkspaceRootChoice(folder, home, deps.platform).ok) {
     const where = relative(home, folder) === "" ? "Your home folder" : "The top folder of a disk";
-    throw new Error(`${where} cannot be a workspace. ${kind === "file"
-      ? "Move the file into a folder, then open it again."
-      : "Open a folder inside it."}`);
+    throw new Error(
+      `${where} cannot be a workspace. ${
+        kind === "file"
+          ? "Move the file into a folder, then open it again."
+          : "Open a folder inside it."
+      }`,
+    );
   }
   return { kind: "folder", rootPath: folder, hasManifest: false, file: fileIn(folder) };
 }
@@ -100,7 +112,10 @@ export function createOpenPathOpener<Workspace extends { rootPath: string }, Win
   let queue: Promise<unknown> = Promise.resolve();
   async function open(path: string, window: Window | undefined): Promise<Workspace | null> {
     const target = resolveOpenPathTarget(path, {
-      workspaces: deps.workspaces(), home: deps.home(), platform: deps.platform, fs: deps.fs,
+      workspaces: deps.workspaces(),
+      home: deps.home(),
+      platform: deps.platform,
+      fs: deps.fs,
     });
     if (!target) return null;
     let workspace: Workspace;

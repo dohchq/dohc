@@ -40,8 +40,13 @@ const FIX: Record<Problem, string> = {
 /** dohc did not move an entry into the workspace trash, because of what is, or may be, only in iCloud Drive. */
 export class ICloudCheckRefusal extends Error {
   readonly because: string;
-  constructor(entry: string, readonly problem: Problem) {
-    super(`dohc did not move ${entry} to the workspace trash because ${BECAUSE[problem]}. ${FIX[problem]}`);
+  constructor(
+    entry: string,
+    readonly problem: Problem,
+  ) {
+    super(
+      `dohc did not move ${entry} to the workspace trash because ${BECAUSE[problem]}. ${FIX[problem]}`,
+    );
     this.name = "ICloudCheckRefusal";
     this.because = BECAUSE[problem];
   }
@@ -80,13 +85,14 @@ export async function refuseOnlyInICloud(target: string): Promise<void> {
       }
       for (let at = 0; at < files.length; at += 64) {
         const batch = files.slice(at, at + 64);
-        const stats = await Promise.all(batch.map(path => lstat(path)));
-        stats.forEach((entry, index) => { if (candidate(entry)) candidates.push(batch[index]!); });
+        const stats = await Promise.all(batch.map((path) => lstat(path)));
+        stats.forEach((entry, index) => {
+          if (candidate(entry)) candidates.push(batch[index]!);
+        });
         if (overdue()) throw refusal("too-large");
       }
     }
   }
-  // An answer that came late is no answer.
   if (overdue()) throw refusal(top.isDirectory() ? "too-large" : "unchecked");
   if (!candidates.length) return;
   let flags: readonly number[];
@@ -96,13 +102,17 @@ export async function refuseOnlyInICloud(target: string): Promise<void> {
     throw refusal("unchecked");
   }
   if (flags.length !== candidates.length) throw refusal("unchecked");
-  if (flags.some(value => (value & SF_DATALESS) !== 0)) throw refusal(top.isFile() ? "whole" : "part");
+  if (flags.some((value) => (value & SF_DATALESS) !== 0))
+    throw refusal(top.isFile() ? "whole" : "part");
 }
 
 // Each path's st_flags, in order, from /usr/bin/stat, because Node does not
 // expose them. No shell; the paths go in batches well under ARG_MAX. A path
 // that vanished makes stat fail, and so does the whole read.
-export async function readFlagsWithStat(paths: readonly string[], timeoutMs: number): Promise<number[]> {
+export async function readFlagsWithStat(
+  paths: readonly string[],
+  timeoutMs: number,
+): Promise<number[]> {
   const deadline = performance.now() + timeoutMs;
   const flags: number[] = [];
   for (let at = 0; at < paths.length;) {
@@ -114,15 +124,19 @@ export async function readFlagsWithStat(paths: readonly string[], timeoutMs: num
     const timeout = Math.floor(deadline - performance.now());
     if (timeout <= 0) throw new Error("No time left to read file flags.");
     const stdout = await new Promise<string>((resolve, reject) => {
-      execFile("/usr/bin/stat", ["-f", "%Xf", "--", ...batch], { timeout, encoding: "utf8" },
-        (error, out) => (error ? reject(error) : resolve(out)));
+      execFile(
+        "/usr/bin/stat",
+        ["-f", "%Xf", "--", ...batch],
+        { timeout, encoding: "utf8" },
+        (error, out) => (error ? reject(error) : resolve(out)),
+      );
     });
     const lines = stdout.split("\n");
     if (lines.at(-1) === "") lines.pop();
-    if (lines.length !== batch.length || !lines.every(line => /^[0-9a-f]+$/iu.test(line))) {
+    if (lines.length !== batch.length || !lines.every((line) => /^[0-9a-f]+$/iu.test(line))) {
       throw new Error("stat answered for other files.");
     }
-    flags.push(...lines.map(line => Number.parseInt(line, 16)));
+    flags.push(...lines.map((line) => Number.parseInt(line, 16)));
   }
   return flags;
 }

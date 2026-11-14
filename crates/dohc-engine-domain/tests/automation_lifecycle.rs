@@ -70,7 +70,6 @@ fn write_as(
     );
 }
 
-/// Write `path` as `object` in `version`.
 fn write_object(
     store: &mut EngineStore,
     (version, object): (&str, &str),
@@ -135,7 +134,6 @@ fn reconcile_version(store: &mut EngineStore, version: &str, now_ms: i64) -> Vec
     }
 }
 
-/// Each claim's kind and record.
 fn claimed(claims: &[AutomationClaim]) -> Vec<(AutomationChangeKind, &str)> {
     claims
         .iter()
@@ -148,7 +146,6 @@ fn claimed(claims: &[AutomationClaim]) -> Vec<(AutomationChangeKind, &str)> {
         .collect()
 }
 
-/// Journal `moment_id` as a replication import from another computer.
 fn import(store: &mut EngineStore, moment_id: &str, origin_seq: i64) {
     store
         .write_with(&NoFaults, |tx| {
@@ -277,7 +274,6 @@ fn a_record_added_and_removed_on_this_computer_claims_once_each() {
     );
 }
 
-/// Drain every pending claim and read its `status` fact.
 fn served_facts(
     store: &mut EngineStore,
     now_ms: i64,
@@ -381,7 +377,6 @@ fn a_synced_or_older_moment_claims_nothing() {
     subscribe(&mut store, LIFECYCLE, 5);
     seed_collection(&mut store);
 
-    // Another computer created beta: replication imported its moment.
     write(
         &mut store,
         "tasks/beta.md",
@@ -395,7 +390,6 @@ fn a_synced_or_older_moment_claims_nothing() {
         "the computer that created the file claims it, not this one"
     );
 
-    // A subscription made after gamma's file was created does not claim it.
     write(
         &mut store,
         "tasks/gamma.md",

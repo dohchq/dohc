@@ -32,14 +32,9 @@ export function preferredBuildOutput(
 
 export function presentBuildOutput(site: SitePackageDerivedFactsInput): string | null {
   const preferred = preferredBuildOutput(site);
-  const outputs = [
-    ...(preferred ? [preferred] : []),
-    ...site.buildOutputs,
-  ];
+  const outputs = [...(preferred ? [preferred] : []), ...site.buildOutputs];
   for (const output of new Set(outputs)) {
-    const entry = site.root === "."
-      ? `${output}/index.html`
-      : `${site.root}/${output}/index.html`;
+    const entry = site.root === "." ? `${output}/index.html` : `${site.root}/${output}/index.html`;
     if (site.sourceFiles.includes(entry)) return output;
   }
   return null;
@@ -54,7 +49,7 @@ export function needsBuiltArtifact(site: SitePackageDerivedFactsInput): boolean 
     site.configuredScripts.start ||
     site.configuredScripts.build ||
     site.configuredBuildOutput ||
-    site.buildOutputs.length > 0
+    site.buildOutputs.length > 0,
   );
 }
 
@@ -213,14 +208,24 @@ const WEB_SCRIPT_TOKENS = [
 ];
 
 const FRAMEWORK_CONFIG_NAMES = new Set(
-  ["app", "astro", "next", "svelte", "tanstack", "vite", "vinxi"].flatMap(name =>
-    ["cjs", "cts", "js", "mjs", "mts", "ts", ...(name === "astro" ? ["json"] : [])]
-      .map(extension => `${name}.config.${extension}`)),
+  ["app", "astro", "next", "svelte", "tanstack", "vite", "vinxi"].flatMap((name) =>
+    ["cjs", "cts", "js", "mjs", "mts", "ts", ...(name === "astro" ? ["json"] : [])].map(
+      (extension) => `${name}.config.${extension}`,
+    ),
+  ),
 );
 
 export const SITE_DISCOVERY_FILE_NAMES: readonly string[] = [
-  "index.html", "dohc.json", "package.json", "app.publish.json",
-  "pnpm-lock.yaml", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb",
+  "index.html",
+  "dohc.json",
+  "package.json",
+  "app.publish.json",
+  "pnpm-lock.yaml",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
   ...FRAMEWORK_CONFIG_NAMES,
 ];
 
@@ -273,11 +278,7 @@ function fileName(path: string): string {
 }
 
 function pathBasename(path: string): string {
-  return path === "" ? "" : path.split("/").at(-1) ?? path;
-}
-
-function sitePath(root: string, child: string): string {
-  return root === "" ? child : `${root}/${child}`;
+  return path === "" ? "" : (path.split("/").at(-1) ?? path);
 }
 
 function hasIgnoredSiteSegment(path: string): boolean {
@@ -285,9 +286,7 @@ function hasIgnoredSiteSegment(path: string): boolean {
   return segments.some((segment, index) => {
     const stripped = stripWindowsAliasSuffix(segment);
     const nextStripped =
-      segments[index + 1] === undefined
-        ? undefined
-        : stripWindowsAliasSuffix(segments[index + 1]!);
+      segments[index + 1] === undefined ? undefined : stripWindowsAliasSuffix(segments[index + 1]!);
     if (IGNORED_SITE_SEGMENTS.has(stripped)) return true;
     return stripped === ".next" && nextStripped === "cache";
   });
@@ -315,7 +314,7 @@ function getCandidate(candidates: Map<string, Candidate>, root: string): Candida
 // Exported so MCP's own site detector can apply the same safe-relative-path
 // rule to a configured build.output — the two detectors reporting different
 // values for the identical dohc.json is a contract violation, not just an
-// inconsistency (round-15 finding 12).
+// inconsistency.
 export function safeRelativeConfigPath(value: string): string | undefined {
   if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\")) {
     return undefined;
@@ -392,10 +391,7 @@ function parsePreview(
       );
     }
   }
-  if (
-    preview.command &&
-    (preview.mode === "static" || preview.mode === "build")
-  ) {
+  if (preview.command && (preview.mode === "static" || preview.mode === "build")) {
     diagnostics.push(
       diagnostic(
         path,
@@ -542,13 +538,21 @@ export function parseDohcSiteConfig(json: string, path = "dohc.json"): ParsedDoh
   return { config, diagnostics, declaredType };
 }
 
-function parsePackageJson(body: string, path: string): { json?: PackageJson; diagnostics: SiteDiagnostic[] } {
+function parsePackageJson(
+  body: string,
+  path: string,
+): { json?: PackageJson; diagnostics: SiteDiagnostic[] } {
   try {
     const parsed = JSON.parse(body);
     if (!isRecord(parsed)) {
       return {
         diagnostics: [
-          diagnostic(path, "error", "invalid-package-json", "package.json must contain a JSON object."),
+          diagnostic(
+            path,
+            "error",
+            "invalid-package-json",
+            "package.json must contain a JSON object.",
+          ),
         ],
       };
     }
@@ -625,8 +629,7 @@ function includesWebScriptToken(haystack: string, token: string): boolean {
 // package.json look like a web project" rule desktop's discoverSites
 // already does — testing only whether any script exists (rather than
 // whether one actually names a web dependency or tool) is a materially
-// looser test that disagrees with desktop's Sites view on the same input
-// (round-16 finding 9).
+// looser test that disagrees with desktop's Sites view on the same input.
 export function hasWebScript(pkg: PackageJson | undefined): boolean {
   const scripts = packageScripts(pkg);
   return Object.entries(scripts).some(([name, value]) => {
@@ -635,10 +638,7 @@ export function hasWebScript(pkg: PackageJson | undefined): boolean {
   });
 }
 
-export function inferSiteScripts(
-  pkg?: PackageJson,
-  config?: DohcSiteConfig,
-): SiteScripts {
+export function inferSiteScripts(pkg?: PackageJson, config?: DohcSiteConfig): SiteScripts {
   const scripts = packageScripts(pkg);
   const inferred: SiteScripts = {};
   for (const key of PACKAGE_SCRIPT_KEYS) {
@@ -691,7 +691,7 @@ export function frameworkConfigName(names: ReadonlySet<string>): string | undefi
 }
 
 function titleFromRoot(root: string): string {
-  const basename = root === "" ? "workspace site" : root.split("/").at(-1) ?? root;
+  const basename = root === "" ? "workspace site" : (root.split("/").at(-1) ?? root);
   return basename
     .replace(/^@/, "")
     .replace(/[-_.]+/g, " ")
@@ -702,19 +702,21 @@ function titleFromRoot(root: string): string {
 
 function packageTitle(pkg: PackageJson | undefined): string | undefined {
   if (typeof pkg?.name !== "string" || pkg.name.trim() === "") return undefined;
-  const name = pkg.name.includes("/") ? pkg.name.split("/").at(-1) ?? pkg.name : pkg.name;
+  const name = pkg.name.includes("/") ? (pkg.name.split("/").at(-1) ?? pkg.name) : pkg.name;
   return titleFromRoot(name);
 }
 
 function siteKind(candidate: Candidate): SiteKind {
-  if (candidate.hasDohcConfig || candidate.hasPublishManifest || candidate.hasFrameworkConfig) return "configured";
+  if (candidate.hasDohcConfig || candidate.hasPublishManifest || candidate.hasFrameworkConfig)
+    return "configured";
   if (candidate.hasPackageJson && candidate.hasWebPackageSignal) return "package";
   return "static";
 }
 
 function siteConfidence(candidate: Candidate): SiteConfidence {
   if (candidate.dohcConfig?.type === "app") return "high";
-  if (candidate.hasIndexHtml || candidate.hasPublishManifest || candidate.hasFrameworkConfig) return "high";
+  if (candidate.hasIndexHtml || candidate.hasPublishManifest || candidate.hasFrameworkConfig)
+    return "high";
   if (candidate.hasWebPackageSignal || candidate.hasBuildOutputSignal) return "medium";
   return "low";
 }
@@ -768,7 +770,8 @@ function finalizeSite(candidate: Candidate): WorkspaceSite {
   // name can still be arbitrarily long and neither goes through that parse
   // path — bound the title this site actually carries, whichever source won.
   const diagnostics = [...candidate.diagnostics];
-  const rawTitle = config?.title ?? packageTitle(candidate.packageJson) ?? titleFromRoot(candidate.root);
+  const rawTitle =
+    config?.title ?? packageTitle(candidate.packageJson) ?? titleFromRoot(candidate.root);
   const title =
     rawTitle.length > SITE_TITLE_MAX_LENGTH
       ? (() => {
@@ -791,9 +794,7 @@ function finalizeSite(candidate: Candidate): WorkspaceSite {
     ...(entry ? { entry } : {}),
     ...(candidate.packageManager ? { packageManager: candidate.packageManager } : {}),
     scripts,
-    ...(config?.preview?.mode
-      ? { configuredPreviewMode: config.preview.mode }
-      : {}),
+    ...(config?.preview?.mode ? { configuredPreviewMode: config.preview.mode } : {}),
     ...(config?.build?.output ? { configuredBuildOutput: config.build.output } : {}),
     buildOutputs: [...candidate.buildOutputs].sort(),
     ...(configPath ? { configPath } : {}),
@@ -901,7 +902,10 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
   for (const [root, candidate] of candidates) {
     const output = candidate.dohcConfig?.build?.output;
     if (!output) continue;
-    configuredOutputArtifacts.set(`${root === "" ? output : `${root}/${output}`}/index.html`, { root, output });
+    configuredOutputArtifacts.set(`${root === "" ? output : `${root}/${output}`}/index.html`, {
+      root,
+      output,
+    });
   }
 
   for (const path of normalizedPaths) {

@@ -28,8 +28,11 @@ export function parseAccountRoute(parts: readonly string[]): AccountWorkspaceRou
   if (parts.length === 3) return { route: "account-workspaces" };
   if (parts.length !== 4) throw notFound();
   // An ID that cannot be a workspace answers as one this account does not own.
-  try { return { route: "account-workspace", workspaceId: parseWorkspaceId(parts[3]) }; }
-  catch { throw notFound(); }
+  try {
+    return { route: "account-workspace", workspaceId: parseWorkspaceId(parts[3]) };
+  } catch {
+    throw notFound();
+  }
 }
 
 /**
@@ -38,13 +41,19 @@ export function parseAccountRoute(parts: readonly string[]): AccountWorkspaceRou
  * and so is a fenced account.
  */
 export async function bearerAccountSession(
-  storage: SyncRelayStorage, resolveAccountSession: ResolveAccountSession, request: Request,
+  storage: SyncRelayStorage,
+  resolveAccountSession: ResolveAccountSession,
+  request: Request,
 ): Promise<AccountSession> {
   const authorization = request.headers.get("authorization");
-  if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
-  const session = await resolveAccountSession(new Request(request.url, {
-    headers: { authorization: authorization! }, signal: request.signal,
-  }));
+  if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
+    throw notFound();
+  const session = await resolveAccountSession(
+    new Request(request.url, {
+      headers: { authorization: authorization! },
+      signal: request.signal,
+    }),
+  );
   if (accountIsFenced(storage, session.userId)) throw notFound();
   return session;
 }
@@ -59,9 +68,13 @@ export function createAccountWorkspaceRoutes(options: {
   resolveAccountSession: ResolveAccountSession;
 }) {
   const { storage } = options;
-  const account = async (request: Request) => (await bearerAccountSession(storage, options.resolveAccountSession, request)).userId;
+  const account = async (request: Request) =>
+    (await bearerAccountSession(storage, options.resolveAccountSession, request)).userId;
 
-  return async function respondToAccountWorkspaces(request: Request, route: AccountWorkspaceRoute): Promise<Response> {
+  return async function respondToAccountWorkspaces(
+    request: Request,
+    route: AccountWorkspaceRoute,
+  ): Promise<Response> {
     if (route.route === "account-workspaces") {
       if (request.method !== "GET") throw relayError("method_not_allowed");
       const userId = await account(request);
@@ -76,9 +89,20 @@ export function createAccountWorkspaceRoutes(options: {
       throw badRequest("the body must be exactly { showOnPhone: boolean }");
     }
     // Reading the body waited, so the sign-in and the workspace's owner are checked again.
-    if (await account(request) !== userId || !storage.setShowOnPhone({ ownerUserId: userId, workspaceId: route.workspaceId, showOnPhone: body.showOnPhone })) {
+    if (
+      (await account(request)) !== userId ||
+      !storage.setShowOnPhone({
+        ownerUserId: userId,
+        workspaceId: route.workspaceId,
+        showOnPhone: body.showOnPhone,
+      })
+    ) {
       throw notFound();
     }
-    return jsonResponse({ ok: true, workspaceId: route.workspaceId, showOnPhone: body.showOnPhone });
+    return jsonResponse({
+      ok: true,
+      workspaceId: route.workspaceId,
+      showOnPhone: body.showOnPhone,
+    });
   };
 }

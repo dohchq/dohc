@@ -1,10 +1,26 @@
 import { isShareAccessValue, visibleSharePath } from "@dohc/security-contract/share-selector";
-import { parseApprovalAgent, type ApprovalAgent } from "@dohc/security-contract/approval-provenance";
+import {
+  parseApprovalAgent,
+  type ApprovalAgent,
+} from "@dohc/security-contract/approval-provenance";
 import { createHash } from "node:crypto";
-import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppCollectionCapability, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
-import { parseAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
+import {
+  parseAppPublicationCandidate,
+  parseAppCollectionCapability,
+  type AppCollectionCapability,
+  type AppPublicationCandidate,
+  type AppPublicationLimits,
+} from "@dohc/security-contract/app-publication";
+import {
+  parseAppDatasetCapability,
+  type AppDatasetCapability,
+} from "@dohc/security-contract/dataset";
 
-import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "../shareFilter";
+import {
+  effectiveShareSelector,
+  parseStoredAnyShareSelectorJson,
+  targetVersionId,
+} from "../shareFilter";
 import { notFound, badRequest, relayError, RelayError } from "../errors";
 import { assertWorkspaceQuota } from "./workspaces";
 import type { StorageContext } from "./context";
@@ -13,7 +29,13 @@ import { authorizeLinkSession } from "../linkSecurity";
 import { readLinkEnrollment } from "./linkEnrollment";
 import { readCurrentShareGrant } from "./currentShareGrant";
 
-export interface PublicationOwner { workspaceId: string; shareId: string; grantId: string; generation: number; ownerUserId: string }
+export interface PublicationOwner {
+  workspaceId: string;
+  shareId: string;
+  grantId: string;
+  generation: number;
+  ownerUserId: string;
+}
 export interface PublishAppPublicationInput extends PublicationOwner {
   agent?: ApprovalAgent | null;
   candidate: unknown;
@@ -21,19 +43,48 @@ export interface PublishAppPublicationInput extends PublicationOwner {
   limits: AppPublicationLimits;
   nowMs: number;
 }
-export interface AppPublicationApproval { agent: ApprovalAgent | null; selector: unknown; access: "view" | "comment" | "edit"; committedCandidateDigest: string; sourceRevision: string; capabilities: AppPublicationCandidate["capabilities"] }
-export interface AppPublicationTakedown { actor: "operator"; disabledAtMs: number; reason: string }
-export interface DisableAppPublicationInput { publicationId: string; reason: string; nowMs: number }
+export interface AppPublicationApproval {
+  agent: ApprovalAgent | null;
+  selector: unknown;
+  access: "view" | "comment" | "edit";
+  committedCandidateDigest: string;
+  sourceRevision: string;
+  capabilities: AppPublicationCandidate["capabilities"];
+}
+export interface AppPublicationTakedown {
+  actor: "operator";
+  disabledAtMs: number;
+  reason: string;
+}
+export interface DisableAppPublicationInput {
+  publicationId: string;
+  reason: string;
+  nowMs: number;
+}
 export interface AppPublicationRow {
   operatorTakedown?: AppPublicationTakedown;
   approvalProvenance?: AppPublicationApproval;
-  publicationId: string; candidate: AppPublicationCandidate; owner: PublicationOwner;
-  active: boolean; authorityRevision: number; createdAtMs: number;
+  publicationId: string;
+  candidate: AppPublicationCandidate;
+  owner: PublicationOwner;
+  active: boolean;
+  authorityRevision: number;
+  createdAtMs: number;
 }
 export type AppPublicationState = Omit<AppPublicationRow, "candidate">;
-export interface ReadAppPublicationInput { workspaceId: string; publicationId: string; ownerUserId: string; limits: AppPublicationLimits }
-export interface WithdrawAppPublicationInput extends Omit<ReadAppPublicationInput, "limits"> { expectedAuthorityRevision: number }
-export interface ReactivateAppPublicationInput extends ReadAppPublicationInput { expectedAuthorityRevision: number; agent?: ApprovalAgent | null }
+export interface ReadAppPublicationInput {
+  workspaceId: string;
+  publicationId: string;
+  ownerUserId: string;
+  limits: AppPublicationLimits;
+}
+export interface WithdrawAppPublicationInput extends Omit<ReadAppPublicationInput, "limits"> {
+  expectedAuthorityRevision: number;
+}
+export interface ReactivateAppPublicationInput extends ReadAppPublicationInput {
+  expectedAuthorityRevision: number;
+  agent?: ApprovalAgent | null;
+}
 export interface LinkAppPublicationInput {
   publicationId: string;
   // Derived from an authenticated link session. Never accepted from a request body.
@@ -64,93 +115,257 @@ export interface LinkAppPublicationAuthority {
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const digest = (domain: string, value: unknown) => sha(JSON.stringify([domain, value]));
 function validateBuildIdentity(candidate: AppPublicationCandidate): void {
-  const sourceDigest = digest("dohc-app-source-v2", {entry: candidate.entryPath, files: candidate.inputs,
-    packages: Object.entries(candidate.packageMap).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)});
+  const sourceDigest = digest("dohc-app-source-v2", {
+    entry: candidate.entryPath,
+    files: candidate.inputs,
+    packages: Object.entries(candidate.packageMap).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  });
   const dependencies = new Set(candidate.dependencies);
-  const dependencyLockDigest = digest("dohc-app-dependencies-v1", candidate.inputs.filter(file => dependencies.has(file.path)));
+  const dependencyLockDigest = digest(
+    "dohc-app-dependencies-v1",
+    candidate.inputs.filter((file) => dependencies.has(file.path)),
+  );
   const bundleDigest = digest("dohc-app-bundle-v1", candidate.files);
-  const buildDigest = digest("dohc-app-build-v1", {sourceDigest, dependencyLockDigest, compiler: candidate.compilerIdentity, bundleDigest});
-  if (candidate.sourceDigest !== sourceDigest || candidate.dependencyLockDigest !== dependencyLockDigest || candidate.bundleDigest !== bundleDigest || candidate.buildDigest !== buildDigest) {
+  const buildDigest = digest("dohc-app-build-v1", {
+    sourceDigest,
+    dependencyLockDigest,
+    compiler: candidate.compilerIdentity,
+    bundleDigest,
+  });
+  if (
+    candidate.sourceDigest !== sourceDigest ||
+    candidate.dependencyLockDigest !== dependencyLockDigest ||
+    candidate.bundleDigest !== bundleDigest ||
+    candidate.buildDigest !== buildDigest
+  ) {
     throw badRequest("Publication build identity mismatch.");
   }
 }
-const integer = (value: number) => { if (!Number.isSafeInteger(value) || value < 0) throw badRequest("Invalid publication integer.");return value; };
-function authority(storage: StorageContext, owner: PublicationOwner, candidate?: AppPublicationCandidate): void {
-  const current = readCurrentShareGrant(storage, {grantId: owner.grantId, generation: owner.generation});
-  if (!current || current.share.shareId !== owner.shareId || current.share.workspaceId !== owner.workspaceId ||
-      current.share.granterUserId !== owner.ownerUserId) throw notFound();
-  const {share, grant} = current;
-  const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, grant.access);
+const integer = (value: number) => {
+  if (!Number.isSafeInteger(value) || value < 0) throw badRequest("Invalid publication integer.");
+  return value;
+};
+function authority(
+  storage: StorageContext,
+  owner: PublicationOwner,
+  candidate?: AppPublicationCandidate,
+): void {
+  const current = readCurrentShareGrant(storage, {
+    grantId: owner.grantId,
+    generation: owner.generation,
+  });
+  if (
+    !current ||
+    current.share.shareId !== owner.shareId ||
+    current.share.workspaceId !== owner.workspaceId ||
+    current.share.granterUserId !== owner.ownerUserId
+  )
+    throw notFound();
+  const { share, grant } = current;
+  const parsed = parseStoredAnyShareSelectorJson(share.selectorJson),
+    selector = parsed && effectiveShareSelector(parsed, grant.access);
   if (!selector || "kind" in selector) throw notFound();
-  if (candidate && (targetVersionId(selector) !== candidate.versionId || visibleSharePath(selector, candidate.appRoot) !== candidate.appRoot ||
-      candidate.inputs.some(file => visibleSharePath(selector, file.path) !== file.path))) throw notFound();
+  if (
+    candidate &&
+    (targetVersionId(selector) !== candidate.versionId ||
+      visibleSharePath(selector, candidate.appRoot) !== candidate.appRoot ||
+      candidate.inputs.some((file) => visibleSharePath(selector, file.path) !== file.path))
+  )
+    throw notFound();
 }
-function put(storage: StorageContext, workspace: string, hash: string, bytes: Uint8Array, now: number): void {
+function put(
+  storage: StorageContext,
+  workspace: string,
+  hash: string,
+  bytes: Uint8Array,
+  now: number,
+): void {
   if (sha(bytes) !== hash) throw badRequest("Publication blob digest mismatch.");
   const old = storage.getBlob(workspace, hash);
-  if (old) {if (old.byteLength !== bytes.byteLength || sha(old) !== hash) throw badRequest("Stored publication blob is corrupt.");return;}
+  if (old) {
+    if (old.byteLength !== bytes.byteLength || sha(old) !== hash)
+      throw badRequest("Stored publication blob is corrupt.");
+    return;
+  }
   assertWorkspaceQuota(storage, workspace, bytes.byteLength);
-  storage.db.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content,created_at_ms) VALUES(?,?,?,?,?)").run(workspace, hash, bytes.byteLength, Buffer.from(bytes), now);
+  storage.db
+    .prepare(
+      "INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content,created_at_ms) VALUES(?,?,?,?,?)",
+    )
+    .run(workspace, hash, bytes.byteLength, Buffer.from(bytes), now);
 }
-function header(storage: StorageContext, publicationId: string, workspaceId: string, ownerUserId: string) {
-  const row = storage.db.prepare("SELECT * FROM sync_relay_app_publications WHERE publication_id=?").get(publicationId);
-  if (!row || row.workspace_id !== workspaceId || row.owner_user_id !== ownerUserId || !storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) throw notFound();
-  const state: AppPublicationState = {publicationId,
-    owner: {workspaceId,shareId: String(row.share_id),grantId: String(row.grant_id),generation: Number(row.grant_generation),ownerUserId},
-    active: row.active === 1,authorityRevision: Number(row.authority_revision),createdAtMs: Number(row.created_at_ms)};
-  const approval = storage.db.prepare("SELECT facts_json FROM sync_relay_app_publication_approvals WHERE publication_id=? ORDER BY authority_revision DESC LIMIT 1").get(publicationId);
+function header(
+  storage: StorageContext,
+  publicationId: string,
+  workspaceId: string,
+  ownerUserId: string,
+) {
+  const row = storage.db
+    .prepare("SELECT * FROM sync_relay_app_publications WHERE publication_id=?")
+    .get(publicationId);
+  if (
+    !row ||
+    row.workspace_id !== workspaceId ||
+    row.owner_user_id !== ownerUserId ||
+    !storage.workspaceIsOwnedBy(workspaceId, ownerUserId)
+  )
+    throw notFound();
+  const state: AppPublicationState = {
+    publicationId,
+    owner: {
+      workspaceId,
+      shareId: String(row.share_id),
+      grantId: String(row.grant_id),
+      generation: Number(row.grant_generation),
+      ownerUserId,
+    },
+    active: row.active === 1,
+    authorityRevision: Number(row.authority_revision),
+    createdAtMs: Number(row.created_at_ms),
+  };
+  const approval = storage.db
+    .prepare(
+      "SELECT facts_json FROM sync_relay_app_publication_approvals WHERE publication_id=? ORDER BY authority_revision DESC LIMIT 1",
+    )
+    .get(publicationId);
   if (approval) state.approvalProvenance = JSON.parse(String(approval.facts_json));
-  return {row, state};
+  return { row, state };
 }
-function withOperatorTakedown<State extends AppPublicationState>(storage: StorageContext, state: State): State {
-  const takedown = storage.db.prepare("SELECT disabled_at_ms,reason FROM sync_relay_app_publication_takedowns WHERE publication_id=?").get(state.publicationId);
-  return takedown ? {...state, operatorTakedown: {actor: "operator", disabledAtMs: Number(takedown.disabled_at_ms), reason: String(takedown.reason)}} : state;
+function withOperatorTakedown<State extends AppPublicationState>(
+  storage: StorageContext,
+  state: State,
+): State {
+  const takedown = storage.db
+    .prepare(
+      "SELECT disabled_at_ms,reason FROM sync_relay_app_publication_takedowns WHERE publication_id=?",
+    )
+    .get(state.publicationId);
+  return takedown
+    ? {
+        ...state,
+        operatorTakedown: {
+          actor: "operator",
+          disabledAtMs: Number(takedown.disabled_at_ms),
+          reason: String(takedown.reason),
+        },
+      }
+    : state;
 }
 class PublicationManifestUnavailable extends RelayError {
-  constructor() {super("bad_request", "Publication manifest is unavailable.");}
+  constructor() {
+    super("bad_request", "Publication manifest is unavailable.");
+  }
 }
 function stored(storage: StorageContext, input: ReadAppPublicationInput): AppPublicationRow {
-  const {row, state} = header(storage, input.publicationId, input.workspaceId, input.ownerUserId);
-  const {limits} = input;
+  const { row, state } = header(storage, input.publicationId, input.workspaceId, input.ownerUserId);
+  const { limits } = input;
   const bytes = storage.getBlob(String(row.workspace_id), String(row.manifest_sha256));
-  if (!bytes || bytes.byteLength > limits.maxMetadataBytes || sha(bytes) !== row.manifest_sha256) throw new PublicationManifestUnavailable();
-  try {return {...state, candidate: parseAppPublicationCandidate(JSON.parse(Buffer.from(bytes).toString("utf8")), limits)};}
-  catch {throw new PublicationManifestUnavailable();}
+  if (!bytes || bytes.byteLength > limits.maxMetadataBytes || sha(bytes) !== row.manifest_sha256)
+    throw new PublicationManifestUnavailable();
+  try {
+    return {
+      ...state,
+      candidate: parseAppPublicationCandidate(
+        JSON.parse(Buffer.from(bytes).toString("utf8")),
+        limits,
+      ),
+    };
+  } catch {
+    throw new PublicationManifestUnavailable();
+  }
 }
-export function publishAppPublication(storage: StorageContext, input: PublishAppPublicationInput): AppPublicationRow {
+export function publishAppPublication(
+  storage: StorageContext,
+  input: PublishAppPublicationInput,
+): AppPublicationRow {
   const candidate = parseAppPublicationCandidate(input.candidate, input.limits);
   validateBuildIdentity(candidate);
-  const owner = {workspaceId: input.workspaceId,shareId: input.shareId,grantId: input.grantId,generation: input.generation,ownerUserId: input.ownerUserId};
-  const now = integer(input.nowMs), bytes = Buffer.from(JSON.stringify(candidate)), manifestHash = sha(bytes);
+  const owner = {
+    workspaceId: input.workspaceId,
+    shareId: input.shareId,
+    grantId: input.grantId,
+    generation: input.generation,
+    ownerUserId: input.ownerUserId,
+  };
+  const now = integer(input.nowMs),
+    bytes = Buffer.from(JSON.stringify(candidate)),
+    manifestHash = sha(bytes);
   const publicationId = sha(JSON.stringify(["dohc-app-publication-v1", owner, manifestHash]));
-  if (!Array.isArray(input.blobs) || input.blobs.length > candidate.files.length) throw badRequest("Invalid publication blob inventory.");
+  if (!Array.isArray(input.blobs) || input.blobs.length > candidate.files.length)
+    throw badRequest("Invalid publication blob inventory.");
   const provided = new Map<string, Uint8Array>();
   for (const blob of input.blobs) {
-    const file = candidate.files.find(file => file.sha256 === blob.sha256);
-    if (!file || !(blob.bytes instanceof Uint8Array) || blob.bytes.byteLength !== file.byteLength || provided.has(blob.sha256)) throw badRequest("Invalid publication blob.");
+    const file = candidate.files.find((file) => file.sha256 === blob.sha256);
+    if (
+      !file ||
+      !(blob.bytes instanceof Uint8Array) ||
+      blob.bytes.byteLength !== file.byteLength ||
+      provided.has(blob.sha256)
+    )
+      throw badRequest("Invalid publication blob.");
     provided.set(blob.sha256, Uint8Array.from(blob.bytes));
   }
   return storage.tx(() => {
     authority(storage, owner, candidate);
     for (const file of candidate.files) {
       const content = provided.get(file.sha256) ?? storage.getBlob(owner.workspaceId, file.sha256);
-      if (!content || content.byteLength !== file.byteLength) throw badRequest("Publication bundle is incomplete.");
+      if (!content || content.byteLength !== file.byteLength)
+        throw badRequest("Publication bundle is incomplete.");
       put(storage, owner.workspaceId, file.sha256, content, now);
     }
-    const existing = storage.db.prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?").get(publicationId);
-    if (existing) return withOperatorTakedown(storage, stored(storage, {...owner, publicationId, limits: input.limits})); // A retry never reactivates a withdrawn publication.
+    const existing = storage.db
+      .prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?")
+      .get(publicationId);
+    if (existing)
+      return withOperatorTakedown(
+        storage,
+        stored(storage, { ...owner, publicationId, limits: input.limits }),
+      ); // A retry never reactivates a withdrawn publication.
     assertPublishingNotHeld(storage, owner.ownerUserId);
     put(storage, owner.workspaceId, manifestHash, bytes, now);
-    storage.db.prepare(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision)
-      VALUES(?,?,?,?,?,?,?,?,1,1)`).run(publicationId,owner.workspaceId,owner.shareId,owner.grantId,owner.generation,owner.ownerUserId,manifestHash,now);
-    for (const hash of new Set([manifestHash, ...candidate.files.map(file => file.sha256)])) {
-      storage.db.prepare("INSERT INTO sync_relay_app_publication_blobs(publication_id,workspace_id,sha256) VALUES(?,?,?)").run(publicationId,owner.workspaceId,hash);
+    storage.db
+      .prepare(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision)
+      VALUES(?,?,?,?,?,?,?,?,1,1)`)
+      .run(
+        publicationId,
+        owner.workspaceId,
+        owner.shareId,
+        owner.grantId,
+        owner.generation,
+        owner.ownerUserId,
+        manifestHash,
+        now,
+      );
+    for (const hash of new Set([manifestHash, ...candidate.files.map((file) => file.sha256)])) {
+      storage.db
+        .prepare(
+          "INSERT INTO sync_relay_app_publication_blobs(publication_id,workspace_id,sha256) VALUES(?,?,?)",
+        )
+        .run(publicationId, owner.workspaceId, hash);
     }
-    const approvalProvenance = recordApproval(storage, publicationId, 1, owner, candidate, input.agent);
-    return {publicationId,candidate,owner,active:true,authorityRevision:1,createdAtMs:now,approvalProvenance};
+    const approvalProvenance = recordApproval(
+      storage,
+      publicationId,
+      1,
+      owner,
+      candidate,
+      input.agent,
+    );
+    return {
+      publicationId,
+      candidate,
+      owner,
+      active: true,
+      authorityRevision: 1,
+      createdAtMs: now,
+      approvalProvenance,
+    };
   });
 }
-export function readAppPublication(storage: StorageContext, input: ReadAppPublicationInput): AppPublicationRow {
+export function readAppPublication(
+  storage: StorageContext,
+  input: ReadAppPublicationInput,
+): AppPublicationRow {
   return storage.readTx(() => withOperatorTakedown(storage, stored(storage, input)));
 }
 
@@ -163,59 +378,135 @@ export interface ListAppPublicationsInput {
 }
 export type AppPublicationListRow = {
   operatorTakedown?: AppPublicationTakedown;
-  approvalProvenance?: AppPublicationApproval; publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; linkCurrent: boolean; collectionCapability: AppCollectionCapability | "unavailable" | null; datasetCapability: AppDatasetCapability | "unavailable" | null;
-} & ({manifestUnavailable: false; appRoot: string; sourceRevision: string} | {manifestUnavailable: true});
+  approvalProvenance?: AppPublicationApproval;
+  publicationId: string;
+  authorityRevision: number;
+  shareId: string;
+  grantId: string;
+  active: boolean;
+  linkCurrent: boolean;
+  collectionCapability: AppCollectionCapability | "unavailable" | null;
+  datasetCapability: AppDatasetCapability | "unavailable" | null;
+} & (
+  | { manifestUnavailable: false; appRoot: string; sourceRevision: string }
+  | { manifestUnavailable: true }
+);
 
 function publicationLinkIsCurrent(storage: StorageContext, owner: PublicationOwner): boolean {
-  try { authority(storage, owner); return true; }
-  catch (error) { if (error instanceof RelayError && error.code === "not_found") return false; throw error; }
+  try {
+    authority(storage, owner);
+    return true;
+  } catch (error) {
+    if (error instanceof RelayError && error.code === "not_found") return false;
+    throw error;
+  }
 }
 
 export function listAppPublications(storage: StorageContext, input: ListAppPublicationsInput) {
   return storage.readTx(() => {
     if (!storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId)) throw notFound();
-    const rows = storage.db.prepare(`SELECT p.publication_id,a.capability_json FROM sync_relay_app_publications p
+    const rows = storage.db
+      .prepare(`SELECT p.publication_id,a.capability_json FROM sync_relay_app_publications p
       LEFT JOIN sync_relay_app_collection_approvals a ON a.publication_id=p.publication_id AND a.workspace_id=p.workspace_id AND a.active=1
       WHERE p.workspace_id=? AND p.owner_user_id=? AND p.publication_id>? ORDER BY p.publication_id LIMIT 26`)
       .all(input.workspaceId, input.ownerUserId, input.cursor ?? "");
-    const publications = rows.slice(0, 25).flatMap<AppPublicationListRow>(row => {
+    const publications = rows.slice(0, 25).flatMap<AppPublicationListRow>((row) => {
       const publicationId = String(row.publication_id);
       let collectionCapability: AppPublicationListRow["collectionCapability"] = null;
 
       let datasetCapability: AppPublicationListRow["datasetCapability"] = null;
       if (row.capability_json !== null) {
-        try { collectionCapability = parseAppCollectionCapability(JSON.parse(String(row.capability_json))); }
-        catch { collectionCapability = "unavailable"; }
+        try {
+          collectionCapability = parseAppCollectionCapability(
+            JSON.parse(String(row.capability_json)),
+          );
+        } catch {
+          collectionCapability = "unavailable";
+        }
       }
       try {
-        const publication = withOperatorTakedown(storage, stored(storage, {...input, publicationId}));
-        if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot) return [];
+        const publication = withOperatorTakedown(
+          storage,
+          stored(storage, { ...input, publicationId }),
+        );
+        if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot)
+          return [];
         const capability = publication.candidate.capabilities[0];
 
-        if (capability?.kind === "dataset") datasetCapability = parseAppDatasetCapability(capability);
-        return [{publicationId, ...(publication.operatorTakedown ? {operatorTakedown:publication.operatorTakedown} : {}), approvalProvenance:publication.approvalProvenance, authorityRevision: publication.authorityRevision, manifestUnavailable: false,
-          shareId: publication.owner.shareId, grantId: publication.owner.grantId, appRoot: publication.candidate.appRoot,
-          sourceRevision: publication.candidate.sourceRevision, active: publication.active, linkCurrent: publicationLinkIsCurrent(storage, publication.owner), collectionCapability, datasetCapability}];
+        if (capability?.kind === "dataset")
+          datasetCapability = parseAppDatasetCapability(capability);
+        return [
+          {
+            publicationId,
+            ...(publication.operatorTakedown
+              ? { operatorTakedown: publication.operatorTakedown }
+              : {}),
+            approvalProvenance: publication.approvalProvenance,
+            authorityRevision: publication.authorityRevision,
+            manifestUnavailable: false,
+            shareId: publication.owner.shareId,
+            grantId: publication.owner.grantId,
+            appRoot: publication.candidate.appRoot,
+            sourceRevision: publication.candidate.sourceRevision,
+            active: publication.active,
+            linkCurrent: publicationLinkIsCurrent(storage, publication.owner),
+            collectionCapability,
+            datasetCapability,
+          },
+        ];
       } catch (error) {
         if (!(error instanceof PublicationManifestUnavailable)) throw error;
-        const state = withOperatorTakedown(storage, header(storage, publicationId, input.workspaceId, input.ownerUserId).state);
-        return [{publicationId, ...(state.operatorTakedown ? {operatorTakedown:state.operatorTakedown} : {}), approvalProvenance:state.approvalProvenance, authorityRevision: state.authorityRevision, manifestUnavailable: true,
-          shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active, linkCurrent: publicationLinkIsCurrent(storage, state.owner), collectionCapability, datasetCapability: null}];
+        const state = withOperatorTakedown(
+          storage,
+          header(storage, publicationId, input.workspaceId, input.ownerUserId).state,
+        );
+        return [
+          {
+            publicationId,
+            ...(state.operatorTakedown ? { operatorTakedown: state.operatorTakedown } : {}),
+            approvalProvenance: state.approvalProvenance,
+            authorityRevision: state.authorityRevision,
+            manifestUnavailable: true,
+            shareId: state.owner.shareId,
+            grantId: state.owner.grantId,
+            active: state.active,
+            linkCurrent: publicationLinkIsCurrent(storage, state.owner),
+            collectionCapability,
+            datasetCapability: null,
+          },
+        ];
       }
     });
-    return {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};
+    return { publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null };
   });
 }
-export function withdrawAppPublication(storage: StorageContext, input: WithdrawAppPublicationInput): AppPublicationState {
+export function withdrawAppPublication(
+  storage: StorageContext,
+  input: WithdrawAppPublicationInput,
+): AppPublicationState {
   return storage.tx(() => {
-    const current = withOperatorTakedown(storage, header(storage,input.publicationId,input.workspaceId,input.ownerUserId).state);
+    const current = withOperatorTakedown(
+      storage,
+      header(storage, input.publicationId, input.workspaceId, input.ownerUserId).state,
+    );
     const share = storage.getShare(current.owner.shareId);
-    if (!share || share.workspaceId !== current.owner.workspaceId || share.granterUserId !== input.ownerUserId) throw notFound();
-    if (current.authorityRevision !== input.expectedAuthorityRevision) throw relayError("conflict","Publication authority changed.");
+    if (
+      !share ||
+      share.workspaceId !== current.owner.workspaceId ||
+      share.granterUserId !== input.ownerUserId
+    )
+      throw notFound();
+    if (current.authorityRevision !== input.expectedAuthorityRevision)
+      throw relayError("conflict", "Publication authority changed.");
     if (!current.active) return current;
-    if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict","Publication authority is exhausted.");
-    storage.db.prepare("UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
-    return {...current,active:false,authorityRevision:current.authorityRevision+1};
+    if (current.authorityRevision >= Number.MAX_SAFE_INTEGER)
+      throw relayError("conflict", "Publication authority is exhausted.");
+    storage.db
+      .prepare(
+        "UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?",
+      )
+      .run(input.publicationId);
+    return { ...current, active: false, authorityRevision: current.authorityRevision + 1 };
   });
 }
 
@@ -223,162 +514,350 @@ export function withdrawAppPublication(storage: StorageContext, input: WithdrawA
 export const TAKEDOWN_LISTED_COPIES = 50;
 export interface AppPublicationTakedownResult extends AppPublicationState {
   /** The owner's other active publications of the same bundle, such as the app on another share link. */
-  otherActiveCopies: {publicationIds: string[]; total: number};
+  otherActiveCopies: { publicationIds: string[]; total: number };
 }
-export function disableAppPublication(storage: StorageContext, input: DisableAppPublicationInput): AppPublicationTakedownResult {
-  if (!/^[a-f0-9]{64}$/.test(input.publicationId) || typeof input.reason !== "string" ||
-      !input.reason.trim() || input.reason.length > 1024 || Buffer.byteLength(input.reason) > 4096 || input.reason.includes("\0")) throw badRequest("Invalid publication takedown.");
+export function disableAppPublication(
+  storage: StorageContext,
+  input: DisableAppPublicationInput,
+): AppPublicationTakedownResult {
+  if (
+    !/^[a-f0-9]{64}$/.test(input.publicationId) ||
+    typeof input.reason !== "string" ||
+    !input.reason.trim() ||
+    input.reason.length > 1024 ||
+    Buffer.byteLength(input.reason) > 4096 ||
+    input.reason.includes("\0")
+  )
+    throw badRequest("Invalid publication takedown.");
   const now = integer(input.nowMs);
   return storage.tx(() => {
-    const row = storage.db.prepare("SELECT workspace_id,owner_user_id,manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?").get(input.publicationId);
+    const row = storage.db
+      .prepare(
+        "SELECT workspace_id,owner_user_id,manifest_sha256 FROM sync_relay_app_publications WHERE publication_id=?",
+      )
+      .get(input.publicationId);
     if (!row) throw notFound();
-    const current = withOperatorTakedown(storage, header(storage, input.publicationId, String(row.workspace_id), String(row.owner_user_id)).state);
+    const current = withOperatorTakedown(
+      storage,
+      header(storage, input.publicationId, String(row.workspace_id), String(row.owner_user_id))
+        .state,
+    );
     // A takedown holds the owner's app publishing, and a retry after a lift holds it again.
-    storage.db.prepare("INSERT OR IGNORE INTO sync_relay_app_publishing_holds(publication_id,owner_user_id,held_at_ms) VALUES(?,?,?)")
+    storage.db
+      .prepare(
+        "INSERT OR IGNORE INTO sync_relay_app_publishing_holds(publication_id,owner_user_id,held_at_ms) VALUES(?,?,?)",
+      )
       .run(input.publicationId, String(row.owner_user_id), now);
-    const copies = storage.db.prepare(`SELECT publication_id FROM sync_relay_app_publications
+    const copies = storage.db
+      .prepare(`SELECT publication_id FROM sync_relay_app_publications
       WHERE owner_user_id=? AND manifest_sha256=? AND active=1 AND publication_id<>? ORDER BY publication_id`)
-      .all(String(row.owner_user_id), String(row.manifest_sha256), input.publicationId).map(copy => String(copy.publication_id));
-    const otherActiveCopies = {publicationIds: copies.slice(0, TAKEDOWN_LISTED_COPIES), total: copies.length};
-    if (current.operatorTakedown) return {...current, otherActiveCopies};
-    if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority is exhausted.");
-    const operatorTakedown: AppPublicationTakedown = {actor: "operator", disabledAtMs: now, reason: input.reason.trim()};
-    storage.db.prepare("INSERT INTO sync_relay_app_publication_takedowns(publication_id,actor,disabled_at_ms,reason) VALUES(?,'operator',?,?)")
+      .all(String(row.owner_user_id), String(row.manifest_sha256), input.publicationId)
+      .map((copy) => String(copy.publication_id));
+    const otherActiveCopies = {
+      publicationIds: copies.slice(0, TAKEDOWN_LISTED_COPIES),
+      total: copies.length,
+    };
+    if (current.operatorTakedown) return { ...current, otherActiveCopies };
+    if (current.authorityRevision >= Number.MAX_SAFE_INTEGER)
+      throw relayError("conflict", "Publication authority is exhausted.");
+    const operatorTakedown: AppPublicationTakedown = {
+      actor: "operator",
+      disabledAtMs: now,
+      reason: input.reason.trim(),
+    };
+    storage.db
+      .prepare(
+        "INSERT INTO sync_relay_app_publication_takedowns(publication_id,actor,disabled_at_ms,reason) VALUES(?,'operator',?,?)",
+      )
       .run(input.publicationId, now, operatorTakedown.reason);
-    storage.db.prepare("UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
-    return {...current, active: false, authorityRevision: current.authorityRevision + 1, operatorTakedown, otherActiveCopies};
+    storage.db
+      .prepare(
+        "UPDATE sync_relay_app_publications SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?",
+      )
+      .run(input.publicationId);
+    return {
+      ...current,
+      active: false,
+      authorityRevision: current.authorityRevision + 1,
+      operatorTakedown,
+      otherActiveCopies,
+    };
   });
 }
 
 function assertPublishingNotHeld(storage: StorageContext, ownerUserId: string): void {
-  if (storage.db.prepare("SELECT 1 FROM sync_relay_app_publishing_holds WHERE owner_user_id=?").get(ownerUserId)) {
-    throw relayError("conflict", "The server operator stopped your account from publishing apps. Contact the server operator.");
+  if (
+    storage.db
+      .prepare("SELECT 1 FROM sync_relay_app_publishing_holds WHERE owner_user_id=?")
+      .get(ownerUserId)
+  ) {
+    throw relayError(
+      "conflict",
+      "The server operator stopped your account from publishing apps. Contact the server operator.",
+    );
   }
 }
 
 /** Lifts the hold from the owner of any publication taken down since the last lift. False when no hold matches. */
 export function liftAppPublishingHold(storage: StorageContext, publicationId: string): boolean {
   if (!/^[a-f0-9]{64}$/.test(publicationId)) throw badRequest("Invalid publication ID.");
-  return storage.tx(() => storage.db.prepare(`DELETE FROM sync_relay_app_publishing_holds
+  return storage.tx(
+    () =>
+      storage.db
+        .prepare(`DELETE FROM sync_relay_app_publishing_holds
     WHERE owner_user_id=(SELECT owner_user_id FROM sync_relay_app_publishing_holds WHERE publication_id=?)`)
-    .run(publicationId).changes > 0);
+        .run(publicationId).changes > 0,
+  );
 }
 
-function recordApproval(storage: StorageContext, publicationId: string, authorityRevision: number, owner: PublicationOwner, candidate: AppPublicationCandidate, agent?: ApprovalAgent | null): AppPublicationApproval {
+function recordApproval(
+  storage: StorageContext,
+  publicationId: string,
+  authorityRevision: number,
+  owner: PublicationOwner,
+  candidate: AppPublicationCandidate,
+  agent?: ApprovalAgent | null,
+): AppPublicationApproval {
   const grant = storage.getShareGrant(owner.grantId)!;
-  const facts: AppPublicationApproval = {agent:parseApprovalAgent(agent),selector:JSON.parse(storage.getShare(owner.shareId)!.selectorJson),access:grant.access as AppPublicationApproval["access"],committedCandidateDigest:sha(JSON.stringify(candidate)),sourceRevision:candidate.sourceRevision,capabilities:candidate.capabilities};
-  storage.db.prepare("INSERT INTO sync_relay_app_publication_approvals(publication_id,authority_revision,facts_json) VALUES(?,?,?)").run(publicationId,authorityRevision,JSON.stringify(facts));
+  const facts: AppPublicationApproval = {
+    agent: parseApprovalAgent(agent),
+    selector: JSON.parse(storage.getShare(owner.shareId)!.selectorJson),
+    access: grant.access as AppPublicationApproval["access"],
+    committedCandidateDigest: sha(JSON.stringify(candidate)),
+    sourceRevision: candidate.sourceRevision,
+    capabilities: candidate.capabilities,
+  };
+  storage.db
+    .prepare(
+      "INSERT INTO sync_relay_app_publication_approvals(publication_id,authority_revision,facts_json) VALUES(?,?,?)",
+    )
+    .run(publicationId, authorityRevision, JSON.stringify(facts));
   return facts;
 }
 
-export function reactivateAppPublication(storage: StorageContext, input: ReactivateAppPublicationInput): AppPublicationState {
+export function reactivateAppPublication(
+  storage: StorageContext,
+  input: ReactivateAppPublicationInput,
+): AppPublicationState {
   return storage.tx(() => {
-    const current = withOperatorTakedown(storage, header(storage, input.publicationId, input.workspaceId, input.ownerUserId).state);
-    if (current.operatorTakedown) throw relayError("conflict", "The server operator disabled this publication. Contact the server operator.");
-    if (current.authorityRevision !== input.expectedAuthorityRevision) throw relayError("conflict", "Publication authority changed.");
+    const current = withOperatorTakedown(
+      storage,
+      header(storage, input.publicationId, input.workspaceId, input.ownerUserId).state,
+    );
+    if (current.operatorTakedown)
+      throw relayError(
+        "conflict",
+        "The server operator disabled this publication. Contact the server operator.",
+      );
+    if (current.authorityRevision !== input.expectedAuthorityRevision)
+      throw relayError("conflict", "Publication authority changed.");
     const candidate = stored(storage, input).candidate;
     authority(storage, current.owner, candidate);
     validateBuildIdentity(candidate);
     const manifestHash = sha(JSON.stringify(candidate));
-    if (sha(JSON.stringify(["dohc-app-publication-v1", current.owner, manifestHash])) !== current.publicationId) throw badRequest("Publication identity mismatch.");
+    if (
+      sha(JSON.stringify(["dohc-app-publication-v1", current.owner, manifestHash])) !==
+      current.publicationId
+    )
+      throw badRequest("Publication identity mismatch.");
     for (const file of candidate.files) {
       const bytes = storage.getBlob(current.owner.workspaceId, file.sha256);
-      if (!bytes || bytes.byteLength !== file.byteLength || sha(bytes) !== file.sha256) throw badRequest("Publication bundle is unavailable.");
+      if (!bytes || bytes.byteLength !== file.byteLength || sha(bytes) !== file.sha256)
+        throw badRequest("Publication bundle is unavailable.");
     }
     if (current.active) return current;
     assertPublishingNotHeld(storage, current.owner.ownerUserId);
-    if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority is exhausted.");
-    storage.db.prepare("UPDATE sync_relay_app_publications SET active=1,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
-    const approvalProvenance = recordApproval(storage, input.publicationId, current.authorityRevision + 1, current.owner, candidate, input.agent);
-    return {...current, active: true, authorityRevision: current.authorityRevision + 1, approvalProvenance};
+    if (current.authorityRevision >= Number.MAX_SAFE_INTEGER)
+      throw relayError("conflict", "Publication authority is exhausted.");
+    storage.db
+      .prepare(
+        "UPDATE sync_relay_app_publications SET active=1,authority_revision=authority_revision+1 WHERE publication_id=?",
+      )
+      .run(input.publicationId);
+    const approvalProvenance = recordApproval(
+      storage,
+      input.publicationId,
+      current.authorityRevision + 1,
+      current.owner,
+      candidate,
+      input.agent,
+    );
+    return {
+      ...current,
+      active: true,
+      authorityRevision: current.authorityRevision + 1,
+      approvalProvenance,
+    };
   });
 }
 
-function currentLinkPublicationPrincipal(storage: StorageContext, input: Omit<LinkAppPublicationInput, "publicationId">) {
+function currentLinkPublicationPrincipal(
+  storage: StorageContext,
+  input: Omit<LinkAppPublicationInput, "publicationId">,
+) {
   const enrollment = readLinkEnrollment(storage, input, input.nowMs);
   if (!enrollment || enrollment.principal?.blockedAtMs != null) throw notFound();
   const session = storage.findLinkSessionByCapabilityHash(input.capabilityHash);
-  if (!session || session.capabilityHash !== input.capabilityHash || !Number.isSafeInteger(input.nowMs) ||
-      input.nowMs < 0) throw notFound();
+  if (
+    !session ||
+    session.capabilityHash !== input.capabilityHash ||
+    !Number.isSafeInteger(input.nowMs) ||
+    input.nowMs < 0
+  )
+    throw notFound();
   const authorized = authorizeLinkSession(storage, session, input.nowMs, input.publicEditRelease);
   // A Group link's grant carries chat access, and no app is published to a Group.
   if (!authorized || !isShareAccessValue(authorized.grant.access)) throw notFound();
-  return {enrollment, session, authorized};
+  return { enrollment, session, authorized };
 }
 
-function currentLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput,
-  verified?: {candidate: AppPublicationCandidate; manifestHash: string},
-  principal?: ReturnType<typeof currentLinkPublicationPrincipal>) {
-  const {enrollment, session, authorized} = principal ?? currentLinkPublicationPrincipal(storage, input);
-  const lookup = {workspaceId: authorized.share.workspaceId, ownerUserId: authorized.share.granterUserId,
-    publicationId: input.publicationId, limits: input.limits};
-  const {state: publication, row} = header(storage, lookup.publicationId, lookup.workspaceId, lookup.ownerUserId);
-  if (!publication.active || publication.owner.shareId !== authorized.share.shareId ||
-      publication.owner.grantId !== authorized.grant.grantId || publication.owner.generation !== authorized.grant.generation ||
-      !Number.isSafeInteger(publication.authorityRevision) || publication.authorityRevision < 1 ||
-      (input.expectedAuthorityRevision !== undefined && input.expectedAuthorityRevision !== publication.authorityRevision)) throw notFound();
+function currentLinkAppPublication(
+  storage: StorageContext,
+  input: LinkAppPublicationInput,
+  verified?: { candidate: AppPublicationCandidate; manifestHash: string },
+  principal?: ReturnType<typeof currentLinkPublicationPrincipal>,
+) {
+  const { enrollment, session, authorized } =
+    principal ?? currentLinkPublicationPrincipal(storage, input);
+  const lookup = {
+    workspaceId: authorized.share.workspaceId,
+    ownerUserId: authorized.share.granterUserId,
+    publicationId: input.publicationId,
+    limits: input.limits,
+  };
+  const { state: publication, row } = header(
+    storage,
+    lookup.publicationId,
+    lookup.workspaceId,
+    lookup.ownerUserId,
+  );
+  if (
+    !publication.active ||
+    publication.owner.shareId !== authorized.share.shareId ||
+    publication.owner.grantId !== authorized.grant.grantId ||
+    publication.owner.generation !== authorized.grant.generation ||
+    !Number.isSafeInteger(publication.authorityRevision) ||
+    publication.authorityRevision < 1 ||
+    (input.expectedAuthorityRevision !== undefined &&
+      input.expectedAuthorityRevision !== publication.authorityRevision)
+  )
+    throw notFound();
   let candidate: AppPublicationCandidate;
   if (verified) {
     if (row.manifest_sha256 !== verified.manifestHash) throw notFound();
     candidate = verified.candidate;
   } else {
-    try { candidate = stored(storage, lookup).candidate; } catch (error) {
+    try {
+      candidate = stored(storage, lookup).candidate;
+    } catch (error) {
       if (error instanceof PublicationManifestUnavailable) throw notFound();
       throw error;
     }
   }
   authority(storage, publication.owner, candidate);
   const manifestHash = verified?.manifestHash ?? sha(JSON.stringify(candidate));
-  if (sha(JSON.stringify(["dohc-app-publication-v1", publication.owner, manifestHash])) !== publication.publicationId) throw notFound();
+  if (
+    sha(JSON.stringify(["dohc-app-publication-v1", publication.owner, manifestHash])) !==
+    publication.publicationId
+  )
+    throw notFound();
   const result: LinkAppPublicationAuthority = {
-    descriptor: {publicationId: publication.publicationId, authorityRevision: publication.authorityRevision,
-      files: candidate.files},
+    descriptor: {
+      publicationId: publication.publicationId,
+      authorityRevision: publication.authorityRevision,
+      files: candidate.files,
+    },
     workspaceId: authorized.share.workspaceId,
-    datasetId: candidate.capabilities.find(value => value.kind === "dataset")?.datasetId ?? null,
-    shareId: authorized.share.shareId, grantId: session.grantId, generation: session.generation,
-    sessionId: session.sessionId, principalId: enrollment.principal?.principalId ?? null, expiresAtMs: session.expiresAtMs,
+    datasetId: candidate.capabilities.find((value) => value.kind === "dataset")?.datasetId ?? null,
+    shareId: authorized.share.shareId,
+    grantId: session.grantId,
+    generation: session.generation,
+    sessionId: session.sessionId,
+    principalId: enrollment.principal?.principalId ?? null,
+    expiresAtMs: session.expiresAtMs,
   };
-  return {result, workspaceId: authorized.share.workspaceId, candidate, manifestHash};
+  return { result, workspaceId: authorized.share.workspaceId, candidate, manifestHash };
 }
 
-export interface ListLinkAppPublicationsInput extends Omit<LinkAppPublicationInput, "publicationId" | "expectedAuthorityRevision"> {cursor?: string}
-export function listLinkAppPublications(storage: StorageContext, input: ListLinkAppPublicationsInput) {
+export interface ListLinkAppPublicationsInput extends Omit<
+  LinkAppPublicationInput,
+  "publicationId" | "expectedAuthorityRevision"
+> {
+  cursor?: string;
+}
+export function listLinkAppPublications(
+  storage: StorageContext,
+  input: ListLinkAppPublicationsInput,
+) {
   return storage.readTx(() => {
     const principal = currentLinkPublicationPrincipal(storage, input);
-    const {session, authorized} = principal;
-    const pinned: {publicationId: string; authorityRevision: number; manifestHash: string}[] = [];
-    const rows = storage.db.prepare(`SELECT publication_id FROM sync_relay_app_publications
+    const { session, authorized } = principal;
+    const pinned: { publicationId: string; authorityRevision: number; manifestHash: string }[] = [];
+    const rows = storage.db
+      .prepare(`SELECT publication_id FROM sync_relay_app_publications
       WHERE workspace_id=? AND grant_id=? AND grant_generation=? AND active=1 AND publication_id>?
-      ORDER BY publication_id LIMIT 26`).all(authorized.share.workspaceId, session.grantId, session.generation, input.cursor ?? "");
-    const publications = rows.slice(0, 25).flatMap(row => {
+      ORDER BY publication_id LIMIT 26`)
+      .all(authorized.share.workspaceId, session.grantId, session.generation, input.cursor ?? "");
+    const publications = rows.slice(0, 25).flatMap((row) => {
       try {
-        const {candidate, result, manifestHash} = currentLinkAppPublication(storage, {...input, publicationId: String(row.publication_id)}, undefined, principal);
-        const name = (candidate.appRoot.split("/").at(-1) ?? "App").replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 128) || "App";
-        pinned.push({publicationId: result.descriptor.publicationId, authorityRevision: result.descriptor.authorityRevision, manifestHash});
-        return [{publicationId: result.descriptor.publicationId, name}];
+        const { candidate, result, manifestHash } = currentLinkAppPublication(
+          storage,
+          { ...input, publicationId: String(row.publication_id) },
+          undefined,
+          principal,
+        );
+        const name =
+          (candidate.appRoot.split("/").at(-1) ?? "App")
+            .replace(/[\u0000-\u001f\u007f]/g, "")
+            .slice(0, 128) || "App";
+        pinned.push({
+          publicationId: result.descriptor.publicationId,
+          authorityRevision: result.descriptor.authorityRevision,
+          manifestHash,
+        });
+        return [{ publicationId: result.descriptor.publicationId, name }];
       } catch (error) {
         if (error instanceof RelayError && error.code === "not_found") return [];
         throw error;
       }
     });
-    const page = {publications, nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null};
-    const capturedInput = {...input, limits: {...input.limits}};
-    const assertCurrent = (nowMs: number) => storage.readTx(() => {
-      const current = currentLinkPublicationPrincipal(storage, {...capturedInput, nowMs});
-      if (current.authorized.share.workspaceId !== authorized.share.workspaceId ||
+    const page = {
+      publications,
+      nextCursor: rows.length > 25 ? String(rows[24]!.publication_id) : null,
+    };
+    const capturedInput = { ...input, limits: { ...input.limits } };
+    const assertCurrent = (nowMs: number) =>
+      storage.readTx(() => {
+        const current = currentLinkPublicationPrincipal(storage, { ...capturedInput, nowMs });
+        if (
+          current.authorized.share.workspaceId !== authorized.share.workspaceId ||
           current.authorized.share.granterUserId !== authorized.share.granterUserId ||
           current.authorized.share.shareId !== authorized.share.shareId ||
           current.authorized.share.selectorJson !== authorized.share.selectorJson ||
           current.authorized.grant.access !== authorized.grant.access ||
-          current.session.grantId !== session.grantId || current.session.generation !== session.generation) throw notFound();
-      for (const publication of pinned) {
-        const {state, row} = header(storage, publication.publicationId, authorized.share.workspaceId, authorized.share.granterUserId);
-        if (!state.active || state.authorityRevision !== publication.authorityRevision ||
-            state.owner.shareId !== authorized.share.shareId || state.owner.grantId !== session.grantId ||
-            state.owner.generation !== session.generation || row.manifest_sha256 !== publication.manifestHash) throw notFound();
-      }
-    });
-    return {page, assertCurrent};
+          current.session.grantId !== session.grantId ||
+          current.session.generation !== session.generation
+        )
+          throw notFound();
+        for (const publication of pinned) {
+          const { state, row } = header(
+            storage,
+            publication.publicationId,
+            authorized.share.workspaceId,
+            authorized.share.granterUserId,
+          );
+          if (
+            !state.active ||
+            state.authorityRevision !== publication.authorityRevision ||
+            state.owner.shareId !== authorized.share.shareId ||
+            state.owner.grantId !== session.grantId ||
+            state.owner.generation !== session.generation ||
+            row.manifest_sha256 !== publication.manifestHash
+          )
+            throw notFound();
+        }
+      });
+    return { page, assertCurrent };
   });
 }
 
@@ -388,29 +867,44 @@ export function requireLinkAppPublication(storage: StorageContext, input: LinkAp
 }
 
 /** Retain only verified immutable content; every invocation still rechecks current authority. */
-export function createLinkAppPublicationGuard(storage: StorageContext, input: LinkAppPublicationInput): (nowMs: number) => void {
-  const capturedInput = {...input, limits: {...input.limits}};
+export function createLinkAppPublicationGuard(
+  storage: StorageContext,
+  input: LinkAppPublicationInput,
+): (nowMs: number) => void {
+  const capturedInput = { ...input, limits: { ...input.limits } };
   const captured = storage.readTx(() => currentLinkAppPublication(storage, capturedInput));
-  const pinned = {...capturedInput, expectedAuthorityRevision: captured.result.descriptor.authorityRevision};
-  return nowMs => storage.readTx(() => {
-    currentLinkAppPublication(storage, {...pinned, nowMs}, captured);
-  });
+  const pinned = {
+    ...capturedInput,
+    expectedAuthorityRevision: captured.result.descriptor.authorityRevision,
+  };
+  return (nowMs) =>
+    storage.readTx(() => {
+      currentLinkAppPublication(storage, { ...pinned, nowMs }, captured);
+    });
 }
 
 /** Shared by launch admission and protected reads; all standing comes from current server state. */
-export function authorizeLinkAppPublication(storage: StorageContext, input: LinkAppPublicationInput): LinkAppPublicationAuthority {
+export function authorizeLinkAppPublication(
+  storage: StorageContext,
+  input: LinkAppPublicationInput,
+): LinkAppPublicationAuthority {
   return storage.readTx(() => requireLinkAppPublication(storage, input).result);
 }
 
-export function readLinkAppPublicationBlob(storage: StorageContext, input: LinkAppPublicationInput & {
-  sha256: string; expectedAuthorityRevision: number;
-}) {
+export function readLinkAppPublicationBlob(
+  storage: StorageContext,
+  input: LinkAppPublicationInput & {
+    sha256: string;
+    expectedAuthorityRevision: number;
+  },
+) {
   return storage.readTx(() => {
-    const {result, workspaceId} = requireLinkAppPublication(storage, input);
-    const file = result.descriptor.files.find(file => file.sha256 === input.sha256);
+    const { result, workspaceId } = requireLinkAppPublication(storage, input);
+    const file = result.descriptor.files.find((file) => file.sha256 === input.sha256);
     if (!file) throw notFound();
     const bytes = storage.getBlob(workspaceId, file.sha256);
-    if (!bytes || bytes.byteLength !== file.byteLength || sha(bytes) !== file.sha256) throw notFound();
-    return {...result, file, bytes};
+    if (!bytes || bytes.byteLength !== file.byteLength || sha(bytes) !== file.sha256)
+      throw notFound();
+    return { ...result, file, bytes };
   });
 }

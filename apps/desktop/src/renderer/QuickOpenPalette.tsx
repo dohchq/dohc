@@ -1,13 +1,6 @@
 import { useCallback, useMemo, useRef } from "react";
-import {
-  CommandPalette,
-  MAX_COMMAND_PALETTE_MATCHES,
-  type Command,
-} from "./CommandPalette";
-import {
-  prepareQuickOpenPaths,
-  rankPreparedQuickOpenPaths,
-} from "./workbench/quick-open-rank";
+import { CommandPalette, MAX_COMMAND_PALETTE_MATCHES, type Command } from "./CommandPalette";
+import { prepareQuickOpenPaths, rankPreparedQuickOpenPaths } from "./workbench/quick-open-rank";
 
 export function QuickOpenPalette(props: {
   files: readonly { path: string }[];
@@ -29,7 +22,6 @@ export function QuickOpenPalette(props: {
     [props.files],
   );
   const ranking = useMemo(() => {
-    // Match the previous Map behavior if a listing contains duplicate paths.
     const commandsByPath = new Map(commands.map((command) => [command.id, command]));
     return {
       commandsByPath,
@@ -41,11 +33,9 @@ export function QuickOpenPalette(props: {
   }, [commands, props.pinned, props.recent]);
   const rank = useCallback(
     (query: string) =>
-      rankPreparedQuickOpenPaths(
-        query,
-        ranking.paths,
-        MAX_COMMAND_PALETTE_MATCHES,
-      ).map((path) => ranking.commandsByPath.get(path)!),
+      rankPreparedQuickOpenPaths(query, ranking.paths, MAX_COMMAND_PALETTE_MATCHES).map((path) =>
+        ranking.commandsByPath.get(path)!,
+      ),
     [ranking],
   );
 

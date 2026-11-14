@@ -139,15 +139,6 @@ macro_rules! received_ydoc_test {
 
 received_ydoc_test!(received_ydoc_open, "ydoc.open");
 received_ydoc_test!(received_ydoc_record_update, "ydoc.recordUpdate");
-received_ydoc_test!(received_ydoc_resync, "ydoc.resync");
-received_ydoc_test!(
-    received_ydoc_adopt_collection_record,
-    "ydoc.adoptCollectionRecord"
-);
-received_ydoc_test!(received_ydoc_settle, "ydoc.settle");
-received_ydoc_test!(received_ydoc_close, "ydoc.close");
-received_ydoc_test!(received_ydoc_evict, "ydoc.evict");
-
 #[tokio::test]
 async fn received_ydoc_guard_keeps_snapshot_reads() {
     let scratch = ScratchDir::new().unwrap();

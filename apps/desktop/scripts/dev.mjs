@@ -64,11 +64,7 @@ function engineBinaryName(platform) {
   return `dohc-workspace-engine${platform === "win32" ? ".exe" : ""}`;
 }
 
-export function validateWorkspaceEngineBuild(
-  output,
-  root,
-  platform = process.platform,
-) {
+export function validateWorkspaceEngineBuild(output, root, platform = process.platform) {
   const executable = workspaceEngineExecutable(output);
   // Keep this in sync with defaultEngineBinaryPath's unpackaged branch.
   const expected = resolve(root, "target", "debug", engineBinaryName(platform));
@@ -153,16 +149,20 @@ async function buildWorkspaceEngine(environment, runCargo) {
 
 export async function buildThenStartDesktop({
   runCargo = runProcess,
-  startDev = () => spawnSync(
-    process.execPath,
-    [electronViteCliPath(), "dev", ...process.argv.slice(2)],
-    electronViteSpawnOptions(process.env),
-  ),
+  startDev = () =>
+    spawnSync(
+      process.execPath,
+      [electronViteCliPath(), "dev", ...process.argv.slice(2)],
+      electronViteSpawnOptions(process.env),
+    ),
 } = {}) {
   const cancellation = cancellationScope("Desktop build");
   let interrupted;
-  try { await withBuildBudget((environment) => buildWorkspaceEngine(environment, runCargo)); }
-  finally { interrupted = await cancellation.dispose(); }
+  try {
+    await withBuildBudget((environment) => buildWorkspaceEngine(environment, runCargo));
+  } finally {
+    interrupted = await cancellation.dispose();
+  }
   if (interrupted) throw interrupted;
   return startDev();
 }
@@ -175,14 +175,30 @@ async function run() {
     "verify the Electron installation",
   );
 
-  runRequired(process.execPath, [join(import.meta.dirname, "stage-app-compiler.mjs")],
-    { stdio: "inherit" }, "stage the app compiler");
-  runRequired(process.execPath, [join(import.meta.dirname, "stage-engine-reader.mjs")],
-    { stdio: "inherit" }, "stage the Markdown reader");
-  runRequired(process.execPath, [join(import.meta.dirname, "stage-agent-probe.mjs")],
-    { stdio: "inherit" }, "stage the agent probe");
-  runRequired(process.execPath, [join(import.meta.dirname, "stage-app-backend-runtime.mjs")],
-    { stdio: "inherit" }, "stage the app backend runtime");
+  runRequired(
+    process.execPath,
+    [join(import.meta.dirname, "stage-app-compiler.mjs")],
+    { stdio: "inherit" },
+    "stage the app compiler",
+  );
+  runRequired(
+    process.execPath,
+    [join(import.meta.dirname, "stage-engine-reader.mjs")],
+    { stdio: "inherit" },
+    "stage the Markdown reader",
+  );
+  runRequired(
+    process.execPath,
+    [join(import.meta.dirname, "stage-agent-probe.mjs")],
+    { stdio: "inherit" },
+    "stage the agent probe",
+  );
+  runRequired(
+    process.execPath,
+    [join(import.meta.dirname, "stage-app-backend-runtime.mjs")],
+    { stdio: "inherit" },
+    "stage the app backend runtime",
+  );
 
   const devServer = await buildThenStartDesktop();
   if (devServer.error) fail("start electron-vite", devServer.error);
@@ -190,8 +206,7 @@ async function run() {
 }
 
 const isMain =
-  process.argv[1] !== undefined &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isMain) {
   run().catch((error) => fail("start the development session", error));

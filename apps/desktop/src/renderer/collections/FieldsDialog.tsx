@@ -64,12 +64,10 @@ export function useSchemaRun(apply: SchemaApply) {
 
 export function FieldsDialog(props: {
   schema: CollectionSchema;
-  /** Collection folder paths a relation field can target. */
   relationTargets: readonly string[];
   apply: SchemaApply;
   /** What each Button field does now, by field name; null while it loads. */
   buttonStates?: ReadonlyMap<string, AutomationButtonState> | null;
-  /** Opens the automation builder with the trigger set to this button. */
   onChooseButtonAutomation?: (field: string) => void;
   /** The type a new field starts with. The dialog then opens on its name. */
   addType?: CollectionFieldType;
@@ -133,7 +131,10 @@ export function FieldsDialog(props: {
           ) : null}
           {props.schema.fields.map((field) =>
             editing === field.name ? (
-              <div key={field.name} className="flex flex-col gap-1.5 rounded-lg border border-line bg-panel-2 p-2">
+              <div
+                key={field.name}
+                className="flex flex-col gap-1.5 rounded-lg border border-line bg-panel-2 p-2"
+              >
                 {/* Read-only: renaming ships with the record-key rewrite. */}
                 <input
                   type="text"
@@ -154,17 +155,25 @@ export function FieldsDialog(props: {
                 {field.type === "select" || field.type === "multi-select" ? (
                   <ul aria-label="Option colors" className="m-0 flex list-none flex-col p-0">
                     {parseOptionsText(editOptions).map((option) => {
-                      const color = Object.hasOwn(editColors, option) ? editColors[option]! : optionColor(field, option);
+                      const color = Object.hasOwn(editColors, option)
+                        ? editColors[option]!
+                        : optionColor(field, option);
                       return (
                         <li key={option} className="flex h-8 items-center gap-2 px-1">
                           <span className="flex min-w-0 flex-1">
-                            <OptionPill label={option} color={color} dot={field.type === "select"} />
+                            <OptionPill
+                              label={option}
+                              color={color}
+                              dot={field.type === "select"}
+                            />
                           </span>
                           <OptionColorPicker
                             label={`Color for ${option}`}
                             value={color}
                             disabled={pending}
-                            onChange={(next) => setEditColors((colors) => ({ ...colors, [option]: next }))}
+                            onChange={(next) =>
+                              setEditColors((colors) => ({ ...colors, [option]: next }))
+                            }
                           />
                         </li>
                       );
@@ -175,24 +184,20 @@ export function FieldsDialog(props: {
                   <SecondaryButton disabled={pending} onClick={() => setEditing(null)}>
                     Cancel
                   </SecondaryButton>
-                  <PrimaryButton
-                    disabled={pending}
-                    onClick={() => void saveEdit(field.name)}
-                  >
+                  <PrimaryButton disabled={pending} onClick={() => void saveEdit(field.name)}>
                     Save field
                   </PrimaryButton>
                 </div>
               </div>
             ) : (
               <div key={field.name} className="flex h-8 items-center gap-2 rounded-md px-2">
-                <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
-                  {field.name}
-                </span>
+                <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{field.name}</span>
                 <span className="shrink-0 text-[11px] text-subtle">
                   {FIELD_TYPE_LABELS[field.type]}
                 </span>
-                {field.type === "button" && props.onChooseButtonAutomation &&
-                  props.buttonStates?.get(field.name)?.kind === "no-automation" ? (
+                {field.type === "button" &&
+                props.onChooseButtonAutomation &&
+                props.buttonStates?.get(field.name)?.kind === "no-automation" ? (
                   <SecondaryButton
                     aria-label={`Choose what it does: ${field.name}`}
                     disabled={pending}

@@ -14,7 +14,9 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date(AT));
   lines = [];
-  vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+  vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+    lines.push(String(line));
+  });
 });
 
 afterEach(async () => {
@@ -27,9 +29,16 @@ afterEach(async () => {
 
 async function listen(handler: AuthGateway["handler"]): Promise<string> {
   const router = createRouter({
-    auth: { handler, api: { getSession: async () => null, deviceVerify: async () => ({ status: "pending" }) } },
+    auth: {
+      handler,
+      api: { getSession: async () => null, deviceVerify: async () => ({ status: "pending" }) },
+    },
     readiness: async () => ({ ok: true, database: "ok", schema: "ok", missingTables: [] }),
-    descriptor: { authUrl: "http://auth.test", relayUrl: "http://relay.test", shareUrl: "http://share.test" },
+    descriptor: {
+      authUrl: "http://auth.test",
+      relayUrl: "http://relay.test",
+      shareUrl: "http://share.test",
+    },
     emailTransport: "smtp",
     allowedOrigins: [],
   });
@@ -51,8 +60,12 @@ it("logs a sign-in as its route, never its query, body or address", async () => 
 });
 
 it("logs a sign-in route it does not list, and a token in the path, as the sign-in prefix", async () => {
-  const base = await listen(async () => new Response(null, { status: 302, headers: { location: "/account" } }));
-  const reset = await fetch(`${base}/api/auth/reset-password/${TOKEN}?callbackURL=%2Faccount`, { redirect: "manual" });
+  const base = await listen(
+    async () => new Response(null, { status: 302, headers: { location: "/account" } }),
+  );
+  const reset = await fetch(`${base}/api/auth/reset-password/${TOKEN}?callbackURL=%2Faccount`, {
+    redirect: "manual",
+  });
   expect(reset.status).toBe(302);
   const page = await fetch(`${base}/account/reset-password?token=${TOKEN}`);
   expect(page.status).toBe(200);
@@ -72,8 +85,12 @@ it("logs a path no route matches as one fixed word", async () => {
 });
 
 it("logs an answer whose client leaves before its body ends, once", async () => {
-  // One chunk, then a body that never ends: the client leaves mid-answer.
-  const base = await listen(async () => new Response(new ReadableStream({ start: (controller) => controller.enqueue(new Uint8Array([1])) })));
+  const base = await listen(
+    async () =>
+      new Response(
+        new ReadableStream({ start: (controller) => controller.enqueue(new Uint8Array([1])) }),
+      ),
+  );
   const leave = new AbortController();
   const response = await fetch(`${base}/api/auth/stream`, { signal: leave.signal });
   expect(response.status).toBe(200);

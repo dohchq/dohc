@@ -25,10 +25,7 @@ function harness() {
     workspaceId: "workspace-1",
     writable: true,
   };
-  const handlers = new Map<
-    string,
-    (event: TestEvent, payload: unknown) => Promise<unknown>
-  >();
+  const handlers = new Map<string, (event: TestEvent, payload: unknown) => Promise<unknown>>();
   const read = vi.fn<() => Promise<unknown>>(async () => ({
     path: "data.sqlite",
     tables: [],
@@ -46,21 +43,13 @@ function harness() {
     page: { offset: 0, rows: [], nextOffset: null },
     version: 1,
   }));
-  const dependencies: WorkspaceDatabaseIpcDependencies<
-    TestEvent,
-    TestWorkspace
-  > = {
+  const dependencies: WorkspaceDatabaseIpcDependencies<TestEvent, TestWorkspace> = {
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: (event) => {
       trace.push("trust");
       if (!event.trusted) throw new Error("Untrusted renderer.");
     },
-    withWorkspaceOperation: async (
-      _event,
-      workspaceId,
-      inactiveMessage,
-      work,
-    ) => {
+    withWorkspaceOperation: async (_event, workspaceId, inactiveMessage, work) => {
       trace.push(`workspace:${workspaceId}`);
       if (workspaceId !== workspace.workspaceId) throw new Error(inactiveMessage);
       return work({ workspace, signal: controller.signal });
@@ -151,11 +140,7 @@ describe("workspace database IPC", () => {
       }),
     ).resolves.toMatchObject({ version: 1 });
 
-    expect(test.trace).toEqual([
-      "trust",
-      "workspace:workspace-1",
-      "writable",
-    ]);
+    expect(test.trace).toEqual(["trust", "workspace:workspace-1", "writable"]);
     expect(test.edit).toHaveBeenCalledWith(
       { workspace: test.workspace, signal: test.controller.signal },
       {
@@ -169,9 +154,9 @@ describe("workspace database IPC", () => {
 
   it("rejects untrusted, malformed, unauthorized, and read-only requests before work", async () => {
     const untrusted = harness();
-    await expect(
-      untrusted.invoke(CHANNELS.readWorkspaceDatabase, null, false),
-    ).rejects.toThrow("Untrusted renderer.");
+    await expect(untrusted.invoke(CHANNELS.readWorkspaceDatabase, null, false)).rejects.toThrow(
+      "Untrusted renderer.",
+    );
     expect(untrusted.read).not.toHaveBeenCalled();
 
     const malformed = harness();
@@ -285,10 +270,7 @@ describe("workspace database IPC", () => {
     const databaseWorker = createWorkspaceDatabaseWorkerOwner({
       onRequestStarted: () => started.resolve(),
     });
-    const handlers = new Map<
-      string,
-      (event: TestEvent, payload: unknown) => Promise<unknown>
-    >();
+    const handlers = new Map<string, (event: TestEvent, payload: unknown) => Promise<unknown>>();
     const workspace = { workspaceId: "workspace-1", writable: true };
     registerWorkspaceDatabaseIpcHandlers<TestEvent, typeof workspace>({
       registerHandler: (channel, handler) => handlers.set(channel, handler),
@@ -296,8 +278,7 @@ describe("workspace database IPC", () => {
       withWorkspaceOperation: async (_event, _workspaceId, _message, work) =>
         work({ workspace, signal: new AbortController().signal }),
       assertWritableWorkspace: () => undefined,
-      read: (_operation, path) =>
-        databaseWorker.readPath({ absolutePath: databasePath, path }),
+      read: (_operation, path) => databaseWorker.readPath({ absolutePath: databasePath, path }),
       readPage: async () => {
         throw new Error("Page read was not expected.");
       },
@@ -312,19 +293,20 @@ describe("workspace database IPC", () => {
     let readSettled = false;
 
     try {
-      const read = handlers
-        .get(CHANNELS.readWorkspaceDatabase)!({ trusted: true }, {
+      const read = handlers.get(CHANNELS.readWorkspaceDatabase)!(
+        { trusted: true },
+        {
           workspaceId: workspace.workspaceId,
           relativePath: "large.sqlite",
-        })
-        .finally(() => {
-          readSettled = true;
-        });
+        },
+      ).finally(() => {
+        readSettled = true;
+      });
       await started.promise;
 
-      await expect(
-        handlers.get(pingChannel)!({ trusted: true }, undefined),
-      ).resolves.toEqual({ pong: true });
+      await expect(handlers.get(pingChannel)!({ trusted: true }, undefined)).resolves.toEqual({
+        pong: true,
+      });
       expect(readSettled).toBe(false);
       await read;
     } finally {

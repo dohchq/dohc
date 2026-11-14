@@ -258,8 +258,6 @@ fn deferred_ingest_stays_unrecorded_without_degrading_and_returns_on_a_rescan() 
         "a deferred path must not keep the layer rescanning while the session lasts"
     );
 
-    // A requested rescan offers the path again, and once the session lets go
-    // it is captured and no longer deferred.
     controller.mark_dirty();
     sink.deferred.clear();
     let retry = completed(
@@ -311,7 +309,6 @@ fn deferred_retire_keeps_the_path_without_degrading_and_retires_on_a_rescan() {
         "a deferred path must not keep the layer rescanning while the session lasts"
     );
 
-    // Once the session lets go, a requested rescan retires the path.
     controller.mark_dirty();
     sink.deferred.clear();
     let retry = completed(
@@ -326,8 +323,6 @@ fn deferred_retire_keeps_the_path_without_degrading_and_retires_on_a_rescan() {
     assert!(controller.deferred_paths().is_empty());
 }
 
-// A change was planned, but the file was gone when the sink read it and a
-// live session holds its record. The entry stays so a later scan retires it.
 #[test]
 fn an_ingest_whose_held_file_is_gone_keeps_the_path_for_a_retire() {
     let ws = Scratch::new();
@@ -371,7 +366,7 @@ fn an_ingest_whose_held_file_is_gone_keeps_the_path_for_a_retire() {
     assert!(matches!(retry.ops.as_slice(), [CaptureOp::Retire { path }] if path == "open.md"));
 }
 
-// dohc#2360. A session settled a new document before capture recorded its
+// A session settled a new document before capture recorded its
 // file, and the file was gone when the sink read it. The path has no entry to
 // keep, so it waits as a retire candidate, and the scan after release retires
 // the record.
@@ -428,7 +423,7 @@ fn first_sight_deferred_delete_returns_as_a_retire() {
     assert!(after.is_empty(), "a retired candidate is not offered again");
 }
 
-// dohc#2360. A session releases a tracked document, and the next scan finds it
+// A session releases a tracked document, and the next scan finds it
 // grown past what capture tracks, so capture forgets the path. The offer came
 // while the path was still tracked, and it still retires the record once the
 // file is gone.
@@ -648,7 +643,6 @@ fn manifest_records_the_bytes_actually_captured_not_the_scan_hash() {
             .reconcile(&scanner, ws.path(), &CancellationToken::new())
             .expect("prepare"),
     );
-    // The sink re-reads and captures newer bytes than the scan hashed.
     let mut sink = IdempotentSink {
         reread_sha: BTreeMap::from([("raced.md".to_owned(), "sha-of-newer-bytes".to_owned())]),
         ..IdempotentSink::default()
@@ -1024,10 +1018,6 @@ fn apply(
     apply_reconcile_plan_cancellable(plan, sink, &NoFaults, &CancellationToken::new(), None)
 }
 
-/// A peer must receive a respelled path's retire before its ingest, or a
-/// disk that ignores case deletes the new file. When the retire of
-/// `notes.md` must wait, here because an editor has it open, the ingest of
-/// `Notes.md` waits for a later pass; other paths go on.
 #[test]
 fn an_ingest_waits_for_the_waiting_retire_of_its_old_spelling() {
     let plan = plan_of(

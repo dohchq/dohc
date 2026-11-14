@@ -160,7 +160,7 @@ async fn secret_merge_replay(
     }
     std::fs::write(root.join("foo.env"), "TOKEN=base").unwrap();
     if !delete_first {
-        // The desktop's merge places deletes before writes (#2240).
+        // The desktop's merge places deletes before writes.
         std::fs::remove_file(root.join("foo.env")).unwrap();
         std::fs::write(root.join(placed), "TOKEN=target").unwrap();
     }
@@ -344,8 +344,6 @@ const NOTES: CaseRename = CaseRename {
     after: "Notes.md",
 };
 
-/// Main has `from`; the draft edits it to `text` and renames it to `to`.
-/// The folder holds Main's file at `before`.
 fn seed_case_only_rename(root: &Path, db: &Path, rename: &CaseRename, text: &str) {
     let CaseRename { from, to, .. } = *rename;
     let mut store = EngineStore::open(db, 1).unwrap();
@@ -470,7 +468,7 @@ async fn text_case_only_merge_survives_reopen_replay() {
 
 /// The merge's delete of `from` fails for a moment, as a busy file makes it,
 /// and stays pending. The merge then writes `to`. With `edit`, the person
-/// changes the file before that write (#2369).
+/// changes the file before that write.
 async fn text_case_only_merge_after_failed_delete(
     rename: CaseRename<'_>,
     text: &str,
@@ -520,7 +518,6 @@ async fn text_case_only_merge_after_failed_delete(
         )
         .await
         .unwrap();
-    // A later replay must keep what the merge left.
     actor
         .materialize_replay_pending(root.path().into(), WS.into(), 6)
         .await
@@ -640,8 +637,7 @@ async fn text_case_only_merge_with_equal_bytes_keeps_the_new_spelling() {
 }
 
 /// A switch's delete of `path` that couldn't finish replays after the person
-/// renamed `from` to `to` on disk and capture recorded the file at `renamed`
-/// (#2299).
+/// renamed `from` to `to` on disk and capture recorded the file at `renamed`.
 async fn pending_switch_delete_after_rename(path: &str, from: &str, to: &str, renamed: &str) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {
@@ -686,7 +682,6 @@ async fn pending_switch_delete_after_rename(path: &str, from: &str, to: &str, re
         assert_eq!(pending.len(), 1);
         assert!(pending[0].job_id.starts_with("version-switch-mat_"));
         std::fs::rename(root.join(from), root.join(to)).unwrap();
-        // Capture records the renamed file, with the bytes the delete expects.
         let mut capture = text_write("draft", renamed, "text", "renamed");
         capture.now_ms = 3;
         VersionedTextStore::new(&mut store)

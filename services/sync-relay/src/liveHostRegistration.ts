@@ -1,6 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
-import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import {
+  parseLiveObjectBinding,
+  type LiveObjectBinding,
+} from "@dohc/live-session-contract/live-object-binding";
 
 export interface LiveHostRegistration {
   readonly id: number;
@@ -10,21 +13,30 @@ export interface LiveHostRegistration {
 
 /** A shared host owns the document, whatever selector its registration was opened with. */
 export function sameLiveHostDocument(left: LiveObjectBinding, right: LiveObjectBinding): boolean {
-  const {selectorPaths: _leftSelectors, ...leftDocument} = left;
-  const {selectorPaths: _rightSelectors, ...rightDocument} = right;
+  const { selectorPaths: _leftSelectors, ...leftDocument } = left;
+  const { selectorPaths: _rightSelectors, ...rightDocument } = right;
   return isDeepStrictEqual(leftDocument, rightDocument);
 }
 
 /** One registration per object. Reuse keeps browser readers on the host's current native handle. */
 export class LiveHostRegistrations {
-  readonly #registrations = new Map<string, { value: LiveHostRegistration; lifetime: AbortController }>();
-  constructor(private readonly connection: {
-    client: EngineClient; workspace: string; nextRequestId(): number; deadlineMs: number;
-  }) {}
+  readonly #registrations = new Map<
+    string,
+    { value: LiveHostRegistration; lifetime: AbortController }
+  >();
+  constructor(
+    private readonly connection: {
+      client: EngineClient;
+      workspace: string;
+      nextRequestId(): number;
+      deadlineMs: number;
+    },
+  ) {}
 
   capture(binding: LiveObjectBinding): LiveHostRegistration {
     const saved = this.#registrations.get(binding.objectId);
-    if (!saved || !sameLiveHostDocument(saved.value.binding, binding)) throw new Error("Live host registration is unavailable.");
+    if (!saved || !sameLiveHostDocument(saved.value.binding, binding))
+      throw new Error("Live host registration is unavailable.");
     return { ...saved.value, binding: structuredClone(saved.value.binding) };
   }
 
@@ -49,10 +61,16 @@ export class LiveHostRegistrations {
     const saved = this.#registrations.get(binding.objectId);
     if (saved && sameLiveHostDocument(saved.value.binding, binding)) return this.capture(binding);
     this.invalidate(binding.objectId);
-    const response = await this.connection.client.sendRequest({
-      id: this.connection.nextRequestId(), method: "liveApplication.register", workspace: this.connection.workspace,
-      params: { binding: {...binding, selectorPaths: [...binding.selectorPaths]} }, deadlineMs: this.connection.deadlineMs,
-    }, signal);
+    const response = await this.connection.client.sendRequest(
+      {
+        id: this.connection.nextRequestId(),
+        method: "liveApplication.register",
+        workspace: this.connection.workspace,
+        params: { binding: { ...binding, selectorPaths: [...binding.selectorPaths] } },
+        deadlineMs: this.connection.deadlineMs,
+      },
+      signal,
+    );
     signal?.throwIfAborted();
     const id = (response.result as { registrationId?: unknown })?.registrationId;
     if (typeof id !== "number") throw new Error("Invalid live host registration.");

@@ -15,52 +15,29 @@ import {
   revealMenuRow,
 } from "../ui/Menu";
 import { listenForDismiss } from "../ui/useDismiss";
-// Table row/column/header controls — Notion-style handles + menus layered on
-// TableKit's existing commands (addRowBefore/After, deleteRow,
-// addColumnBefore/After, deleteColumn, toggleHeaderRow, deleteTable).
+// Table row, column, and header controls: hover handles, "+" strips on the
+// right and bottom edges, and menus layered on TableKit's existing commands.
 // TableKit ships every command already; this file is only the missing UI.
+// Hovering a cell reveals exactly one handle for its column and one for its
+// row. Dragging a handle reorders. Row boundaries expose a separate resize
+// affordance so reorder and resize remain distinct gestures.
 //
-// Interaction model (mirrors Notion's simple tables):
-// - Hovering a cell reveals exactly one small pill handle above its column
-//   and one beside its ROW (the plugin's mousemove handler toggles
-//   `is-active` on the matching grips) — not a bar on every row/column at
-//   once. Clicking a handle selects the row/column and opens its options
-//   menu (insert before/after, align, duplicate, delete).
-// - Hovering the table reveals slim "+" strips hugging the full right edge
-//   (append column) and bottom edge (append row), plus a "⋯" table menu at
-//   the top-left corner (toggle header row, delete table).
-// - Dragging a handle reorders rows/columns with an insertion-line preview.
-//   Row boundaries also expose a separate resize affordance so reorder and
-//   resize remain distinct gestures.
+// Only what survives a Markdown round-trip gets UI. GFM tables express
+// per-column alignment in the delimiter row (`:---`, `:---:`, `---:`) but not
+// merged cells, so there is alignment UI and deliberately no merge or split
+// UI. Alignment lives on the standard `align` cell attr that
+// @tiptap/extension-table already serializes to and parses from the
+// delimiter row, so the round-trip needs no custom serializer.
 //
-// GFM round-trip caveat (see AGENTS.md "text is the primitive"): markdown
-// tables express per-COLUMN alignment via the delimiter row (`:---`, `:---:`,
-// `---:`) but not merged cells. So there is per-column alignment UI (the
-// column grip menu's Align left/center/right, applied to every cell in the
-// column) but deliberately no merge/split UI — only what survives a markdown
-// round-trip. Alignment lives on the standard `align` cell attr that
-// @tiptap/extension-table already serializes to / parses from the GFM
-// delimiter row, so the round-trip is lossless with no custom serializer.
-//
-// Grip placement: each grip is a ProseMirror decoration widget nested
-// *inside* the relevant cell (first-row cell for a column grip,
-// first-cell-of-row for a row grip) but rendered in the table's outer margin
-// via negative CSS offsets (a column grip floats above its column, a row grip
-// floats left of its row — Notion-style), so grip chrome never overlaps or
-// reflows cell text. Nesting the widget inside the cell (rather than a
-// JS-measured floating overlay) is what keeps each grip glued to its
-// column/row during a live column-resize drag: prosemirror-tables mutates
-// cell/col widths directly on the DOM (see prosemirror-tables'
-// columnresizing.ts) without dispatching a transaction until mouseup — the
-// same trick it uses to render its own `.column-resize-handle` widget nested
-// inside the cell. A widget that is a DOM descendant of the cell inherits the
-// live-resized box for free through ordinary CSS layout (`position: absolute`
-// against the cell's `position: relative`; the negative top/left offsets only
-// shift the grip into the margin — the edge it hugs still tracks the cell);
-// a JS-measured overlay driven off `docChanged`/ResizeObserver would visibly
-// lag until the drag finishes. This mirrors the block gutter (`blockControls`
-// inline in MarkdownEditor.tsx): a widget nested one position inside the
-// target node, hover-revealed via a `Decoration.node` class on an ancestor.
+// Each grip is a ProseMirror decoration widget nested inside its cell
+// (first-row cell for a column grip, first cell of the row for a row grip)
+// and drawn in the table's outer margin with negative CSS offsets, so it
+// never overlaps or reflows cell text. Keep the widget inside the cell. During
+// a column-resize drag, prosemirror-tables changes cell widths on the DOM
+// and dispatches no transaction until mouseup (see its columnresizing.ts). A
+// nested widget follows the resized cell through CSS layout. A JS-measured
+// overlay driven by `docChanged` or ResizeObserver would lag until the drag
+// ends.
 
 import { Fragment, Node as PMNode } from "@tiptap/pm/model";
 import {
@@ -97,10 +74,7 @@ let nextTableControlsInstanceId = 0;
 const GRIP_MARGIN = 18;
 const MIN_ROW_HEIGHT = 36;
 
-type TableCommand = (
-  state: EditorState,
-  dispatch?: (tr: Transaction) => void,
-) => boolean;
+type TableCommand = (state: EditorState, dispatch?: (tr: Transaction) => void) => boolean;
 
 type GripMenuItem = {
   label: string;
@@ -151,7 +125,6 @@ type TableControlsRuntime = {
   activeRowResize: TableRowResizeState | null;
   cancelPointer: (() => void) | null;
   closeMenu: (() => void) | null;
-  /** The grip or button whose menu is open. */
   menuAnchor: HTMLElement | null;
   menuSerial: number;
 };
@@ -187,10 +160,7 @@ function clearColumnResizePreview(view: EditorView): void {
 
 const suppressTableGripClickUntil = new WeakMap<HTMLButtonElement, number>();
 
-type RectLike = Pick<
-  DOMRect,
-  "left" | "right" | "top" | "bottom" | "width" | "height"
->;
+type RectLike = Pick<DOMRect, "left" | "right" | "top" | "bottom" | "width" | "height">;
 
 export function resolveTableMenuPosition({
   anchorRect,
@@ -307,16 +277,11 @@ function focusCell(view: EditorView, cellPos: number): void {
   view.dispatch(view.state.tr.setSelection(TextSelection.near($pos)));
 }
 
-function setTableRowHeight(
-  view: EditorView,
-  rowPos: number,
-  height: number | null,
-): void {
+function setTableRowHeight(view: EditorView, rowPos: number, height: number | null): void {
   if (view.editable === false) return;
   const row = view.state.doc.nodeAt(rowPos);
   if (!row || row.type.name !== "tableRow") return;
-  const normalized =
-    height === null ? null : Math.max(MIN_ROW_HEIGHT, Math.round(height));
+  const normalized = height === null ? null : Math.max(MIN_ROW_HEIGHT, Math.round(height));
   const current = Number(row.attrs.height);
   if (
     (normalized === null && row.attrs.height == null) ||
@@ -332,10 +297,7 @@ function setTableRowHeight(
   );
 }
 
-function tableAtCellPos(
-  doc: PMNode,
-  cellPos: number,
-): { node: PMNode; pos: number } | null {
+function tableAtCellPos(doc: PMNode, cellPos: number): { node: PMNode; pos: number } | null {
   const $cell = doc.resolve(cellPos);
   for (let depth = $cell.depth; depth > 0; depth -= 1) {
     if ($cell.node(depth).type.name === "table") {
@@ -468,15 +430,8 @@ function duplicateRow(view: EditorView, cellPos: number): void {
       });
       continue;
     }
-    const copyType =
-      cell.type.name === "tableHeader" && cellType ? cellType : cell.type;
-    cells.push(
-      copyType.create(
-        { ...cell.attrs, rowspan: 1 },
-        cell.content,
-        cell.marks,
-      ),
-    );
+    const copyType = cell.type.name === "tableHeader" && cellType ? cellType : cell.type;
+    cells.push(copyType.create({ ...cell.attrs, rowspan: 1 }, cell.content, cell.marks));
   }
 
   let insertPos = tableStart;
@@ -488,15 +443,6 @@ function duplicateRow(view: EditorView, cellPos: number): void {
   view.focus();
 }
 
-// Duplicate the logical column containing `cellPos`, inserting the copy right
-// after it in every row (bottom-to-top so earlier insert positions stay
-// valid). Pasted/imported colspans follow prosemirror-tables' addColumn
-// convention: a spanning cell covering the selected column is widened at
-// that boundary, with its matching colwidth entry duplicated in place — so
-// every row gains the same logical column and merged headers remain aligned.
-// The dedup set guards pasted-in rowspan cells — a spanning cell appears at
-// several TableMap slots but must be copied or widened once; its operation
-// covers the same rows.
 function duplicateColumn(view: EditorView, cellPos: number): void {
   if (view.editable === false) return;
   const { state } = view;
@@ -751,10 +697,7 @@ function openGripMenu(
     const measured = menu.getBoundingClientRect();
     // jsdom has no layout and returns zero. The estimate also prevents a
     // one-frame jump in a very slow renderer before the first measurement.
-    const menuHeight = Math.min(
-      menuMaxHeight,
-      measured.height || items.length * 28 + 10,
-    );
+    const menuHeight = Math.min(menuMaxHeight, measured.height || items.length * 28 + 10);
     const position = resolveTableMenuPosition({
       anchorRect,
       placement,
@@ -767,9 +710,14 @@ function openGripMenu(
     if (entered) return;
     // The list enters from its grip's side.
     entered = true;
-    const side = placement === "row"
-      ? position.x >= anchorRect.right ? "right" : "left"
-      : position.y >= anchorRect.bottom ? "below" : "above";
+    const side =
+      placement === "row"
+        ? position.x >= anchorRect.right
+          ? "right"
+          : "left"
+        : position.y >= anchorRect.bottom
+          ? "below"
+          : "above";
     for (const [name, value] of Object.entries(menuEnterFrom(side))) {
       menu.style.setProperty(name, String(value));
     }
@@ -816,7 +764,8 @@ function openGripMenu(
       close();
       if (reason !== "blur") return;
       const active = anchor.ownerDocument.activeElement;
-      if (active === null || active === anchor.ownerDocument.body) anchor.focus({ preventScroll: true });
+      if (active === null || active === anchor.ownerDocument.body)
+        anchor.focus({ preventScroll: true });
     },
   });
   runtime.closeMenu = close;
@@ -829,11 +778,7 @@ function clearTableDropTargetChrome(view: EditorView): void {
       ".dohc-table-grip.is-drop-target, .dohc-table-drop-before, .dohc-table-drop-after",
     )
     .forEach((element) =>
-      element.classList.remove(
-        "is-drop-target",
-        "dohc-table-drop-before",
-        "dohc-table-drop-after",
-      ),
+      element.classList.remove("is-drop-target", "dohc-table-drop-before", "dohc-table-drop-after"),
     );
 }
 
@@ -844,11 +789,7 @@ function clearTableDragChrome(view: EditorView): void {
       ".dohc-table-grip.is-dragging, .dohc-table-drag-source, table.is-reordering",
     )
     .forEach((element) =>
-      element.classList.remove(
-        "is-dragging",
-        "dohc-table-drag-source",
-        "is-reordering",
-      ),
+      element.classList.remove("is-dragging", "dohc-table-drag-source", "is-reordering"),
     );
 }
 
@@ -862,9 +803,7 @@ function markTableBand(
     table.rows[index]?.classList.add(className);
     return;
   }
-  Array.from(table.rows).forEach((row) =>
-    row.cells[index]?.classList.add(className),
-  );
+  Array.from(table.rows).forEach((row) => row.cells[index]?.classList.add(className));
 }
 
 // The live region an editor parks on its host. Keyed by view so the plugin's
@@ -893,11 +832,7 @@ function removeTableDragStatus(view: EditorView): void {
   tableDragStatusNodes.delete(view);
 }
 
-function createTableDragPreview(
-  view: EditorView,
-  band: TableBand,
-  index: number,
-): HTMLElement {
+function createTableDragPreview(view: EditorView, band: TableBand, index: number): HTMLElement {
   const ownerDocument = view.dom.ownerDocument;
   const host = shadowHost(view);
   const preview = ownerDocument.createElement("div");
@@ -907,10 +842,7 @@ function createTableDragPreview(
   return preview;
 }
 
-function createTableDropIndicator(
-  view: EditorView,
-  band: TableBand,
-): HTMLElement {
+function createTableDropIndicator(view: EditorView, band: TableBand): HTMLElement {
   const ownerDocument = view.dom.ownerDocument;
   const host = shadowHost(view);
   const indicator = ownerDocument.createElement("div");
@@ -920,18 +852,11 @@ function createTableDropIndicator(
   return indicator;
 }
 
-function positionTableDragPreview(
-  preview: HTMLElement,
-  clientX: number,
-  clientY: number,
-): void {
+function positionTableDragPreview(preview: HTMLElement, clientX: number, clientY: number): void {
   preview.style.transform = `translate3d(${clientX + 14}px, ${clientY + 14}px, 0)`;
 }
 
-function positionTableDropIndicator(
-  drag: TableDragState,
-  target: TableDropTarget,
-): void {
+function positionTableDropIndicator(drag: TableDragState, target: TableDropTarget): void {
   const tableRect = drag.tableElement.getBoundingClientRect();
   const targetRect = target.bandElement.getBoundingClientRect();
   const wrapperRect = drag.tableElement
@@ -966,10 +891,7 @@ function editorElementFromPoint(
   const ownerDocument = view.dom.ownerDocument;
   const hostWindow = ownerWindow(view.dom);
   const root = view.dom.getRootNode();
-  if (
-    root instanceof hostWindow.ShadowRoot &&
-    typeof root.elementFromPoint === "function"
-  ) {
+  if (root instanceof hostWindow.ShadowRoot && typeof root.elementFromPoint === "function") {
     return root.elementFromPoint(clientX, clientY);
   }
   return ownerDocument.elementFromPoint(clientX, clientY);
@@ -1053,9 +975,7 @@ function markTableDropTarget(
     drag.band === "row"
       ? `[data-table-row="${target.index}"]`
       : `[data-table-column="${target.index}"]`;
-  drag.tableElement
-    .querySelector(gripSelector)
-    ?.classList.add("is-drop-target");
+  drag.tableElement.querySelector(gripSelector)?.classList.add("is-drop-target");
   target.bandElement.classList.add(
     target.side === "before" ? "dohc-table-drop-before" : "dohc-table-drop-after",
   );
@@ -1067,10 +987,7 @@ function findVerticalScrollContainer(view: EditorView): HTMLElement | null {
   let element = view.dom.parentElement;
   while (element) {
     const overflowY = hostWindow.getComputedStyle(element).overflowY;
-    if (
-      /(auto|scroll)/.test(overflowY) &&
-      element.scrollHeight > element.clientHeight
-    ) {
+    if (/(auto|scroll)/.test(overflowY) && element.scrollHeight > element.clientHeight) {
       return element;
     }
     element = element.parentElement;
@@ -1109,9 +1026,7 @@ function updateTableDragTarget(
 
   autoScrollTableDrag(drag, clientY);
 
-  const changed =
-    drag.dropTarget?.index !== target.index ||
-    drag.dropTarget?.side !== target.side;
+  const changed = drag.dropTarget?.index !== target.index || drag.dropTarget?.side !== target.side;
   drag.dropTarget = target;
   if (target.destination === drag.index) {
     clearTableDropTargetChrome(view);
@@ -1143,14 +1058,11 @@ function finishTableDrop(
   suppressTableGripClickUntil.set(drag.sourceButton, Date.now() + 250);
 
   if (target && target.destination !== drag.index) {
-    const sourceTable =
-      drag.band === "row" ? tableAtCellPos(view.state.doc, drag.cellPos) : null;
+    const sourceTable = drag.band === "row" ? tableAtCellPos(view.state.doc, drag.cellPos) : null;
     const rowHeights = sourceTable
       ? Array.from({ length: sourceTable.node.childCount }, (_, index) => {
           const height = sourceTable.node.child(index).attrs.height;
-          return typeof height === "number" && Number.isFinite(height)
-            ? height
-            : null;
+          return typeof height === "number" && Number.isFinite(height) ? height : null;
         })
       : null;
     // prosemirror-tables resolves rowspan/colspan ranges from the current
@@ -1282,11 +1194,7 @@ function configureGripDrag(
     return drag;
   };
 
-  const finishPointerDragAt = (
-    clientX: number,
-    clientY: number,
-    pointerId?: number,
-  ) => {
+  const finishPointerDragAt = (clientX: number, clientY: number, pointerId?: number) => {
     const session = pointerSession;
     if (!session || (pointerId !== undefined && session.pointerId !== pointerId)) {
       return;
@@ -1302,9 +1210,8 @@ function configureGripDrag(
     const hitTarget = editorElementFromPoint(view, clientX, clientY);
     const previousTarget = drag.dropTarget;
     const target =
-      (hitTarget
-        ? updateTableDragTarget(view, drag, hitTarget, clientX, clientY)
-        : null) ?? previousTarget;
+      (hitTarget ? updateTableDragTarget(view, drag, hitTarget, clientX, clientY) : null) ??
+      previousTarget;
     pointerSession = undefined;
     releasePointer(session.pointerId);
     finishTableDrop(runtime, view, drag, target);
@@ -1708,15 +1615,20 @@ function widgetDecoration(
   key: string,
 ): Decoration {
   const offset = pos - anchor;
-  return Decoration.widget(pos, (view, getPos) => toDOM(view, () => {
-    const widgetPos = getPos();
-    return widgetPos === undefined ? undefined : widgetPos - offset;
-  }), {
-    side: -1,
-    key,
-    ignoreSelection: true,
-    stopEvent: () => true,
-  });
+  return Decoration.widget(
+    pos,
+    (view, getPos) =>
+      toDOM(view, () => {
+        const widgetPos = getPos();
+        return widgetPos === undefined ? undefined : widgetPos - offset;
+      }),
+    {
+      side: -1,
+      key,
+      ignoreSelection: true,
+      stopEvent: () => true,
+    },
+  );
 }
 
 // Calls `visit` for each table that overlaps from..to. A textblock holds only
@@ -1762,7 +1674,9 @@ function updateTableControlDecorations(
   tablesBetween(doc, range.from, range.to, (node, pos) => {
     const end = pos + node.nodeSize;
     decorations = decorations.remove(
-      decorations.find(pos, end).filter((decoration) => decoration.from >= pos && decoration.to <= end),
+      decorations
+        .find(pos, end)
+        .filter((decoration) => decoration.from >= pos && decoration.to <= end),
     );
     pushTableControls(added, node, pos, runtime, rowResizeEnabled);
   });
@@ -1779,9 +1693,7 @@ function pushTableControls(
   const map = TableMap.get(node);
   const tableStart = pos + 1;
 
-  decorations.push(
-    Decoration.node(pos, pos + node.nodeSize, { class: "dohc-table-node" }),
-  );
+  decorations.push(Decoration.node(pos, pos + node.nodeSize, { class: "dohc-table-node" }));
 
   // Column grips: one per column, anchored inside that column's row-0
   // cell. Dedup guards against pasted-in colspan cells (the editor never
@@ -1854,8 +1766,7 @@ function pushTableControls(
         widgetDecoration(
           resizeCellPos + 1,
           rowPos,
-          (view, anchorPos) =>
-            buildRowResizeHandle(runtime, view, anchorPos, rowIndex),
+          (view, anchorPos) => buildRowResizeHandle(runtime, view, anchorPos, rowIndex),
           `dohc-table-row-resize-${rowIndex}`,
         ),
       );
@@ -1905,7 +1816,14 @@ function measureAppendStrips(table: HTMLElement): AppendStripLayout {
 // Inline styles override the CSS fallback (which only spans the anchor cell)
 // because the strip's absolute-positioning containing block is its anchor
 // cell, not the table.
-function applyAppendStrips({ rect, colStrip, colTop, rowStrip, rowLeft, handles }: AppendStripLayout): void {
+function applyAppendStrips({
+  rect,
+  colStrip,
+  colTop,
+  rowStrip,
+  rowLeft,
+  handles,
+}: AppendStripLayout): void {
   if (colStrip && colTop !== undefined) {
     colStrip.style.top = `${rect.top - colTop}px`;
     colStrip.style.height = `${rect.height}px`;
@@ -1953,9 +1871,7 @@ function sizeChangedAppendStrips(view: EditorView, from: number, to: number): vo
 
 type HoveredTable = { table: HTMLElement; col: number; row: number };
 
-export function makeTableControlsPlugin(
-  options: { rowResizeEnabled?: boolean } = {},
-): Plugin {
+export function makeTableControlsPlugin(options: { rowResizeEnabled?: boolean } = {}): Plugin {
   const runtime = createTableControlsRuntime();
   const rowResizeEnabled = options.rowResizeEnabled ?? true;
   // Notion reveals one column handle (above the hovered column) and one row
@@ -2059,7 +1975,8 @@ export function makeTableControlsPlugin(
       const handle = columnResizingPluginKey.getState(oldState)?.activeHandle ?? -1;
       // After a change outside the column's table, the view puts a lost
       // handle back (followColumnResize).
-      if (handle > -1 && positionInUnchangedTable(oldState.doc, state.doc, handle) !== null) return null;
+      if (handle > -1 && positionInUnchangedTable(oldState.doc, state.doc, handle) !== null)
+        return null;
       // prosemirror-tables moves the handle of a deleted cell onto the next
       // cell. Deleting or replacing the cell deletes across its first position.
       const mapping = new Mapping();
@@ -2072,11 +1989,7 @@ export function makeTableControlsPlugin(
     },
     state: {
       init(_, instance) {
-        return buildTableControlDecorations(
-          instance.doc,
-          runtime,
-          rowResizeEnabled,
-        );
+        return buildTableControlDecorations(instance.doc, runtime, rowResizeEnabled);
       },
       apply(tr, old) {
         if (!tr.docChanged) return old;
@@ -2125,7 +2038,8 @@ export function makeTableControlsPlugin(
           followColumnResize(view, prevState);
           const resize = columnResizingPluginKey.getState(view.state);
           if (
-            docChanged && resize?.activeHandle === -1 &&
+            docChanged &&
+            resize?.activeHandle === -1 &&
             columnResizingPluginKey.getState(prevState)?.dragging
           ) {
             clearColumnResizePreview(view);

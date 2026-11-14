@@ -34,25 +34,18 @@ it.each([
   "settlement_cut_journal_delete",
   "settlement_binding_usage_insert",
   "settlement_admission_usage_insert",
-])(
-  "refuses missing proof retention object %s without repairing it",
-  async (name) => {
-    const storage = await testStorage(),
-      path = storagePath(storage);
-    closeTestStorage(storage);
-    const db = inspectDatabase(path);
-    db.exec(
-      `DROP ${name.startsWith("sync_relay_") ? "TABLE" : "TRIGGER"} ${name}`,
-    );
-    expect(() => initializeHostedSettlementSchema(db as SqliteDb)).toThrow(
-      "Hosted settlement schema is missing or damaged.",
-    );
-    db.close();
-    expect(() => reopenTestStorage(path)).toThrow(
-      /schema is missing or damaged/,
-    );
-  },
-);
+])("refuses missing proof retention object %s without repairing it", async (name) => {
+  const storage = await testStorage(),
+    path = storagePath(storage);
+  closeTestStorage(storage);
+  const db = inspectDatabase(path);
+  db.exec(`DROP ${name.startsWith("sync_relay_") ? "TABLE" : "TRIGGER"} ${name}`);
+  expect(() => initializeHostedSettlementSchema(db as SqliteDb)).toThrow(
+    "Hosted settlement schema is missing or damaged.",
+  );
+  db.close();
+  expect(() => reopenTestStorage(path)).toThrow(/schema is missing or damaged/);
+});
 it("refuses unmarked hosted retention tables", async () => {
   const storage = await testStorage(),
     path = storagePath(storage);
@@ -103,35 +96,21 @@ it("releases cut quota when its journal parent is deleted, without charging twic
   insertCut.run(first, digest, digest, 1, 0);
   insertCut.run(second, digest, digest, 1, 0);
   expect(usage()).toBe(288);
-  db.prepare(
-    "DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=?",
-  ).run(first);
+  db.prepare("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=?").run(first);
   expect(
-    db
-      .prepare(`SELECT 1 FROM ${SETTLEMENT_CUTS} WHERE journal_cursor=?`)
-      .get(first),
+    db.prepare(`SELECT 1 FROM ${SETTLEMENT_CUTS} WHERE journal_cursor=?`).get(first),
   ).toBeUndefined();
   expect(usage()).toBe(144);
-  db.prepare(`DELETE FROM ${SETTLEMENT_CUTS} WHERE journal_cursor=?`).run(
-    second,
-  );
+  db.prepare(`DELETE FROM ${SETTLEMENT_CUTS} WHERE journal_cursor=?`).run(second);
   expect(usage()).toBe(0);
-  db.prepare(
-    "DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=?",
-  ).run(second);
+  db.prepare("DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=?").run(second);
   expect(usage()).toBe(0);
   insertJournal.run("third", digest, digest, new Uint8Array([1]), digest);
   const third = Number(cursor.get("third")!.journal_cursor);
   insertCut.run(third, digest, digest, 1, 0);
-  db.prepare(
-    "DELETE FROM sync_relay_workspaces WHERE workspace_id='workspace'",
-  ).run();
+  db.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id='workspace'").run();
   expect(db.prepare(`SELECT 1 FROM ${SETTLEMENT_CUTS}`).get()).toBeUndefined();
   expect(
-    db
-      .prepare(
-        "SELECT 1 FROM sync_relay_workspace_usage WHERE workspace_id='workspace'",
-      )
-      .get(),
+    db.prepare("SELECT 1 FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get(),
   ).toBeUndefined();
 });

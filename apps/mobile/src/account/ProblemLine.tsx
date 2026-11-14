@@ -8,8 +8,12 @@ export function ProblemLine({ text, onRetry }: { text: string; onRetry(): void }
   const theme = useTheme();
   return (
     <View style={styles.line}>
-      <Text style={[styles.text, { color: theme.danger }]} accessibilityRole="alert">{text}</Text>
-      <View style={styles.action}><ActionPill label={noticesWords.tryAgain} onPress={onRetry} /></View>
+      <Text style={[styles.text, { color: theme.danger }]} accessibilityRole="alert">
+        {text}
+      </Text>
+      <View style={styles.action}>
+        <ActionPill label={noticesWords.tryAgain} onPress={onRetry} />
+      </View>
     </View>
   );
 }

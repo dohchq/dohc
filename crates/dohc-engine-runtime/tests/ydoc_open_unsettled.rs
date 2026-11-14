@@ -99,8 +99,6 @@ async fn an_open_reports_a_lineage_ahead_of_its_file_until_a_settle_covers_it() 
     );
     let key = fresh.key.clone();
 
-    // An edit the engine journaled and never settled: a crash leaves exactly
-    // this, and the next open must say so.
     let doc = dohc_engine_collab::Ydoc::wire();
     record(&handle, &key, doc.plaintext_insert(0, "typed"), 20, true).await;
     let crashed = open(&handle, 30).await;
@@ -110,7 +108,6 @@ async fn an_open_reports_a_lineage_ahead_of_its_file_until_a_settle_covers_it() 
         "the file does not have the journaled edit"
     );
 
-    // The settle writes the file; the lineage is then not ahead of it.
     settle(&handle, scratch.path(), &crashed, 40).await;
     assert_eq!(disk(), "typed");
     let settled = open(&handle, 50).await;
@@ -122,8 +119,6 @@ async fn an_open_reports_a_lineage_ahead_of_its_file_until_a_settle_covers_it() 
     let deleted = open(&handle, 70).await;
     assert!(deleted.unsettled, "a deletion the file lacks is unsettled");
 
-    // Put the text back before settling: the projection matches what the
-    // file already holds, and the no-write settle still records it.
     record(&handle, &key, doc.plaintext_insert(0, "ty"), 80, false).await;
     let restored = open(&handle, 90).await;
     assert!(restored.unsettled);
@@ -180,8 +175,6 @@ async fn a_pruned_lineage_forgets_its_settle() {
     supervisor.close(&db).expect("close actor");
 }
 
-// A capture of an outside edit folds into a lineage the engine kept. The file
-// already holds the folded text, so the next open has nothing to settle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_captured_outside_edit_leaves_nothing_to_settle_on_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -200,7 +193,6 @@ async fn a_captured_outside_edit_leaves_nothing_to_settle_on_reopen() {
     )
     .await;
     settle(&handle, scratch.path(), &state, 30).await;
-    // No close, as a crash leaves it: the lineage stays.
 
     std::fs::write(scratch.path().join(PATH), "written outside").expect("outside edit");
     handle
@@ -234,9 +226,6 @@ async fn a_captured_outside_edit_leaves_nothing_to_settle_on_reopen() {
     supervisor.close(&db).expect("close actor");
 }
 
-// A collaborator's update applied while the document is closed writes its
-// projection through a materialization job. Until that job lands the file is
-// behind; once it lands, the next open has nothing to settle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_remote_update_applied_while_closed_settles_nothing_once_written() {
     let scratch = ScratchDir::new().expect("scratch");

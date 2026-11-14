@@ -142,7 +142,6 @@ pub(super) fn clamp_limit(limit: i64, maximum: usize) -> Option<usize> {
     Some(limit.min(maximum))
 }
 
-/// The bounded FTS fetch size for an over-fetch multiplier.
 fn fetch_size(limit: usize, multiplier: usize) -> i64 {
     let raw = limit.saturating_mul(multiplier).min(MAX_FTS_FETCH);
     i64::try_from(raw).unwrap_or(i64::MAX)

@@ -67,7 +67,12 @@ const results = {
         depth: 0,
         recordedAtMs: 20,
         automationRun: null,
-        linkAuthor: { kind: "link", grantId: "link", grantGeneration: 2, publicPrincipalId: "public-holder" },
+        linkAuthor: {
+          kind: "link",
+          grantId: "link",
+          grantGeneration: 2,
+          publicPrincipalId: "public-holder",
+        },
       },
     ],
   },
@@ -81,13 +86,12 @@ const results = {
     recordPath: record.path,
   },
 } satisfies {
-  [Verb in Extract<
-    CliVerb,
-    | "collectionQuery"
-    | "collectionRecord"
-    | "collectionSetFields"
-    | "collectionCreateRecord"
-  >]: CliResultByVerb[Verb];
+  [
+    Verb in Extract<
+      CliVerb,
+      "collectionQuery" | "collectionRecord" | "collectionSetFields" | "collectionCreateRecord"
+    >
+  ]: CliResultByVerb[Verb];
 };
 
 async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
@@ -107,10 +111,15 @@ describe("desktop CLI collection proxy", () => {
   it("preserves the update diagnostic for collection queries and record reads", async () => {
     await withWorkspace(async (base) => {
       await mkdir(join(base.root, "tasks"));
-      const failure = { ok: false as const, reason: "tasks/collection.yaml uses a newer version. Update dohc to read this file." };
+      const failure = {
+        ok: false as const,
+        reason: "tasks/collection.yaml uses a newer version. Update dohc to read this file.",
+      };
       const ctx: ToolContext = { ...base, request: vi.fn(async () => failure) };
       await expect(queryCollection(ctx, { collectionPath: "tasks" })).resolves.toEqual(failure);
-      await expect(readRecord(ctx, { collectionPath: "tasks", recordId: record.id })).resolves.toEqual(failure);
+      await expect(
+        readRecord(ctx, { collectionPath: "tasks", recordId: record.id }),
+      ).resolves.toEqual(failure);
     });
   });
   it("maps all four collection tools to their CLI verbs with the MCP workspace and agent actor", async () => {
@@ -233,8 +242,8 @@ describe("desktop CLI collection proxy", () => {
   it("reads a mounted share but refuses to write into it", async () => {
     await withWorkspace(async (base) => {
       await mkdir(join(base.root, "shared-with-me", "trip"), { recursive: true });
-      const request = vi.fn(async (incoming: CliRequestWithoutToken) =>
-        results[incoming.verb as keyof typeof results],
+      const request = vi.fn(
+        async (incoming: CliRequestWithoutToken) => results[incoming.verb as keyof typeof results],
       );
       const ctx: ToolContext = { ...base, request };
 
@@ -256,7 +265,6 @@ describe("desktop CLI collection proxy", () => {
         ok: false,
         reason: expect.stringContaining("path rejected"),
       });
-      // Only the read reached the desktop.
       expect(request).toHaveBeenCalledOnce();
     });
   });
@@ -339,8 +347,6 @@ describe("desktop CLI collection proxy", () => {
       await expect(
         createRecord(ctx, { collectionPath: "tasks", name: "new-task" }),
       ).resolves.toEqual({ ok: false, reason: DOHC_TRANSPORT_UNAVAILABLE_REASON });
-      // The record folder holds exactly the file the test wrote: no fallback
-      // file write happened.
       await expect(readdir(join(base.root, "tasks"))).resolves.toEqual(["task.md"]);
     });
   });
@@ -348,15 +354,43 @@ describe("desktop CLI collection proxy", () => {
 
 describe("desktop CLI automation proxy", () => {
   const run = {
-    run: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
-    trigger: { kind: "changed" as const, recordId: "rec_1", by: "human" as const, sharedAuthor: null, depth: 0 },
-    definitionChanged: true, neverStarted: false, chainStopped: false, undone: false,
+    run: "atc_1",
+    state: "failed" as const,
+    error: "The record is open elsewhere.",
+    createdAtMs: 1,
+    updatedAtMs: 2,
+    trigger: {
+      kind: "changed" as const,
+      recordId: "rec_1",
+      by: "human" as const,
+      sharedAuthor: null,
+      depth: 0,
+    },
+    definitionChanged: true,
+    neverStarted: false,
+    chainStopped: false,
+    undone: false,
   };
   const answers = {
     automationRuns: { ok: true, runs: [{ ...run, changes: 1 }], next: "1:atc_1" },
-    automationRun: { ok: true, run: { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
-      steps: [{ step: 1, changes: [{ kind: "created", recordId: "rec_2", path: "tasks/two.md" }] }], failedStep: 2, startsOver: false } },
-  } satisfies { [Verb in Extract<CliVerb, "automationRuns" | "automationRun">]: CliResultByVerb[Verb] };
+    automationRun: {
+      ok: true,
+      run: {
+        ...run,
+        findMs: 12,
+        planMs: 0,
+        writeMs: 30,
+        writeCount: 1,
+        steps: [
+          { step: 1, changes: [{ kind: "created", recordId: "rec_2", path: "tasks/two.md" }] },
+        ],
+        failedStep: 2,
+        startsOver: false,
+      },
+    },
+  } satisfies {
+    [Verb in Extract<CliVerb, "automationRuns" | "automationRun">]: CliResultByVerb[Verb];
+  };
 
   it("maps the automation tools to their CLI verbs, and passes on a refused retry of a changed automation", async () => {
     await withWorkspace(async (base) => {
@@ -369,7 +403,12 @@ describe("desktop CLI automation proxy", () => {
           if (request.verb === "automationRetry") {
             return request.args.startOver
               ? { ok: true, status: "queued" }
-              : { ok: false, status: "definition-changed", repeatsMessages: false, reason: "This automation changed since the run failed." };
+              : {
+                  ok: false,
+                  status: "definition-changed",
+                  repeatsMessages: false,
+                  reason: "This automation changed since the run failed.",
+                };
           }
           return answers[request.verb as keyof typeof answers];
         }),
@@ -378,13 +417,25 @@ describe("desktop CLI automation proxy", () => {
 
       await expect(listAutomationRuns(ctx, automation)).resolves.toEqual(answers.automationRuns);
       await listAutomationRuns(ctx, { ...automation, page: "1:atc_1" });
-      await expect(readAutomationRun(ctx, { ...automation, run: "atc_1" })).resolves.toEqual(answers.automationRun);
+      await expect(readAutomationRun(ctx, { ...automation, run: "atc_1" })).resolves.toEqual(
+        answers.automationRun,
+      );
       await expect(retryAutomationRun(ctx, { ...automation, run: "atc_1" })).resolves.toEqual({
-        ok: false, status: "definition-changed", repeatsMessages: false, reason: "This automation changed since the run failed.",
+        ok: false,
+        status: "definition-changed",
+        repeatsMessages: false,
+        reason: "This automation changed since the run failed.",
       });
-      await expect(retryAutomationRun(ctx, { ...automation, run: "atc_1", startOver: true })).resolves.toEqual({ ok: true, status: "queued" });
+      await expect(
+        retryAutomationRun(ctx, { ...automation, run: "atc_1", startOver: true }),
+      ).resolves.toEqual({ ok: true, status: "queued" });
 
-      const common = { cwd: base.root, actor: "agent", collectionPath: "tasks", automation: "stamp" };
+      const common = {
+        cwd: base.root,
+        actor: "agent",
+        collectionPath: "tasks",
+        automation: "stamp",
+      };
       expect(requests.map((request) => ({ verb: request.verb, args: request.args }))).toEqual([
         { verb: "automationRuns", args: common },
         { verb: "automationRuns", args: { ...common, page: "1:atc_1" } },
@@ -400,70 +451,157 @@ describe("desktop CLI automation proxy", () => {
       await mkdir(join(base.root, "tasks"), { recursive: true });
       const refused = {
         ok: false,
-        reason: "Only the computer this run failed on can try it again. The notice names that computer.",
-        notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+        reason:
+          "Only the computer this run failed on can try it again. The notice names that computer.",
+        notice: {
+          title: 'Automation "Stamp" failed',
+          body: "The record is open elsewhere. It ran on Laptop.",
+        },
       };
       const ctx: ToolContext = { ...base, request: vi.fn(async () => refused) };
-      await expect(retryAutomationRun(ctx, { collectionPath: "tasks", automation: "stamp", run: "atc_1" })).resolves.toEqual(refused);
-      await expect(listAutomationRuns(ctx, { collectionPath: "../outside", automation: "stamp" }))
-        .resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+      await expect(
+        retryAutomationRun(ctx, { collectionPath: "tasks", automation: "stamp", run: "atc_1" }),
+      ).resolves.toEqual(refused);
+      await expect(
+        listAutomationRuns(ctx, { collectionPath: "../outside", automation: "stamp" }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
       // Try again changes records, so a mounted share is refused as any write is.
       await mkdir(join(base.root, "shared-with-me", "trip"), { recursive: true });
-      await expect(retryAutomationRun(ctx, { collectionPath: "shared-with-me/trip", automation: "stamp", run: "atc_1" }))
-        .resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+      await expect(
+        retryAutomationRun(ctx, {
+          collectionPath: "shared-with-me/trip",
+          automation: "stamp",
+          run: "atc_1",
+        }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
       expect(ctx.request).toHaveBeenCalledTimes(1);
     });
   });
 });
 
 it("preserves partial record facts and accepts the returned retry identity", async () => {
-  await withWorkspace(async base => {
+  await withWorkspace(async (base) => {
     await mkdir(join(base.root, "tasks"), { recursive: true });
     const partial = {
-      kind: "partial" as const, created: ["tasks/retry.md"], failedStage: "index" as const, reason: "not indexed",
-      retry: { mode: "resume" as const, recordId: record.id, instruction: "Try again with this record ID." },
+      kind: "partial" as const,
+      created: ["tasks/retry.md"],
+      failedStage: "index" as const,
+      reason: "not indexed",
+      retry: {
+        mode: "resume" as const,
+        recordId: record.id,
+        instruction: "Try again with this record ID.",
+      },
     };
     const request = vi.fn().mockResolvedValue({ ok: false, reason: "not indexed", partial });
     const ctx = { ...base, request };
-    expect(await createRecord(ctx, { collectionPath: "tasks", name: "retry" })).toEqual({ ok: false, reason: "not indexed", partial });
-    const completed = { ok: true, recordId: record.id, recordPath: "tasks/retry.md", kept: { status: "done" } };
+    expect(await createRecord(ctx, { collectionPath: "tasks", name: "retry" })).toEqual({
+      ok: false,
+      reason: "not indexed",
+      partial,
+    });
+    const completed = {
+      ok: true,
+      recordId: record.id,
+      recordPath: "tasks/retry.md",
+      kept: { status: "done" },
+    };
     request.mockResolvedValue(completed);
-    expect(await createRecord(ctx, { collectionPath: "tasks", name: "retry", recordId: partial.retry.recordId })).toEqual(completed);
+    expect(
+      await createRecord(ctx, {
+        collectionPath: "tasks",
+        name: "retry",
+        recordId: partial.retry.recordId,
+      }),
+    ).toEqual(completed);
     expect(request.mock.calls[1]![0].args.recordId).toBe(partial.retry.recordId);
   });
 });
 
 describe("desktop CLI button proxy", () => {
   it("inspects a shared Collection and carries its confirmation names to the same press path", async () => {
-    await withWorkspace(async base => {
+    await withWorkspace(async (base) => {
       await mkdir(join(base.root, "Billing"), { recursive: true });
       const actions = [{ name: "destination/sendInvoice", label: "Send invoice" }];
-      const listed = { ok: true as const, buttons: [{ field: "Send", state: { kind: "ready" as const, automationId: "collection:Billing#send", irreversible: actions } }] };
-      const request = vi.fn(async (input: CliRequestWithoutToken) => input.verb === "automationButtons" ? listed : { ok: true as const, relayed: true as const });
+      const listed = {
+        ok: true as const,
+        buttons: [
+          {
+            field: "Send",
+            state: {
+              kind: "ready" as const,
+              automationId: "collection:Billing#send",
+              irreversible: actions,
+            },
+          },
+        ],
+      };
+      const request = vi.fn(async (input: CliRequestWithoutToken) =>
+        input.verb === "automationButtons" ? listed : { ok: true as const, relayed: true as const },
+      );
       const ctx: ToolContext = { ...base, shareAccess: "edit", request };
       await expect(inspectButtons(ctx, { collectionPath: "Billing" })).resolves.toEqual(listed);
-      expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ verb: "automationButtons", args: { cwd: base.root, actor: "agent", collectionPath: "Billing" } }));
-      await expect(pressButton(ctx, { collectionPath: "Billing", button: "Send", recordId: "12", confirm: actions.map(action => action.name) })).resolves.toEqual({ ok: true, relayed: true });
-      expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ verb: "automationPress", args: expect.objectContaining({ confirm: ["destination/sendInvoice"], actor: "agent" }) }));
+      expect(request).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          verb: "automationButtons",
+          args: { cwd: base.root, actor: "agent", collectionPath: "Billing" },
+        }),
+      );
+      await expect(
+        pressButton(ctx, {
+          collectionPath: "Billing",
+          button: "Send",
+          recordId: "12",
+          confirm: actions.map((action) => action.name),
+        }),
+      ).resolves.toEqual({ ok: true, relayed: true });
+      expect(request).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          verb: "automationPress",
+          args: expect.objectContaining({ confirm: ["destination/sendInvoice"], actor: "agent" }),
+        }),
+      );
     });
   });
   it("maps dohc_press_button to the press verb, and refuses a mounted share before any request", async () => {
     await withWorkspace(async (base) => {
       await mkdir(join(base.root, "Billing"), { recursive: true });
       await mkdir(join(base.root, "shared-with-me", "trip"), { recursive: true });
-      const pressed = { ok: true, run: "atc_1", outcome: null, error: null, waiting: null } satisfies CliResultByVerb["automationPress"];
+      const pressed = {
+        ok: true,
+        run: "atc_1",
+        outcome: null,
+        error: null,
+        waiting: null,
+      } satisfies CliResultByVerb["automationPress"];
       const request = vi.fn(async (_request: CliRequestWithoutToken) => pressed);
       const ctx: ToolContext = { ...base, request };
-      await expect(pressButton(ctx, { collectionPath: "Billing", button: "Send", recordId: "12", confirm: ["destination-dataset/sendInvoice"], requestId: "press-1" }))
-        .resolves.toEqual(pressed);
-      expect(request).toHaveBeenCalledWith(expect.objectContaining({
-        verb: "automationPress",
-        args: {
-          cwd: base.root, actor: "agent", collectionPath: "Billing", field: "Send", record: "12", confirm: ["destination-dataset/sendInvoice"], requestId: "press-1",
-        },
-      }));
-      await expect(pressButton(ctx, { collectionPath: "shared-with-me/trip", button: "Send", recordId: "12" }))
-        .resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
+      await expect(
+        pressButton(ctx, {
+          collectionPath: "Billing",
+          button: "Send",
+          recordId: "12",
+          confirm: ["destination-dataset/sendInvoice"],
+          requestId: "press-1",
+        }),
+      ).resolves.toEqual(pressed);
+      expect(request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          verb: "automationPress",
+          args: {
+            cwd: base.root,
+            actor: "agent",
+            collectionPath: "Billing",
+            field: "Send",
+            record: "12",
+            confirm: ["destination-dataset/sendInvoice"],
+            requestId: "press-1",
+          },
+        }),
+      );
+      await expect(
+        pressButton(ctx, { collectionPath: "shared-with-me/trip", button: "Send", recordId: "12" }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("path rejected") });
       expect(request).toHaveBeenCalledTimes(1);
     });
   });

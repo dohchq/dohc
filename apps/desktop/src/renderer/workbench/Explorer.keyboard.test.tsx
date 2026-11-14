@@ -74,7 +74,9 @@ function row(path: string): HTMLElement {
 }
 
 function expectTabStop(path: string) {
-  expect(screen.getAllByRole("treeitem").filter((item) => item.tabIndex === 0)).toEqual([row(path)]);
+  expect(screen.getAllByRole("treeitem").filter((item) => item.tabIndex === 0)).toEqual([
+    row(path),
+  ]);
   for (const item of screen.getAllByRole("treeitem")) {
     expect(item.tabIndex).toBe(item.dataset.path === path ? 0 : -1);
   }
@@ -102,7 +104,9 @@ describe("Explorer tree tab stop", () => {
     await user.tab({ shift: true });
     expect(document.activeElement).toBe(row("notes.md"));
     await user.tab({ shift: true });
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Collapse folders in explorer" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Collapse folders in explorer" }),
+    );
   });
 
   it("re-enters at the selected row", async () => {
@@ -122,7 +126,9 @@ describe("Explorer tree tab stop", () => {
     const view = render(<Fixture {...props} />);
     await user.click(row("notes.md"));
 
-    view.rerender(<Fixture {...props} files={props.files.filter((file) => file.path !== "notes.md")} />);
+    view.rerender(
+      <Fixture {...props} files={props.files.filter((file) => file.path !== "notes.md")} />,
+    );
 
     expectTabStop("apps");
     await tabIntoTree(user, "apps");
@@ -155,7 +161,10 @@ describe("Explorer tree tab stop", () => {
       <Fixture
         {...props}
         folders={[]}
-        files={[{ path: "a.md", kind: "file" }, { path: "notes.md", kind: "file" }]}
+        files={[
+          { path: "a.md", kind: "file" },
+          { path: "notes.md", kind: "file" },
+        ]}
       />,
     );
 
@@ -215,7 +224,9 @@ describe("active and picked rows", () => {
   it("marks no row active when the active tab is not a tree path", () => {
     render(<Fixture {...explorerProps({ ...expanded, ...opened(untitled) })} />);
     expect(marked()).toEqual([]);
-    expect(screen.getAllByRole("treeitem").some((item) => item.className.includes("font-medium"))).toBe(false);
+    expect(
+      screen.getAllByRole("treeitem").some((item) => item.className.includes("font-medium")),
+    ).toBe(false);
   });
 
   it("shows one click as one active row with no tint", async () => {
@@ -249,7 +260,6 @@ describe("active and picked rows", () => {
     expect(row("notes.md").className).toContain("font-medium");
     expect(row("apps/reading-list/index.html").className).not.toContain("font-medium");
 
-    // Clearing the pick returns the open file to the active fill.
     fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
     expect(marked()).toEqual(["notes.md"]);
     expect(row("notes.md").className).toContain("bg-selected");
@@ -308,9 +318,6 @@ describe("active and picked rows", () => {
   });
 });
 
-// A click that opened a file selects only that file. When a new page takes
-// the editor, nothing in the tree is selected, so Delete acts on the focused
-// row.
 describe("the open file's selection after a new page opens", () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -321,7 +328,9 @@ describe("the open file's selection after a new page opens", () => {
     const props = explorerProps({ shareView: { granterEmail: "owner@example.test" } });
     const view = render(<Fixture {...props} />);
     await user.click(row("notes.md"));
-    const groups = (activeTab: string) => [{ id: "group-1", tabs: [{ path: activeTab }], activeTab, size: 1 }];
+    const groups = (activeTab: string) => [
+      { id: "group-1", tabs: [{ path: activeTab }], activeTab, size: 1 },
+    ];
     view.rerender(<Fixture {...props} editorGroups={groups("notes.md")} />);
     view.rerender(<Fixture {...props} editorGroups={groups(newPageTabPath("page-1", ""))} />);
     return { user, deleteWorkspacePath };
@@ -347,7 +356,10 @@ describe("the open file's selection after a new page opens", () => {
     await user.keyboard("{Delete}");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledTimes(1));
-    expect(deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "apps" });
+    expect(deleteWorkspacePath).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      relativePath: "apps",
+    });
   });
 
   it("deletes the file that was open when its row has focus", async () => {
@@ -356,15 +368,16 @@ describe("the open file's selection after a new page opens", () => {
     await user.keyboard("{Delete}");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledTimes(1));
-    expect(deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "notes.md" });
+    expect(deleteWorkspacePath).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      relativePath: "notes.md",
+    });
   });
 });
 
 describe("macOS file tree keys", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  // A delete goes to the trash with Undo on its notice, so the key deletes
-  // without asking.
   it.each([
     ["darwin", "⌘⌫ deletes", { key: "Backspace", metaKey: true }, true],
     ["darwin", "⌫ alone does not delete", { key: "Backspace" }, false],
@@ -410,7 +423,12 @@ describe("the delete dialog by keyboard", () => {
     const { user, deleteWorkspacePath } = await askToDelete();
     expect(document.activeElement).toBe(screen.getByTestId("confirm-delete"));
     await user.keyboard("{Enter}");
-    await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "notes.md" }));
+    await waitFor(() =>
+      expect(deleteWorkspacePath).toHaveBeenCalledWith({
+        workspaceId: "workspace-1",
+        relativePath: "notes.md",
+      }),
+    );
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
   });
 
@@ -444,7 +462,10 @@ describe("selecting several rows in Files", () => {
     });
   const bar = () => screen.queryByTestId("explorer-selection-bar");
   const selected = () =>
-    screen.getAllByRole("treeitem").filter((item) => item.getAttribute("aria-selected") === "true").map((item) => item.dataset.path);
+    screen
+      .getAllByRole("treeitem")
+      .filter((item) => item.getAttribute("aria-selected") === "true")
+      .map((item) => item.dataset.path);
 
   it("counts two or more selected rows, and shows no count for one", () => {
     render(<Fixture {...many()} />);
@@ -452,8 +473,8 @@ describe("selecting several rows in Files", () => {
     expect(bar()).toBeNull();
 
     fireEvent.click(row("c.md"), { ctrlKey: true });
-    for (const path of ["b.md", "c.md"]) expect(row(path).className).toContain("bg-(--dohc-selection) text-ink");
-    // The open row outside the selection keeps its own fill and weight.
+    for (const path of ["b.md", "c.md"])
+      expect(row(path).className).toContain("bg-(--dohc-selection) text-ink");
     expect(row("a.md").className).toContain("bg-selected font-medium");
     expect(bar()?.textContent).toBe("2 selected");
 
@@ -471,11 +492,18 @@ describe("selecting several rows in Files", () => {
     fireEvent.click(row("c.md"), { ctrlKey: true });
     fireEvent.click(row("d.md"), { ctrlKey: true });
     expect(bar()?.textContent).toBe("3 selected");
-    view.rerender(<Fixture {...props} files={props.files.filter((file) => file.path !== "c.md")} />);
+    view.rerender(
+      <Fixture {...props} files={props.files.filter((file) => file.path !== "c.md")} />,
+    );
     expect(bar()?.textContent).toBe("2 selected");
     fireEvent.keyDown(row("d.md"), { key: "Delete" });
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
-    await waitFor(() => expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["b.md", "d.md"]));
+    await waitFor(() =>
+      expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual([
+        "b.md",
+        "d.md",
+      ]),
+    );
   });
 
   it("extends the selection with Shift and the arrows from the row it started on", async () => {
@@ -505,9 +533,18 @@ describe("selecting several rows in Files", () => {
 
   it.each([
     ["pins the rows that are not pinned", ["c.md"], "pin", ["b.md", "d.md"]],
-    ["unpins every row when all are pinned", ["b.md", "c.md", "d.md"], "unpin", ["b.md", "c.md", "d.md"]],
+    [
+      "unpins every row when all are pinned",
+      ["b.md", "c.md", "d.md"],
+      "unpin",
+      ["b.md", "c.md", "d.md"],
+    ],
   ] as const)("%s from a selected row's menu", async (_name, pinned, choice, toggled) => {
-    const entry: ExplorerMenuEntry = { kind: "item", label: choice === "pin" ? "Pin 3 items" : "Unpin 3 items", id: choice };
+    const entry: ExplorerMenuEntry = {
+      kind: "item",
+      label: choice === "pin" ? "Pin 3 items" : "Unpin 3 items",
+      id: choice,
+    };
     const readExplorerMenu = vi.fn(async (_input: unknown) => [entry]);
     vi.stubGlobal("dohcDesktop", { readExplorerMenu });
     const user = userEvent.setup();
@@ -518,7 +555,11 @@ describe("selecting several rows in Files", () => {
     fireEvent.click(row("d.md"), { ctrlKey: true });
     fireEvent.contextMenu(row("c.md"));
     expect(readExplorerMenu).toHaveBeenCalledWith({
-      workspaceId: "workspace-1", path: "c.md", kind: "file", pinned: choice === "unpin", count: 3,
+      workspaceId: "workspace-1",
+      path: "c.md",
+      kind: "file",
+      pinned: choice === "unpin",
+      count: 3,
     });
     await user.click(await screen.findByRole("menuitem", { name: entry.label }));
     await waitFor(() => expect(onTogglePin.mock.calls.map(([path]) => path)).toEqual(toggled));
@@ -531,7 +572,12 @@ describe("selecting several rows in Files", () => {
     fireEvent.click(row("b.md"));
     fireEvent.click(row("c.md"), { ctrlKey: true });
     fireEvent.contextMenu(row("d.md"));
-    expect(readExplorerMenu).toHaveBeenCalledWith({ workspaceId: "workspace-1", path: "d.md", kind: "file", pinned: false });
+    expect(readExplorerMenu).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      path: "d.md",
+      kind: "file",
+      pinned: false,
+    });
     expect(selected()).toEqual(["d.md"]);
     await act(async () => {});
   });
@@ -554,7 +600,9 @@ describe("selecting several rows in Files", () => {
 
     await waitFor(() => expect(onPathsChanged).toHaveBeenCalledTimes(1));
     expect(deleteWorkspacePath).toHaveBeenCalledTimes(3);
-    expect(onPathsChanged.mock.calls[0]![0]).toEqual([expect.objectContaining({ kind: "delete-file", path: "c.md" })]);
+    expect(onPathsChanged.mock.calls[0]![0]).toEqual([
+      expect.objectContaining({ kind: "delete-file", path: "c.md" }),
+    ]);
     expect(onError).toHaveBeenCalledTimes(1);
     const [, , retry, changes, livePage] = onError.mock.calls[0]!;
     expect(livePage).toEqual({ paths: ["b.md", "d.md"], action: "delete" });
@@ -565,20 +613,27 @@ describe("selecting several rows in Files", () => {
     ];
     expect(changes).toEqual(refused);
 
-    // Try again deletes the two refused pages again, and reports the same changes.
     deleteWorkspacePath.mockClear();
     retry();
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
-    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["b.md", "d.md"]);
+    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual([
+      "b.md",
+      "d.md",
+    ]);
     expect(onError.mock.calls[1]![3]).toEqual(refused);
   });
 
   it("reports a live editing refusal apart from another failure in the same delete", async () => {
     const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
       if (relativePath === "b.md") {
-        throw new Error(`Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "b.md" while it has live editing on\nIn Live documents, stop live editing for this page, then delete it again.`);
+        throw new Error(
+          `Error invoking remote method 'desktop:delete-workspace-path': LivePageOwnedError: dohc can't delete "b.md" while it has live editing on\nIn Live documents, stop live editing for this page, then delete it again.`,
+        );
       }
-      if (relativePath === "c.md") throw new Error("Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.");
+      if (relativePath === "c.md")
+        throw new Error(
+          "Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.",
+        );
     });
     vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
     const onError = vi.fn();
@@ -599,7 +654,10 @@ describe("selecting several rows in Files", () => {
       `Error invoking remote method 'desktop:delete-workspace-path': LiveFolderError: dohc can't delete "box" while a page in it has live editing on\nIn Live documents, stop live editing for every page in this folder, then delete the folder again.`,
     );
     const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
-      if (relativePath === "archive") throw new Error("Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.");
+      if (relativePath === "archive")
+        throw new Error(
+          "Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.",
+        );
       if (relativePath === "box") throw folderRefusal;
     });
     vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
@@ -614,8 +672,6 @@ describe("selecting several rows in Files", () => {
     const order = deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath);
     expect(order.indexOf("archive")).toBeLessThan(order.indexOf("box"));
     expect(onError).toHaveBeenCalledTimes(2);
-    // The folder's report keeps its own refusal, which the shell turns into
-    // the way to Live documents, and its Try again.
     const folder = onError.mock.calls.find(([, , , change]) => change?.path === "box");
     expect(folder?.[1]).toBe(folderRefusal);
     expect(folder?.[2]).toEqual(expect.any(Function));
@@ -635,7 +691,6 @@ describe("selecting several rows in Files", () => {
     fireEvent.keyDown(row("d.md"), { key: "Delete" });
     await waitFor(() => expect(deleted()).toEqual(["d.md"]));
 
-    // A delete clears the selection, so select the two rows again.
     fireEvent.click(row("b.md"));
     fireEvent.click(row("c.md"), { ctrlKey: true });
     act(() => row("c.md").focus());
@@ -644,8 +699,6 @@ describe("selecting several rows in Files", () => {
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
   });
 
-  // A share view's delete has no trash, so it still asks, once, for the
-  // whole selection.
   it("asks once to delete the selection in a share view", async () => {
     const deleteWorkspacePath = vi.fn(async (_input: { relativePath: string }) => undefined);
     vi.stubGlobal("dohcDesktop", { deleteWorkspacePath });
@@ -655,9 +708,19 @@ describe("selecting several rows in Files", () => {
     await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}{Delete}");
     const dialog = screen.getByTestId("delete-confirm");
     expect(within(dialog).getByRole("heading").textContent).toBe("Delete 3 items?");
-    expect([...dialog.querySelectorAll("li")].map((item) => item.textContent)).toEqual(["b.md", "c.md", "d.md"]);
+    expect([...dialog.querySelectorAll("li")].map((item) => item.textContent)).toEqual([
+      "b.md",
+      "c.md",
+      "d.md",
+    ]);
     expect(deleteWorkspacePath).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("confirm-delete"));
-    await waitFor(() => expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["b.md", "c.md", "d.md"]));
+    await waitFor(() =>
+      expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual([
+        "b.md",
+        "c.md",
+        "d.md",
+      ]),
+    );
   });
 });

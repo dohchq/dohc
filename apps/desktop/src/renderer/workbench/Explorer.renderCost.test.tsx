@@ -101,7 +101,14 @@ describe("Explorer render cost", () => {
     let listing!: ReturnType<typeof useWorkspaceListing>;
     function Host() {
       listing = useWorkspaceListing(props.workspaceId);
-      return <Explorer {...props} files={listing.files} folders={listing.folders} listingRequest={listing.fileListingCommit?.request ?? 0} />;
+      return (
+        <Explorer
+          {...props}
+          files={listing.files}
+          folders={listing.folders}
+          listingRequest={listing.fileListingCommit?.request ?? 0}
+        />
+      );
     }
     try {
       render(<Host />);
@@ -115,7 +122,9 @@ describe("Explorer render cost", () => {
         });
         const indexes = vi.mocked(indexFileListing).mock.calls.length;
         const trees = vi.mocked(buildTree).mock.calls.length;
-        await act(async () => { await listing.refreshFiles(cached ? { allowCached: true } : {}); });
+        await act(async () => {
+          await listing.refreshFiles(cached ? { allowCached: true } : {});
+        });
         costs.push({
           indexes: vi.mocked(indexFileListing).mock.calls.length - indexes,
           trees: vi.mocked(buildTree).mock.calls.length - trees,
@@ -176,18 +185,13 @@ describe("Explorer render cost", () => {
     expect(vi.mocked(parseTab)).toHaveBeenCalledTimes(calls);
   });
 
-  // Selection state lives in the Explorer, so a click re-renders the tree —
-  // but the row callbacks read selection through refs, so only the rows whose
-  // flags changed re-render, never the whole tree via new callback identities.
   it("re-renders only the rows a selection change touches", () => {
     render(<Explorer {...explorerProps()} />);
     const baseline = basenameOfCalls();
 
-    // First selection: a.md loses the tab stop; b.md gains selection and focus.
     fireEvent.click(rowButton("b.md"));
     expect(basenameOfCalls()).toBe(baseline + 2);
 
-    // Moving the selection: b.md clears, d.md gains — two rows, not four.
     fireEvent.click(rowButton("d.md"));
     expect(basenameOfCalls()).toBe(baseline + 4);
   });
@@ -196,13 +200,16 @@ describe("Explorer render cost", () => {
     const marks = createPathMarks();
     render(
       <PendingShareMarks.Provider value={marks}>
-        <Explorer {...explorerProps({ files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })) })} />
+        <Explorer
+          {...explorerProps({
+            files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
+          })}
+        />
       </PendingShareMarks.Provider>,
     );
     const baseline = basenameOfCalls();
     act(() => marks.set(["file-0003.md"], []));
     expect(basenameOfCalls()).toBe(baseline + 1);
-    // The same answer again, as a status poll brings, renders nothing.
     act(() => marks.set(["file-0003.md"], []));
     expect(basenameOfCalls()).toBe(baseline + 1);
     act(() => marks.set([], []));
@@ -223,9 +230,7 @@ describe("Explorer render cost", () => {
     expect(mounted.every((row) => row.style.height === "28px")).toBe(true);
     expect(rowButton("file-0000.md").getAttribute("aria-posinset")).toBe("1");
     expect(rowButton("file-0000.md").getAttribute("aria-setsize")).toBe("500");
-    expect(
-      mounted.some((row) => row.dataset.path === "file-0499.md"),
-    ).toBe(false);
+    expect(mounted.some((row) => row.dataset.path === "file-0499.md")).toBe(false);
   });
 
   it("windows scrolled rows while retaining the focused tree item", () => {
@@ -341,9 +346,7 @@ describe("Explorer render cost", () => {
 
       expect(document.body.contains(rowButton("file-0100.md"))).toBe(true);
       expect(
-        screen
-          .queryAllByTestId("tree-row")
-          .some((row) => row.dataset.path === "file-0080.md"),
+        screen.queryAllByTestId("tree-row").some((row) => row.dataset.path === "file-0080.md"),
       ).toBe(false);
 
       const handle = screen.getByTestId("open-editors-resize");
@@ -420,9 +423,7 @@ describe("Explorer render cost", () => {
     fireEvent.dragEnd(origin);
     await waitFor(() => {
       expect(
-        screen
-          .queryAllByTestId("tree-row")
-          .some((row) => row.dataset.path === "file-0001.md"),
+        screen.queryAllByTestId("tree-row").some((row) => row.dataset.path === "file-0001.md"),
       ).toBe(false);
     });
   });

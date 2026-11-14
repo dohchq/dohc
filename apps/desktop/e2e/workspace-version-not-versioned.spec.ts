@@ -16,7 +16,10 @@ import {
 // rename, and the rename then shows in Main too.
 
 async function pathExists(path: string): Promise<boolean> {
-  return access(path).then(() => true, () => false);
+  return access(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 async function chooseVersion(page: Page, name: string, create: boolean): Promise<void> {
@@ -46,7 +49,6 @@ test("in a version, a file over the size limit is marked and its rename asks fir
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "clip.bin");
 
-    // On Main nothing is marked.
     await expect(page.getByTestId("version-menu-active")).toHaveText("Main", { timeout: 20_000 });
     await expect(page.locator("[data-testid=tree-row-not-versioned]")).toHaveCount(0);
 
@@ -57,7 +59,6 @@ test("in a version, a file over the size limit is marked and its rename asks fir
     await expect(explorerRow(page, "plan.md")).not.toHaveAttribute("data-not-versioned", "true");
     await page.screenshot({ path: testInfo.outputPath("not-versioned-row.png") });
 
-    // Cancel leaves the file alone.
     await clip.click();
     await clip.press("F2");
     const rename = page.getByRole("textbox", { name: "New name" });
@@ -65,13 +66,14 @@ test("in a version, a file over the size limit is marked and its rename asks fir
     await rename.press("Enter");
     const dialog = page.getByTestId("not-versioned-confirm");
     await expect(dialog).toContainText("Rename clip.bin in Main too?");
-    await expect(dialog).toContainText("It isn't versioned, so Main and every version have the same copy.");
+    await expect(dialog).toContainText(
+      "It isn't versioned, so Main and every version have the same copy.",
+    );
     await page.screenshot({ path: testInfo.outputPath("not-versioned-confirm.png") });
     await page.getByTestId("cancel-not-versioned").click();
     await expect(dialog).toHaveCount(0);
     expect(await pathExists(join(temp.rootPath, "clip.bin"))).toBe(true);
 
-    // Rename anyway renames it.
     await clip.press("F2");
     await rename.fill("renamed.bin");
     await rename.press("Enter");
@@ -81,7 +83,6 @@ test("in a version, a file over the size limit is marked and its rename asks fir
     expect(await pathExists(join(temp.rootPath, "clip.bin"))).toBe(false);
     await expect(page.getByTestId("workspace-shell-error")).toHaveCount(0);
 
-    // Main shows the rename too, and marks nothing.
     await chooseVersion(page, "Main", false);
     await expect(explorerRow(page, "renamed.bin")).toBeVisible();
     await expect(explorerRow(page, "clip.bin")).toHaveCount(0);

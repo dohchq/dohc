@@ -19,14 +19,11 @@ import {
   tableRowHeights,
 } from "@dohc/ydoc-projection/table-row-heights";
 import { assertSupportedListMarkdown } from "@dohc/ydoc-projection/list-markdown";
-import {
-  activateReadOnlyLinkHref,
-  type WorkspaceLinkTarget,
-} from "../linkActivation";
+import { activateReadOnlyLinkHref, type WorkspaceLinkTarget } from "../linkActivation";
 import { MARKDOWN_COMPONENTS } from "./markdownComponents";
 import { initialChunkCount, splitMarkdownBlocks } from "./splitMarkdownBlocks";
 
-// Visible-first markdown rendering (Phase 16 recovery): parse + commit only
+// Visible-first markdown rendering: parse + commit only
 // the opening window on mount, then backfill the rest in idle slices. The
 // first usable document lands in tens of ms instead of paying the full-tree
 // parse+commit (~575ms for 250KB) up front. Same react-markdown, same
@@ -148,7 +145,11 @@ function remarkHtmlBlocksAsText() {
   return (tree: Root) => {
     tree.children = tree.children.map((node): RootContent =>
       node.type === "html"
-        ? { type: "paragraph", children: [{ type: "text", value: node.value }], position: node.position }
+        ? {
+            type: "paragraph",
+            children: [{ type: "text", value: node.value }],
+            position: node.position,
+          }
         : node,
     );
   };
@@ -175,10 +176,7 @@ function ReadOnlyLink({ children, href }: { children?: ReactNode; href?: string 
   }
   const activate = (
     event: React.MouseEvent<HTMLAnchorElement> | React.KeyboardEvent<HTMLAnchorElement>,
-  ) =>
-    activateReadOnlyLinkHref(href, event, (target) =>
-      openWorkspaceLink.current?.(target),
-    );
+  ) => activateReadOnlyLinkHref(href, event, (target) => openWorkspaceLink.current?.(target));
   return (
     <a
       href={href}
@@ -252,10 +250,7 @@ export function IncrementalMarkdownDocument(props: {
         : splitMarkdownBlocks(props.body),
     [props.body],
   );
-  const firstWindow = useMemo(
-    () => initialChunkCount(chunks, FIRST_WINDOW_BYTES),
-    [chunks],
-  );
+  const firstWindow = useMemo(() => initialChunkCount(chunks, FIRST_WINDOW_BYTES), [chunks]);
   const [renderWindow, setRenderWindow] = useState(() => ({
     chunks,
     visibleCount: firstWindow,
@@ -266,10 +261,8 @@ export function IncrementalMarkdownDocument(props: {
   if (renderWindow.chunks !== chunks) {
     setRenderWindow({ chunks, visibleCount: firstWindow });
   }
-  const visibleCount =
-    renderWindow.chunks === chunks ? renderWindow.visibleCount : firstWindow;
+  const visibleCount = renderWindow.chunks === chunks ? renderWindow.visibleCount : firstWindow;
 
-  // Idle backfill: append chunks until the whole document is committed.
   useEffect(() => {
     if (visibleCount >= chunks.length) return;
     return scheduleIdle(() => {
@@ -277,10 +270,7 @@ export function IncrementalMarkdownDocument(props: {
         current.chunks === chunks
           ? {
               chunks,
-              visibleCount: Math.min(
-                current.visibleCount + 16,
-                chunks.length,
-              ),
+              visibleCount: Math.min(current.visibleCount + 16, chunks.length),
             }
           : current,
       );

@@ -31,9 +31,29 @@ const SETTINGS: DesktopUserSettings = {
   ...DEFAULT_USER_SETTINGS,
   profile: { preferredName: "Sam" },
   agents: {
-    default: { name: "Nova", hue: "olive", launch: { command }, changesFiles: true, enabled: true, timeoutMinutes: 1 },
-    vega: { name: "Vega", hue: "blue", launch: { command }, changesFiles: true, enabled: false, timeoutMinutes: 1 },
-    terminal: { name: "Terminal", hue: "rose", changesFiles: true, enabled: false, timeoutMinutes: 1 },
+    default: {
+      name: "Nova",
+      hue: "olive",
+      launch: { command },
+      changesFiles: true,
+      enabled: true,
+      timeoutMinutes: 1,
+    },
+    vega: {
+      name: "Vega",
+      hue: "blue",
+      launch: { command },
+      changesFiles: true,
+      enabled: false,
+      timeoutMinutes: 1,
+    },
+    terminal: {
+      name: "Terminal",
+      hue: "rose",
+      changesFiles: true,
+      enabled: false,
+      timeoutMinutes: 1,
+    },
   },
 };
 
@@ -54,16 +74,37 @@ function personalRoster(now: number) {
     revision: 0,
     agents: [
       {
-        agentId: GROK, name: "Grok Bot", hue: "teal", reportedProduct: "Grok", reportedVersion: "4.1", status: "active",
-        createdAtMs: now - 7 * DAY, signedInAtMs: now - 3 * DAY, lastActionAtMs: now - 2 * HOUR,
-        reach: [{ workspaceId: WORKSPACE_ID, level: "comment" }, { workspaceId: "budget", level: "view" }],
+        agentId: GROK,
+        name: "Grok Bot",
+        hue: "teal",
+        reportedProduct: "Grok",
+        reportedVersion: "4.1",
+        status: "active",
+        createdAtMs: now - 7 * DAY,
+        signedInAtMs: now - 3 * DAY,
+        lastActionAtMs: now - 2 * HOUR,
+        reach: [
+          { workspaceId: WORKSPACE_ID, level: "comment" },
+          { workspaceId: "budget", level: "view" },
+        ],
       },
       {
-        agentId: MIRA, name: "Mira", hue: "amber", reportedProduct: null, reportedVersion: null, status: "signed_out",
-        createdAtMs: now - 20 * DAY, signedInAtMs: now - 20 * DAY, lastActionAtMs: now - 9 * DAY, reach: [],
+        agentId: MIRA,
+        name: "Mira",
+        hue: "amber",
+        reportedProduct: null,
+        reportedVersion: null,
+        status: "signed_out",
+        createdAtMs: now - 20 * DAY,
+        signedInAtMs: now - 20 * DAY,
+        lastActionAtMs: now - 9 * DAY,
+        reach: [],
       },
     ],
-    workspaces: [{ workspaceId: WORKSPACE_ID, name: "Trip" }, { workspaceId: "budget", name: "Budget" }],
+    workspaces: [
+      { workspaceId: WORKSPACE_ID, name: "Trip" },
+      { workspaceId: "budget", name: "Budget" },
+    ],
   };
 }
 
@@ -95,13 +136,24 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
   try {
     const roster = personalRoster(Date.now());
     proxy = await startServerProxy(undefined, {
-      answer: (method, path) => method === "GET" && path === "/sync/personal-agents" ? { status: 200, body: roster } : undefined,
+      answer: (method, path) =>
+        method === "GET" && path === "/sync/personal-agents"
+          ? { status: 200, body: roster }
+          : undefined,
     });
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     proxy.routeRelayTo(relay.baseUrl);
     await seedWorkspaceManifest(temp, WORKSPACE_ID);
-    await seedCloudCredentials(temp, { serverUrl: proxy.origin, relayUrl: proxy.origin, userId: OWNER, token: `test:${OWNER}` });
-    await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), `${JSON.stringify(SETTINGS, null, 2)}\n`);
+    await seedCloudCredentials(temp, {
+      serverUrl: proxy.origin,
+      relayUrl: proxy.origin,
+      userId: OWNER,
+      token: `test:${OWNER}`,
+    });
+    await writeFile(
+      join(temp.homeDir, USER_SETTINGS_FILE),
+      `${JSON.stringify(SETTINGS, null, 2)}\n`,
+    );
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
@@ -118,7 +170,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await page.mouse.move(0, 0);
     await shoot(page, section, "settings-agents");
 
-    // Nova's page: its switch, its test, what it can do and how dohc starts it.
     await row("default").click();
     const agentPage = section.getByTestId("agent-page");
     await expect(agentPage).toHaveAttribute("data-agent-id", "default");
@@ -127,16 +178,18 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await page.mouse.move(0, 0);
     await shoot(page, section, "settings-agents-page");
 
-    // Tab from the back button to the switch.
     await agentPage.getByTestId("agent-back").focus();
-    for (let presses = 0; presses < 6 && !await novaSwitch.evaluate((element) => element === document.activeElement); presses += 1) {
+    for (
+      let presses = 0;
+      presses < 6 && !(await novaSwitch.evaluate((element) => element === document.activeElement));
+      presses += 1
+    ) {
       await page.keyboard.press("Tab");
     }
     await expect(novaSwitch).toBeFocused();
     await shoot(page, section, "settings-agents-switch-focus");
     await agentPage.getByTestId("agent-back").click();
 
-    // Add agent with Agent link chosen: the link this workspace's agents sign in with.
     await section.getByTestId("agent-add").click();
     const addSheet = page.getByTestId("agent-add-sheet");
     await addSheet.getByTestId("agent-runs-with-link").click();
@@ -147,7 +200,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await addSheet.getByRole("button", { name: "Cancel" }).click();
     await expect(addSheet).toBeHidden();
 
-    // Grok Bot's page: its color, what it can reach, its activity and Sign out.
     await row(GROK).click();
     await expect(agentPage).toHaveAttribute("data-agent-id", GROK);
     await expect(agentPage).toHaveAttribute("data-status", "active");
@@ -155,7 +207,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await page.mouse.move(0, 0);
     await shoot(page, section, "settings-agents-personal-page");
 
-    // Its reach sheet, with this workspace at Comment and Budget at View.
     await agentPage.getByTestId("personal-agent-reach").click();
     const reachSheet = page.getByTestId("personal-agent-reach-sheet");
     await expect(reachSheet.getByTestId("personal-agent-reach-row")).toHaveCount(2);
@@ -165,7 +216,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await expect(reachSheet).toBeHidden();
     await agentPage.getByTestId("agent-back").click();
 
-    // Mira signed out: dimmed, no reach, and a way to sign in again.
     await row(MIRA).click();
     await expect(agentPage).toHaveAttribute("data-agent-id", MIRA);
     await expect(agentPage).toHaveAttribute("data-status", "signed_out");

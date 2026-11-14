@@ -11,7 +11,12 @@ import {
 
 type TestActivityWorkspace = CreatedWorkspace & { attachmentId?: symbol };
 export const idleObservation: WorkspaceActivityOptions["observationFor"] = () => ({
-  ready: Promise.resolve(), stop: async () => {}, pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {}, retry: async () => {},
+  ready: Promise.resolve(),
+  stop: async () => {},
+  pulledPaths: async () => {},
+  pullStarting: () => {},
+  pullFinished: () => {},
+  retry: async () => {},
 });
 
 /** Test-only registry adapter for the single-attachment activity service. */
@@ -29,13 +34,11 @@ export function createInMemoryWorkspaceActivity(
     const current = authorities.get(workspace.workspaceId);
     if (
       current &&
-      (current.workspace.rootPath === workspace.rootPath ||
-        service.isOpen(current.state))
+      (current.workspace.rootPath === workspace.rootPath || service.isOpen(current.state))
     ) {
       current.workspace = {
         ...workspace,
-        attachmentId:
-          workspace.attachmentId ?? current.workspace.attachmentId,
+        attachmentId: workspace.attachmentId ?? current.workspace.attachmentId,
       };
       return current;
     }
@@ -43,8 +46,7 @@ export function createInMemoryWorkspaceActivity(
       workspace: {
         ...workspace,
         attachmentId:
-          workspace.attachmentId ??
-          Symbol(`test-workspace-attachment:${workspace.workspaceId}`),
+          workspace.attachmentId ?? Symbol(`test-workspace-attachment:${workspace.workspaceId}`),
       },
       state: new WorkspaceActivityState(),
     };
@@ -91,15 +93,9 @@ export function createInMemoryWorkspaceActivity(
       engineOptions?: { joinBootstrap?: boolean },
     ) => {
       const authority = authorityFor(workspace);
-      return service.enableCloud(
-        authority.workspace,
-        authority.state,
-        engineOptions,
-      );
+      return service.enableCloud(authority.workspace, authority.state, engineOptions);
     },
-    reconcileCloud: (
-      engineFor: Parameters<typeof service.reconcileCloud>[1],
-    ): void => {
+    reconcileCloud: (engineFor: Parameters<typeof service.reconcileCloud>[1]): void => {
       for (const authority of authorities.values()) {
         service.reconcileCloud(authority.state, engineFor, false);
       }
@@ -107,9 +103,7 @@ export function createInMemoryWorkspaceActivity(
     },
     stopEngines: async (): Promise<void> => {
       await Promise.all(
-        [...authorities.values()].map(({ state }) =>
-          service.stopEngine(state, false),
-        ),
+        [...authorities.values()].map(({ state }) => service.stopEngine(state, false)),
       );
       notify();
     },
@@ -121,12 +115,7 @@ export function createInMemoryWorkspaceActivity(
       workspaceId: string,
       refusal: EngineStoreRefusal | null,
       detail: string | null,
-    ) =>
-      service.recordShareViewStoreRefusal(
-        requireAuthority(workspaceId).state,
-        refusal,
-        detail,
-      ),
+    ) => service.recordShareViewStoreRefusal(requireAuthority(workspaceId).state, refusal, detail),
     listOpenWorkspaceIds: () =>
       [...authorities.entries()]
         .filter(([, authority]) => service.isOpen(authority.state))
@@ -135,10 +124,7 @@ export function createInMemoryWorkspaceActivity(
       const authority = authorities.get(workspaceId);
       if (authority) service.queueCloudSync(authority.state);
     },
-    retryCloudSync: (
-      workspaceId: string,
-      reason: "person" | "reconnect",
-    ): Promise<void> => {
+    retryCloudSync: (workspaceId: string, reason: "person" | "reconnect"): Promise<void> => {
       const authority = authorities.get(workspaceId);
       return authority ? service.retryCloudSync(authority.state, reason) : Promise.resolve();
     },
@@ -147,10 +133,7 @@ export function createInMemoryWorkspaceActivity(
       if (!authority) throw new Error("This workspace is not open.");
       await service.syncNow(authority.state);
     },
-    setAgentRun: (
-      workspaceId: string,
-      run: ActiveAgentRun | null,
-    ): Promise<void> => {
+    setAgentRun: (workspaceId: string, run: ActiveAgentRun | null): Promise<void> => {
       const authority = requireAuthority(workspaceId);
       return service.setAgentRun(authority.workspace, authority.state, run);
     },
@@ -176,11 +159,7 @@ export function createInMemoryWorkspaceActivity(
     ): Promise<void> => {
       const authority = authorities.get(workspaceId);
       if (!authority) return Promise.resolve();
-      return service.clearAgentRun(
-        authority.state,
-        agentRunId,
-        expectedRootPath,
-      );
+      return service.clearAgentRun(authority.state, agentRunId, expectedRootPath);
     },
     agentRunState: (workspaceId: string) => {
       const authority = requireAuthority(workspaceId);
@@ -188,9 +167,7 @@ export function createInMemoryWorkspaceActivity(
     },
     hasAgentRun: (workspaceId: string, expectedRootPath?: string): boolean => {
       const authority = authorities.get(workspaceId);
-      return authority
-        ? service.hasAgentRun(authority.state, expectedRootPath)
-        : false;
+      return authority ? service.hasAgentRun(authority.state, expectedRootPath) : false;
     },
     dispatchedAgent: (workspaceId: string): string | null => {
       const authority = authorities.get(workspaceId);
@@ -213,9 +190,7 @@ export function createInMemoryWorkspaceActivity(
       expectedRootPath?: string,
     ): WorkspaceEngineCapture | null => {
       const authority = authorities.get(workspaceId);
-      return authority
-        ? service.engineCaptureFor(authority.state, expectedRootPath)
-        : null;
+      return authority ? service.engineCaptureFor(authority.state, expectedRootPath) : null;
     },
     workspaceRootPath: (workspaceId: string): string | null => {
       const authority = authorities.get(workspaceId);
@@ -226,16 +201,10 @@ export function createInMemoryWorkspaceActivity(
       events: Parameters<WorkspaceEngineCapture["registerExpectedEngineEvents"]>[0],
     ) => {
       const authority = requireAuthority(workspaceId);
-      return service.registerExpectedEngineEvents(
-        authority.workspace,
-        authority.state,
-        events,
-      );
+      return service.registerExpectedEngineEvents(authority.workspace, authority.state, events);
     },
     stopAll: async (): Promise<void> => {
-      await Promise.all(
-        [...authorities.values()].map(({ state }) => service.stop(state)),
-      );
+      await Promise.all([...authorities.values()].map(({ state }) => service.stop(state)));
       authorities.clear();
     },
   };

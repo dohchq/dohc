@@ -21,7 +21,14 @@ import { isContextMenuKey, isDeleteKey } from "../ui/keys";
 import { Menu, type MenuItem } from "../ui/Menu";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { AppMarks } from "./AppsSection";
-import { CollectionsElsewhereRow, CollectionsRefusalRow, RANGE_KEYS, rangeBetween, type ExplorerProps, type RowDropPreview } from "./Explorer";
+import {
+  CollectionsElsewhereRow,
+  CollectionsRefusalRow,
+  RANGE_KEYS,
+  rangeBetween,
+  type ExplorerProps,
+  type RowDropPreview,
+} from "./Explorer";
 import {
   classifyFiles,
   collectionRows,
@@ -39,13 +46,6 @@ import { NOT_VERSIONED, NOT_VERSIONED_TITLE, useNotVersionedMark } from "./notVe
 import { TabGlyph } from "./tabGlyph";
 import { parseTab, siteTabPath } from "./workbenchState";
 
-// Home: the workspace by kind, as one keyboard list. Arrows move through
-// every section, Left and Right fold a section or a folder, and Enter opens.
-// Each row's menu is the Files menu for the same file or folder, so a
-// rename, move or delete here is the same change Files makes. Rows select as
-// Files' rows do, by their workspace path, so a page pinned and in Pages is
-// one selected path.
-
 const ROW_HEIGHT = 28;
 const GLYPH_SIZE = 14;
 const VIRTUALIZE_ABOVE = 200;
@@ -62,17 +62,13 @@ export interface ExplorerHomeProps {
   // Changes whenever the Open editors section above Home changes height, so
   // the Pages window is measured again.
   aboveLayout: string;
-  // The file or folder the Explorer is renaming, and its name field.
   editingPath: string | null;
   renderEditRow: (depth: number) => ReactNode;
-  // The Explorer's selection: workspace paths.
   selection: ReadonlySet<string>;
   onSelect: (paths: ReadonlySet<string>) => void;
-  // Opens the row's menu at the pointer.
   onMenu: (kind: "file" | "folder", path: string, at: { x: number; y: number }) => void;
   onRename: (path: string, isFolder: boolean) => void;
   onDelete: (paths: string[]) => void;
-  // Switches to Files, with this path selected when it has one.
   onShowInFiles: (paths: readonly string[] | null) => void;
   drag: {
     start: (path: string, event: DragEvent) => void;
@@ -81,7 +77,6 @@ export interface ExplorerHomeProps {
     leave: () => void;
     end: () => void;
   };
-  // How a drag over this path would land, while one is in progress.
   dropPreviewFor: (path: string) => RowDropPreview | null;
 }
 
@@ -93,12 +88,9 @@ type Section = {
   // More can load, so the count shows how many have loaded so far, with a "+".
   countMore?: boolean;
   rows: HomeRowModel[];
-  // A last row that is not a file, such as Show all in Files.
   more?: { key: string; label: string; testId: string; onActivate: () => void };
   add?: { label: string; onClick: () => void };
-  // The section's own actions, in a ⋯ beside its +.
   actions?: MenuItem[];
-  // What the section shows before or after its rows.
   body?: ReactNode;
   after?: ReactNode;
   // The muted line a section with nothing in it shows under its header. It
@@ -117,7 +109,8 @@ const SECTION_TEST_IDS: Record<HomeSectionId, string> = {
   other: "explorer-other-files",
 };
 
-const HEADER_BUTTON = "grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink";
+const HEADER_BUTTON =
+  "grid size-6 shrink-0 place-items-center rounded text-subtle group-hover:text-muted hover:bg-hover hover:text-ink";
 
 function SectionActions(props: { label: string; testId: string; items: readonly MenuItem[] }) {
   const [open, setOpen] = useState(false);
@@ -129,7 +122,14 @@ function SectionActions(props: { label: string; testId: string; items: readonly 
       onOpenChange={setOpen}
       width={248}
       trigger={(trigger) => (
-        <button {...trigger} type="button" data-testid={props.testId} aria-label={props.label} title={props.label} className={HEADER_BUTTON}>
+        <button
+          {...trigger}
+          type="button"
+          data-testid={props.testId}
+          aria-label={props.label}
+          title={props.label}
+          className={HEADER_BUTTON}
+        >
           <MoreHorizontal size={13} aria-hidden />
         </button>
       )}
@@ -156,13 +156,31 @@ export function ExplorerHome(props: ExplorerHomeProps) {
 
   const noFolders = useMemo(() => new Set<string>(), []);
   const kinds = useMemo(
-    () => classifyFiles(files, explorer.collectionFolders, explorer.appFolders ?? noFolders, explorer.unclaimedDatasetFolders ?? noFolders),
-    [files, explorer.collectionFolders, explorer.appFolders, explorer.unclaimedDatasetFolders, noFolders],
+    () =>
+      classifyFiles(
+        files,
+        explorer.collectionFolders,
+        explorer.appFolders ?? noFolders,
+        explorer.unclaimedDatasetFolders ?? noFolders,
+      ),
+    [
+      files,
+      explorer.collectionFolders,
+      explorer.appFolders,
+      explorer.unclaimedDatasetFolders,
+      noFolders,
+    ],
   );
   const tree = useMemo(() => pageTree(kinds.pages), [kinds.pages]);
   const pages = useMemo(() => pageRows(tree, expanded), [tree, expanded]);
-  const sketches = useMemo(() => fileRows("sketches", kinds.sketches.shown, fileByPath), [kinds.sketches, fileByPath]);
-  const others = useMemo(() => fileRows("other", kinds.others.shown, fileByPath), [kinds.others, fileByPath]);
+  const sketches = useMemo(
+    () => fileRows("sketches", kinds.sketches.shown, fileByPath),
+    [kinds.sketches, fileByPath],
+  );
+  const others = useMemo(
+    () => fileRows("other", kinds.others.shown, fileByPath),
+    [kinds.others, fileByPath],
+  );
   const dataCollections = explorer.dataCollections;
   const lookup = useMemo<HomeLookup>(
     () => ({
@@ -186,9 +204,16 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   const appRows = useMemo<HomeRowModel[]>(
     () =>
       appList.map((app) => ({
-        key: `apps:${app.root}`, section: "apps", parentKey: "apps", depth: 1, label: app.title,
-        glyph: { glyph: "app", icon: undefined }, open: siteTabPath(app.root),
-        menu: { path: app.root, kind: "folder" }, folder: false, expanded: false,
+        key: `apps:${app.root}`,
+        section: "apps",
+        parentKey: "apps",
+        depth: 1,
+        label: app.title,
+        glyph: { glyph: "app", icon: undefined },
+        open: siteTabPath(app.root),
+        menu: { path: app.root, kind: "folder" },
+        folder: false,
+        expanded: false,
       })),
     [appList],
   );
@@ -200,10 +225,11 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     !!explorer.onRestoreCollection ||
     !!refusal ||
     !!explorer.collectionsElsewhere;
-  // Pages, Collections and Apps always show in a workspace of your own, each
+  // Apps, Pages and Collections always show in a workspace of your own, each
   // saying when it has nothing. A share view shows only the kinds it holds.
   const appsStatus = apps?.state.status;
-  const appsShown = appsStatus === "failed" || appList.length > 0 || (!!apps && !explorer.shareView);
+  const appsShown =
+    appsStatus === "failed" || appList.length > 0 || (!!apps && !explorer.shareView);
   const collectionActions: MenuItem[] = [];
   if (!refusal && explorer.onIncludeArchivedCollections) {
     const archived = explorer.includeArchivedCollections ?? false;
@@ -215,8 +241,18 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       onSelect: () => explorer.onIncludeArchivedCollections?.(!archived),
     });
   }
-  if (!refusal && explorer.onRestoreCollection && !explorer.shareView && !explorer.collectionsElsewhere) {
-    collectionActions.push({ id: "restore", label: "Restore from recovery file…", testId: "collections-restore", onSelect: explorer.onRestoreCollection });
+  if (
+    !refusal &&
+    explorer.onRestoreCollection &&
+    !explorer.shareView &&
+    !explorer.collectionsElsewhere
+  ) {
+    collectionActions.push({
+      id: "restore",
+      label: "Restore from recovery file…",
+      testId: "collections-restore",
+      onSelect: explorer.onRestoreCollection,
+    });
   }
 
   // A read on its way holds one row's height and says nothing, so the
@@ -224,6 +260,21 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   const holdRow = <div aria-hidden className="h-7" />;
   const collectionsUnknown = refusal ? undefined : explorer.collectionsUnknown;
   const sections: Section[] = [];
+  // dohc is for building apps, so Apps leads Home.
+  if (appsShown) {
+    sections.push({
+      id: "apps",
+      label: "Apps",
+      count: appList.length,
+      countLabel: (count) => plural(count, "app", "apps"),
+      rows: appRows,
+      ...(apps?.state.status === "failed"
+        ? { body: <RetryRow testId="sites-failed" onRetry={apps.retry} /> }
+        : {}),
+      ...(appsStatus === "loading" ? { body: holdRow } : {}),
+      ...(appsStatus === "ready" && appList.length === 0 ? { empty: "No apps yet." } : {}),
+    });
+  }
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
   if (pages.length > 0 || !explorer.shareView) {
     sections.push({
@@ -244,7 +295,14 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       countLabel: (count) => plural(count, "sketch", "sketches"),
       rows: sketches,
       ...(kinds.sketches.count > FILES_SHOWN
-        ? { more: { key: "sketches:more", label: "Show all in Files", testId: "sketches-show-all", onActivate: () => props.onShowInFiles(null) } }
+        ? {
+            more: {
+              key: "sketches:more",
+              label: "Show all in Files",
+              testId: "sketches-show-all",
+              onActivate: () => props.onShowInFiles(null),
+            },
+          }
         : {}),
     });
   }
@@ -254,37 +312,48 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       id: "collections",
       label: "Collections",
       count: refusal ? undefined : collections.length,
-      countLabel: (count) => more ? `${count} or more Collections` : plural(count, "Collection", "Collections"),
+      countLabel: (count) =>
+        more ? `${count} or more Collections` : plural(count, "Collection", "Collections"),
       rows: refusal ? [] : collections,
       ...(more
-        ? { countMore: true, more: { key: "collections:more", label: "Show more Collections", testId: "collections-more", onActivate: more } }
+        ? {
+            countMore: true,
+            more: {
+              key: "collections:more",
+              label: "Show more Collections",
+              testId: "collections-more",
+              onActivate: more,
+            },
+          }
         : {}),
-      ...(explorer.shareView ? {} : { add: { label: "New Collection", onClick: () => explorer.onNewCollection("") } }),
+      ...(explorer.shareView
+        ? {}
+        : { add: { label: "New Collection", onClick: () => explorer.onNewCollection("") } }),
       ...(collectionActions.length > 0 ? { actions: collectionActions } : {}),
       body: refusal ? (
-        <CollectionsRefusalRow refusal={refusal} onKeep={explorer.onKeepCollections} onRetry={explorer.onRetryCollections} />
+        <CollectionsRefusalRow
+          refusal={refusal}
+          onKeep={explorer.onKeepCollections}
+          onRetry={explorer.onRetryCollections}
+        />
       ) : collectionsUnknown === "failed" && explorer.onRetryCollections ? (
         <RetryRow testId="collections-failed" onRetry={explorer.onRetryCollections} />
-      ) : collectionsUnknown ? holdRow : undefined,
-      after: !refusal && explorer.collectionsElsewhere ? (
-        <CollectionsElsewhereRow elsewhere={explorer.collectionsElsewhere} onKeep={explorer.onKeepCollections} />
+      ) : collectionsUnknown ? (
+        holdRow
       ) : undefined,
-      ...(!refusal && !collectionsUnknown && !explorer.collectionsElsewhere && !explorer.onMoreDataCollections && collections.length === 0
+      after:
+        !refusal && explorer.collectionsElsewhere ? (
+          <CollectionsElsewhereRow
+            elsewhere={explorer.collectionsElsewhere}
+            onKeep={explorer.onKeepCollections}
+          />
+        ) : undefined,
+      ...(!refusal &&
+      !collectionsUnknown &&
+      !explorer.collectionsElsewhere &&
+      !explorer.onMoreDataCollections &&
+      collections.length === 0
         ? { empty: "No Collections yet." }
-        : {}),
-    });
-  }
-  if (appsShown) {
-    sections.push({
-      id: "apps",
-      label: "Apps",
-      count: appList.length,
-      countLabel: (count) => plural(count, "app", "apps"),
-      rows: appRows,
-      ...(apps?.state.status === "failed" ? { body: <RetryRow testId="sites-failed" onRetry={apps.retry} /> } : {}),
-      ...(appsStatus === "loading" ? { body: holdRow } : {}),
-      ...(appsStatus === "ready" && appList.length === 0
-        ? { empty: "No apps yet." }
         : {}),
     });
   }
@@ -296,23 +365,36 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       countLabel: (count) => plural(count, "file", "files"),
       rows: others,
       ...(kinds.others.count > FILES_SHOWN
-        ? { more: { key: "other:more", label: "Show all in Files", testId: "other-files-show-all", onActivate: () => props.onShowInFiles(null) } }
+        ? {
+            more: {
+              key: "other:more",
+              label: "Show all in Files",
+              testId: "other-files-show-all",
+              onActivate: () => props.onShowInFiles(null),
+            },
+          }
         : {}),
     });
   }
 
-  // ---- one keyboard list over every section ----
-
   // Which sections are drawn, with their rows; the sections themselves are
   // rebuilt each render, so the list follows this key.
-  const sectionsKey = sections.map((section) => `${section.id}${section.more ? "+" : ""}`).join(" ");
+  const sectionsKey = sections
+    .map((section) => `${section.id}${section.more ? "+" : ""}`)
+    .join(" ");
   const nav = useMemo(() => {
     const rows: FlatRow[] = [];
     const items = new Map<string, NavItem>();
     for (const section of sections) {
       const sectionKey = `section:${section.id}`;
       const open = !collapsed.has(section.id);
-      rows.push({ fullPath: sectionKey, isFolder: true, isExpanded: open, depth: 0, parentPath: null });
+      rows.push({
+        fullPath: sectionKey,
+        isFolder: true,
+        isExpanded: open,
+        depth: 0,
+        parentPath: null,
+      });
       items.set(sectionKey, { sectionId: section.id });
       if (!open) continue;
       for (const row of section.rows) {
@@ -326,12 +408,17 @@ export function ExplorerHome(props: ExplorerHomeProps) {
         items.set(row.key, { sectionId: section.id, row });
       }
       if (section.more) {
-        rows.push({ fullPath: section.more.key, isFolder: false, isExpanded: false, depth: 1, parentPath: sectionKey });
+        rows.push({
+          fullPath: section.more.key,
+          isFolder: false,
+          isExpanded: false,
+          depth: 1,
+          parentPath: sectionKey,
+        });
         items.set(section.more.key, { sectionId: section.id, more: true });
       }
     }
     return { rows, items };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinned, pages, sketches, collections, appRows, others, collapsed, sectionsKey]);
 
   // The workspace path of the row the active editor shows. An app or a
@@ -342,12 +429,12 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       for (const row of section.rows) if (row.open === activePath && row.menu) return row.menu.path;
     }
     return null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinned, pages, sketches, collections, appRows, others, sectionsKey, activePath]);
 
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const selectedNoteId = useId();
-  const tabbableKey = focusedKey && nav.items.has(focusedKey) ? focusedKey : (nav.rows[0]?.fullPath ?? null);
+  const tabbableKey =
+    focusedKey && nav.items.has(focusedKey) ? focusedKey : (nav.rows[0]?.fullPath ?? null);
   const rowRefs = useRef(new Map<string, HTMLElement>());
   const pendingFocus = useRef<string | null>(null);
   const registerRef = useCallback((key: string, element: HTMLElement | null) => {
@@ -372,9 +459,20 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       start: Math.max(0, Math.min(first, pages.length) - OVERSCAN),
       end: Math.min(pages.length, first + visible + OVERSCAN),
     };
-    setRange((current) => (current.start === next.start && current.end === next.end ? current : next));
+    setRange((current) =>
+      current.start === next.start && current.end === next.end ? current : next,
+    );
   }, [pages.length, scrollerRef, windowed]);
-  useLayoutEffect(updateRange, [updateRange, sectionsKey, collapsed, props.aboveLayout]);
+  // Apps and Pinned sit above Pages, so their rows move it too.
+  useLayoutEffect(updateRange, [
+    updateRange,
+    sectionsKey,
+    collapsed,
+    props.aboveLayout,
+    appRows.length,
+    appsStatus,
+    pinned.length,
+  ]);
   useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller || !windowed) return;
@@ -428,9 +526,12 @@ export function ExplorerHome(props: ExplorerHomeProps) {
 
   // Where a Shift-click or Shift+arrow range starts: a row's key.
   const anchorKey = useRef<string | null>(null);
-  // The workspace paths of the rows from one key to another, in order.
   const pathsBetween = (from: string, to: string): Set<string> => {
-    const keys = rangeBetween(nav.rows.map((row) => row.fullPath), from, to) ?? [to];
+    const keys = rangeBetween(
+      nav.rows.map((row) => row.fullPath),
+      from,
+      to,
+    ) ?? [to];
     return new Set(keys.flatMap((key) => nav.items.get(key)?.row?.menu?.path ?? []));
   };
 
@@ -447,7 +548,8 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     const was = shownOpenRow.current;
     shownOpenRow.current = openRowPath;
     const { selection, onSelect } = live.current.props;
-    if (was !== null && was !== openRowPath && selection.size === 1 && selection.has(was)) onSelect(new Set());
+    if (was !== null && was !== openRowPath && selection.size === 1 && selection.has(was))
+      onSelect(new Set());
   }, [openRowPath]);
 
   const openRow = useCallback((row: HomeRowModel) => {
@@ -457,15 +559,15 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       return;
     }
     if (row.open === null) {
-      // A pinned folder that is no Collection or app opens in Files, and so do
-      // the files to fix of a Collection that can't open.
       if (row.fix) onShowInFiles(row.fix);
       else if (row.menu) onShowInFiles([row.menu.path]);
       return;
     }
     const tab = parseTab(row.open);
-    if (tab.kind === "collection" && tab.collectionPath !== null) current.onOpenCollection(tab.collectionPath);
-    else if (tab.kind === "transactionalCollection") current.onOpenDataCollection?.(tab.datasetPath, tab.tableId);
+    if (tab.kind === "collection" && tab.collectionPath !== null)
+      current.onOpenCollection(tab.collectionPath);
+    else if (tab.kind === "transactionalCollection")
+      current.onOpenDataCollection?.(tab.datasetPath, tab.tableId);
     else current.onOpenFile(row.open);
   }, []);
 
@@ -476,7 +578,11 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       setFocusedKey(row.key);
       const { props: current, pathsBetween: between } = live.current;
       const path = row.menu?.path;
-      if (path !== undefined && event !== undefined && hasPrimaryModifier(event, window.dohcDesktop?.platform)) {
+      if (
+        path !== undefined &&
+        event !== undefined &&
+        hasPrimaryModifier(event, window.dohcDesktop?.platform)
+      ) {
         const next = new Set(current.selection);
         if (next.has(path)) next.delete(path);
         else next.add(path);
@@ -506,15 +612,12 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     if (!row.menu) return;
     rowRefs.current.get(row.key)?.focus({ preventScroll: true });
     const current = live.current.props;
-    // A row outside the selection is the selection while its menu acts.
     if (!current.selection.has(row.menu.path)) {
       current.onSelect(new Set([row.menu.path]));
       anchorKey.current = row.key;
     }
     current.onMenu(row.menu.kind, row.menu.path, { x: event.clientX, y: event.clientY });
   }, []);
-  // A rename shows its name field in the row it started from, or else the
-  // first row for that path.
   const editingPath = props.editingPath;
   const editKey = useMemo(() => {
     if (editingPath === null) return null;
@@ -523,7 +626,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     for (const [key, item] of nav.items) if (item.row?.menu?.path === editingPath) return key;
     return null;
     // The row it started from is the one focused when it began.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingPath, nav]);
 
   const onKeyDown = (event: KeyboardEvent) => {
@@ -544,7 +646,9 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       !event.altKey
     ) {
       event.preventDefault();
-      props.onSelect(new Set([...nav.items.values()].flatMap((entry) => entry.row?.menu?.path ?? [])));
+      props.onSelect(
+        new Set([...nav.items.values()].flatMap((entry) => entry.row?.menu?.path ?? [])),
+      );
       return;
     }
     if (menu && event.key === "F2") {
@@ -552,8 +656,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       props.onRename(menu.path, menu.kind === "folder");
       return;
     }
-    // The selection, or the focused row alone when it is outside the
-    // selection. From a heading, the selection.
     if (isDeleteKey(event) && (menu || props.selection.size > 0)) {
       event.preventDefault();
       props.onDelete(menu && !props.selection.has(menu.path) ? [menu.path] : [...props.selection]);
@@ -578,20 +680,21 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       case "expand":
       case "collapse":
         if (heading) toggleSection(acted.sectionId, action.kind === "expand");
-        else if (acted.row?.menu) explorer.onSetFolderExpanded(acted.row.menu.path, action.kind === "expand");
+        else if (acted.row?.menu)
+          explorer.onSetFolderExpanded(acted.row.menu.path, action.kind === "expand");
         break;
       case "toggle":
         if (heading) toggleSection(acted.sectionId);
         else if (acted.row) openRow(acted.row);
         break;
       case "open":
-        if (acted.more) sections.find((section) => section.id === acted.sectionId)?.more?.onActivate();
+        if (acted.more)
+          sections.find((section) => section.id === acted.sectionId)?.more?.onActivate();
         else if (acted.row) openRow(acted.row);
         break;
     }
   };
 
-  // Add an app here… lands on the first app.
   const appsReveal = apps?.reveal ?? false;
   const onAppsRevealed = apps?.onRevealed;
   const appsSettled = apps ? apps.state.status !== "loading" : true;
@@ -614,9 +717,8 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     return <SkeletonRows layout="list" className="mt-4 px-3 py-2" label="Loading files..." />;
   }
 
-  // As in Files, the rows of a selection that is not just the open row take
-  // the picked fill.
-  const selectionIsOpenRow = openRowPath !== null && props.selection.size === 1 && props.selection.has(openRowPath);
+  const selectionIsOpenRow =
+    openRowPath !== null && props.selection.size === 1 && props.selection.has(openRowPath);
   const renderRow = (row: HomeRowModel): ReactNode => {
     if (editKey === row.key) return props.renderEditRow(row.depth - 1);
     const common = {
@@ -647,7 +749,14 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     if (row.section === "pages") {
       const preview = props.dropPreviewFor(row.menu!.path);
       return (
-        <HomeRow key={row.key} {...common} chevronSlot dropKind={preview?.kind} dropRole={preview?.role} drag={props.drag} />
+        <HomeRow
+          key={row.key}
+          {...common}
+          chevronSlot
+          dropKind={preview?.kind}
+          dropRole={preview?.role}
+          drag={props.drag}
+        />
       );
     }
     return <HomeRow key={row.key} {...common} />;
@@ -656,7 +765,8 @@ export function ExplorerHome(props: ExplorerHomeProps) {
   const renderPages = (rows: HomeRowModel[]): ReactNode[] => {
     if (!windowed) return rows.map(renderRow);
     const mounted = new Set<number>();
-    for (let index = range.start; index < Math.min(range.end, rows.length); index += 1) mounted.add(index);
+    for (let index = range.start; index < Math.min(range.end, rows.length); index += 1)
+      mounted.add(index);
     // The row that holds the tab stop or the name field stays mounted.
     for (const key of [tabbableKey, editKey]) {
       const index = key ? pagesIndex.get(key) : undefined;
@@ -665,11 +775,27 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     const out: ReactNode[] = [];
     let next = 0;
     for (const index of [...mounted].sort((a, b) => a - b)) {
-      if (index > next) out.push(<li key={`space-${next}`} role="none" aria-hidden style={{ height: (index - next) * ROW_HEIGHT }} />);
+      if (index > next)
+        out.push(
+          <li
+            key={`space-${next}`}
+            role="none"
+            aria-hidden
+            style={{ height: (index - next) * ROW_HEIGHT }}
+          />,
+        );
       out.push(renderRow(rows[index]!));
       next = index + 1;
     }
-    if (next < rows.length) out.push(<li key={`space-${next}`} role="none" aria-hidden style={{ height: (rows.length - next) * ROW_HEIGHT }} />);
+    if (next < rows.length)
+      out.push(
+        <li
+          key={`space-${next}`}
+          role="none"
+          aria-hidden
+          style={{ height: (rows.length - next) * ROW_HEIGHT }}
+        />,
+      );
     return out;
   };
 
@@ -687,7 +813,10 @@ export function ExplorerHome(props: ExplorerHomeProps) {
             aria-label={section.label}
             className="mt-4 first:mt-0"
           >
-            <header data-testid={`${testId}-header`} className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover">
+            <header
+              data-testid={`${testId}-header`}
+              className="group mx-1 flex h-6 items-center gap-1 rounded-md hover:bg-hover"
+            >
               <button
                 type="button"
                 ref={(element) => registerRef(sectionKey, element)}
@@ -710,13 +839,22 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                     aria-label={section.countLabel?.(section.count)}
                     className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none text-subtle"
                   >
-                    {section.count}{section.countMore ? "+" : null}
+                    {section.count}
+                    {section.countMore ? "+" : null}
                   </span>
                 ) : null}
-                <ChevronRight size={11} aria-hidden className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />
+                <ChevronRight
+                  size={11}
+                  aria-hidden
+                  className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+                />
               </button>
               {section.actions ? (
-                <SectionActions label={`${section.label} actions`} testId={`${testId}-actions`} items={section.actions} />
+                <SectionActions
+                  label={`${section.label} actions`}
+                  testId={`${testId}-actions`}
+                  items={section.actions}
+                />
               ) : null}
               {section.add ? (
                 <button
@@ -735,7 +873,11 @@ export function ExplorerHome(props: ExplorerHomeProps) {
               <>
                 {section.body ? <div className="px-1">{section.body}</div> : null}
                 {emptyId ? (
-                  <p id={emptyId} data-testid={`${testId}-empty`} className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted">
+                  <p
+                    id={emptyId}
+                    data-testid={`${testId}-empty`}
+                    className="m-0 px-3 py-1.5 text-[12px] leading-4 text-muted"
+                  >
                     {section.empty}
                   </p>
                 ) : null}
@@ -745,7 +887,9 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                     aria-label={section.label}
                     className="m-0 list-none p-0"
                   >
-                    {section.id === "pages" ? renderPages(section.rows) : section.rows.map(renderRow)}
+                    {section.id === "pages"
+                      ? renderPages(section.rows)
+                      : section.rows.map(renderRow)}
                     {section.more ? (
                       <li className="px-1">
                         <button
@@ -764,7 +908,9 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                     ) : null}
                   </ul>
                 ) : null}
-                {section.after ? <div className="flex flex-col items-stretch px-1">{section.after}</div> : null}
+                {section.after ? (
+                  <div className="flex flex-col items-stretch px-1">{section.after}</div>
+                ) : null}
               </>
             ) : null}
           </section>
@@ -783,7 +929,9 @@ function HomeGlyph({ row, tone }: { row: HomeRowModel; tone: string }) {
     const Glyph = row.glyph.open ? FolderOpen : Folder;
     return <Glyph size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${tone}`} />;
   }
-  return <TabGlyph glyph={row.glyph.glyph} icon={row.glyph.icon} size={GLYPH_SIZE} className={tone} />;
+  return (
+    <TabGlyph glyph={row.glyph.glyph} icon={row.glyph.icon} size={GLYPH_SIZE} className={tone} />
+  );
 }
 
 // One Home row: its mark and name, then on hover or keyboard focus its pin
@@ -799,7 +947,6 @@ const HomeRow = memo(function HomeRow(props: {
   active: boolean;
   tabbable: boolean;
   testId?: string;
-  // An Apps row: the app's marks and its pin.
   app?: SitePackageInfo;
   pinned?: boolean;
   onSetPinned?: (appRoot: string, pinned: boolean) => void;
@@ -818,7 +965,6 @@ const HomeRow = memo(function HomeRow(props: {
   const onSetPinned = app ? props.onSetPinned : undefined;
   const pinned = props.pinned ?? false;
   const pinLabel = pinned ? "Unpin" : "Pin to sidebar";
-  // As in Files, a file the active version does not track is dimmed and says so.
   const notVersioned = useNotVersionedMark(path ?? "", row.menu?.kind === "file");
   const fill = props.dropKind
     ? props.dropKind === "blocked"
@@ -833,7 +979,6 @@ const HomeRow = memo(function HomeRow(props: {
         : notVersioned
           ? "text-subtle hover:bg-hover hover:text-muted"
           : "text-muted hover:bg-hover hover:text-ink";
-  // An allowed drop target's glyph takes the success color.
   const glyphTone =
     props.dropKind && props.dropKind !== "blocked" && props.dropRole === "target"
       ? "text-success"
@@ -842,7 +987,6 @@ const HomeRow = memo(function HomeRow(props: {
         : "text-subtle";
   const trailing = (onSetPinned ? 1 : 0) + (row.menu || row.fix ? 1 : 0);
   const [reached, setReached] = useState(false);
-  // How the menu of a Collection that can't open was opened, while it is open.
   const [fixMenu, setFixMenu] = useState<"pointer" | "keyboard" | null>(null);
   const rowButton = useRef<HTMLButtonElement | null>(null);
   const rowBox = useRef<HTMLDivElement | null>(null);
@@ -857,7 +1001,6 @@ const HomeRow = memo(function HomeRow(props: {
         onPointerEnter={reached ? undefined : () => setReached(true)}
         className={`group relative flex items-center rounded-md transition-colors duration-75 ${cause ? "" : "h-7"} ${fill}`}
       >
-        {/* As in Files, the open row in a picked selection gains a 2px ink edge. */}
         {!props.dropKind && picked && active ? (
           <span
             aria-hidden
@@ -882,7 +1025,14 @@ const HomeRow = memo(function HomeRow(props: {
           aria-current={active ? "page" : undefined}
           aria-describedby={picked ? props.selectedNoteId : undefined}
           {...(row.folder ? { "aria-expanded": row.expanded } : {})}
-          title={row.unavailable ?? (app ? app.root : notVersioned ? `${path}\n${NOT_VERSIONED}. ${NOT_VERSIONED_TITLE}` : path)}
+          title={
+            row.unavailable ??
+            (app
+              ? app.root
+              : notVersioned
+                ? `${path}\n${NOT_VERSIONED}. ${NOT_VERSIONED_TITLE}`
+                : path)
+          }
           data-not-versioned={notVersioned ? "true" : undefined}
           aria-disabled={row.unavailable && !row.fix ? true : undefined}
           tabIndex={props.tabbable ? 0 : -1}
@@ -892,12 +1042,16 @@ const HomeRow = memo(function HomeRow(props: {
             props.onFocus(row.key);
           }}
           onClick={(event) => props.onClick(row, event)}
-          onKeyDown={row.fix ? (event) => {
-            if (!isContextMenuKey(event)) return;
-            event.preventDefault();
-            setReached(true);
-            setFixMenu("keyboard");
-          } : undefined}
+          onKeyDown={
+            row.fix
+              ? (event) => {
+                  if (!isContextMenuKey(event)) return;
+                  event.preventDefault();
+                  setReached(true);
+                  setFixMenu("keyboard");
+                }
+              : undefined
+          }
           onContextMenu={(event) => {
             props.onContextMenu(row, event);
             if (!row.fix) return;
@@ -919,22 +1073,40 @@ const HomeRow = memo(function HomeRow(props: {
         >
           {props.chevronSlot ? (
             row.folder ? (
-              <span onClick={(event) => props.onChevronClick(row, event)} className="grid shrink-0 place-items-center">
-                <ChevronRight size={12} aria-hidden className={`text-subtle transition-transform ${row.expanded ? "rotate-90" : ""}`} />
+              <span
+                onClick={(event) => props.onChevronClick(row, event)}
+                className="grid shrink-0 place-items-center"
+              >
+                <ChevronRight
+                  size={12}
+                  aria-hidden
+                  className={`text-subtle transition-transform ${row.expanded ? "rotate-90" : ""}`}
+                />
               </span>
             ) : (
               <span aria-hidden className="w-3 shrink-0" />
             )
           ) : null}
-          <HomeGlyph row={row} tone={notVersioned && !props.dropKind ? `${glyphTone} opacity-60` : glyphTone} />
+          <HomeGlyph
+            row={row}
+            tone={notVersioned && !props.dropKind ? `${glyphTone} opacity-60` : glyphTone}
+          />
           {/* The folder hint gives way before the name; the title holds the whole path.
               A row with a cause keeps its sentence as the row's title, so its name has its own. */}
-          <span title={cause ? row.label : undefined} className="min-w-0 flex-auto truncate">{row.label}</span>
+          <span title={cause ? row.label : undefined} className="min-w-0 flex-auto truncate">
+            {row.label}
+          </span>
           {row.detail ? (
-            <span className={`min-w-0 truncate text-[12px] ${cause ? "col-[-2/-1] row-start-2 -mt-1 leading-4 text-warning" : "shrink-[999] text-subtle"}`}>{row.detail}</span>
+            <span
+              className={`min-w-0 truncate text-[12px] ${cause ? "col-[-2/-1] row-start-2 -mt-1 leading-4 text-warning" : "shrink-[999] text-subtle"}`}
+            >
+              {row.detail}
+            </span>
           ) : null}
           {notVersioned && !cause ? (
-            <span data-testid="home-row-not-versioned" className="shrink-0 text-[11px] text-subtle">{NOT_VERSIONED}</span>
+            <span data-testid="home-row-not-versioned" className="shrink-0 text-[11px] text-subtle">
+              {NOT_VERSIONED}
+            </span>
           ) : null}
           {app ? <AppMarks app={app} /> : null}
         </button>
@@ -949,7 +1121,9 @@ const HomeRow = memo(function HomeRow(props: {
                 tabIndex={-1}
                 onClick={() => onSetPinned(app!.root, !pinned)}
                 className={`grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink ${
-                  pinned ? "" : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
+                  pinned
+                    ? ""
+                    : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
                 }`}
               >
                 <Pin size={13} aria-hidden className={pinned ? "text-ink" : undefined} />
@@ -971,7 +1145,14 @@ const HomeRow = memo(function HomeRow(props: {
             {row.fix && reached ? (
               <Menu
                 label={`More actions for ${row.label}`}
-                items={[{ id: "show-in-files", label: "Show in Files", testId: "home-row-show-in-files", onSelect: () => props.onClick(row) }]}
+                items={[
+                  {
+                    id: "show-in-files",
+                    label: "Show in Files",
+                    testId: "home-row-show-in-files",
+                    onSelect: () => props.onClick(row),
+                  },
+                ]}
                 open={fixMenu !== null}
                 fromKeyboard={fixMenu === "keyboard"}
                 // Under the cause line, so the list never covers what it acts on.

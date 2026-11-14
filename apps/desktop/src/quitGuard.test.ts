@@ -11,27 +11,37 @@ import {
 type Window = { id: number; destroyed: boolean };
 const window = (id: number): Window => ({ id, destroyed: false });
 
-function rounds(options: {
-  windows?: Window[];
-  confirmProceed?: (kind: ExitKind) => Promise<boolean>;
-} = {}) {
+function rounds(
+  options: {
+    windows?: Window[];
+    confirmProceed?: (kind: ExitKind) => Promise<boolean>;
+  } = {},
+) {
   const windows = options.windows ?? [window(1), window(2)];
   const sent: Array<{ to: number; message: ExitRoundMessage }> = [];
   const confirmProceed = vi.fn(options.confirmProceed ?? (async () => false));
   const exits = createExitRounds<Window>({
     participants: () => windows.filter((entry) => !entry.destroyed),
     participantId: (entry) => entry.id,
-    send: (entry, message) => { sent.push({ to: entry.id, message }); },
+    send: (entry, message) => {
+      sent.push({ to: entry.id, message });
+    },
     confirmProceed,
     timeoutMs: 1_000,
   });
   const requests = (to: number) =>
-    sent.filter((entry) => entry.to === to && entry.message.kind === "request").map((entry) => entry.message.roundId);
+    sent
+      .filter((entry) => entry.to === to && entry.message.kind === "request")
+      .map((entry) => entry.message.roundId);
   const closings = (to: number) =>
-    sent.filter((entry) => entry.to === to && entry.message.kind !== "request").map((entry) => entry.message.kind);
+    sent
+      .filter((entry) => entry.to === to && entry.message.kind !== "request")
+      .map((entry) => entry.message.kind);
   const settled = (outcome: Promise<unknown>) => {
     const state = { value: null as unknown };
-    void outcome.then((value) => { state.value = value; });
+    void outcome.then((value) => {
+      state.value = value;
+    });
     return state;
   };
   return { exits, windows, sent, requests, closings, confirmProceed, settled };
@@ -86,7 +96,6 @@ describe("exit rounds", () => {
     r.exits.answer(1, round.roundId, "clear");
     r.exits.answer(2, round.roundId, "hold");
     await vi.advanceTimersByTimeAsync(60_000);
-    // Every window answered: the held one owns the decision, no dialog.
     expect(r.confirmProceed).not.toHaveBeenCalled();
     r.exits.answer(2, round.roundId, "clear");
     await expect(round.outcome).resolves.toBe("proceed");
@@ -116,7 +125,6 @@ describe("exit rounds", () => {
     expect(r.closings(1)).toEqual(["cancelled"]);
     expect(r.closings(2)).toEqual(["cancelled"]);
     expect(r.exits.current()).toBeNull();
-    // A late clear for the cancelled round counts for nothing.
     expect(r.exits.answer(1, round.roundId, "clear")).toBe(false);
   });
 
@@ -161,8 +169,6 @@ describe("exit rounds", () => {
     expect(empty.confirmProceed).not.toHaveBeenCalled();
   });
 
-  // A silent window may be busy, not dead. The ACK window never proceeds by
-  // itself: it asks the USER, and "Wait" keeps everything as it was.
   it("asks the user about a silent window and waiting keeps a quit vetoed", async () => {
     vi.useFakeTimers();
     const r = rounds();
@@ -209,7 +215,12 @@ describe("exit rounds", () => {
   it("does not let a stale timeout decision cover a window enrolled while the dialog was up", async () => {
     vi.useFakeTimers();
     let decide!: (proceed: boolean) => void;
-    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const r = rounds({
+      confirmProceed: () =>
+        new Promise<boolean>((resolve) => {
+          decide = resolve;
+        }),
+    });
     const round = r.exits.begin("quit");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(r.confirmProceed).toHaveBeenCalledOnce();
@@ -232,10 +243,14 @@ describe("exit rounds", () => {
   it("lets the escalation dialog own an install against a late renderer answer", async () => {
     vi.useFakeTimers();
     let decide!: (proceed: boolean) => void;
-    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const r = rounds({
+      confirmProceed: () =>
+        new Promise<boolean>((resolve) => {
+          decide = resolve;
+        }),
+    });
     const round = r.exits.begin("update");
     await vi.advanceTimersByTimeAsync(1_000);
-    // Both wake mid-dialog and say clear.
     r.exits.answer(1, round.roundId, "clear");
     r.exits.answer(2, round.roundId, "clear");
     const state = r.settled(round.outcome);
@@ -248,22 +263,28 @@ describe("exit rounds", () => {
   it("keeps a newcomer's reply while the install dialog is up, and lets it cancel", async () => {
     vi.useFakeTimers();
     let decide!: (proceed: boolean) => void;
-    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const r = rounds({
+      confirmProceed: () =>
+        new Promise<boolean>((resolve) => {
+          decide = resolve;
+        }),
+    });
     const round = r.exits.begin("update");
     await vi.advanceTimersByTimeAsync(1_000);
     const third = window(3);
     r.exits.enroll(third);
-    // Its hold is kept: after the dialog proceeds, the round waits on it.
     expect(r.exits.answer(3, round.roundId, "hold")).toBe(true);
     decide(true);
     await vi.advanceTimersByTimeAsync(0);
     const state = r.settled(round.outcome);
     await vi.advanceTimersByTimeAsync(0);
-    expect(state.value, "a held newcomer must not be overridden by a dialog that never named it").toBeNull();
+    expect(
+      state.value,
+      "a held newcomer must not be overridden by a dialog that never named it",
+    ).toBeNull();
     r.exits.answer(3, round.roundId, "clear");
     await expect(round.outcome).resolves.toBe("proceed");
 
-    // And its Go back cancels even while the dialog is still open.
     const again = rounds({ confirmProceed: () => new Promise<boolean>(() => undefined) });
     const second = again.exits.begin("update");
     await vi.advanceTimersByTimeAsync(1_000);
@@ -275,7 +296,13 @@ describe("exit rounds", () => {
   it("does not stage an install behind an open dialog when the last member leaves", async () => {
     vi.useFakeTimers();
     let decide!: (proceed: boolean) => void;
-    const r = rounds({ windows: [window(1)], confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const r = rounds({
+      windows: [window(1)],
+      confirmProceed: () =>
+        new Promise<boolean>((resolve) => {
+          decide = resolve;
+        }),
+    });
     const round = r.exits.begin("update");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(r.confirmProceed).toHaveBeenCalledOnce();
@@ -286,7 +313,12 @@ describe("exit rounds", () => {
     decide(false);
     await expect(round.outcome).resolves.toBe("cancelled");
 
-    const two = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const two = rounds({
+      confirmProceed: () =>
+        new Promise<boolean>((resolve) => {
+          decide = resolve;
+        }),
+    });
     const twoRound = two.exits.begin("update");
     two.exits.answer(1, twoRound.roundId, "clear");
     await vi.advanceTimersByTimeAsync(1_000);
@@ -303,7 +335,12 @@ describe("exit rounds", () => {
   it("forces only the silent windows the quit dialog was about, never one that answered for itself", async () => {
     vi.useFakeTimers();
     let decide!: (proceed: boolean) => void;
-    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const r = rounds({
+      confirmProceed: () =>
+        new Promise<boolean>((resolve) => {
+          decide = resolve;
+        }),
+    });
     const round = r.exits.begin("quit");
     r.exits.answer(1, round.roundId, "clear");
     // A window opened after the round began answers clear before the
@@ -314,7 +351,6 @@ describe("exit rounds", () => {
     r.exits.answer(3, round.roundId, "clear");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(r.confirmProceed).toHaveBeenCalledOnce();
-    // One more window opens while the dialog is up: not covered either.
     const fourth = window(4);
     r.exits.enroll(fourth);
     r.exits.answer(4, round.roundId, "clear");
@@ -336,7 +372,6 @@ describe("exit rounds", () => {
     r.exits.answer(1, round.roundId, "clear");
     r.exits.answer(2, round.roundId, "clear");
     await expect(round.outcome).resolves.toBe("proceed");
-    // A stale id retracts nothing; the proceeded round reaches both.
     r.exits.retract(round.roundId + 1);
     expect(r.closings(2)).toEqual(["proceed"]);
     r.exits.retract(round.roundId);
@@ -346,15 +381,12 @@ describe("exit rounds", () => {
     expect(r.closings(1)).toEqual(["proceed", "cancelled"]);
   });
 
-  // A late draft stopped one window's unload after the round proceeded, and
-  // the person went back there. Every member hears the exit is off.
   it("retracts a proceeded round when a member goes back on its exit", async () => {
     const r = rounds();
     const round = r.exits.begin("update");
     r.exits.answer(1, round.roundId, "clear");
     r.exits.answer(2, round.roundId, "clear");
     await expect(round.outcome).resolves.toBe("proceed");
-    // A clear, a stranger, or a stale id takes nothing back.
     expect(r.exits.answer(2, round.roundId, "clear")).toBe(false);
     expect(r.exits.answer(99, round.roundId, "cancel")).toBe(false);
     expect(r.exits.answer(2, round.roundId + 1, "cancel")).toBe(false);
@@ -377,8 +409,6 @@ describe("exit rounds", () => {
     await expect(update.outcome).resolves.toBe("proceed");
     expect(r.exits.approvedExit()).toBe("update");
 
-    // A quit asked afterwards takes the approval away, and a forced quit
-    // approves a quit, not the update.
     const quit = r.exits.begin("quit");
     expect(r.exits.approvedExit()).toBeNull();
     await vi.advanceTimersByTimeAsync(1_000);
@@ -393,8 +423,6 @@ describe("exit rounds", () => {
     expect(r.exits.approvedExit()).toBeNull();
   });
 
-  // Wait is not authorization. It keeps the quit vetoed, asks nothing more,
-  // and the next explicit quit decides afresh.
   it("does not re-prompt after Wait on a silent window, and a new quit asks again", async () => {
     vi.useFakeTimers();
     const r = rounds({ confirmProceed: async () => false });
@@ -405,8 +433,6 @@ describe("exit rounds", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(r.confirmProceed, "Wait must not repeat the prompt unasked").toHaveBeenCalledOnce();
     expect(r.exits.current()?.roundId).toBe(round.roundId);
-    // The user asks to quit again: the silent window is asked once more,
-    // and its silence goes back to the user.
     const again = r.exits.begin("quit");
     expect(again.roundId).toBe(round.roundId);
     expect(r.requests(2)).toEqual([round.roundId, round.roundId]);
@@ -421,8 +447,6 @@ describe("exit rounds", () => {
     r.exits.answer(1, round.roundId, "clear");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(r.confirmProceed).toHaveBeenCalledOnce();
-    // A new window is tracked and then loads, and a member that already
-    // answered reloads. Each is asked, and none re-prompts the user.
     const third = window(3);
     r.exits.enroll(third);
     r.exits.enroll(third);
@@ -440,11 +464,15 @@ describe("exit rounds", () => {
   it("lets a late clear during Wait settle only on the next explicit quit", async () => {
     vi.useFakeTimers();
     let decide!: (proceed: boolean) => void;
-    const r = rounds({ confirmProceed: () => new Promise<boolean>((resolve) => { decide = resolve; }) });
+    const r = rounds({
+      confirmProceed: () =>
+        new Promise<boolean>((resolve) => {
+          decide = resolve;
+        }),
+    });
     const round = r.exits.begin("quit");
     r.exits.answer(1, round.roundId, "clear");
     await vi.advanceTimersByTimeAsync(1_000);
-    // The slow window answers clear while the dialog is up; the user waits.
     r.exits.answer(2, round.roundId, "clear");
     decide(false);
     await vi.advanceTimersByTimeAsync(0);
@@ -452,8 +480,6 @@ describe("exit rounds", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(state.value, "Wait is not authorization to quit").toBeNull();
     expect(r.confirmProceed).toHaveBeenCalledOnce();
-    // Cmd+Q again: everyone is clear, so the quit proceeds without a stuck
-    // round asking nobody.
     const again = r.exits.begin("quit");
     expect(again.created).toBe(false);
     await expect(round.outcome).resolves.toBe("proceed");
@@ -470,7 +496,9 @@ describe("quit guard", () => {
   }
   function quitEvent() {
     const event = { prevented: false, preventDefault: () => undefined };
-    event.preventDefault = () => { event.prevented = true; };
+    event.preventDefault = () => {
+      event.prevented = true;
+    };
     return event;
   }
 
@@ -524,7 +552,10 @@ describe("workspace window registry", () => {
   type FakeWindow = { id: string; destroyed: boolean; crashed?: boolean };
 
   it("asks only windows whose renderer still runs, and still lists a crashed one for the force path", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed, (entry) => entry.crashed === true);
+    const registry = createWorkspaceWindowRegistry<FakeWindow>(
+      (entry) => entry.destroyed,
+      (entry) => entry.crashed === true,
+    );
     const working: FakeWindow = { id: "working", destroyed: false };
     const crashed: FakeWindow = { id: "crashed", destroyed: false, crashed: true };
     const closed: FakeWindow = { id: "closed", destroyed: true };
@@ -536,7 +567,10 @@ describe("workspace window registry", () => {
   });
 
   it("lists every live workspace window for the force-quit path", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed, (entry) => entry.crashed === true);
+    const registry = createWorkspaceWindowRegistry<FakeWindow>(
+      (entry) => entry.destroyed,
+      (entry) => entry.crashed === true,
+    );
     const first: FakeWindow = { id: "first", destroyed: false };
     const gone: FakeWindow = { id: "gone", destroyed: true };
     const second: FakeWindow = { id: "second", destroyed: false };
@@ -547,7 +581,10 @@ describe("workspace window registry", () => {
   });
 
   it("answers with a tracked workspace window, never another live window", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed, (entry) => entry.crashed === true);
+    const registry = createWorkspaceWindowRegistry<FakeWindow>(
+      (entry) => entry.destroyed,
+      (entry) => entry.crashed === true,
+    );
     const workspace: FakeWindow = { id: "workspace", destroyed: false };
     const pdfExport: FakeWindow = { id: "pdf-export", destroyed: false };
     registry.track(workspace);
@@ -556,7 +593,10 @@ describe("workspace window registry", () => {
   });
 
   it("skips destroyed windows and forgets closed ones", () => {
-    const registry = createWorkspaceWindowRegistry<FakeWindow>((entry) => entry.destroyed, (entry) => entry.crashed === true);
+    const registry = createWorkspaceWindowRegistry<FakeWindow>(
+      (entry) => entry.destroyed,
+      (entry) => entry.crashed === true,
+    );
     const closed: FakeWindow = { id: "old", destroyed: true };
     const open: FakeWindow = { id: "new", destroyed: false };
     registry.track(closed);

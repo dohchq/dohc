@@ -19,7 +19,6 @@ import {
 
 afterEach(closeTestStorages);
 
-// Each origin's log starts at originSeq 0.
 const firstOp = { originSeq: 0, opKind: "workspace.init", payload: {}, recordedAtMs: 1_000 };
 
 async function ownedLog(activity = new DiscussionActivityHub()) {
@@ -102,7 +101,6 @@ describe("held device log reads", () => {
     });
     await claimWorkspace(h, "owner", "workspace");
     await appendLog(h, "owner", "workspace", [firstOp]);
-    // The desktop's session, and another device of the same account.
     const desktop = new Request("http://relay.test/sync/workspace/log?since=1&hold=30000", {
       headers: { authorization: "Bearer user:owner", "x-dohc-relay-client-ip": "192.0.2.10" },
     });
@@ -124,7 +122,9 @@ describe("held device log reads", () => {
   it("releases the parked read when the device goes away", async () => {
     const { h, activity } = await ownedLog();
     const device = new AbortController();
-    const held = h(request("owner", "/sync/workspace/log?since=1&hold=30000", { signal: device.signal }));
+    const held = h(
+      request("owner", "/sync/workspace/log?since=1&hold=30000", { signal: device.signal }),
+    );
     await vi.waitFor(() => expect(activity.stats().waiters).toBe(1));
     device.abort();
     await held.catch(() => undefined);
@@ -152,14 +152,16 @@ describe("held device log reads", () => {
       shouldPark: () => true,
     });
     expect(() =>
-      activity.wait(linkLogWaitGroup("workspace"), "link:other", { holdMs: 30_000, shouldPark: () => true }),
+      activity.wait(linkLogWaitGroup("workspace"), "link:other", {
+        holdMs: 30_000,
+        shouldPark: () => true,
+      }),
     ).toThrow(DiscussionActivityCapacityError);
 
     const held = h(request("owner", "/sync/workspace/log?since=1&hold=30000"));
     await vi.waitFor(() => expect(activity.stats().waiters).toBe(2));
     await appendLog(h, "owner", "workspace", [firstOp], { originId: "origin-b" });
     expect(await json(await held)).toMatchObject({ hasMore: true });
-    // The append wakes the link reader too.
     await linkRead;
     reader.abort();
     expect(activity.stats().waiters).toBe(0);

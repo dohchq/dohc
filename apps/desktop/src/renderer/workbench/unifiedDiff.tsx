@@ -1,13 +1,3 @@
-// Shared unified-diff building + rendering (extracted from the shell's
-// history diff page so the versions compare surface renders diffs the exact
-// same way). Pure functions plus one presentational component; no IPC.
-//
-// Both callers — the history diff page in DesktopWorkspaceShell and the
-// versions compare page in WorkspaceVersions — run on the UI thread, so the
-// bounds below are what keeps a hydrated 10 MiB body from freezing them.
-// computeTextDiff does the work once per pair of bodies (both callers memoize
-// it); buildUnifiedDiffLines and the counts only read the result.
-
 import type { ReactNode } from "react";
 
 type DiffLine = {
@@ -52,7 +42,6 @@ type TextDiff = {
   /// The bodies were too big to compare line by line, so `lines` is the
   /// contiguous approximation: one removed block, then one added block.
   degraded: boolean;
-  /// The most diff lines the display will show.
   displayLimit: number;
 };
 
@@ -60,16 +49,6 @@ type TextDiff = {
 // so the cell count bounds memory: 250,000 cells is 1 MB.
 const HISTORY_LCS_DIFF_CELL_LIMIT = 250_000;
 
-// Each of those cells compares two whole lines, so the time is the cell count
-// times the line length, which the cell limit does not bound. This bounds it.
-// Measured by unifiedDiff.measure.test.ts (Windows 11, Node 22, the renderer's
-// V8): the largest body this limit admits (499 lines of 3,990 characters, 4 MB
-// across both sides) costs 50 ms for a full pass. `.length` counts UTF-16
-// code units, and a CJK comparison costs about twice an ASCII one of the same
-// unit count, so the limit is halved to hold for either script. The largest
-// healthy body measured (499 lines of 2,000-character paragraphs) is 500
-// million units, so this is twice the healthy maximum; a 10 MiB body degrades
-// to the contiguous diff.
 export const HISTORY_DIFF_WORK_LIMIT = 1_000_000_000;
 
 /// An upper bound on the characters the LCS inner loop must compare: one whole
@@ -123,19 +102,11 @@ function pushBounded(
 // The degraded shape: everything between the common prefix and the common
 // suffix becomes one removed block followed by one added block. Compaction
 // never drops any of that — it only drops context lines — so building more
-// than the display shows is pure waste. A 10 MiB body of short lines used to
-// build two million objects to render eight hundred.
-function buildContiguousDiff(
-  before: string[],
-  after: string[],
-  maxLines: number,
-): LineDiff {
+// than the display shows is pure waste. Unbounded, a 10 MiB body of short
+// lines would build two million objects to render eight hundred.
+function buildContiguousDiff(before: string[], after: string[], maxLines: number): LineDiff {
   let prefix = 0;
-  while (
-    prefix < before.length &&
-    prefix < after.length &&
-    before[prefix] === after[prefix]
-  ) {
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) {
     prefix += 1;
   }
 
@@ -189,12 +160,7 @@ function buildLineDiff(before: string[], after: string[], maxLines: number): Lin
     const created = before.length === 0;
     const source = created ? after : before;
     const lines: DiffLine[] = [];
-    const hiddenLines = pushBounded(
-      lines,
-      source,
-      created ? "added" : "removed",
-      maxLines,
-    );
+    const hiddenLines = pushBounded(lines, source, created ? "added" : "removed", maxLines);
     return {
       lines,
       hiddenLines,
@@ -216,14 +182,12 @@ function buildLineDiff(before: string[], after: string[], maxLines: number): Lin
 
   const columnCount = after.length + 1;
   const table = new Uint32Array(cellCount);
-  const at = (beforeIndex: number, afterIndex: number) =>
-    beforeIndex * columnCount + afterIndex;
+  const at = (beforeIndex: number, afterIndex: number) => beforeIndex * columnCount + afterIndex;
 
   for (let beforeIndex = before.length - 1; beforeIndex >= 0; beforeIndex -= 1) {
     for (let afterIndex = after.length - 1; afterIndex >= 0; afterIndex -= 1) {
       if (before[beforeIndex] === after[afterIndex]) {
-        table[at(beforeIndex, afterIndex)] =
-          table[at(beforeIndex + 1, afterIndex + 1)] + 1;
+        table[at(beforeIndex, afterIndex)] = table[at(beforeIndex + 1, afterIndex + 1)] + 1;
       } else {
         table[at(beforeIndex, afterIndex)] = Math.max(
           table[at(beforeIndex + 1, afterIndex)],
@@ -241,10 +205,7 @@ function buildLineDiff(before: string[], after: string[], maxLines: number): Lin
       lines.push({ kind: "context", text: before[beforeIndex] });
       beforeIndex += 1;
       afterIndex += 1;
-    } else if (
-      table[at(beforeIndex + 1, afterIndex)] >=
-      table[at(beforeIndex, afterIndex + 1)]
-    ) {
+    } else if (table[at(beforeIndex + 1, afterIndex)] >= table[at(beforeIndex, afterIndex + 1)]) {
       lines.push({ kind: "removed", text: before[beforeIndex] });
       beforeIndex += 1;
     } else {
@@ -382,13 +343,6 @@ function compactUnifiedDiffLines(
   ];
 }
 
-// Word marks are made only for the lines the page shows, so the display bound
-// already caps how many pairs there are. This caps their size. Past this many
-// characters across every paired line, the whole diff stays at line level:
-// one 10 MiB line would otherwise cost its whole length to split into words.
-// Measured on Windows 11 in Node 24: 602 marked lines of 240 characters add
-// 3 ms to the page's diff, and 11 ms when they also spend all of
-// WORD_DIFF_PAGE_CELLS below.
 export const WORD_DIFF_CHAR_LIMIT = 200_000;
 
 // Each pair compares only the words between its common start and end. Past
@@ -407,8 +361,6 @@ const WORD_DIFF_MIN_SHARED = 0.5;
 const WORD_TOKEN =
   /[\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}]|(?:(?![\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}])[\p{L}\p{M}\p{N}_])+|\s+|[^]/gu;
 
-// The changed tokens as ranges of `text`. Two changes one space apart read as
-// one change, so "quick brown" -> "slow red" marks both words together.
 function changedRanges(text: string, tokens: string[], changed: Uint8Array): WordRange[] {
   const ranges: [number, number][] = [];
   let offset = 0;
@@ -515,9 +467,6 @@ export function changedWords(
   return { before: beforeRanges, after: afterRanges };
 }
 
-// Pairs each change block's removed and added lines in order, and marks their
-// changed words. All or nothing: past WORD_DIFF_CHAR_LIMIT no line is marked,
-// so a page never mixes the two levels.
 function markChangedWords(lines: UnifiedDiffLine[]): UnifiedDiffLine[] {
   const pairs: [number, number][] = [];
   let chars = 0;
@@ -525,7 +474,10 @@ function markChangedWords(lines: UnifiedDiffLine[]): UnifiedDiffLine[] {
   while (index < lines.length) {
     const removed: number[] = [];
     const added: number[] = [];
-    while (index < lines.length && (lines[index].kind === "removed" || lines[index].kind === "added")) {
+    while (
+      index < lines.length &&
+      (lines[index].kind === "removed" || lines[index].kind === "added")
+    ) {
       (lines[index].kind === "removed" ? removed : added).push(index);
       index += 1;
     }
@@ -601,10 +553,7 @@ function LineText({ line }: { line: UnifiedDiffLine }) {
 // proposal review): old/new gutters, a quiet +/− mark, then the text. A
 // changed line is tinted with a bar at its edge; the mark says which way it
 // changed without color. Screen readers hear the line's prefix instead.
-export function UnifiedDiffLines(props: {
-  lines: UnifiedDiffLine[];
-  testId?: string;
-}) {
+export function UnifiedDiffLines(props: { lines: UnifiedDiffLine[]; testId?: string }) {
   return (
     <div
       data-testid={props.testId}
@@ -679,18 +628,23 @@ export function diffStatCells(added: number, removed: number): ("added" | "remov
 
 /// A diff's size in lines: `+2 −2` and the bar. Screen readers hear the
 /// counts in words instead.
-export function DiffCounts(props: {
-  counts: { added: number; removed: number };
-  testId?: string;
-}) {
+export function DiffCounts(props: { counts: { added: number; removed: number }; testId?: string }) {
   const { added, removed } = props.counts;
   return (
-    <span data-testid={props.testId} className="inline-flex shrink-0 items-center gap-1.5 font-mono text-[11px]">
+    <span
+      data-testid={props.testId}
+      className="inline-flex shrink-0 items-center gap-1.5 font-mono text-[11px]"
+    >
       <span className="sr-only">
-        {added} {added === 1 ? "line" : "lines"} added, {removed} {removed === 1 ? "line" : "lines"} removed
+        {added} {added === 1 ? "line" : "lines"} added, {removed} {removed === 1 ? "line" : "lines"}{" "}
+        removed
       </span>
-      <span aria-hidden className="text-success">+{added}</span>
-      <span aria-hidden className="text-danger">−{removed}</span>
+      <span aria-hidden className="text-success">
+        +{added}
+      </span>
+      <span aria-hidden className="text-danger">
+        −{removed}
+      </span>
       <span aria-hidden className="flex gap-0.5">
         {diffStatCells(added, removed).map((cell, index) => (
           <span

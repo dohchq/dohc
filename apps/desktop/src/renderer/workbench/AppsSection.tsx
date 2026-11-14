@@ -81,8 +81,7 @@ function appsIdentity(workspaceId: string): string {
 
 function appDiagnosticLabel(app: SitePackageInfo): string | null {
   const diagnostic =
-    app.diagnostics.find((entry) => entry.severity === "error") ??
-    app.diagnostics[0];
+    app.diagnostics.find((entry) => entry.severity === "error") ?? app.diagnostics[0];
   if (!diagnostic) return null;
   const prefix = diagnostic.severity === "error" ? "Error" : "Warning";
   const detail = diagnostic.message || APP_CHECK_FALLBACK_MESSAGE;

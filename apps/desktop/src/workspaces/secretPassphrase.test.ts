@@ -1,14 +1,9 @@
 import { describe, expect, it } from "vitest";
-import {
-  MIN_SECRET_PASSPHRASE_LENGTH,
-  validateSecretPassphrase,
-} from "./secretPassphrase";
+import { MIN_SECRET_PASSPHRASE_LENGTH, validateSecretPassphrase } from "./secretPassphrase";
 
 describe("validateSecretPassphrase", () => {
   it("rejects an empty passphrase with the required message", () => {
-    expect(validateSecretPassphrase("")).toBe(
-      "Passphrase required to protect synced secrets.",
-    );
+    expect(validateSecretPassphrase("")).toBe("Passphrase required to protect synced secrets.");
   });
 
   it("rejects a passphrase shorter than the floor", () => {
@@ -19,9 +14,7 @@ describe("validateSecretPassphrase", () => {
   });
 
   it("accepts a passphrase at exactly the floor", () => {
-    expect(
-      validateSecretPassphrase("a".repeat(MIN_SECRET_PASSPHRASE_LENGTH)),
-    ).toBeNull();
+    expect(validateSecretPassphrase("a".repeat(MIN_SECRET_PASSPHRASE_LENGTH))).toBeNull();
   });
 
   it("accepts a normal passphrase", () => {

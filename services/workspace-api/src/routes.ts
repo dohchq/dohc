@@ -92,7 +92,8 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
     const url = new URL(request.url);
     const path = url.pathname;
     const cors = corsHeaders(request.headers.get("origin"), allowed);
-    const mark = (pattern: Parameters<typeof WORKSPACE_API_REQUEST_LOG.mark>[1]) => WORKSPACE_API_REQUEST_LOG.mark(request, pattern);
+    const mark = (pattern: Parameters<typeof WORKSPACE_API_REQUEST_LOG.mark>[1]) =>
+      WORKSPACE_API_REQUEST_LOG.mark(request, pattern);
 
     if (path.startsWith("/api/auth/")) mark(authPattern(path));
     if (request.method === "OPTIONS" && path.startsWith("/api/auth/")) {
@@ -104,12 +105,15 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
       if (requestOrigin !== null && !allowed.has(requestOrigin)) {
         return json({ code: "INVALID_ORIGIN", message: "This origin is not allowed." }, 403, cors);
       }
-      if (options.emailTransport === "none" && EMAIL_ROUTES.has(path) && request.method === "POST") {
+      if (
+        options.emailTransport === "none" &&
+        EMAIL_ROUTES.has(path) &&
+        request.method === "POST"
+      ) {
         return json(
           {
             code: "EMAIL_DELIVERY_UNCONFIGURED",
-            message:
-              "This server cannot send email yet. Contact the server owner.",
+            message: "This server cannot send email yet. Contact the server owner.",
           },
           503,
           cors,
@@ -117,7 +121,10 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
       }
       const bounded = await withBodyAtMost(request, AUTH_BODY_MAX_BYTES);
       if (!bounded) {
-        return json({ code: "BODY_TOO_LARGE", message: "This request is too large." }, 413, { ...cors, connection: "close" });
+        return json({ code: "BODY_TOO_LARGE", message: "This request is too large." }, 413, {
+          ...cors,
+          connection: "close",
+        });
       }
       const response = await options.auth.handler(bounded);
       response.headers.set("cache-control", "no-store");
@@ -127,7 +134,8 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
 
     if (path === CRASH_REPORT_PATH && options.crashReports) {
       mark(CRASH_REPORT_PATH);
-      if (request.method !== "POST") return json({ ok: false, error: "method not allowed" }, 405, { allow: "POST" });
+      if (request.method !== "POST")
+        return json({ ok: false, error: "method not allowed" }, 405, { allow: "POST" });
       const answer = await options.crashReports(request);
       return json(answer.body, answer.status, answer.headers);
     }
@@ -151,7 +159,9 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
         case "/account/sign-in":
           return page(signInPage({ next: samePath(url.searchParams.get("next")) ?? undefined }));
         case "/account/sign-up":
-          return page(signUpPage({ next: samePath(url.searchParams.get("next")) ?? undefined, closed }));
+          return page(
+            signUpPage({ next: samePath(url.searchParams.get("next")) ?? undefined, closed }),
+          );
         case "/account/forgot-password":
           return page(forgotPasswordPage());
         case "/account/reset-password":
@@ -187,7 +197,11 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
       }
     }
 
-    if (request.method === "POST" && path === "/test/device/approve" && options.seams?.deviceApprove) {
+    if (
+      request.method === "POST" &&
+      path === "/test/device/approve" &&
+      options.seams?.deviceApprove
+    ) {
       mark("/test/device/approve");
       return options.seams.deviceApprove(request);
     }
@@ -209,12 +223,17 @@ async function devicePageFor(auth: AuthGateway, request: Request, url: URL): Pro
 
   const session = await auth.api.getSession({ headers: request.headers });
   if (!session) {
-    return redirect(`/account/sign-in?next=${encodeURIComponent(`/device?user_code=${encodeURIComponent(userCode)}`)}`);
+    return redirect(
+      `/account/sign-in?next=${encodeURIComponent(`/device?user_code=${encodeURIComponent(userCode)}`)}`,
+    );
   }
 
   let status: string | null | undefined;
   try {
-    ({ status } = await auth.api.deviceVerify({ query: { user_code: userCode }, headers: request.headers }));
+    ({ status } = await auth.api.deviceVerify({
+      query: { user_code: userCode },
+      headers: request.headers,
+    }));
   } catch (error) {
     const kind = deviceErrorKind(error);
     if (!kind) throw error;
@@ -247,6 +266,7 @@ async function withBodyAtMost(request: Request, maxBytes: number): Promise<Reque
   } finally {
     reader.releaseLock();
   }
+  // oxlint-disable-next-line unicorn/no-invalid-fetch-options -- the method is inherited from request, which has a body
   return "bytes" in read ? new Request(request, { body: read.bytes }) : null;
 }
 
@@ -301,7 +321,10 @@ function corsHeaders(origin: string | null, allowed: Set<string>): Record<string
 // Only a path on this origin is a safe post-sign-in destination. `//host` and
 // `/\host` both leave this origin once a browser resolves them.
 function samePath(value: string | null): string | null {
-  return value === "/account" || (value !== null && /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(value)) ? value : null;
+  return value === "/account" ||
+    (value !== null && /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(value))
+    ? value
+    : null;
 }
 
 function page(body: string, status = 200): Response {

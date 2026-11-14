@@ -1,6 +1,19 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+  type Ref,
+} from "react";
 import { Check, LoaderCircle, Minus, Plus, RotateCcw } from "lucide-react";
-import { AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "@dohc/workspace-contracts/agent-hues";
+import {
+  AGENT_HUES,
+  IDENTITY_HUES,
+  type AgentHue,
+  type IdentityHue,
+} from "@dohc/workspace-contracts/agent-hues";
 import { palette } from "../tokens";
 import { useRadioGroup } from "../ui/SegmentedControl";
 
@@ -14,11 +27,8 @@ export function SettingRow(props: {
   testId?: string;
   // The row a Customize… command opened Settings for. Settings focuses it.
   highlighted?: boolean;
-  // Under the title, such as the way to ask your agent.
   aside?: ReactNode;
-  // Before the title, such as the signed-in account's avatar.
   lead?: ReactNode;
-  // After the title on its line, such as the app's version.
   detail?: ReactNode;
   // A row of a long list that only shows a value, such as a shortcut's keys.
   // Its title needs less room than a description, so the value stays beside it
@@ -80,10 +90,15 @@ export function SettingRow(props: {
           when the controls wrap under the text, it stays at the end of the
           text's line and the controls start at the text's left edge. */}
       {props.onReset ? (
-        <ResetButton onReset={props.modified ? props.onReset : undefined} className={props.top ? "mt-1" : ""} />
+        <ResetButton
+          onReset={props.modified ? props.onReset : undefined}
+          className={props.top ? "mt-1" : ""}
+        />
       ) : null}
       {props.children ? (
-        <div className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}>
+        <div
+          className={`flex max-w-full shrink-0 flex-wrap gap-2 ${props.top ? "items-start" : "items-center"}`}
+        >
           {props.children}
         </div>
       ) : null}
@@ -111,7 +126,11 @@ export function ResetButton(props: { onReset?: () => void; className?: string })
     );
   }
   return (
-    <button type="button" onClick={props.onReset} className={`text-muted transition-colors hover:bg-hover hover:text-ink ${place}`}>
+    <button
+      type="button"
+      onClick={props.onReset}
+      className={`text-muted transition-colors hover:bg-hover hover:text-ink ${place}`}
+    >
       {face}
     </button>
   );
@@ -121,7 +140,9 @@ export function ResetButton(props: { onReset?: () => void; className?: string })
 export function SettingsSection(props: { title?: string; children: ReactNode }) {
   return (
     <section aria-label={props.title} className="mt-8 first:mt-0">
-      {props.title ? <h4 className="m-0 mb-2.5 text-sm font-semibold text-ink">{props.title}</h4> : null}
+      {props.title ? (
+        <h4 className="m-0 mb-2.5 text-sm font-semibold text-ink">{props.title}</h4>
+      ) : null}
       <div className="rounded-lg border border-line bg-panel px-5">{props.children}</div>
     </section>
   );
@@ -142,23 +163,41 @@ function ThemeWindow(props: { theme: "light" | "dark"; half?: boolean }) {
   return (
     <span
       className="absolute inset-0"
-      style={{ background: tokens.bg, clipPath: props.half ? "polygon(100% 0, 100% 100%, 0 100%)" : undefined }}
+      style={{
+        background: tokens.bg,
+        clipPath: props.half ? "polygon(100% 0, 100% 100%, 0 100%)" : undefined,
+      }}
     >
       <span
         className="absolute inset-y-0 left-0 w-[18px]"
         style={{ background: props.theme === "dark" ? tokens.panel2 : tokens.panel }}
       />
-      <span className="absolute left-[26px] top-3.5 h-1 w-9 rounded-sm opacity-40" style={{ background: tokens.ink }} />
-      <span className="absolute left-[26px] top-6 h-1 w-6 rounded-sm opacity-20" style={{ background: tokens.ink }} />
+      <span
+        className="absolute left-[26px] top-3.5 h-1 w-9 rounded-sm opacity-40"
+        style={{ background: tokens.ink }}
+      />
+      <span
+        className="absolute left-[26px] top-6 h-1 w-6 rounded-sm opacity-20"
+        style={{ background: tokens.ink }}
+      />
     </span>
   );
 }
 
 /** The theme as three windows, one per choice, in a radiogroup. */
 export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeMode) => void }) {
-  const group = useRadioGroup({ value: props.value, options: THEME_OPTIONS, onChange: props.onChange });
+  const group = useRadioGroup({
+    value: props.value,
+    options: THEME_OPTIONS,
+    onChange: props.onChange,
+  });
   return (
-    <div role="radiogroup" aria-label="Theme" onKeyDown={group.onKeyDown} className="flex items-start gap-3.5">
+    <div
+      role="radiogroup"
+      aria-label="Theme"
+      onKeyDown={group.onKeyDown}
+      className="flex items-start gap-3.5"
+    >
       {THEME_OPTIONS.map((option, index) => {
         const checked = props.value === option.value;
         return (
@@ -193,9 +232,7 @@ export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeM
 }
 
 type StepperPart = {
-  // The tooltip's words. For − and + it is also the button's name.
   label: string;
-  // The keys that do the same, shown as chips in the tooltip.
   keys?: readonly string[];
   disabled?: boolean;
   onClick: () => void;
@@ -209,7 +246,6 @@ type StepperPartName = "decrease" | "reset" | "increase";
  * keyboard focused it. A click does not open one.
  */
 export function StepperControl(props: {
-  // The setting's name in a sentence, such as "zoom".
   setting: string;
   value: string;
   decrease: StepperPart;
@@ -218,7 +254,6 @@ export function StepperControl(props: {
 }) {
   const [hovered, setHovered] = useState<StepperPartName | null>(null);
   const [focused, setFocused] = useState<StepperPartName | null>(null);
-  // The part whose tooltip Escape put away, until the pointer or focus moves.
   const [dismissed, setDismissed] = useState<StepperPartName | null>(null);
   const shown = hovered ?? focused;
   const tip = shown === dismissed ? null : shown;
@@ -240,7 +275,11 @@ export function StepperControl(props: {
       >
         <button
           type="button"
-          aria-label={name === "reset" ? `Reset ${props.setting} to ${props.reset.to}, now ${props.value}` : spec.label}
+          aria-label={
+            name === "reset"
+              ? `Reset ${props.setting} to ${props.reset.to}, now ${props.value}`
+              : spec.label
+          }
           aria-describedby={open ? `${tipId}-${name}` : undefined}
           // Overlay leaves this Escape to the control: it closes the tooltip.
           data-tooltip-open={open ? "" : undefined}
@@ -273,7 +312,10 @@ export function StepperControl(props: {
           >
             {spec.label}
             {spec.keys?.map((key) => (
-              <kbd key={key} className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle">
+              <kbd
+                key={key}
+                className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle"
+              >
                 {key}
               </kbd>
             ))}
@@ -284,9 +326,17 @@ export function StepperControl(props: {
   };
   return (
     <div className="flex h-7 items-center rounded-md border border-line">
-      {part("decrease", "w-7 rounded-l-[5px] text-muted", <Minus size={14} strokeWidth={1.9} aria-hidden />)}
+      {part(
+        "decrease",
+        "w-7 rounded-l-[5px] text-muted",
+        <Minus size={14} strokeWidth={1.9} aria-hidden />,
+      )}
       {part("reset", "w-[52px] border-x border-line font-mono text-[12px] text-ink", props.value)}
-      {part("increase", "w-7 rounded-r-[5px] text-muted", <Plus size={14} strokeWidth={1.9} aria-hidden />)}
+      {part(
+        "increase",
+        "w-7 rounded-r-[5px] text-muted",
+        <Plus size={14} strokeWidth={1.9} aria-hidden />,
+      )}
     </div>
   );
 }
@@ -326,7 +376,6 @@ export function SwitchControl(props: {
   // An element whose words name the switch. Its name then wins over `label`
   // while that element exists.
   labelledBy?: string;
-  // The hover words, such as what a click does.
   tooltip?: string;
   // What a screen reader says after the name, in place of the tooltip, so a
   // tooltip that repeats the name is not read twice.
@@ -347,7 +396,12 @@ export function SwitchControl(props: {
   return (
     <>
       {props.busy ? (
-        <LoaderCircle data-testid="switch-busy" size={12} aria-hidden className="shrink-0 animate-spin text-subtle" />
+        <LoaderCircle
+          data-testid="switch-busy"
+          size={12}
+          aria-hidden
+          className="shrink-0 animate-spin text-subtle"
+        />
       ) : props.busy === false ? (
         <span aria-hidden className="size-3 shrink-0" />
       ) : null}
@@ -403,13 +457,15 @@ const HUE_FILLS: Record<AgentHue, string> = {
  * The arrows choose as they move, unless `arrowsMoveFocus`: then they move
  * focus only and Enter or Space chooses, for a list where each choice saves.
  */
-export function HueControl(props: {
-  label: string;
-  arrowsMoveFocus?: boolean;
-} & (
-  | { shape: "person"; value: IdentityHue | null; onChange: (value: IdentityHue) => void }
-  | { shape: "agent"; value: AgentHue; onChange: (value: AgentHue) => void }
-)) {
+export function HueControl(
+  props: {
+    label: string;
+    arrowsMoveFocus?: boolean;
+  } & (
+    | { shape: "person"; value: IdentityHue | null; onChange: (value: IdentityHue) => void }
+    | { shape: "agent"; value: AgentHue; onChange: (value: AgentHue) => void }
+  ),
+) {
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const hues: readonly AgentHue[] = props.shape === "agent" ? AGENT_HUES : IDENTITY_HUES;
   const currentIndex = props.value === null ? 0 : Math.max(0, hues.indexOf(props.value));
@@ -419,9 +475,12 @@ export function HueControl(props: {
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const step = event.key === "ArrowRight" || event.key === "ArrowDown"
-      ? 1
-      : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+    const step =
+      event.key === "ArrowRight" || event.key === "ArrowDown"
+        ? 1
+        : event.key === "ArrowLeft" || event.key === "ArrowUp"
+          ? -1
+          : 0;
     if (step === 0) return;
     event.preventDefault();
     const focused = optionRefs.current.indexOf(event.target as HTMLButtonElement);
@@ -431,7 +490,12 @@ export function HueControl(props: {
   };
 
   return (
-    <div role="radiogroup" aria-label={props.label} onKeyDown={handleKeyDown} className="flex items-center gap-1.5">
+    <div
+      role="radiogroup"
+      aria-label={props.label}
+      onKeyDown={handleKeyDown}
+      className="flex items-center gap-1.5"
+    >
       {hues.map((hue, index) => {
         const name = hue[0]!.toUpperCase() + hue.slice(1);
         return (

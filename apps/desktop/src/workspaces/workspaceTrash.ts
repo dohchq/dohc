@@ -7,17 +7,12 @@ import {
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
 
-// The workspace trash keeps what a delete or a replacing move took when the
-// system trash did not, what a settings Reset moved aside, and each delete's
-// and move's recovery record. All of it describes what happened on this
-// computer, so it lives in `.dohc/local`, which iCloud Drive skips. dohc
-// neither reads nor moves an old `.dohc/trash`.
-
 /** The workspace trash as a person sees it, from the workspace's root. */
 export const WORKSPACE_TRASH = ".dohc/local/trash";
 
 /** Where a staged entry is, for a reader that has already found the trash. */
-export const stagedTrashEntry = (rootPath: string, staged: string) => join(rootPath, ".dohc", "local", "trash", staged);
+export const stagedTrashEntry = (rootPath: string, staged: string) =>
+  join(rootPath, ".dohc", "local", "trash", staged);
 
 /** What dohc says when it did not do `what` because the engine has not prepared `.dohc/local`. */
 function trashNotReady(what: string, refusal: LocalStateRefusal): string {
@@ -32,7 +27,10 @@ function trashNotReady(what: string, refusal: LocalStateRefusal): string {
  * current open prepared `.dohc/local`. Refuses anything at the path but a
  * folder in the workspace only this user can change.
  */
-export async function workspaceTrashForWrite(workspace: LocalStateWorkspace, what: string): Promise<string> {
+export async function workspaceTrashForWrite(
+  workspace: LocalStateWorkspace,
+  what: string,
+): Promise<string> {
   try {
     return await localStateFolder(workspace, "trash", DOHC_TRASH_GUARD);
   } catch (error) {

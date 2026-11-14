@@ -1,9 +1,7 @@
 import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   activeWorkspace,
@@ -16,15 +14,12 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// The history timeline shows engine moments (real summaries) and the diff
-// page restores through the engine with a forward moment and an undo.
-
 test("a workspace shows engine moments and restores a file end-to-end", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    // #1122 creates empty workspaces. Own the capture baseline in this fixture.
+    // A new workspace is empty. Own the capture baseline in this fixture.
     await writeWorkspaceFiles(temp, [
       { path: "startup.md", contents: "Startup capture baseline.\n" },
     ]);
@@ -38,45 +33,35 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
     await page.getByTestId(activityPin("history")).click();
     await expect(
       page
-        .locator(
-          '[data-testid="engine-moment-group"], [data-testid="engine-moment-open"]',
-        )
+        .locator('[data-testid="engine-moment-group"], [data-testid="engine-moment-open"]')
         .first(),
     ).toBeVisible();
 
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/plan.md", contents: "first draft\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "first draft\n" }]);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
     const momentRow = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]',
     );
     await expect(momentRow.first()).toBeVisible();
-    // One line: the file's name, then its folder.
     await expect(momentRow.first()).toContainText("plan.mdnotes");
-    // Engine history replaces the legacy list entirely for this workspace.
     await expect(page.getByTestId("history-list")).toHaveCount(0);
 
-    // Second edit -> newest moment carries the v1 -> v2 diff.
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/plan.md", contents: "second draft\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "second draft\n" }]);
     await expect(momentRow).toHaveCount(2);
 
     await momentRow.first().click();
     const diffPage = page.getByTestId("engine-moment-diff-page");
     await expect(diffPage).toBeVisible();
     await expect(page.getByTestId("engine-diff-lines")).toContainText("second draft");
-    // Word level: only the changed word is marked, as a deletion and an
-    // insertion, on lines a screen reader names as removed and added.
     const lines = page.getByTestId("engine-diff-lines");
     await expect(lines.locator("del")).toHaveText("first");
     await expect(lines.locator("ins")).toHaveText("second");
     await expect(lines.locator("[data-kind='removed'] code")).toHaveText("Removed: first draft");
     await expect(lines.locator("[data-kind='added'] code")).toHaveText("Added: second draft");
-    await expect(page.getByTestId("engine-diff-counts")).toContainText("1 line added, 1 line removed");
+    await expect(page.getByTestId("engine-diff-counts")).toContainText(
+      "1 line added, 1 line removed",
+    );
 
-    // Engine restore: back to the state before this change...
     await page.getByTestId("engine-diff-restore-file").click();
     await expect(page.getByTestId("engine-diff-restore-status")).toContainText(
       "Restored the earlier state",
@@ -85,7 +70,6 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
       .poll(() => readFile(join(temp.rootPath, "notes/plan.md"), "utf8"))
       .toBe("first draft\n");
 
-    // ...recorded as a forward moment with the real restore summary.
     await expect(
       page
         .locator('[data-testid="engine-moment-open"]')
@@ -93,11 +77,8 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
         .first(),
     ).toBeVisible();
 
-    // Undo = restore to before the restore moment (forward again).
     await page.getByTestId("engine-diff-undo-restore").click();
-    await expect(page.getByTestId("engine-diff-restore-status")).toContainText(
-      "Undid the restore",
-    );
+    await expect(page.getByTestId("engine-diff-restore-status")).toContainText("Undid the restore");
     await expect
       .poll(() => readFile(join(temp.rootPath, "notes/plan.md"), "utf8"))
       .toBe("second draft\n");
@@ -108,8 +89,8 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
 
 // A person creates a workspace, makes its first document, types, and opens
 // History. The document's editor still holds it when capture first sees the
-// file, and capture used to count that as a failed ingest: History paused,
-// and could not list the document until its tab closed.
+// file. Capture must not count that as a failed ingest, which would pause
+// History and keep the document out of its list until its tab closed.
 test("History lists the first document of a new workspace while it is open", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;

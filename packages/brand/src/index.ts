@@ -1,1 +1,1 @@
-export * from './DohcLogo'
+export * from "./DohcLogo";

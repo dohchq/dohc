@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  parseCollectionSchema,
-  type CollectionSchema,
-} from "@dohc/workspace-contracts";
+import { parseCollectionSchema, type CollectionSchema } from "@dohc/workspace-contracts";
 import {
   addField,
   addSelectOption,
@@ -26,7 +23,12 @@ const FULL: CollectionSchema = {
     { name: "Estimate", type: "number" },
     { name: "Done", type: "checkbox" },
     { name: "Due", type: "date" },
-    { name: "Status", type: "select", options: ["Todo", "Doing", "Done"], colors: { Doing: "amber", Done: "teal" } },
+    {
+      name: "Status",
+      type: "select",
+      options: ["Todo", "Doing", "Done"],
+      colors: { Doing: "amber", Done: "teal" },
+    },
     { name: "Tags", type: "multi-select", options: ["a", "b"] },
     { name: "Owner", type: "person" },
     { name: "Blocks", type: "relation", collection: "projects/tasks", many: true },
@@ -79,9 +81,7 @@ describe("schema mutations", () => {
   it("addField appends and round-trips", () => {
     const next = addField(FULL, { name: "Notes", type: "text" });
     expect(next.fields.at(-1)).toEqual({ name: "Notes", type: "text" });
-    expect(
-      parseCollectionSchema(serializeCollectionSchema(next)).status,
-    ).toBe("valid");
+    expect(parseCollectionSchema(serializeCollectionSchema(next)).status).toBe("valid");
   });
 
   it("writes option colors in option order", () => {
@@ -100,16 +100,22 @@ describe("schema mutations", () => {
       colors: { Doing: "amber", Done: "rose" },
     });
     expect(setOptionColor(FULL, "Status", "Gone", "rose")).toEqual(FULL);
-    // An option named like an Object member has no color until one is set.
     const odd = setFieldOptions(FULL, "Status", ["constructor"]);
     expect(odd.fields[4]).toEqual({ name: "Status", type: "select", options: ["constructor"] });
-    expect(parseCollectionSchema(serializeCollectionSchema(setOptionColor(odd, "Status", "constructor", "plum"))).schema.fields[4])
-      .toEqual({ name: "Status", type: "select", options: ["constructor"], colors: { constructor: "plum" } });
+    expect(
+      parseCollectionSchema(
+        serializeCollectionSchema(setOptionColor(odd, "Status", "constructor", "plum")),
+      ).schema.fields[4],
+    ).toEqual({
+      name: "Status",
+      type: "select",
+      options: ["constructor"],
+      colors: { constructor: "plum" },
+    });
   });
 
   it("setFieldOptions replaces options only on select fields", () => {
     const next = setFieldOptions(FULL, "Status", ["Todo", "Done"]);
-    // A removed option takes its color with it.
     expect(next.fields[4]).toEqual({
       name: "Status",
       type: "select",
@@ -122,8 +128,9 @@ describe("schema mutations", () => {
       options: ["Todo"],
       colors: { Todo: "gray" },
     });
-    // A chosen color lands over the colors already in the file.
-    expect(setFieldOptions(FULL, "Status", ["Todo", "Done"], { Todo: "gray" }).fields[4]).toMatchObject({
+    expect(
+      setFieldOptions(FULL, "Status", ["Todo", "Done"], { Todo: "gray" }).fields[4],
+    ).toMatchObject({
       colors: { Todo: "gray", Done: "teal" },
     });
     expect(setFieldOptions(FULL, "Name", ["x"]).fields[0]).toEqual({
@@ -153,17 +160,13 @@ describe("schema mutations", () => {
       dateField: null,
     };
     const added = addView(FULL, table);
-    expect(added.views.map((view) => view.name)).toEqual([
-      "Board",
-      "Calendar",
-      "All",
-    ]);
+    expect(added.views.map((view) => view.name)).toEqual(["Board", "Calendar", "All"]);
     const renamed = renameView(added, "All", "Everything");
     expect(renamed.views.at(-1)?.name).toBe("Everything");
     const deleted = deleteView(renamed, "Everything");
     expect(deleted.views).toEqual(FULL.views);
-    expect(
-      parseCollectionSchema(serializeCollectionSchema(renamed)).schema.views,
-    ).toEqual(renamed.views);
+    expect(parseCollectionSchema(serializeCollectionSchema(renamed)).schema.views).toEqual(
+      renamed.views,
+    );
   });
 });

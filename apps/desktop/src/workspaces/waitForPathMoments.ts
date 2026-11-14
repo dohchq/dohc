@@ -19,8 +19,9 @@ export function waitForPathMoments(
   path: string,
   count: number,
 ): Promise<WorkspaceEngineMomentSummary[]> {
-  return pollPathMoments(capture, path, `${count} captured moment(s)`,
-    (matching) => matching.length >= count ? matching : undefined);
+  return pollPathMoments(capture, path, `${count} captured moment(s)`, (matching) =>
+    matching.length >= count ? matching : undefined,
+  );
 }
 
 /**
@@ -34,14 +35,19 @@ export async function waitForCapturedContents(
   count: number,
 ): Promise<void> {
   const sha256 = hash(contents);
-  await pollPathMoments(capture, path, `moment ${count} with contents ${sha256}`, async (matching) => {
-    if (matching.length < count) return undefined;
-    const newest = matching.reduce((a, b) => (a.momentOrder > b.momentOrder ? a : b));
-    const detail = await capture.readMoment(newest.id);
-    if (detail?.protected) return true;
-    const after = detail?.moment.payload.after;
-    return after && (after.sha256 ?? hash(after.text)) === sha256 ? true : undefined;
-  });
+  await pollPathMoments(
+    capture,
+    path,
+    `moment ${count} with contents ${sha256}`,
+    async (matching) => {
+      if (matching.length < count) return undefined;
+      const newest = matching.reduce((a, b) => (a.momentOrder > b.momentOrder ? a : b));
+      const detail = await capture.readMoment(newest.id);
+      if (detail?.protected) return true;
+      const after = detail?.moment.payload.after;
+      return after && (after.sha256 ?? hash(after.text)) === sha256 ? true : undefined;
+    },
+  );
 }
 
 function hash(contents: string | Uint8Array): string {

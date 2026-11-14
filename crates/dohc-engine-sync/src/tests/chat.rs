@@ -29,54 +29,6 @@ fn decision_winner(engine: &EngineStore) -> (String, i64, String, i64) {
 }
 
 #[test]
-fn imported_decision_refuses_unsafe_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = open_store();
-    let operation = envelope(
-        "unsafe-decision-time",
-        0,
-        "chat.decision.set",
-        decision_payload("open", i64::MAX, None),
-    );
-
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-    let row_count: i64 = engine
-        .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM chat_decisions", [], |row| row.get(0))
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("decision row count");
-    assert_eq!(
-        row_count, 0,
-        "dropping the persisted-safe atMs bound journals a decision that the cross-engine read contract cannot represent."
-    );
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "unsafe-decision-time").expect("ack"),
-        0
-    );
-}
-
-#[test]
-fn imported_decision_refuses_an_explicit_null_resolver() {
-    let (_scratch, _path, mut engine) = open_store();
-    let mut payload = decision_payload("resolved", 100, None);
-    payload["resolvedByMessageId"] = serde_json::Value::Null;
-    let operation = envelope("null-decision-resolver", 0, "chat.decision.set", payload);
-
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-    let row_count: i64 = engine
-        .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM chat_decisions", [], |row| row.get(0))
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("decision row count");
-    assert_eq!(row_count, 0);
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "null-decision-resolver").expect("ack"),
-        0
-    );
-}
-
-#[test]
 fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
     let ops = [
         envelope(
@@ -120,244 +72,6 @@ fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
     );
     assert_eq!(winners[0].0, "resolved");
     assert_eq!(winners[0].2, "beta");
-}
-
-#[test]
-fn local_only_decision_resolver_producer_converges_through_apply() {
-    let (_source_scratch, _source_path, mut source) = open_store();
-    LinkedChatStore::new(&mut source)
-        .create_channel(
-            "ws",
-            "decision-channel",
-            "Decisions",
-            ChatChannelKind::Channel,
-            10,
-            &NoFaults,
-        )
-        .expect("source channel");
-    LinkedChatStore::new(&mut source)
-        .start_channel_thread(
-            &StartChannelThread {
-                automation: None,
-                workspace_id: "ws".to_owned(),
-                channel_id: "decision-channel".to_owned(),
-                thread_id: "decision-thread".to_owned(),
-                message_id: "decision-message".to_owned(),
-                title: None,
-                lane: ChatThreadLane::Posts,
-                own_thread: false,
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Verified".to_owned(),
-                author_owner_display_name: None,
-                author_user_id: Some("verified-user".to_owned()),
-                origin: None,
-                body: "Choose a launch date".to_owned(),
-                needs_decision: true,
-                options: Vec::new(),
-                attachments: Vec::new(),
-                author_agent_id: None,
-                author_reported: None,
-                work: None,
-                wake_agent_ids: Vec::new(),
-                now_ms: 20,
-                request_id: Some("decision-thread".to_owned()),
-            },
-            &NoFaults,
-        )
-        .expect("source decision");
-    LinkedChatStore::new(&mut source)
-        .send_message(
-            &SendMessage {
-                automation: None,
-                workspace_id: "ws".to_owned(),
-                thread_id: "decision-thread".to_owned(),
-                message_id: "local-resolver".to_owned(),
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Local".to_owned(),
-                author_owner_display_name: None,
-                author_user_id: None,
-                parent_message_id: None,
-                origin: None,
-                body: "Resolve while signed out".to_owned(),
-                needs_decision: false,
-                options: Vec::new(),
-                attachments: Vec::new(),
-                author_agent_id: None,
-                author_reported: None,
-                work: None,
-                wake_agent_ids: Vec::new(),
-                now_ms: 30,
-                request_id: Some("local-resolver".to_owned()),
-            },
-            &NoFaults,
-        )
-        .expect("local-only resolver");
-    let source_decision = LinkedChatStore::new(&mut source)
-        .resolve_decision(
-            &ResolveDecision {
-                workspace_id: "ws".to_owned(),
-                thread_id: "decision-thread".to_owned(),
-                message_id: "decision-message".to_owned(),
-                resolved_by_message_id: "local-resolver".to_owned(),
-                chosen_option: None,
-                now_ms: 40,
-                request_id: "resolve-with-local-message".to_owned(),
-            },
-            &NoFaults,
-        )
-        .expect("resolve source decision");
-    assert_eq!(
-        source_decision.resolved_by_message_id.as_deref(),
-        Some("local-resolver")
-    );
-
-    let outbound: Vec<ReplicationEnvelope> = source
-        .read_with(|conn| {
-            let mut statement = conn.prepare(
-                "SELECT origin_id,origin_seq,op_kind,payload_json,recorded_at_ms \
-                 FROM replication_log \
-                 WHERE workspace_id='ws' AND imported=0 \
-                 ORDER BY origin_seq",
-            )?;
-            statement
-                .query_map([], |row| {
-                    let payload_json: String = row.get(3)?;
-                    Ok(ReplicationEnvelope {
-                        settlement_admission: None,
-                        admitted_author_snapshot: None,
-                        workspace_id: "ws".to_owned(),
-                        origin_id: row.get(0)?,
-                        origin_seq: row.get(1)?,
-                        op_kind: row.get(2)?,
-                        payload: serde_json::from_str(&payload_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                payload_json.len(),
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?,
-                        recorded_at_ms: row.get(4)?,
-                        relay_seq: None,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .expect("produced chat envelopes");
-    let produced = outbound
-        .iter()
-        .find(|operation| {
-            operation.op_kind == "chat.decision.set" && operation.payload["state"] == "resolved"
-        })
-        .expect("produced resolved decision envelope");
-    assert_eq!(produced.payload["state"], "resolved");
-    assert!(produced.payload.get("resolvedByMessageId").is_none());
-    assert!(outbound.iter().all(|operation| {
-        operation
-            .payload
-            .get("messageId")
-            .and_then(|value| value.as_str())
-            != Some("local-resolver")
-    }));
-
-    let (_target_scratch, _target_path, mut target) = open_store();
-    for operation in &outbound {
-        assert_eq!(
-            apply_chat_envelope(&mut target, operation, &NoFaults)
-                .expect("apply produced chat envelope"),
-            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-        );
-    }
-    let applied: (String, Option<String>) = target
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT state,resolved_by_message_id FROM chat_decisions \
-                 WHERE workspace_id='ws' AND message_id='decision-message'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("applied decision state");
-    assert_eq!(applied, ("resolved".to_owned(), None));
-
-    let invalid_open = envelope(
-        "invalid-open-resolver",
-        0,
-        "chat.decision.set",
-        json!({
-            "threadId": "decision-thread",
-            "messageId": "decision-message",
-            "state": "open",
-            "resolvedByMessageId": "local-resolver",
-            "atMs": 50
-        }),
-    );
-    assert_invalid_refusal!(apply_chat_envelope(&mut target, &invalid_open, &NoFaults));
-    let state_after_refusal: String = target
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT state FROM chat_decisions \
-                 WHERE workspace_id='ws' AND message_id='decision-message'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("decision state after invalid open payload");
-    assert_eq!(state_after_refusal, "resolved");
-}
-
-#[test]
-fn reaction_lww_remove_wins_equal_time_and_origin_breaks_remaining_ties() {
-    let (_scratch, _path, mut engine) = open_store();
-    let added = envelope(
-        "omega",
-        0,
-        "chat.reaction.set",
-        reaction_payload("added", "👍", 100, "Ada"),
-    );
-    let removed = envelope(
-        "alpha",
-        0,
-        "chat.reaction.set",
-        reaction_payload("removed", "👍", 100, "Ada"),
-    );
-    apply_chat_envelope(&mut engine, &added, &NoFaults).expect("added");
-    apply_chat_envelope(&mut engine, &removed, &NoFaults).expect("removed");
-    assert_eq!(
-        reaction_winner(&engine).0,
-        "removed",
-        "ranking origin before state -> lexically larger added beats an equal-time remove."
-    );
-
-    let low = envelope(
-        "beta",
-        0,
-        "chat.reaction.set",
-        reaction_payload("removed", "🎉", 200, "Bob"),
-    );
-    let high = envelope(
-        "zeta",
-        0,
-        "chat.reaction.set",
-        reaction_payload("removed", "🎉", 200, "Bob"),
-    );
-    apply_chat_envelope(&mut engine, &high, &NoFaults).expect("high");
-    apply_chat_envelope(&mut engine, &low, &NoFaults).expect("low");
-    let winner: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT origin_id FROM chat_reactions WHERE emoji = '🎉'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("winner");
-    assert_eq!(
-        winner, "zeta",
-        "omitting the origin tie-break -> equal-time/equal-state application becomes arrival-dependent."
-    );
 }
 
 #[test]
@@ -406,84 +120,6 @@ fn reaction_lww_is_permutation_convergent() {
 }
 
 #[test]
-fn reaction_import_preserves_remote_time_verbatim() {
-    let (_scratch, _path, mut engine) = open_store();
-    let future = envelope(
-        "peer",
-        0,
-        "chat.reaction.set",
-        reaction_payload("added", "👍", 9_999_999_999, "Ada"),
-    );
-    apply_chat_envelope(&mut engine, &future, &NoFaults).expect("apply");
-    assert_eq!(
-        reaction_winner(&engine).1,
-        9_999_999_999,
-        "receiver-clock clamping remote atMs -> identical envelopes store different total-order keys on different peers."
-    );
-}
-
-#[test]
-fn imported_reaction_refuses_unsafe_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = open_store();
-    let operation = envelope(
-        "unsafe-reaction-time",
-        0,
-        "chat.reaction.set",
-        reaction_payload("added", "👍", i64::MAX, "Ada"),
-    );
-
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-    let row_count: i64 = engine
-        .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM chat_reactions", [], |row| row.get(0))
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("reaction row count");
-    assert_eq!(
-        row_count, 0,
-        "dropping the persisted-safe atMs bound journals a reaction that subsequently makes reaction reads state-corrupt."
-    );
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "unsafe-reaction-time").expect("ack"),
-        0
-    );
-}
-
-#[test]
-fn reaction_import_accepts_negative_time_and_preserves_lww_order() {
-    let (_scratch, _path, mut engine) = open_store();
-    let winner_payload = reaction_payload("added", "👍", -10, "Ada");
-    let winner = envelope("peer", 0, "chat.reaction.set", winner_payload);
-    apply_chat_envelope(&mut engine, &winner, &NoFaults).expect("negative-time reaction");
-
-    let mut older_payload = reaction_payload("removed", "👍", -11, "Ada");
-    older_payload["authorDisplayName"] = json!("Older");
-    let older = envelope("peer", 1, "chat.reaction.set", older_payload);
-    apply_chat_envelope(&mut engine, &older, &NoFaults).expect("older reaction");
-
-    let stored: (String, String, i64) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT state, author_display_name, at_ms FROM chat_reactions \
-                 WHERE workspace_id = 'ws' AND message_id = 'message'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("stored reaction");
-    assert_eq!(
-        stored,
-        ("added".to_owned(), "Ada".to_owned(), -10),
-        "rejecting negative imported time stalls the envelope; replacing the LWW comparison lets the later-arriving older row win."
-    );
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
-        1
-    );
-}
-
-#[test]
 fn reaction_import_rejects_non_emoji_graphemes() {
     for hostile in ["hello", "http://evil.invalid", "👍 nice", "✁"] {
         let (_scratch, _path, mut engine) = open_store();
@@ -510,65 +146,6 @@ fn reaction_import_rejects_non_emoji_graphemes() {
 }
 
 #[test]
-fn imported_opening_message_uses_zero_based_order() {
-    let (_scratch, _path, mut engine) = open_store();
-    let channel = envelope(
-        "opening-order",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "channel-1",
-            "name": "General",
-            "slug": "general",
-            "kind": "channel",
-            "createdAtMs": 10
-        }),
-    );
-    let thread = envelope(
-        "opening-order",
-        1,
-        "chat.thread.create",
-        json!({
-            "threadId": "thread-1",
-            "title": "",
-            "createdAtMs": 20,
-            "channelSlug": "general",
-            "channelWireId": "channel-1"
-        }),
-    );
-    let opening = envelope(
-        "opening-order",
-        2,
-        "chat.message.append",
-        json!({
-            "messageId": "message-1",
-            "threadId": "thread-1",
-            "authorKind": "human",
-            "authorDisplayName": "Alice",
-            "body": "Opening",
-            "createdAtMs": 20
-        }),
-    );
-    for op in [&channel, &thread, &opening] {
-        assert_eq!(
-            apply_chat_envelope(&mut engine, op, &NoFaults).expect("apply chat op"),
-            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-        );
-    }
-    let order: i64 = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT message_order FROM chat_messages \
-                 WHERE workspace_id = 'ws' AND message_id = 'message-1'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("opening message order");
-    assert_eq!(order, 0);
-}
-
-#[test]
 fn imported_channel_carries_its_group_and_an_older_op_still_applies() {
     let (_scratch, _path, mut engine) = open_store();
     let with_group = envelope(
@@ -586,7 +163,6 @@ fn imported_channel_carries_its_group_and_an_older_op_still_applies() {
             "createdAtMs": 10
         }),
     );
-    // An op written before the groups migration names no group fields.
     let older = envelope(
         "group-fields",
         1,
@@ -630,7 +206,6 @@ fn imported_channel_carries_its_group_and_an_older_op_still_applies() {
         ]
     );
 
-    // A group with a folder on a dm is refused.
     let bad = envelope(
         "group-fields-bad",
         0,
@@ -666,7 +241,6 @@ fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
         }),
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &unanswered, &NoFaults));
-    // A bare question resolves with no choice, as before.
     let bare = envelope(
         "poll-no-answer",
         1,
@@ -684,7 +258,6 @@ fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
         ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
 
-    // A file-linked thread is always a post, whatever lane the op claims.
     let file_chat_lane = envelope(
         "file-thread-lane",
         0,
@@ -699,59 +272,6 @@ fn a_replicated_poll_names_its_answer_and_a_file_thread_has_no_chat_lane() {
         }),
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &file_chat_lane, &NoFaults));
-}
-
-#[test]
-fn imported_channel_refuses_non_timestamp_created_at_ms_without_row_and_acks() {
-    for (suffix, created_at_ms) in [("negative", -1), ("unsafe", i64::MAX)] {
-        let (_scratch, _path, mut engine) = open_store();
-        let origin = format!("{suffix}-channel-time");
-        let operation = envelope(
-            &origin,
-            0,
-            "chat.channel.create",
-            json!({
-                "channelId": format!("{suffix}-channel"),
-                "name": "Invalid timestamp",
-                "slug": "invalid-timestamp",
-                "kind": "channel",
-                "createdAtMs": created_at_ms
-            }),
-        );
-
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-        let row_count: i64 = engine
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_channels WHERE workspace_id='ws'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
-            })
-            .expect("channel row count");
-        assert_eq!(row_count, 0);
-        assert_eq!(
-            read_replication_acked_seq(&engine, "ws", &origin).expect("ack"),
-            0
-        );
-    }
-}
-
-#[test]
-fn imported_thread_rejects_linked_object_without_linked_timestamp() {
-    // A file-linked thread must carry linkedAtMs. The oracle accepts this op
-    // (storing linked_at_ms NULL) but then bricks its own read (threadFromRow
-    // numberValue(null) throws corruptStore) — a latent oracle bug. We reject
-    // the malformed op at apply, deliberately stricter than the oracle, so no
-    // durable-unreadable linked thread is ever persisted. Honest mint always
-    // pairs the fields; only a corrupt/hostile peer hits this.
-    assert_imported_thread_rejected(json!({
-        "threadId": "thread-half-linked",
-        "title": "Half linked",
-        "createdAtMs": 20,
-        "linkedObjectId": "object-1"
-    }));
 }
 
 fn assert_imported_thread_rejected(payload: serde_json::Value) {
@@ -772,106 +292,6 @@ fn assert_imported_thread_rejected(payload: serde_json::Value) {
         read_replication_acked_seq(&engine, "ws", "invalid-thread").expect("ack"),
         0
     );
-}
-
-#[test]
-fn imported_thread_rejects_negative_or_unsafe_timestamps() {
-    for payload in [
-        json!({
-            "threadId": "thread",
-            "title": "",
-            "createdAtMs": -1,
-            "linkedObjectId": "object"
-        }),
-        json!({
-            "threadId": "thread",
-            "title": "",
-            "createdAtMs": MAX_WIRE_INTEGER + 1,
-            "linkedObjectId": "object"
-        }),
-        json!({
-            "threadId": "thread",
-            "title": "",
-            "createdAtMs": 1,
-            "linkedObjectId": "object",
-            "linkedAtMs": -1
-        }),
-        json!({
-            "threadId": "thread",
-            "title": "",
-            "createdAtMs": 1,
-            "linkedObjectId": "object",
-            "linkedAtMs": MAX_WIRE_INTEGER + 1
-        }),
-    ] {
-        assert_imported_thread_rejected(payload);
-    }
-}
-
-#[test]
-fn imported_thread_rejects_unbounded_untrimmed_or_control_identifiers() {
-    for payload in [
-        json!({
-            "threadId": " thread",
-            "title": "",
-            "createdAtMs": 1,
-            "linkedObjectId": "object"
-        }),
-        json!({
-            "threadId": "thread",
-            "title": "",
-            "createdAtMs": 1,
-            "linkedObjectId": "\u{FEFF}object"
-        }),
-        json!({
-            "threadId": "thread",
-            "title": "",
-            "createdAtMs": 1,
-            "channelSlug": "general",
-            "channelWireId": "wire\u{7f}"
-        }),
-        json!({
-            "threadId": "a".repeat(257),
-            "title": "",
-            "createdAtMs": 1,
-            "linkedObjectId": "object"
-        }),
-    ] {
-        assert_imported_thread_rejected(payload);
-    }
-}
-
-#[test]
-fn imported_thread_rejects_overlong_or_trim_unstable_titles() {
-    for title in [
-        " padded ".to_owned(),
-        "\u{FEFF}title".to_owned(),
-        "a".repeat(201),
-    ] {
-        assert_imported_thread_rejected(json!({
-            "threadId": "thread",
-            "title": title,
-            "createdAtMs": 1,
-            "linkedObjectId": "object"
-        }));
-    }
-}
-
-#[test]
-fn imported_thread_rejects_channel_slugs_outside_oracle_grammar() {
-    for channel_slug in [
-        "General".to_owned(),
-        "two--words".to_owned(),
-        "-leading".to_owned(),
-        "a".repeat(201),
-    ] {
-        assert_imported_thread_rejected(json!({
-            "threadId": "thread",
-            "title": "",
-            "createdAtMs": 1,
-            "channelSlug": channel_slug
-        }));
-    }
 }
 
 #[test]
@@ -913,64 +333,6 @@ fn imported_thread_rejects_invalid_owner_shape_and_linked_path() {
     ] {
         assert_imported_thread_rejected(payload);
     }
-}
-
-#[test]
-fn imported_slug_only_thread_binds_the_existing_channel() {
-    let (_scratch, _path, mut engine) = open_store();
-    let channel = envelope(
-        "slug-only",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "existing-channel",
-            "name": "Existing",
-            "slug": "existing",
-            "kind": "channel",
-            "createdAtMs": 10
-        }),
-    );
-    let thread = envelope(
-        "slug-only",
-        1,
-        "chat.thread.create",
-        json!({
-            "threadId": "legacy-thread",
-            "title": "",
-            "createdAtMs": 20,
-            "channelSlug": "existing"
-        }),
-    );
-    apply_chat_envelope(&mut engine, &channel, &NoFaults).expect("channel");
-    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
-    let (channel_id, channel_count, placeholder_count): (String, i64, i64) = engine
-        .read_with(|conn| {
-            Ok::<_, rusqlite::Error>((
-                conn.query_row(
-                    "SELECT channel_id FROM chat_threads \
-                     WHERE workspace_id = 'ws' AND thread_id = 'legacy-thread'",
-                    [],
-                    |row| row.get(0),
-                )?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_channels WHERE workspace_id = 'ws'",
-                    [],
-                    |row| row.get(0),
-                )?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_channel_placeholders WHERE workspace_id = 'ws'",
-                    [],
-                    |row| row.get(0),
-                )?,
-            ))
-        })
-        .expect("binding");
-    assert_eq!(
-        channel_id, "existing-channel",
-        "treating channelSlug as a wire id mints a duplicate placeholder."
-    );
-    assert_eq!(channel_count, 1);
-    assert_eq!(placeholder_count, 0);
 }
 
 #[test]
@@ -1208,98 +570,6 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
 }
 
 #[test]
-fn imported_parent_arrival_repairs_the_child_and_bumps_the_conversation() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_unowned_chat_thread(&mut engine, "parent-thread");
-    let child = envelope(
-        "child-origin",
-        0,
-        "chat.message.append",
-        json!({
-            "messageId": "child",
-            "threadId": "parent-thread",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "parentMessageId": "parent",
-            "body": "Child first",
-            "createdAtMs": 30
-        }),
-    );
-    apply_chat_envelope(&mut engine, &child, &NoFaults).expect("child apply");
-    assert_eq!(chat_content_revision(&engine, "parent-thread"), 1);
-
-    let parent = envelope(
-        "parent-origin",
-        0,
-        "chat.message.append",
-        json!({
-            "messageId": "parent",
-            "threadId": "parent-thread",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "body": "Parent later",
-            "createdAtMs": 20
-        }),
-    );
-    apply_chat_envelope(&mut engine, &parent, &NoFaults).expect("parent apply");
-    let repaired_parent: Option<String> = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT parent_message_id FROM chat_messages \
-                 WHERE workspace_id='ws' AND message_id='child'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("repaired parent");
-    assert_eq!(repaired_parent.as_deref(), Some("parent"));
-    assert_eq!(chat_content_revision(&engine, "parent-thread"), 2);
-}
-
-#[test]
-fn ready_pending_replay_bumps_every_conversation_it_materializes() {
-    let (_scratch, _path, mut engine) = open_store();
-    for (origin, thread_id, message_id) in [
-        ("pending-a", "thread-a", "message-a"),
-        ("pending-b", "thread-b", "message-b"),
-    ] {
-        let operation = envelope(
-            origin,
-            0,
-            "chat.message.append",
-            json!({
-                "messageId": message_id,
-                "threadId": thread_id,
-                "authorKind": "human",
-                "authorDisplayName": "Ada",
-                "body": format!("Pending for {thread_id}"),
-                "createdAtMs": 20
-            }),
-        );
-        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("park message");
-    }
-    assert_eq!(pending_chat_coordinate_count(&engine), 2);
-    seed_unowned_chat_thread(&mut engine, "thread-a");
-    seed_unowned_chat_thread(&mut engine, "thread-b");
-
-    LinkedChatStore::new(&mut engine)
-        .create_channel(
-            "ws",
-            "replay-trigger",
-            "Replay trigger",
-            ChatChannelKind::Channel,
-            30,
-            &NoFaults,
-        )
-        .expect("trigger ready replay");
-
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-    assert_eq!(chat_content_revision(&engine, "thread-a"), 1);
-    assert_eq!(chat_content_revision(&engine, "thread-b"), 1);
-}
-
-#[test]
 fn another_computers_automation_message_applies_without_its_automation() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "peer");
@@ -1320,8 +590,6 @@ fn another_computers_automation_message_applies_without_its_automation() {
         }),
     );
     apply_chat_envelope(&mut engine, &message, &NoFaults).expect("automation message");
-    // Only an automation's or an agent's message carries a chain depth,
-    // within the depth bound.
     for (seq, author_kind, owner, depth) in [
         (10, "human", None, json!(1)),
         (11, "automation", Some("Ana"), json!(0)),
@@ -1390,7 +658,6 @@ fn another_computers_automation_message_applies_without_its_automation() {
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &reaction, &NoFaults));
 
-    // An automation message that arrives before its thread is parked, then replays with its person.
     let early = envelope(
         "early-peer",
         0,
@@ -1437,7 +704,6 @@ fn another_computers_automation_message_applies_without_its_automation() {
 /// The relay's origin for `link_message_payload`'s link principal.
 const LINK_ORIGIN: &str = "relay:share-link:principal-1";
 
-/// A link holder's post in the imported Group, as the relay writes it.
 fn link_message_payload(message_id: &str, body: &str) -> serde_json::Value {
     json!({
         "messageId": message_id,
@@ -1577,7 +843,6 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         let op = envelope(LINK_ORIGIN, seq as i64, "chat.message.append", payload);
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
     }
-    // The relay's post itself, from any origin but its link principal's.
     for origin in [
         "relay-link",
         "relay:share-link:principal-2",
@@ -1615,61 +880,6 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
         apply_chat_envelope(&mut engine, &at_cap, &NoFaults).expect("link message at the cap"),
         ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
     );
-}
-
-/// An agent that joined with a link posts as that link, and its post also
-/// names the agent connection the relay authenticated.
-#[test]
-fn a_link_agent_post_replays_with_its_agent_connection() {
-    use dohc_engine_domain::{ChatMessageLinkAuthor, LinkedChatStore};
-
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "peer");
-    let mut payload = link_message_payload("link-message:agent", "Done");
-    payload["agentConnectionId"] = json!("connection-1");
-    let message = envelope(LINK_ORIGIN, 0, "chat.message.append", payload);
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &message, &NoFaults).expect("agent link message"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    let read = LinkedChatStore::new(&mut engine)
-        .get_message("ws", "link-message:agent")
-        .expect("read the agent link message");
-    let agent = Some(ChatMessageLinkAuthor {
-        grant_id: "grant-1".to_owned(),
-        principal_id: "principal-1".to_owned(),
-        agent_connection_id: Some("connection-1".to_owned()),
-    });
-    assert_eq!(read.link_author, agent);
-
-    // A post that waits for its thread replays with its connection.
-    let mut early = link_message_payload("link-message:agent-early", "Early");
-    early["threadId"] = json!("late-thread");
-    early["agentConnectionId"] = json!("connection-1");
-    apply_chat_envelope(
-        &mut engine,
-        &envelope(LINK_ORIGIN, 1, "chat.message.append", early),
-        &NoFaults,
-    )
-    .expect("parked agent link message");
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-    let thread = envelope(
-        "late-thread-peer",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "late-thread",
-            "title": "Late thread",
-            "createdAtMs": 20,
-            "channelSlug": "imported"
-        }),
-    );
-    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-    let replayed = LinkedChatStore::new(&mut engine)
-        .get_message("ws", "link-message:agent-early")
-        .expect("read the replayed agent link message");
-    assert_eq!(replayed.link_author, agent);
 }
 
 /// Only the relay names a message with the link message prefix. A device's
@@ -1711,76 +921,6 @@ fn a_message_that_takes_a_link_message_id_is_refused() {
     assert_eq!(stored, ("link".to_owned(), "Hi".to_owned()));
 }
 
-/// Only the relay names a link post's new thread, under the link holder's
-/// origin. A device's thread that takes such an id first is refused, so the
-/// link post's own thread and message still apply when they arrive.
-#[test]
-fn a_thread_that_takes_a_link_thread_id_is_refused() {
-    use dohc_engine_domain::chats::LINK_THREAD_ID_PREFIX;
-
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "peer");
-    let thread_id = format!("{LINK_THREAD_ID_PREFIX}taken");
-    let thread = |title: &str| {
-        json!({
-            "threadId": thread_id,
-            "title": title,
-            "createdAtMs": 25,
-            "channelSlug": "imported",
-            "channelWireId": "channel-imported",
-            "lane": "chat"
-        })
-    };
-    let taken = envelope("peer", 3, "chat.thread.create", thread("Taken"));
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &taken, &NoFaults));
-    let threads = |engine: &EngineStore| -> Vec<String> {
-        engine
-            .read_with(|conn| {
-                let mut statement = conn
-                    .prepare("SELECT title FROM chat_threads WHERE thread_id = ?1")
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                let rows = statement
-                    .query_map([&thread_id], |row| row.get(0))
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-                rows.collect::<Result<Vec<String>, _>>()
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
-            })
-            .expect("link threads")
-    };
-    assert!(threads(&engine).is_empty());
-
-    apply_chat_envelope(
-        &mut engine,
-        &envelope(LINK_ORIGIN, 0, "chat.thread.create", thread("")),
-        &NoFaults,
-    )
-    .expect("link thread");
-    let mut post = link_message_payload("link-message:in-link-thread", "Hi");
-    post["threadId"] = json!(thread_id);
-    assert_eq!(
-        apply_chat_envelope(
-            &mut engine,
-            &envelope(LINK_ORIGIN, 1, "chat.message.append", post),
-            &NoFaults
-        )
-        .expect("link post"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    assert_eq!(threads(&engine), vec![String::new()]);
-    let stored: (String, String) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT thread_id, author_kind FROM chat_messages WHERE message_id = 'link-message:in-link-thread'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("link post");
-    assert_eq!(stored, (thread_id.clone(), "link".to_owned()));
-}
-
-/// A personal agent, and the relay's origin for its chat.
 const PERSONAL_AGENT: &str = "p-aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PERSONAL_ORIGIN: &str = "relay:personal-agent:p-aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1797,7 +937,6 @@ fn personal_dm_payload(agent_id: &str) -> serde_json::Value {
     })
 }
 
-/// The personal agent's post in the imported Group, as the relay writes it.
 fn personal_message_payload(message_id: &str, thread_id: &str) -> serde_json::Value {
     json!({
         "messageId": message_id,
@@ -1822,7 +961,6 @@ fn personal_thread_payload(thread_id: &str, wire_id: &str) -> serde_json::Value 
     })
 }
 
-/// The stored connection columns of a message, link first.
 fn message_connections(engine: &EngineStore, message_id: &str) -> (Option<String>, Option<String>) {
     engine
         .read_with(|conn| {
@@ -1837,7 +975,6 @@ fn message_connections(engine: &EngineStore, message_id: &str) -> (Option<String
         .expect("message connections")
 }
 
-/// The chats of one agent in `ws`.
 fn agent_chats(engine: &EngineStore, agent_id: &str) -> Vec<String> {
     engine
         .read_with(|conn| {
@@ -1926,7 +1063,6 @@ fn a_personal_agent_origin_writes_its_dm_threads_and_posts() {
         );
     }
 
-    // A named recipient stores the owner's op under the share.
     let shared = envelope(
         &format!("shared:s:{PERSONAL_ORIGIN}"),
         0,
@@ -1938,7 +1074,6 @@ fn a_personal_agent_origin_writes_its_dm_threads_and_posts() {
         applied()
     );
 
-    // A post that waits for its thread replays with its connection.
     apply_chat_envelope(
         &mut engine,
         &envelope(
@@ -2008,7 +1143,6 @@ fn a_personal_agent_post_that_is_not_the_agents_own_is_refused() {
         let op = envelope(PERSONAL_ORIGIN, seq as i64, "chat.message.append", payload);
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
     }
-    // The agent's post, from another agent's origin.
     let other = envelope(
         "relay:personal-agent:p-bbbbbbbbbbbbbbbbbbbbbbbbbb",
         0,
@@ -2144,7 +1278,6 @@ fn a_personal_agent_posts_only_where_the_relay_lets_it() {
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
     }
 
-    // A post that waits for its thread is checked when the thread arrives.
     let early = envelope(
         PERSONAL_ORIGIN,
         7,
@@ -2178,8 +1311,6 @@ fn a_personal_agent_posts_only_where_the_relay_lets_it() {
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 0);
 
-    // A thread that arrives before its chat stands in a Group until the
-    // chat's create arrives, so a post there waits for the create.
     for (seq, (thread_id, wire_id)) in [
         ("thread-before-dm", "dm-later-wire"),
         ("thread-before-group", "group-later-wire"),
@@ -2343,7 +1474,6 @@ fn a_personal_agent_origin_carries_only_its_chat() {
         })
         .expect("channel count");
     assert_eq!(channels, 0);
-    // The next op from the origin still applies.
     assert_eq!(
         apply_chat_envelope(
             &mut engine,
@@ -2368,8 +1498,6 @@ fn no_other_origin_writes_as_a_personal_agent() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "peer");
     let mut forged = Vec::new();
-    // A device's agent post that names the personal agent, with or without
-    // its connection.
     let mut named = personal_message_payload("forged-named", "thread-imported");
     named
         .as_object_mut()
@@ -2380,11 +1508,9 @@ fn no_other_origin_writes_as_a_personal_agent() {
         "forged-connected",
         "thread-imported",
     ));
-    // A device's own agent, naming a connection.
     let mut connected = personal_message_payload("forged-own", "thread-imported");
     connected["authorAgentId"] = json!("helper");
     forged.push(connected);
-    // A human post that takes the personal message prefix.
     let mut taken = personal_message_payload("personal-message:taken", "thread-imported");
     taken["authorKind"] = json!("human");
     let fields = taken.as_object_mut().expect("payload");
@@ -2422,7 +1548,6 @@ fn no_other_origin_writes_as_a_personal_agent() {
         apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("relay thread"),
         applied
     );
-    // A computer's own agent still posts as itself.
     let mut own = personal_message_payload("own-agent", "personal-thread:taken");
     own["authorAgentId"] = json!("helper");
     own.as_object_mut()
@@ -2438,135 +1563,6 @@ fn no_other_origin_writes_as_a_personal_agent() {
         applied
     );
     assert_eq!(message_connections(&engine, "own-agent"), (None, None));
-}
-
-/// A computer that already holds the personal agent's DM and the relay's
-/// create of it end with one chat, whichever arrives first. A repeat create
-/// adds nothing.
-#[test]
-fn a_relay_dm_and_a_dm_already_held_are_one_chat() {
-    use dohc_engine_domain::LinkedChatStore;
-
-    let relay_dm = |seq: i64| {
-        envelope(
-            PERSONAL_ORIGIN,
-            seq,
-            "chat.channel.create",
-            personal_dm_payload(PERSONAL_AGENT),
-        )
-    };
-    let applied = ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()));
-
-    // The computer made the DM first.
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "peer");
-    let held = LinkedChatStore::new(&mut engine)
-        .ensure_agent_channel("ws", "dm-here", PERSONAL_AGENT, "Helper", 5, &NoFaults)
-        .expect("the DM this computer holds");
-    assert_eq!(held.channel_id, "dm-here");
-    for seq in [0, 1] {
-        assert_eq!(
-            apply_chat_envelope(&mut engine, &relay_dm(seq), &NoFaults).expect("relay DM"),
-            applied
-        );
-    }
-    assert_eq!(
-        agent_chats(&engine, PERSONAL_AGENT),
-        vec!["dm-here".to_owned()]
-    );
-    let wire = dohc_engine_domain::chats::agent_channel_wire_id(PERSONAL_AGENT);
-    apply_chat_envelope(
-        &mut engine,
-        &envelope(
-            PERSONAL_ORIGIN,
-            2,
-            "chat.thread.create",
-            personal_thread_payload("personal-thread:t", &wire),
-        ),
-        &NoFaults,
-    )
-    .expect("relay thread in the held DM");
-    let channel: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT channel_id FROM chat_threads WHERE workspace_id = 'ws' AND thread_id = 'personal-thread:t'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("the thread's chat");
-    assert_eq!(channel, "dm-here");
-
-    // The relay's create arrived first.
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "peer");
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &relay_dm(0), &NoFaults).expect("relay DM"),
-        applied
-    );
-    let held = LinkedChatStore::new(&mut engine)
-        .ensure_agent_channel("ws", "dm-here", PERSONAL_AGENT, "Helper", 30, &NoFaults)
-        .expect("the relay's DM");
-    let relay_channel = format!("personal-dm:{PERSONAL_AGENT}");
-    assert_eq!(held.channel_id, relay_channel);
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &relay_dm(1), &NoFaults).expect("repeat"),
-        applied
-    );
-    assert_eq!(agent_chats(&engine, PERSONAL_AGENT), vec![relay_channel]);
-}
-
-/// A desktop that predates an author kind refuses its messages for good, the
-/// way this build refuses a kind newer than itself: the refusal is recorded
-/// and acked, nothing is stored, and the workspace's next op applies.
-#[test]
-fn a_message_from_an_unknown_author_kind_is_refused_and_the_workspace_continues() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "peer");
-    let mut newer = link_message_payload("newer-kind", "Hi");
-    newer["authorKind"] = json!("future-kind");
-    let op = envelope("peer", 3, "chat.message.append", newer);
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
-    let (refusal, stored): ((String, String), i64) = engine
-        .read_with(|conn| {
-            Ok::<_, dohc_engine_storage::StorageError>((
-                conn.query_row(
-                    "SELECT op_kind, reason_message FROM replication_pending_refusals \
-                     WHERE origin_id = 'peer' AND origin_seq = 3",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'newer-kind'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
-            ))
-        })
-        .expect("refusal");
-    assert_eq!(
-        refusal,
-        (
-            "chat.message.append".to_owned(),
-            "chat message payload is invalid".to_owned()
-        )
-    );
-    assert_eq!(stored, 0);
-    let next = group_message(
-        "peer",
-        4,
-        "after-newer",
-        "thread-imported",
-        "human",
-        "Still here",
-    );
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &next, &NoFaults).expect("next op"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
 }
 
 /// A link holder's post starts no Group automation, even one whose prefix it
@@ -2610,8 +1606,6 @@ fn applied_claims(
     }
 }
 
-/// Subscribe `collection:object-tasks#task` to the imported Group's messages
-/// that start with `/task`.
 fn subscribe_imported_group(engine: &mut EngineStore) {
     let channel_id: String = engine
         .read_with(|conn| {
@@ -2641,7 +1635,6 @@ fn subscribe_imported_group(engine: &mut EngineStore) {
     .expect("watch");
 }
 
-/// Another member's message in the imported Group.
 fn group_message(
     origin: &str,
     seq: i64,
@@ -2665,10 +1658,6 @@ fn group_message(
     envelope(origin, seq, "chat.message.append", payload)
 }
 
-/// A Group message claims in the transaction that applies it, dated when it
-/// was written, however it arrives: from the relay, again from a second
-/// lane, or parked until its thread lands. Another computer's automation
-/// arrives without its depth and counts as depth 1.
 #[test]
 fn an_applied_group_message_claims_once_however_it_arrives() {
     use dohc_engine_domain::{AutomationChangeKind, AutomationTrigger, ChangeActorKind};
@@ -3070,140 +2059,6 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
     );
 }
 
-#[test]
-fn imported_follow_parks_until_its_cross_origin_thread_arrives() {
-    let (_scratch, _path, mut engine) = open_store();
-    let follow = envelope(
-        "late-follow",
-        0,
-        "chat.follow.set",
-        json!({
-            "ownerUserId": "owner",
-            "targetKind": "thread",
-            "targetId": "late-thread",
-            "state": "following",
-            "atMs": 30
-        }),
-    );
-
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park follow"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "late-follow").expect("follow ack"),
-        0
-    );
-
-    let target = envelope(
-        "late-thread-origin",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "late-thread",
-            "title": "Late thread",
-            "createdAtMs": 20,
-            "linkedObjectId": "late-thread-object",
-            "linkedAtMs": 20
-        }),
-    );
-    apply_chat_envelope(&mut engine, &target, &NoFaults).expect("apply target thread");
-
-    let state: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT state FROM chat_follows \
-                 WHERE workspace_id='ws' AND owner_user_id='owner' \
-                   AND target_kind='thread' AND target_id='late-thread'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("replayed follow");
-    assert_eq!(state, "following");
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-}
-
-#[test]
-fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
-    let (_scratch, _path, mut engine) = open_store();
-    let thread = envelope(
-        "feed-thread-origin",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "feed-thread",
-            "title": "Feed thread",
-            "createdAtMs": 10,
-            "linkedObjectId": "feed-thread-object",
-            "linkedAtMs": 10
-        }),
-    );
-    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("feed thread");
-    let follow = envelope(
-        "feed-follow-origin",
-        0,
-        "chat.follow.set",
-        json!({
-            "ownerUserId": "owner",
-            "targetKind": "thread",
-            "targetId": "feed-thread",
-            "state": "following",
-            "atMs": 15
-        }),
-    );
-    apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("feed thread follow");
-    let feed_read = envelope(
-        "late-feed-read",
-        0,
-        "chat.feed.read.set",
-        json!({
-            "ownerUserId": "owner",
-            "lastSeenCreatedAtMs": 20,
-            "lastSeenMessageId": "late-feed-message",
-            "atMs": 30
-        }),
-    );
-
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &feed_read, &NoFaults).expect("park feed read"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-
-    let message = envelope(
-        "feed-message-origin",
-        0,
-        "chat.message.append",
-        json!({
-            "messageId": "late-feed-message",
-            "threadId": "feed-thread",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "body": "Arrived later",
-            "createdAtMs": 20
-        }),
-    );
-    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("feed message");
-
-    let coordinate: (i64, String) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT last_seen_created_at_ms,last_seen_message_id \
-                 FROM chat_feed_read_state \
-                 WHERE workspace_id='ws' AND owner_user_id='owner'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("replayed feed coordinate");
-    assert_eq!(coordinate, (20, "late-feed-message".to_owned()));
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-}
-
 fn account_thread_mark(engine: &EngineStore, thread_id: &str) -> Option<(i64, String)> {
     engine
         .read_with(|conn| {
@@ -3281,7 +2136,6 @@ fn imported_thread_read_parks_until_its_message_arrives_then_keeps_the_later_coo
         Some((40, "message-late".to_owned()))
     );
 
-    // An older mark from another copy, and the same mark again, change nothing.
     let older = thread_read_op("desktop", 0, "thread-imported", 20, "message-imported");
     apply_chat_envelope(&mut engine, &older, &NoFaults).expect("older mark");
     apply_chat_envelope(
@@ -3355,7 +2209,6 @@ fn imported_thread_read_refuses_a_coordinate_outside_its_thread_and_takes_a_dm()
         })
         .expect("dm fixture");
 
-    // Another thread's message, and the right message at the wrong time.
     let cross_thread = thread_read_op("read-peer", 0, "dm-thread", 20, "message-imported");
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &cross_thread, &NoFaults));
     let wrong_time = thread_read_op("read-peer", 1, "thread-imported", 21, "message-imported");
@@ -3376,281 +2229,12 @@ fn imported_thread_read_refuses_a_coordinate_outside_its_thread_and_takes_a_dm()
     assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
     assert_eq!(account_thread_mark(&engine, "dm-thread"), None);
 
-    // Unlike a feed mark, a mark in the owner's DM applies.
     let dm = thread_read_op("read-peer", 3, "dm-thread", 100, "dm-message");
     apply_chat_envelope(&mut engine, &dm, &NoFaults).expect("dm mark");
     assert_eq!(
         account_thread_mark(&engine, "dm-thread"),
         Some((100, "dm-message".to_owned()))
     );
-}
-
-#[test]
-fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
-    let (_scratch, _path, mut engine) = open_store();
-    let thread = envelope(
-        "attachment-thread-origin",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "attachment-thread",
-            "title": "Attachment thread",
-            "createdAtMs": 10,
-            "linkedObjectId": "attachment-thread-object",
-            "linkedAtMs": 10
-        }),
-    );
-    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("attachment thread");
-    let attachment_id = attachment_id_for("late-attachment-message", "object", None, None);
-    let attachment = envelope(
-        "late-attachment",
-        0,
-        "chat.attachment.add",
-        json!({
-            "attachmentId": attachment_id,
-            "threadId": "attachment-thread",
-            "messageId": "late-attachment-message",
-            "targetKind": "file",
-            "objectId": "object",
-            "createdAtMs": 30
-        }),
-    );
-
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("park attachment"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-
-    let message = envelope(
-        "attachment-message-origin",
-        0,
-        "chat.message.append",
-        json!({
-            "messageId": "late-attachment-message",
-            "threadId": "attachment-thread",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "body": "Arrived later",
-            "createdAtMs": 20
-        }),
-    );
-    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("attachment message");
-
-    let attachment_count: i64 = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM chat_attachments \
-                 WHERE workspace_id='ws' AND attachment_id=?1",
-                [&attachment_id],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("replayed attachment");
-    assert_eq!(attachment_count, 1);
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-}
-
-#[test]
-fn imported_feed_read_waits_for_placeholder_channel_resolution() {
-    let (_scratch, _path, mut engine) = open_store();
-    let thread = envelope(
-        "placeholder-feed-thread",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "placeholder-feed-thread",
-            "title": "Placeholder feed",
-            "createdAtMs": 10,
-            "channelSlug": "placeholder-feed",
-            "channelWireId": "placeholder-feed-wire"
-        }),
-    );
-    let message = envelope(
-        "placeholder-feed-thread",
-        1,
-        "chat.message.append",
-        json!({
-            "messageId": "placeholder-feed-message",
-            "threadId": "placeholder-feed-thread",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "body": "Waiting for its channel",
-            "createdAtMs": 20
-        }),
-    );
-    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("placeholder thread");
-    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("placeholder message");
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO chat_follows \
-                 (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
-                 VALUES ('ws','owner','thread','placeholder-feed-thread','following',21,'fixture',0)",
-                [],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("enabling follow");
-
-    let read = envelope(
-        "placeholder-feed-read",
-        0,
-        "chat.feed.read.set",
-        json!({
-            "ownerUserId": "owner",
-            "lastSeenCreatedAtMs": 20,
-            "lastSeenMessageId": "placeholder-feed-message",
-            "atMs": 30
-        }),
-    );
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &read, &NoFaults).expect("defer placeholder feed read"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-
-    let channel = envelope(
-        "placeholder-feed-channel",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "placeholder-feed-authoritative",
-            "name": "Placeholder feed",
-            "slug": "placeholder-feed",
-            "kind": "channel",
-            "createdAtMs": 5,
-            "wireId": "placeholder-feed-wire"
-        }),
-    );
-    apply_chat_envelope(&mut engine, &channel, &NoFaults).expect("authoritative channel");
-
-    let coordinate: (i64, String) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT last_seen_created_at_ms,last_seen_message_id \
-                 FROM chat_feed_read_state WHERE workspace_id='ws' AND owner_user_id='owner'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("replayed placeholder feed read");
-    assert_eq!(coordinate, (20, "placeholder-feed-message".to_owned()));
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-}
-
-#[test]
-fn imported_person_follow_waits_for_a_non_dm_message() {
-    let (_scratch, _path, mut engine) = open_store();
-    for operation in [
-        envelope(
-            "dm-person-source",
-            0,
-            "chat.channel.create",
-            json!({
-                "channelId": "dm-person-channel",
-                "name": "Private person",
-                "slug": "private-person",
-                "kind": "dm",
-                "createdAtMs": 10,
-                "wireId": "dm-person-wire"
-            }),
-        ),
-        envelope(
-            "dm-person-source",
-            1,
-            "chat.thread.create",
-            json!({
-                "threadId": "dm-person-thread",
-                "title": "Private person",
-                "createdAtMs": 11,
-                "channelSlug": "private-person",
-                "channelWireId": "dm-person-wire"
-            }),
-        ),
-        envelope(
-            "dm-person-source",
-            2,
-            "chat.message.append",
-            json!({
-                "messageId": "dm-person-message",
-                "threadId": "dm-person-thread",
-                "authorKind": "human",
-                "authorDisplayName": "Ada",
-                "authorUserId": "person-delayed-public",
-                "body": "Private first",
-                "createdAtMs": 12
-            }),
-        ),
-    ] {
-        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("DM person fixture");
-    }
-    let follow = envelope(
-        "dm-person-follow",
-        0,
-        "chat.follow.set",
-        json!({
-            "ownerUserId": "owner",
-            "targetKind": "person",
-            "targetId": "person-delayed-public",
-            "state": "following",
-            "atMs": 20
-        }),
-    );
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("defer DM-only person"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-
-    for operation in [
-        envelope(
-            "public-person-source",
-            0,
-            "chat.thread.create",
-            json!({
-                "threadId": "public-person-thread",
-                "title": "Public person",
-                "createdAtMs": 30,
-                "linkedObjectId": "public-person-object",
-                "linkedAtMs": 30
-            }),
-        ),
-        envelope(
-            "public-person-source",
-            1,
-            "chat.message.append",
-            json!({
-                "messageId": "public-person-message",
-                "threadId": "public-person-thread",
-                "authorKind": "human",
-                "authorDisplayName": "Ada",
-                "authorUserId": "person-delayed-public",
-                "body": "Public later",
-                "createdAtMs": 31
-            }),
-        ),
-    ] {
-        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("public person fixture");
-    }
-
-    let state: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT state FROM chat_follows \
-                 WHERE workspace_id='ws' AND owner_user_id='owner' \
-                   AND target_kind='person' AND target_id='person-delayed-public'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("replayed person follow");
-    assert_eq!(state, "following");
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
 }
 
 #[test]
@@ -3705,440 +2289,6 @@ fn incoming_placeholder_never_displaces_bootstrapped_general_regardless_of_clock
         );
         assert_eq!(newcomer_slug, expected_newcomer_slug);
     }
-}
-
-#[test]
-fn colliding_newcomer_hash_is_stable_across_local_occupancy_histories() {
-    let newcomer_wire = "replicated-newcomer-wire";
-    let newcomer = envelope(
-        "replicated-newcomer",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "replicated-newcomer-channel",
-            "name": "Contested",
-            "slug": "contested",
-            "kind": "channel",
-            "createdAtMs": 50,
-            "wireId": newcomer_wire
-        }),
-    );
-    let expected = collision_slug_for_test("contested", newcomer_wire, 0);
-    let mut newcomer_slugs = Vec::new();
-
-    for (peer, incumbent_created_at_ms) in [("alpha", 10), ("omega", 90)] {
-        let (scratch, _path, mut engine) = open_store();
-        LinkedChatStore::new(&mut engine)
-            .create_channel(
-                "ws",
-                &format!("{peer}-incumbent"),
-                "Contested",
-                ChatChannelKind::Channel,
-                incumbent_created_at_ms,
-                &NoFaults,
-            )
-            .expect("local incumbent");
-        LinkedChatStore::new(&mut engine)
-            .create_channel(
-                "ws",
-                &format!("{peer}-bystander"),
-                &format!("{peer} bystander"),
-                ChatChannelKind::Channel,
-                incumbent_created_at_ms.saturating_add(1),
-                &NoFaults,
-            )
-            .expect("different local occupancy history");
-
-        apply_chat_envelope(&mut engine, &newcomer, &NoFaults).expect("replicated newcomer");
-        let slug: String = engine
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT slug FROM chat_channels \
-                     WHERE workspace_id='ws' AND channel_id='replicated-newcomer-channel'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
-            })
-            .expect("newcomer slug");
-        assert_eq!(
-            slug, expected,
-            "the collision hash must depend only on the newcomer's replicated wire identity"
-        );
-        newcomer_slugs.push((scratch, slug));
-    }
-
-    assert_eq!(newcomer_slugs[0].1, newcomer_slugs[1].1);
-}
-
-#[test]
-fn authoritative_channel_materialization_only_reallocates_its_own_placeholder() {
-    let (_scratch, _path, mut engine) = open_store();
-    let occupied = envelope(
-        "materialization-owner",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "materialization-owner-channel",
-            "name": "Shared name",
-            "slug": "shared-name",
-            "kind": "channel",
-            "createdAtMs": 1
-        }),
-    );
-    let placeholder = envelope(
-        "materialization-placeholder",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "materialization-placeholder-thread",
-            "title": "Placeholder",
-            "createdAtMs": 2,
-            "channelSlug": "wire-alias",
-            "channelWireId": "materialization-placeholder-wire"
-        }),
-    );
-    let authoritative = envelope(
-        "materialization-authoritative",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "materialization-authoritative-channel",
-            "name": "Shared name",
-            "slug": "wire-alias",
-            "kind": "channel",
-            "createdAtMs": 3,
-            "wireId": "materialization-placeholder-wire"
-        }),
-    );
-    for operation in [&occupied, &placeholder, &authoritative] {
-        apply_chat_envelope(&mut engine, operation, &NoFaults).expect("channel operation");
-    }
-
-    let (owner_slug, materialized_slug): (String, String) = engine
-        .read_with(|conn| {
-            Ok::<_, rusqlite::Error>((
-                conn.query_row(
-                    "SELECT slug FROM chat_channels \
-                     WHERE workspace_id='ws' AND channel_id='materialization-owner-channel'",
-                    [],
-                    |row| row.get(0),
-                )?,
-                conn.query_row(
-                    "SELECT c.slug FROM chat_channel_wire_ids w \
-                     JOIN chat_channels c \
-                       ON c.workspace_id=w.workspace_id AND c.channel_id=w.channel_id \
-                     WHERE w.workspace_id='ws' AND w.wire_id='materialization-placeholder-wire'",
-                    [],
-                    |row| row.get(0),
-                )?,
-            ))
-        })
-        .expect("materialized channel slugs");
-    assert_eq!(owner_slug, "shared-name");
-    assert_eq!(
-        materialized_slug,
-        collision_slug_for_test("shared-name", "materialization-placeholder-wire", 0)
-    );
-}
-
-#[test]
-fn noncolliding_channel_apply_does_not_rewrite_unchanged_slugs() {
-    let (_scratch, _path, mut engine) = open_store();
-    let first = envelope(
-        "no-op-slug-first",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "no-op-channel-first",
-            "name": "First",
-            "slug": "first",
-            "kind": "channel",
-            "createdAtMs": 10
-        }),
-    );
-    apply_chat_envelope(&mut engine, &first, &NoFaults).expect("first channel");
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute_batch(
-                "CREATE TABLE channel_slug_update_log (channel_id TEXT NOT NULL); \
-                 CREATE TRIGGER channel_slug_update_probe AFTER UPDATE OF slug ON chat_channels \
-                 BEGIN INSERT INTO channel_slug_update_log(channel_id) VALUES (OLD.channel_id); END;",
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("slug update probe");
-
-    let second = envelope(
-        "no-op-slug-second",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "no-op-channel-second",
-            "name": "Second",
-            "slug": "second",
-            "kind": "channel",
-            "createdAtMs": 20
-        }),
-    );
-    apply_chat_envelope(&mut engine, &second, &NoFaults).expect("second channel");
-    let collider = envelope(
-        "no-op-slug-collider",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "no-op-channel-collider",
-            "name": "First",
-            "slug": "first",
-            "kind": "channel",
-            "createdAtMs": 1,
-            "wireId": "no-op-collider-wire"
-        }),
-    );
-    apply_chat_envelope(&mut engine, &collider, &NoFaults).expect("colliding channel");
-    let (updates, incumbent_slug): (i64, String) = engine
-        .read_with(|conn| {
-            Ok::<_, rusqlite::Error>((
-                conn.query_row("SELECT COUNT(*) FROM channel_slug_update_log", [], |row| {
-                    row.get(0)
-                })?,
-                conn.query_row(
-                    "SELECT slug FROM chat_channels \
-                     WHERE workspace_id='ws' AND channel_id='no-op-channel-first'",
-                    [],
-                    |row| row.get(0),
-                )?,
-            ))
-        })
-        .expect("slug update evidence");
-    assert_eq!(
-        updates, 0,
-        "channel arrival must never update an existing row, even on collision"
-    );
-    assert_eq!(incumbent_slug, "first");
-}
-
-#[test]
-fn local_thread_write_replays_a_parked_remote_follow() {
-    let (_scratch, _path, mut engine) = open_store();
-    let follow = envelope(
-        "local-wakeup-follow",
-        0,
-        "chat.follow.set",
-        json!({
-            "ownerUserId": "owner",
-            "targetKind": "thread",
-            "targetId": "local-wakeup-thread",
-            "state": "following",
-            "atMs": 20
-        }),
-    );
-    apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park remote follow");
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-
-    LinkedChatStore::new(&mut engine)
-        .create_thread(
-            &CreateFileThread {
-                workspace_id: "ws".to_owned(),
-                thread_id: "local-wakeup-thread".to_owned(),
-                title: "Local wakeup".to_owned(),
-                linked_object_id: "local-wakeup-object".to_owned(),
-                linked_path_hint: None,
-                now_ms: 30,
-                request_id: "local-wakeup-request".to_owned(),
-            },
-            &NoFaults,
-        )
-        .expect("local dependency write");
-
-    let state: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT state FROM chat_follows \
-                 WHERE workspace_id='ws' AND owner_user_id='owner' \
-                   AND target_kind='thread' AND target_id='local-wakeup-thread'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("follow replayed by local write");
-    assert_eq!(state, "following");
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-}
-
-#[test]
-fn general_wire_backfill_replays_a_parked_remote_follow() {
-    let (_scratch, _path, mut engine) = open_store();
-    LinkedChatStore::new(&mut engine)
-        .create_channel(
-            "ws",
-            "ordinary-general",
-            "general",
-            ChatChannelKind::Channel,
-            10,
-            &NoFaults,
-        )
-        .expect("ordinary general channel");
-    let follow = envelope(
-        "general-wire-follow",
-        0,
-        "chat.follow.set",
-        json!({
-            "ownerUserId": "owner",
-            "targetKind": "channel",
-            "targetId": GENERAL_CHANNEL_WIRE_ID,
-            "state": "following",
-            "atMs": 20
-        }),
-    );
-    apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park general follow");
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-
-    let general = LinkedChatStore::new(&mut engine)
-        .ensure_general_channel("ws", "unused-general-id", 30, &NoFaults)
-        .expect("backfill general wire id");
-    assert_eq!(general.channel_id, "ordinary-general");
-
-    let state: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT state FROM chat_follows \
-                 WHERE workspace_id='ws' AND owner_user_id='owner' \
-                   AND target_kind='channel' AND target_id=?1",
-                [GENERAL_CHANNEL_WIRE_ID],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("replayed general follow");
-    assert_eq!(state, "following");
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-}
-
-#[test]
-fn default_follow_seed_replays_a_parked_remote_feed_read() {
-    let (_scratch, _path, mut engine) = open_store();
-    LinkedChatStore::new(&mut engine)
-        .create_channel(
-            "ws",
-            "default-channel",
-            "Default channel",
-            ChatChannelKind::Channel,
-            10,
-            &NoFaults,
-        )
-        .expect("default channel");
-    LinkedChatStore::new(&mut engine)
-        .start_channel_thread(
-            &StartChannelThread {
-                automation: None,
-                workspace_id: "ws".to_owned(),
-                thread_id: "default-thread".to_owned(),
-                message_id: "default-message".to_owned(),
-                channel_id: "default-channel".to_owned(),
-                title: Some("Default thread".to_owned()),
-                lane: ChatThreadLane::Posts,
-                own_thread: false,
-                body: "Default opening message".to_owned(),
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Ada".to_owned(),
-                author_owner_display_name: None,
-                author_user_id: Some("ada".to_owned()),
-                origin: None,
-                needs_decision: false,
-                options: Vec::new(),
-                attachments: Vec::new(),
-                author_agent_id: None,
-                author_reported: None,
-                work: None,
-                wake_agent_ids: Vec::new(),
-                now_ms: 20,
-                request_id: Some("default-thread-request".to_owned()),
-            },
-            &NoFaults,
-        )
-        .expect("default opening message");
-    let feed_read = envelope(
-        "default-feed-read",
-        0,
-        "chat.feed.read.set",
-        json!({
-            "ownerUserId": "owner",
-            "lastSeenCreatedAtMs": 20,
-            "lastSeenMessageId": "default-message",
-            "atMs": 30
-        }),
-    );
-    apply_chat_envelope(&mut engine, &feed_read, &NoFaults).expect("park default feed read");
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-
-    LinkedChatStore::new(&mut engine)
-        .ensure_default_channel_follows("ws", "owner", &NoFaults)
-        .expect("seed default follows");
-
-    let coordinate: (i64, String) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT last_seen_created_at_ms,last_seen_message_id \
-                 FROM chat_feed_read_state WHERE workspace_id='ws' AND owner_user_id='owner'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("replayed default feed read");
-    assert_eq!(coordinate, (20, "default-message".to_owned()));
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-}
-
-#[test]
-fn local_follow_write_replays_a_parked_remote_feed_read_at_the_domain_boundary() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "local-follow-fixture");
-    let feed_read = envelope(
-        "local-follow-feed-read",
-        0,
-        "chat.feed.read.set",
-        json!({
-            "ownerUserId": "owner",
-            "lastSeenCreatedAtMs": 20,
-            "lastSeenMessageId": "message-imported",
-            "atMs": 30
-        }),
-    );
-    apply_chat_envelope(&mut engine, &feed_read, &NoFaults).expect("park feed read");
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-
-    LinkedChatStore::new(&mut engine)
-        .set_follow(
-            &SetFollow {
-                workspace_id: "ws".to_owned(),
-                owner_user_id: "owner".to_owned(),
-                replication_owner_user_id: None,
-                target_kind: FollowTargetKind::Thread,
-                target_id: "thread-imported".to_owned(),
-                state: FollowState::Following,
-                now_ms: 40,
-            },
-            &NoFaults,
-        )
-        .expect("local follow");
-
-    let coordinate: (i64, String) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT last_seen_created_at_ms,last_seen_message_id \
-                 FROM chat_feed_read_state WHERE workspace_id='ws' AND owner_user_id='owner'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("replayed feed read");
-    assert_eq!(coordinate, (20, "message-imported".to_owned()));
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
 }
 
 #[test]
@@ -4226,297 +2376,6 @@ fn collision_slug_for_test(requested: &str, allocation_identity: &str, attempt: 
     let bounded = requested[..end].trim_end_matches('-');
     let suffix = dohc_engine_storage::hex(&hasher.finalize());
     format!("{bounded}-{suffix}")
-}
-
-#[test]
-fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal() {
-    let (_scratch, _path, mut first_peer) = open_store();
-    let long_wire_id = "a".repeat(240);
-    let seed = envelope(
-        "long-wire-seed",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "long-wire-seed-thread",
-            "title": "Seed",
-            "createdAtMs": 10,
-            "channelWireId": long_wire_id
-        }),
-    );
-    apply_chat_envelope(&mut first_peer, &seed, &NoFaults).expect("wire-only placeholder");
-
-    let (placeholder_channel_id, stored_slug): (String, String) = first_peer
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT channel_id,slug FROM chat_channels WHERE workspace_id='ws'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-        })
-        .expect("placeholder channel");
-    assert!(
-        crate::apply::is_replicated_channel_slug(&stored_slug),
-        "the synthesized base must already satisfy the outbound channelSlug grammar"
-    );
-    assert_eq!(stored_slug.encode_utf16().count(), 200);
-
-    LinkedChatStore::new(&mut first_peer)
-        .start_channel_thread(
-            &StartChannelThread {
-                automation: None,
-                workspace_id: "ws".to_owned(),
-                channel_id: placeholder_channel_id,
-                thread_id: "long-wire-local-thread".to_owned(),
-                message_id: "long-wire-local-message".to_owned(),
-                title: Some("Local follow-up".to_owned()),
-                lane: ChatThreadLane::Posts,
-                own_thread: false,
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Ada".to_owned(),
-                author_owner_display_name: None,
-                author_user_id: Some("ada".to_owned()),
-                origin: None,
-                body: "Replicate this".to_owned(),
-                needs_decision: false,
-                options: Vec::new(),
-                attachments: Vec::new(),
-                author_agent_id: None,
-                author_reported: None,
-                work: None,
-                wake_agent_ids: Vec::new(),
-                now_ms: 20,
-                request_id: Some("long-wire-local-request".to_owned()),
-            },
-            &NoFaults,
-        )
-        .expect("local thread in placeholder");
-
-    let outbound: ReplicationEnvelope = first_peer
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT origin_id,origin_seq,payload_json,recorded_at_ms \
-                 FROM replication_log \
-                 WHERE workspace_id='ws' AND op_kind='chat.thread.create' \
-                   AND json_extract(payload_json,'$.threadId')='long-wire-local-thread'",
-                [],
-                |row| {
-                    let payload_json: String = row.get(2)?;
-                    Ok(ReplicationEnvelope {
-                        settlement_admission: None,
-                        admitted_author_snapshot: None,
-                        workspace_id: "ws".to_owned(),
-                        origin_id: row.get(0)?,
-                        origin_seq: row.get(1)?,
-                        op_kind: "chat.thread.create".to_owned(),
-                        payload: serde_json::from_str(&payload_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                payload_json.len(),
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?,
-                        recorded_at_ms: row.get(3)?,
-                        relay_seq: None,
-                    })
-                },
-            )
-        })
-        .expect("outbound local thread envelope");
-    assert_eq!(
-        outbound.payload["channelSlug"],
-        json!(stored_slug),
-        "the local thread must journal the bounded persisted slug"
-    );
-
-    let (_second_scratch, _second_path, mut second_peer) = open_store();
-    assert_eq!(
-        apply_chat_envelope(&mut second_peer, &outbound, &NoFaults)
-            .expect("second peer accepts bounded outbound channelSlug"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-}
-
-#[test]
-fn collision_slug_truncation_is_bounded_and_does_not_leave_a_dash_boundary() {
-    let (_scratch, _path, mut engine) = open_store();
-    let long_base = format!("{}-{}", "a".repeat(134), "b".repeat(20));
-    assert!(long_base.len() > 135);
-    for (origin, thread_id, wire_id, created_at_ms) in [
-        (
-            "long-base-owner",
-            "long-base-owner-thread",
-            "long-base-wire-1",
-            1,
-        ),
-        (
-            "long-base-newcomer",
-            "long-base-newcomer-thread",
-            "long-base-wire-2",
-            2,
-        ),
-    ] {
-        let operation = envelope(
-            origin,
-            0,
-            "chat.thread.create",
-            json!({
-                "threadId": thread_id,
-                "title": "Long base",
-                "createdAtMs": created_at_ms,
-                "channelSlug": long_base,
-                "channelWireId": wire_id
-            }),
-        );
-        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("long-base placeholder");
-    }
-
-    let newcomer_slug: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT c.slug FROM chat_channel_wire_ids w \
-                 JOIN chat_channels c \
-                   ON c.workspace_id=w.workspace_id AND c.channel_id=w.channel_id \
-                 WHERE w.workspace_id='ws' AND w.wire_id='long-base-wire-2'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("long-base newcomer slug");
-    assert_eq!(
-        newcomer_slug,
-        collision_slug_for_test(&long_base, "long-base-wire-2", 0)
-    );
-    assert_eq!(newcomer_slug.encode_utf16().count(), 199);
-    assert!(crate::apply::is_replicated_channel_slug(&newcomer_slug));
-    assert!(
-        !newcomer_slug.contains("--"),
-        "truncating at the 135th unit must not leave an empty slug segment"
-    );
-}
-
-#[test]
-fn replay_only_touches_coordinates_for_the_changed_dependency() {
-    let (_scratch, _path, mut engine) = open_store();
-    for (origin, target) in [
-        ("targeted-follow-a", "targeted-thread-a"),
-        ("targeted-follow-b", "targeted-thread-b"),
-    ] {
-        let follow = envelope(
-            origin,
-            0,
-            "chat.follow.set",
-            json!({
-                "ownerUserId": "owner",
-                "targetKind": "thread",
-                "targetId": target,
-                "state": "following",
-                "atMs": 20
-            }),
-        );
-        apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park targeted follow");
-    }
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute_batch(
-                "CREATE TABLE pending_touch_log (origin_id TEXT NOT NULL); \
-                 CREATE TRIGGER pending_touch_probe AFTER DELETE ON chat_pending_replication \
-                 BEGIN INSERT INTO pending_touch_log(origin_id) VALUES (OLD.origin_id); END;",
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("pending replay probe");
-
-    let target = envelope(
-        "targeted-thread-source",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "targeted-thread-a",
-            "title": "Target A",
-            "createdAtMs": 30,
-            "linkedObjectId": "targeted-object-a",
-            "linkedAtMs": 30
-        }),
-    );
-    apply_chat_envelope(&mut engine, &target, &NoFaults).expect("satisfy only target A");
-
-    let touched: Vec<String> = engine
-        .read_with(|conn| {
-            let mut stmt = conn
-                .prepare("SELECT origin_id FROM pending_touch_log ORDER BY origin_id")
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-            let rows = stmt
-                .query_map([], |row| row.get(0))
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("touched pending coordinates");
-    assert_eq!(touched, vec!["targeted-follow-a".to_owned()]);
-    let still_pending: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT origin_id FROM chat_pending_replication \
-                 WHERE workspace_id='ws' AND dependency_id='targeted-thread-b'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("unrelated coordinate remains parked");
-    assert_eq!(still_pending, "targeted-follow-b");
-}
-
-#[test]
-fn imported_follow_refuses_a_resolved_dm_without_parking() {
-    let (_scratch, _path, mut engine) = open_store();
-    let channel = envelope(
-        "dm-target-origin",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "dm-target-channel",
-            "name": "Private",
-            "slug": "private",
-            "kind": "dm",
-            "createdAtMs": 10,
-            "wireId": "dm-target-wire"
-        }),
-    );
-    let thread = envelope(
-        "dm-target-origin",
-        1,
-        "chat.thread.create",
-        json!({
-            "threadId": "dm-target-thread",
-            "title": "Private thread",
-            "createdAtMs": 20,
-            "channelSlug": "private",
-            "channelWireId": "dm-target-wire"
-        }),
-    );
-    apply_chat_envelope(&mut engine, &channel, &NoFaults).expect("DM channel");
-    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("DM thread");
-    let follow = envelope(
-        "dm-follow-origin",
-        0,
-        "chat.follow.set",
-        json!({
-            "ownerUserId": "owner",
-            "targetKind": "thread",
-            "targetId": "dm-target-thread",
-            "state": "following",
-            "atMs": 30
-        }),
-    );
-
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &follow, &NoFaults));
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "dm-follow-origin").expect("DM follow ack"),
-        0
-    );
 }
 
 #[test]
@@ -5181,8 +3040,6 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
                     [],
                     |row| row.get(0),
                 )?,
-                // The replier's implicit follow parks until the placeholder
-                // channel is adopted; only the message's own park counts here.
                 conn.query_row(
                     "SELECT COUNT(*) FROM chat_pending_replication WHERE dependency_kind <> 'follow-target'",
                     [],
@@ -5198,42 +3055,6 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
     );
     assert_eq!(message_rows, 2, "both current-origin messages must apply");
     assert_eq!(pending_rows, 0, "the message must not remain parked");
-}
-
-#[test]
-fn imported_message_refuses_unsafe_created_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "unsafe-message-time");
-    let operation = envelope(
-        "unsafe-message-time",
-        3,
-        "chat.message.append",
-        json!({
-            "messageId": "unsafe-message",
-            "threadId": "thread-imported",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "body": "Unsafe timestamp",
-            "createdAtMs": i64::MAX
-        }),
-    );
-
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-    let row_count: i64 = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' AND message_id='unsafe-message'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("message row count");
-    assert_eq!(row_count, 0);
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "unsafe-message-time").expect("ack"),
-        3
-    );
 }
 
 #[test]
@@ -5410,82 +3231,6 @@ fn imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_st
 }
 
 #[test]
-fn imported_thread_header_message_id_cannot_replace_the_search_header() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "thread-header");
-    engine
-        .write_with(&NoFaults, |tx| {
-            upsert_chat_search_index_row(
-                tx,
-                "ws",
-                "thread-imported",
-                CHAT_THREAD_HEADER_MESSAGE_ID,
-                "Imported thread",
-            )
-            .map_err(SyncError::persist)
-        })
-        .expect("seed thread header search row");
-
-    let collision = envelope(
-        "thread-header",
-        3,
-        "chat.message.append",
-        json!({
-            "messageId": CHAT_THREAD_HEADER_MESSAGE_ID,
-            "threadId": "thread-imported",
-            "authorKind": "human",
-            "authorDisplayName": "Attacker",
-            "body": "replacement search text",
-            "createdAtMs": 30
-        }),
-    );
-    let result = apply_chat_envelope(&mut engine, &collision, &NoFaults);
-
-    let imported_collision: Option<(String, String)> = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT author_display_name,body FROM chat_messages \
-                 WHERE workspace_id='ws' AND thread_id='thread-imported' AND message_id='__thread__'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-        })
-        .expect("collision message lookup");
-    if let Some((display_name, body)) = imported_collision {
-        engine
-            .write_with(&NoFaults, |tx| {
-                upsert_chat_search_index_row(
-                    tx,
-                    "ws",
-                    "thread-imported",
-                    CHAT_THREAD_HEADER_MESSAGE_ID,
-                    &format!("{display_name}\n{body}"),
-                )
-                .map_err(SyncError::persist)
-            })
-            .expect("run the message indexing primitive");
-    }
-
-    let header_text: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT text FROM engine_search_chat_messages_fts \
-                 WHERE workspace_id='ws' AND thread_id='thread-imported' AND message_id='__thread__'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("thread header search row");
-    assert_eq!(header_text, "Imported thread");
-    assert_invalid_refusal!(result);
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "thread-header").expect("ack"),
-        3
-    );
-}
-
-#[test]
 fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotently() {
     let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
@@ -5567,84 +3312,6 @@ fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotentl
 }
 
 #[test]
-fn replicated_untitled_thread_without_messages_matches_rebuild_fallback() {
-    let (_scratch, _path, mut engine) = open_store();
-    let thread = envelope(
-        "fallback-peer",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "fallback-thread",
-            "title": "",
-            "createdAtMs": 10,
-            "channelSlug": "fallback"
-        }),
-    );
-    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
-
-    let header: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT text FROM engine_search_chat_messages_fts \
-                 WHERE workspace_id='ws' AND thread_id='fallback-thread' AND message_id='__thread__'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("fallback thread search header");
-    let rebuild_fallback = chat_thread_display_title("", None);
-    assert_eq!(
-        header.as_bytes(),
-        rebuild_fallback.as_bytes(),
-        "write-time and rebuild headers must be byte-identical"
-    );
-}
-
-#[test]
-fn replicated_untitled_thread_indexes_its_first_message_snippet() {
-    let (_scratch, _path, mut engine) = open_store();
-    let thread = envelope(
-        "snippet-peer",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "snippet-thread",
-            "title": "",
-            "createdAtMs": 10,
-            "linkedObjectId": "snippet-object",
-            "linkedAtMs": 10
-        }),
-    );
-    let message = envelope(
-        "snippet-peer",
-        1,
-        "chat.message.append",
-        json!({
-            "messageId": "snippet-message",
-            "threadId": "snippet-thread",
-            "authorKind": "human",
-            "authorDisplayName": "Sam",
-            "body": "First replicated snippet\nwith more detail",
-            "createdAtMs": 20
-        }),
-    );
-    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
-    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("message");
-
-    let header: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT text FROM engine_search_chat_messages_fts \
-                 WHERE workspace_id='ws' AND thread_id='snippet-thread' AND message_id='__thread__'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("derived thread search header");
-    assert_eq!(header, "First replicated snippet");
-}
-
-#[test]
 fn refused_chat_mutation_rolls_back_all_fts_rows() {
     let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
@@ -5684,221 +3351,6 @@ fn refused_chat_mutation_rolls_back_all_fts_rows() {
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "refused-search-peer").expect("ack"),
         0
-    );
-}
-
-#[test]
-fn imported_channel_create_reuses_the_local_channel_id_rule() {
-    for (origin, channel_id) in [
-        ("long-channel-id", "x".repeat(257)),
-        ("padded-channel-id", " padded-channel ".to_owned()),
-    ] {
-        let (_scratch, _path, mut engine) = open_store();
-        let operation = envelope(
-            origin,
-            0,
-            "chat.channel.create",
-            json!({
-                "channelId": channel_id,
-                "name": "Bounded",
-                "slug": "bounded",
-                "kind": "channel",
-                "createdAtMs": 1
-            }),
-        );
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-        let channel_count: i64 = engine
-            .read_with(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM chat_channels", [], |row| row.get(0))
-            })
-            .expect("channel count");
-        assert_eq!(channel_count, 0);
-        assert_eq!(
-            read_replication_acked_seq(&engine, "ws", origin).expect("ack"),
-            0
-        );
-    }
-}
-
-#[test]
-fn imported_channel_create_refuses_reserved_local_channel_ids() {
-    for (origin, channel_id) in [
-        ("reserved-general-id", GENERAL_CHANNEL_WIRE_ID),
-        ("reserved-agent-id", AGENT_CHANNEL_WIRE_ID),
-    ] {
-        let (_scratch, _path, mut engine) = open_store();
-        let operation = envelope(
-            origin,
-            0,
-            "chat.channel.create",
-            json!({
-                "channelId": channel_id,
-                "name": "Ordinary",
-                "slug": "ordinary",
-                "kind": "channel",
-                "createdAtMs": 1
-            }),
-        );
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-        let channel_count: i64 = engine
-            .read_with(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM chat_channels", [], |row| row.get(0))
-            })
-            .expect("channel count");
-        assert_eq!(channel_count, 0);
-        assert_eq!(
-            read_replication_acked_seq(&engine, "ws", origin).expect("ack"),
-            0
-        );
-    }
-}
-
-#[test]
-fn imported_channel_name_uses_local_nfc_and_utf16_validation() {
-    let (_scratch, _path, mut engine) = open_store();
-    let decomposed = envelope(
-        "channel-name",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "channel-nfc",
-            "name": "Cafe\u{301}",
-            "slug": "cafe",
-            "kind": "channel",
-            "createdAtMs": 1
-        }),
-    );
-    assert!(matches!(
-        apply_chat_envelope(&mut engine, &decomposed, &NoFaults),
-        Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(_),
-            refusals: ref outcome_refusals,
-            sharing_declined: ref outcome_sharing_declined,
-        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
-    ));
-    let stored_name: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT name FROM chat_channels WHERE workspace_id='ws' AND channel_id='channel-nfc'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("normalized channel name");
-    assert_eq!(stored_name, "Café");
-
-    let overlong = envelope(
-        "overlong-channel-name",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "channel-overlong",
-            "name": "x".repeat(81),
-            "slug": "x".repeat(81),
-            "kind": "channel",
-            "createdAtMs": 1
-        }),
-    );
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &overlong, &NoFaults));
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "overlong-channel-name").expect("ack"),
-        0
-    );
-}
-
-#[test]
-fn imported_channel_slug_is_validated_but_derived_from_the_normalized_name() {
-    let (_scratch, _path, mut engine) = open_store();
-    let caller_slug = envelope(
-        "derived-channel-slug",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "channel-derived",
-            "name": "Canonical Name",
-            "slug": "attacker-chosen",
-            "kind": "channel",
-            "createdAtMs": 1
-        }),
-    );
-    assert!(matches!(
-        apply_chat_envelope(&mut engine, &caller_slug, &NoFaults),
-        Ok(ApplyOutcome {
-            primary: ApplyDisposition::Applied(_),
-            refusals: ref outcome_refusals,
-            sharing_declined: ref outcome_sharing_declined,
-        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
-    ));
-    let stored_slug: String = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT slug FROM chat_channels WHERE workspace_id='ws' AND channel_id='channel-derived'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("derived channel slug");
-    assert_eq!(stored_slug, "canonical-name");
-
-    let malformed_slug = envelope(
-        "invalid-channel-slug",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "channel-invalid-slug",
-            "name": "Valid Name",
-            "slug": "NOT VALID",
-            "kind": "channel",
-            "createdAtMs": 1
-        }),
-    );
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &malformed_slug, &NoFaults));
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "invalid-channel-slug").expect("ack"),
-        0
-    );
-}
-
-#[test]
-fn imported_attachment_requires_its_workspace_thread_message_without_fabricating_a_row() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "attachment-owner");
-    let fabricated = envelope(
-        "attachment-owner",
-        3,
-        "chat.attachment.add",
-        json!({
-            "attachmentId": attachment_id_for("missing-message", "object", None, None),
-            "threadId": "thread-imported",
-            "messageId": "missing-message",
-            "targetKind": "file",
-            "objectId": "object",
-            "createdAtMs": 30
-        }),
-    );
-    let result = apply_chat_envelope(&mut engine, &fabricated, &NoFaults);
-    let attachment_count: i64 = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM chat_attachments \
-                 WHERE workspace_id='ws' AND thread_id='thread-imported' AND message_id='missing-message'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("fabricated attachment count");
-    assert_eq!(
-        attachment_count, 0,
-        "no fabricated attachment row may survive"
-    );
-    assert_eq!(
-        result.expect("park missing attachment"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "attachment-owner").expect("attachment ack"),
-        3
     );
 }
 
@@ -6062,347 +3514,6 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
         "unvalidated target ids must not appear in list_follows"
     );
 }
-
-#[test]
-fn imported_authored_fields_reuse_local_display_and_author_id_bounds() {
-    for (origin, field, value) in [
-        (
-            "message-display-bound",
-            "authorDisplayName",
-            "x".repeat(201),
-        ),
-        ("message-author-bound", "authorUserId", "x".repeat(201)),
-    ] {
-        let (_scratch, _path, mut engine) = open_store();
-        imported_chat_fixture(&mut engine, origin);
-        let mut payload = json!({
-            "messageId": format!("message-{origin}"),
-            "threadId": "thread-imported",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "authorUserId": "user",
-            "body": "Body",
-            "createdAtMs": 30
-        });
-        payload[field] = json!(value);
-        let operation = envelope(origin, 3, "chat.message.append", payload);
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-        assert_eq!(
-            read_replication_acked_seq(&engine, "ws", origin).expect("message refusal ack"),
-            3
-        );
-    }
-
-    for (origin, field, value) in [
-        (
-            "reaction-display-bound",
-            "authorDisplayName",
-            "x".repeat(201),
-        ),
-        ("reaction-author-bound", "authorId", "x".repeat(201)),
-    ] {
-        let (_scratch, _path, mut engine) = open_store();
-        let mut payload = reaction_payload("added", "👍", 1, "user");
-        payload[field] = json!(value);
-        let operation = envelope(origin, 0, "chat.reaction.set", payload);
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-        assert_eq!(
-            read_replication_acked_seq(&engine, "ws", origin).expect("reaction refusal ack"),
-            0
-        );
-    }
-}
-
-#[test]
-fn imported_follow_set_refuses_unbounded_or_empty_identities() {
-    for (owner, target) in [
-        ("".to_owned(), "target".to_owned()),
-        ("owner".to_owned(), "".to_owned()),
-        ("😀".repeat(129), "target".to_owned()),
-        ("owner".to_owned(), "😀".repeat(129)),
-    ] {
-        let (_scratch, _path, mut engine) = open_store();
-        let operation = envelope(
-            "invalid-follow",
-            0,
-            "chat.follow.set",
-            json!({
-                "ownerUserId": owner,
-                "targetKind": "person",
-                "targetId": target,
-                "state": "following",
-                "atMs": -1
-            }),
-        );
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-    }
-}
-
-#[test]
-fn imported_follow_refuses_unsafe_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = open_store();
-    let operation = envelope(
-        "unsafe-follow-time",
-        0,
-        "chat.follow.set",
-        json!({
-            "ownerUserId": "owner",
-            "targetKind": "person",
-            "targetId": "target",
-            "state": "following",
-            "atMs": i64::MAX
-        }),
-    );
-
-    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-    let row_count: i64 = engine
-        .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM chat_follows", [], |row| row.get(0))
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("follow row count");
-    assert_eq!(
-        row_count, 0,
-        "dropping the persisted-safe bound persists an LWW value that follow-bearing JavaScript responses cannot represent."
-    );
-    assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "unsafe-follow-time").expect("ack"),
-        0
-    );
-}
-
-#[test]
-fn imported_feed_read_set_refuses_unbounded_or_empty_identities() {
-    for (owner, message) in [
-        ("".to_owned(), "message".to_owned()),
-        ("owner".to_owned(), "".to_owned()),
-        ("😀".repeat(129), "message".to_owned()),
-        ("owner".to_owned(), "😀".repeat(129)),
-    ] {
-        let (_scratch, _path, mut engine) = open_store();
-        let operation = envelope(
-            "invalid-feed-read",
-            0,
-            "chat.feed.read.set",
-            json!({
-                "ownerUserId": owner,
-                "lastSeenCreatedAtMs": -2,
-                "lastSeenMessageId": message,
-                "atMs": -1
-            }),
-        );
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-    }
-}
-
-#[test]
-fn imported_feed_read_refuses_unsafe_timestamps_without_row_and_acks() {
-    for (origin, last_seen_created_at_ms, at_ms) in [
-        ("unsafe-feed-read-time", 1, i64::MAX),
-        ("unsafe-feed-read-cursor", i64::MAX, 1),
-    ] {
-        let (_scratch, _path, mut engine) = open_store();
-        let operation = envelope(
-            origin,
-            0,
-            "chat.feed.read.set",
-            json!({
-                "ownerUserId": "owner",
-                "lastSeenCreatedAtMs": last_seen_created_at_ms,
-                "lastSeenMessageId": "message",
-                "atMs": at_ms
-            }),
-        );
-
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
-        let row_count: i64 = engine
-            .read_with(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM chat_feed_read_state", [], |row| {
-                    row.get(0)
-                })
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)
-            })
-            .expect("feed read row count");
-        assert_eq!(row_count, 0);
-        assert_eq!(
-            read_replication_acked_seq(&engine, "ws", origin).expect("ack"),
-            0
-        );
-    }
-}
-
-fn live_bookmark(engine: &mut EngineStore) -> String {
-    LinkedChatStore::new(engine)
-        .save_bookmark(
-            &SaveBookmark {
-                workspace_id: "ws".to_owned(),
-                owner_user_id: "owner".to_owned(),
-                target_kind: BookmarkTargetKind::Thread,
-                target_id: "thread-imported".to_owned(),
-                mode: BookmarkMode::Live,
-                destination_path: "bookmarks/imported.md".to_owned(),
-                now_ms: 30,
-            },
-            &NoFaults,
-        )
-        .expect("bookmark")
-        .bookmark_id
-}
-
-#[test]
-fn imported_message_requeues_active_live_bookmarks() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "message-bookmark");
-    let bookmark_id = live_bookmark(&mut engine);
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE chat_bookmark_outbox SET projection_state='failed',failure_reason='old' \
-                 WHERE workspace_id='ws' AND bookmark_id=?1",
-                [&bookmark_id],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("failed outbox");
-    let message = envelope(
-        "message-bookmark",
-        3,
-        "chat.message.append",
-        json!({
-            "messageId": "message-imported-2",
-            "threadId": "thread-imported",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "body": "Reply",
-            "createdAtMs": 40
-        }),
-    );
-    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("message");
-    let state: (i64, String, Option<String>, i64) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT generation,projection_state,failure_reason,updated_at_ms \
-                 FROM chat_bookmark_outbox WHERE workspace_id='ws' AND bookmark_id=?1",
-                [&bookmark_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-        })
-        .expect("outbox");
-    assert_eq!(
-        state,
-        (2, "pending".to_owned(), None, 40),
-        "omit the receiver-local bump from imported message apply -> stale generation/state remains."
-    );
-}
-
-#[test]
-fn imported_message_indexes_mentions_only_when_inserted() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "mention-index");
-    let first = envelope(
-        "mention-index",
-        3,
-        "chat.message.append",
-        json!({
-            "messageId": "mention-message",
-            "threadId": "thread-imported",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "body": "hello @one",
-            "createdAtMs": 40
-        }),
-    );
-    let duplicate_id = envelope(
-        "mention-index",
-        4,
-        "chat.message.append",
-        json!({
-            "messageId": "mention-message",
-            "threadId": "thread-imported",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "body": "hostile duplicate @two",
-            "createdAtMs": 50
-        }),
-    );
-    apply_chat_envelope(&mut engine, &first, &NoFaults).expect("first message");
-    apply_chat_envelope(&mut engine, &duplicate_id, &NoFaults).expect("duplicate id");
-    let handles: Vec<String> = engine
-        .read_with(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT handle FROM chat_mentions WHERE message_id='mention-message' ORDER BY handle",
-            )?;
-            stmt.query_map([], |row| row.get(0))?.collect()
-        })
-        .expect("mention handles");
-    assert_eq!(
-        handles,
-        vec!["one"],
-        "indexing before checking INSERT OR IGNORE admits the duplicate payload's handle."
-    );
-}
-
-#[test]
-fn imported_attachment_cross_origin_duplicate_requeues_active_live_bookmarks() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "attachment-bookmark");
-    let bookmark_id = live_bookmark(&mut engine);
-    let attachment = envelope(
-        "attachment-peer",
-        0,
-        "chat.attachment.add",
-        json!({
-            "attachmentId": attachment_id_for("message-imported", "object", None, None),
-            "threadId": "thread-imported",
-            "messageId": "message-imported",
-            "targetKind": "file",
-            "objectId": "object",
-            "pathHint": "notes/file.md",
-            "createdAtMs": 41
-        }),
-    );
-    apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("attachment");
-    let state: (i64, String, i64) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT generation,projection_state,updated_at_ms FROM chat_bookmark_outbox \
-                 WHERE workspace_id='ws' AND bookmark_id=?1",
-                [&bookmark_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-        })
-        .expect("outbox");
-    assert_eq!(
-        state,
-        (2, "pending".to_owned(), 41),
-        "omit the receiver-local bump from imported attachment apply -> bookmark is not reprojected."
-    );
-
-    let cross_origin_duplicate = envelope(
-        "attachment-peer-two",
-        0,
-        "chat.attachment.add",
-        attachment.payload.clone(),
-    );
-    apply_chat_envelope(&mut engine, &cross_origin_duplicate, &NoFaults)
-        .expect("cross-origin duplicate");
-    let duplicated: i64 = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT generation FROM chat_bookmark_outbox \
-                 WHERE workspace_id='ws' AND bookmark_id=?1",
-                [&bookmark_id],
-                |row| row.get(0),
-            )
-        })
-        .expect("outbox after cross-origin duplicate");
-    assert_eq!(
-        duplicated, 3,
-        "gate the bump on INSERT OR IGNORE's affected-row count -> this reachable duplicate stays at 2."
-    );
-}
-
 #[test]
 fn imported_attachment_recomputes_id_and_rejects_mismatch() {
     let (_scratch, _path, mut engine) = open_store();
@@ -6509,43 +3620,6 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
 }
 
 #[test]
-fn chat_reaction_lww_converges_across_origin_arrival_order() {
-    let (_a, _path_a, mut first) = open_store();
-    let (_b, _path_b, mut second) = open_store();
-    let low = envelope(
-        "a",
-        0,
-        "chat.reaction.set",
-        json!({"reactionId":"r","messageId":"m","threadId":"t","emoji":"👍","authorId":"u","authorKind":"human","authorDisplayName":"U","atMs":10,"state":"added"}),
-    );
-    let high = envelope(
-        "b",
-        0,
-        "chat.reaction.set",
-        json!({"reactionId":"r","messageId":"m","threadId":"t","emoji":"👍","authorId":"u","authorKind":"human","authorDisplayName":"U","atMs":20,"state":"removed"}),
-    );
-    apply_chat_envelope(&mut first, &high, &NoFaults).expect("high first");
-    apply_chat_envelope(&mut first, &low, &NoFaults).expect("low second");
-    apply_chat_envelope(&mut second, &low, &NoFaults).expect("low first");
-    apply_chat_envelope(&mut second, &high, &NoFaults).expect("high second");
-    let read = |store: &EngineStore| {
-        store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT state,at_ms,origin_id,origin_seq FROM chat_reactions WHERE workspace_id='ws'",
-                    [],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)),
-                )
-            })
-            .expect("reaction")
-    };
-    assert_eq!(read(&first), read(&second));
-    assert_eq!(read(&first).0, "removed");
-}
-
-/// #5b (feed-read ranking): a delayed older read receipt with a newer wall clock
-/// must not move the read cursor backwards.
-#[test]
 fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "feed-rank-fixture");
@@ -6583,7 +3657,6 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
-    // Older read position (50 < 100) but a newer clock (20 > 10).
     let behind = envelope(
         "peer",
         1,
@@ -6619,7 +3692,6 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
 #[test]
 fn reserved_agent_channel_shapes_rejected() {
     let (_scratch, _path, mut engine) = open_store();
-    // kind=agent but a non-agent wire id -> rejected.
     let rogue_agent = envelope(
         "rogue-agent-peer",
         0,
@@ -6627,8 +3699,6 @@ fn reserved_agent_channel_shapes_rejected() {
         json!({"channelId":"c1","name":"My agent","slug":"my-agent","kind":"agent","createdAtMs":1,"wireId":"wire-not-agent"}),
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &rogue_agent, &NoFaults));
-    // A normal channel squatting the reserved name is also retired as a
-    // refusal under its own origin.
     let name_squat = envelope(
         "squat-peer",
         0,
@@ -6636,8 +3706,6 @@ fn reserved_agent_channel_shapes_rejected() {
         json!({"channelId":"c2","name":"My agent","slug":"reserved-name","kind":"channel","createdAtMs":1}),
     );
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &name_squat, &NoFaults));
-    // The canonical agent channel (agent kind + reserved wire id + reserved
-    // name + canonical slug) applies.
     let canonical = envelope(
         "peer",
         0,
@@ -6656,146 +3724,6 @@ fn reserved_agent_channel_shapes_rejected() {
             sharing_declined: ref outcome_sharing_declined,
         }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
-}
-
-/// A build from before agent ids refused codex's chat, then kept a thread in
-/// it in a hidden group for its wire id. After the upgrade, that group is
-/// codex's chat: the next thread in it applies, and codex's own chat on this
-/// computer is the same chat rather than one whose slug is taken.
-#[test]
-fn another_agents_chat_an_earlier_build_hid_takes_its_next_thread() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    dohc_engine_storage::recovery::create_store_before_migration_for_test(&db, "v2-agent-ids")
-        .expect("earlier store");
-    let codex = "placeholder:device-a:channel_wire_agent_v1_codex";
-    // The suffixes of these wire ids are not agent ids.
-    let my_bot = "placeholder:device-a:channel_wire_agent_v1_my_bot";
-    let review = "placeholder:device-a:channel_wire_agent_v1_code--review";
-    let trailing = "placeholder:device-a:channel_wire_agent_v1_codex-";
-    let conn = rusqlite::Connection::open(&db).expect("open earlier store");
-    conn.execute(
-        "INSERT INTO chat_channels (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
-         VALUES ('ws', ?1, 'my-agent-codex', 'my-agent-codex', 'channel', 5, 5), \
-                ('ws', ?2, 'channel-wire-agent-v1-my-bot', 'channel-wire-agent-v1-my-bot', 'channel', 6, 6), \
-                ('ws', ?3, 'my-agent-code-review', 'my-agent-code-review', 'channel', 7, 7), \
-                ('ws', ?4, 'channel-wire-agent-v1-codex', 'channel-wire-agent-v1-codex', 'channel', 8, 8)",
-        params![codex, my_bot, review, trailing],
-    )
-    .expect("seed the hidden groups");
-    conn.execute(
-        "INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
-         VALUES ('ws', 'channel_wire_agent_v1_codex', ?1), ('ws', 'channel_wire_agent_v1_my_bot', ?2), \
-                ('ws', 'channel_wire_agent_v1_code--review', ?3), ('ws', 'channel_wire_agent_v1_codex-', ?4)",
-        params![codex, my_bot, review, trailing],
-    )
-    .expect("seed the wire ids");
-    conn.execute(
-        "INSERT INTO chat_channel_placeholders (workspace_id, channel_id, wire_id) \
-         VALUES ('ws', ?1, 'channel_wire_agent_v1_codex'), ('ws', ?2, 'channel_wire_agent_v1_my_bot'), \
-                ('ws', ?3, 'channel_wire_agent_v1_code--review'), ('ws', ?4, 'channel_wire_agent_v1_codex-')",
-        params![codex, my_bot, review, trailing],
-    )
-    .expect("seed the placeholders");
-    conn.execute(
-        "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, updated_at_ms, channel_id) \
-         VALUES ('ws', 'codex-first', 'First', 5, 5, ?1)",
-        params![codex],
-    )
-    .expect("seed the first thread");
-    drop(conn);
-
-    let mut engine = EngineStore::open(&db, 1_000).expect("migrate");
-    for (origin, thread_id, payload) in [
-        (
-            "device-a",
-            "codex-second",
-            json!({
-                "threadId": "codex-second", "title": "Second", "createdAtMs": 20,
-                "channelSlug": "my-agent-codex", "channelWireId": "channel_wire_agent_v1_codex"
-            }),
-        ),
-        (
-            "device-c",
-            "my-bot-second",
-            json!({
-                "threadId": "my-bot-second", "title": "Second", "createdAtMs": 21,
-                "channelWireId": "channel_wire_agent_v1_my_bot"
-            }),
-        ),
-        (
-            "device-d",
-            "review-second",
-            json!({
-                "threadId": "review-second", "title": "Second", "createdAtMs": 22,
-                "channelWireId": "channel_wire_agent_v1_code--review"
-            }),
-        ),
-        (
-            "device-e",
-            "trailing-second",
-            json!({
-                "threadId": "trailing-second", "title": "Second", "createdAtMs": 23,
-                "channelWireId": "channel_wire_agent_v1_codex-"
-            }),
-        ),
-    ] {
-        let operation = envelope(origin, 0, "chat.thread.create", payload);
-        assert_eq!(
-            apply_chat_envelope(&mut engine, &operation, &NoFaults).expect(thread_id),
-            ApplyOutcome::new(ApplyDisposition::Applied(Vec::new())),
-            "{thread_id} applies"
-        );
-    }
-
-    // The kind and agent of a thread's chat, and whether that chat is hidden.
-    let chat_of = |thread_id: &str| -> (String, Option<String>, bool) {
-        engine
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT c.kind, c.agent_id, \
-                            EXISTS (SELECT 1 FROM chat_channel_placeholders p \
-                                    WHERE p.workspace_id = c.workspace_id AND p.channel_id = c.channel_id) \
-                     FROM chat_threads t \
-                     JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
-                     WHERE t.workspace_id = 'ws' AND t.thread_id = ?1",
-                    [thread_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-            })
-            .expect("the thread's chat")
-    };
-    assert_eq!(
-        chat_of("codex-second"),
-        ("agent".to_owned(), Some("codex".to_owned()), false),
-        "the hidden group is codex's chat"
-    );
-    for thread_id in ["my-bot-second", "review-second", "trailing-second"] {
-        assert_eq!(
-            chat_of(thread_id),
-            ("channel".to_owned(), None, true),
-            "{thread_id}: a wire id that names no agent keeps its hidden group"
-        );
-    }
-
-    let mut chats = LinkedChatStore::new(&mut engine);
-    let chat = chats
-        .ensure_agent_channel("ws", "codex-here", "codex", "Codex", 30, &NoFaults)
-        .expect("codex's chat");
-    assert_eq!(chat.channel_id, codex);
-    assert_eq!(chat.slug, "my-agent-codex");
-    assert_eq!(chat.kind, ChatChannelKind::Agent);
-    assert_eq!(chat.agent_id.as_deref(), Some("codex"));
-    assert_eq!(
-        chats
-            .list_channels("ws")
-            .expect("channels")
-            .iter()
-            .filter(|summary| summary.channel.agent_id.as_deref() == Some("codex"))
-            .map(|summary| summary.thread_count)
-            .collect::<Vec<_>>(),
-        vec![2]
-    );
 }
 
 /// A thread whose agent's wire id maps to a group is refused, and the next op
@@ -6844,45 +3772,6 @@ fn a_thread_for_an_agent_wire_id_that_maps_to_a_group_is_refused() {
     );
 }
 
-/// An earlier build's group named "My agent notes" sends a thread before its
-/// create. The group's hidden placeholder keeps the name and takes a slug no
-/// agent chat can have, as the group's create would.
-#[test]
-fn a_hidden_group_named_like_an_agent_chat_takes_another_slug() {
-    let (_scratch, _path, mut engine) = open_store();
-    let operation = envelope(
-        "device-a",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "notes-thread", "title": "Notes", "createdAtMs": 20,
-            "channelSlug": "my-agent-notes", "channelWireId": "notes-wire"
-        }),
-    );
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("the thread"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    let (name, slug): (String, String) = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT c.name, c.slug FROM chat_threads t \
-                 JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
-                 WHERE t.workspace_id = 'ws' AND t.thread_id = 'notes-thread'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-        })
-        .expect("the thread's group");
-    assert_eq!(name, "my-agent-notes");
-    assert_eq!(
-        slug,
-        dohc_engine_domain::chats::channel_collision_slug("my-agent-notes", "notes-wire", 0)
-    );
-}
-
-/// An earlier build's group named "My agent notes".
 fn seed_notes_group(engine: &mut EngineStore) {
     engine
         .write_with(&NoFaults, |tx| {
@@ -6916,7 +3805,6 @@ fn moved_notes_group() -> (String, String) {
     )
 }
 
-/// Start a thread in `channel_id` and return the thread create it journaled.
 fn journaled_thread(engine: &mut EngineStore, channel_id: &str) -> ReplicationEnvelope {
     LinkedChatStore::new(engine)
         .start_channel_thread(
@@ -7023,125 +3911,6 @@ fn an_agent_chat_from_sync_takes_its_slug_from_a_group() {
         .expect("the other computer's hidden chat");
     assert_eq!(peer_chat, ("agent".to_owned(), "my-agent-notes".to_owned()));
     assert_eq!(name_and_slug(&peer, "notes-group"), moved_notes_group());
-}
-
-/// An earlier sync or upgrade left the notes agent's chat on another slug,
-/// beside the group that holds its agent's slug. A thread made there still
-/// goes out with the agent's slug, and making the agent's chat moves the chat
-/// back onto it.
-#[test]
-fn an_agent_chat_on_another_slug_goes_back_to_its_own() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_notes_group(&mut engine);
-    let hashed = dohc_engine_domain::chats::channel_collision_slug(
-        "my-agent-notes",
-        "channel_wire_agent_v1_notes",
-        0,
-    );
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO chat_channels \
-                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, agent_id) \
-                 VALUES ('ws', 'notes-chat', 'Notes', ?1, 'agent', 2, 2, 'notes')",
-                [&hashed],
-            )
-            .map_err(SyncError::persist)?;
-            tx.execute_batch(
-                "INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
-                 VALUES ('ws', 'channel_wire_agent_v1_notes', 'notes-chat')",
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("the notes agent's chat on another slug");
-
-    let thread = journaled_thread(&mut engine, "notes-chat");
-    assert_eq!(thread.payload["channelSlug"], json!("my-agent-notes"));
-    let (_peer_scratch, _peer_path, mut peer) = open_store();
-    assert_eq!(
-        apply_chat_envelope(&mut peer, &thread, &NoFaults).expect("the other computer"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-
-    let chat = LinkedChatStore::new(&mut engine)
-        .ensure_agent_channel("ws", "notes-here", "notes", "Notes", 30, &NoFaults)
-        .expect("the notes agent's chat");
-    assert_eq!(
-        (chat.channel_id.as_str(), chat.slug.as_str()),
-        ("notes-chat", "my-agent-notes")
-    );
-    assert_eq!(name_and_slug(&engine, "notes-group"), moved_notes_group());
-}
-
-/// Only a crafted op can leave one agent's chat on another agent's slug. The
-/// notes agent's chat still takes its slug when it arrives, and the other chat
-/// goes back to its own when its agent's chat is made.
-#[test]
-fn an_agent_chat_takes_its_slug_from_another_agents_chat() {
-    let (_scratch, _path, mut engine) = open_store();
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute_batch(
-                "INSERT INTO chat_channels \
-                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms, agent_id) \
-                 VALUES ('ws', 'codex-chat', 'Codex', 'my-agent-notes', 'agent', 1, 1, 'codex')",
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("the codex agent's chat on the notes agent's slug");
-    let create = envelope(
-        "device-a",
-        0,
-        "chat.channel.create",
-        json!({
-            "channelId": "notes-chat", "name": "Notes", "slug": "my-agent-notes",
-            "kind": "agent", "createdAtMs": 5, "wireId": "channel_wire_agent_v1_notes"
-        }),
-    );
-    apply_chat_envelope(&mut engine, &create, &NoFaults).expect("the notes agent's chat");
-    assert_eq!(
-        name_and_slug(&engine, "notes-chat"),
-        ("Notes".to_owned(), "my-agent-notes".to_owned())
-    );
-    assert_eq!(
-        name_and_slug(&engine, "codex-chat"),
-        (
-            "Codex".to_owned(),
-            dohc_engine_domain::chats::channel_collision_slug("my-agent-notes", "codex-chat", 0)
-        )
-    );
-
-    let chat = LinkedChatStore::new(&mut engine)
-        .ensure_agent_channel("ws", "codex-here", "codex", "Codex", 30, &NoFaults)
-        .expect("the codex agent's chat");
-    assert_eq!(
-        (chat.channel_id.as_str(), chat.slug.as_str()),
-        ("codex-chat", "my-agent-codex")
-    );
-}
-
-#[test]
-fn imported_agent_message_keeps_its_owner_display_name() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "agent-owner");
-    let operation = envelope(
-        "agent-owner",
-        3,
-        "chat.message.append",
-        json!({
-            "messageId": "agent-owner-message", "threadId": "thread-imported",
-            "authorKind": "agent", "authorDisplayName": "Nova", "authorOwnerDisplayName": "Ada",
-            "body": "Done", "createdAtMs": 30
-        }),
-    );
-    apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("apply");
-    let stored: String = engine.read_with(|conn| {
-        conn.query_row("SELECT author_owner_display_name FROM chat_messages WHERE message_id='agent-owner-message'", [], |row| row.get(0))
-            .map_err(dohc_engine_storage::StorageError::corrupt_public)
-    }).expect("owner");
-    assert_eq!(stored, "Ada");
 }
 
 /// A name from another device reaches chat without characters that hide or
@@ -7251,8 +4020,6 @@ fn imported_chat_names_drop_characters_that_hide_or_reorder_text() {
         .expect("stored reaction");
     assert_eq!(reacted, "Analisa");
 
-    // A name with nothing visible left is no name, for a post and for the
-    // person an agent posts for.
     for (seq, name, owner) in [
         (8, "\u{200B}\u{3164}", None),
         (9, "\u{200C}", None),
@@ -7271,90 +4038,6 @@ fn imported_chat_names_drop_characters_that_hide_or_reorder_text() {
         let blank = envelope("peer", seq, "chat.message.append", payload);
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &blank, &NoFaults));
     }
-}
-
-/// An older build parked posts whose names this build refuses. When their
-/// thread arrives, the thread applies and each such post is refused.
-#[test]
-fn a_parked_post_whose_name_is_now_refused_lets_its_thread_arrive() {
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "peer");
-    let parked = [
-        ("human", "\u{200B}", None),
-        ("human", "\u{3164}", None),
-        ("agent", "Nova", Some("\u{200D}")),
-    ];
-    for (seq, (author_kind, name, owner)) in parked.into_iter().enumerate() {
-        let seq = seq as i64;
-        let mut payload = json!({
-            "messageId": format!("parked-{seq}"), "threadId": "late-thread",
-            "authorKind": author_kind, "authorDisplayName": "Ana", "body": "Hi",
-            "createdAtMs": 30
-        });
-        if owner.is_some() {
-            payload["authorOwnerDisplayName"] = json!("Ana");
-        }
-        let op = envelope("old-peer", seq, "chat.message.append", payload.clone());
-        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("parked post");
-        // The payload as the older build recorded it.
-        payload["authorDisplayName"] = json!(name);
-        if let Some(owner) = owner {
-            payload["authorOwnerDisplayName"] = json!(owner);
-        }
-        engine
-            .write_with(&NoFaults, |tx| {
-                tx.execute(
-                    "UPDATE replication_log SET payload_json = ?2 \
-                     WHERE workspace_id = 'ws' AND origin_id = 'old-peer' AND origin_seq = ?1",
-                    params![seq, payload.to_string()],
-                )
-                .map_err(SyncError::persist)
-            })
-            .expect("record the older payload");
-    }
-    assert_eq!(pending_chat_coordinate_count(&engine), 3);
-
-    let thread = envelope(
-        "late-thread-peer",
-        0,
-        "chat.thread.create",
-        json!({ "threadId": "late-thread", "title": "Late thread", "createdAtMs": 20, "channelSlug": "imported" }),
-    );
-    let outcome = apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("the thread applies");
-    assert!(
-        matches!(outcome.primary, ApplyDisposition::Applied(_)),
-        "the thread arrives"
-    );
-    let mut refused: Vec<(String, i64)> = outcome
-        .refusals
-        .iter()
-        .map(|refusal| (refusal.origin_id.clone(), refusal.origin_seq))
-        .collect();
-    refused.sort();
-    assert_eq!(
-        refused,
-        [0, 1, 2].map(|seq| ("old-peer".to_owned(), seq)).to_vec()
-    );
-    assert_eq!(pending_chat_coordinate_count(&engine), 0);
-    let (threads, posts): (i64, i64) = engine
-        .read_with(|conn| {
-            Ok::<_, dohc_engine_storage::StorageError>((
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_threads WHERE thread_id = 'late-thread'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_messages WHERE message_id LIKE 'parked-%'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
-            ))
-        })
-        .expect("counts");
-    assert_eq!((threads, posts), (1, 0));
 }
 
 #[test]
@@ -7413,207 +4096,6 @@ fn received_and_parked_messages_wake_no_agent_here() {
         (2, 0),
         "only the sender's computer records a request"
     );
-}
-
-#[test]
-fn an_imported_agent_message_keeps_what_it_reported_and_a_bad_report_is_refused() {
-    use dohc_engine_domain::{ChatReportedAgent, LinkedChatStore};
-    let setup = |engine: &mut EngineStore, origin: &str| {
-        for (seq, kind, payload) in [
-            (
-                0,
-                "chat.channel.create",
-                json!({"channelId": "channel-1", "name": "General", "slug": "general", "kind": "channel", "createdAtMs": 10}),
-            ),
-            (
-                1,
-                "chat.thread.create",
-                json!({"threadId": "thread-1", "title": "", "createdAtMs": 20, "channelSlug": "general", "channelWireId": "channel-1"}),
-            ),
-        ] {
-            apply_chat_envelope(engine, &envelope(origin, seq, kind, payload), &NoFaults)
-                .expect("apply chat op");
-        }
-    };
-    let message = |author_kind: &str, reported: serde_json::Value| {
-        let mut message = json!({
-            "messageId": "message-1",
-            "threadId": "thread-1",
-            "authorKind": author_kind,
-            "authorDisplayName": "Nova",
-            "body": "Opened a PR",
-            "createdAtMs": 20,
-            "authorReported": reported,
-        });
-        if author_kind == "agent" {
-            message["authorOwnerDisplayName"] = json!("Ice");
-        }
-        message
-    };
-
-    let (_scratch, _path, mut engine) = open_store();
-    setup(&mut engine, "reported");
-    let op = envelope(
-        "reported",
-        2,
-        "chat.message.append",
-        message(
-            "agent",
-            json!({"product": "Claude Code", "version": "2.1", "model": "Claude Opus 5.5"}),
-        ),
-    );
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("apply message"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    let stored = LinkedChatStore::new(&mut engine)
-        .get_message("ws", "message-1")
-        .expect("message");
-    assert_eq!(
-        stored.author_reported,
-        Some(ChatReportedAgent {
-            product: Some("Claude Code".to_owned()),
-            version: Some("2.1".to_owned()),
-            model: Some("Claude Opus 5.5".to_owned()),
-        })
-    );
-
-    // A message from a build that sends no report stores none.
-    let (_scratch, _path, mut engine) = open_store();
-    setup(&mut engine, "unreported");
-    let mut unreported = message("agent", json!(null));
-    unreported
-        .as_object_mut()
-        .expect("payload")
-        .remove("authorReported");
-    let op = envelope("unreported", 2, "chat.message.append", unreported);
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("apply message"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    assert_eq!(
-        LinkedChatStore::new(&mut engine)
-            .get_message("ws", "message-1")
-            .expect("message")
-            .author_reported,
-        None
-    );
-
-    for (author_kind, reported) in [
-        ("human", json!({"product": "Claude Code"})),
-        ("agent", json!({"version": "2.1"})),
-        ("agent", json!({"product": "Claude\u{7}Code"})),
-        // 40 emoji are 80 UTF-16 units, past the limit JavaScript counts.
-        ("agent", json!({"model": "\u{1F600}".repeat(40)})),
-        ("agent", json!({"product": "\u{FEFF}Claude Code"})),
-    ] {
-        let (_scratch, _path, mut engine) = open_store();
-        setup(&mut engine, "bad-report");
-        let op = envelope(
-            "bad-report",
-            2,
-            "chat.message.append",
-            message(author_kind, reported),
-        );
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
-    }
-}
-
-/// An agent message from another computer keeps its work report, so the
-/// thread's Work card is the same there. A report from a person, with an
-/// unknown status or with a bad link is refused.
-#[test]
-fn an_imported_agent_message_keeps_its_work_report_and_a_bad_report_is_refused() {
-    use dohc_engine_domain::{ChatWorkReport, ChatWorkStatus, LinkedChatStore};
-    let setup = |engine: &mut EngineStore, origin: &str| {
-        for (seq, kind, payload) in [
-            (
-                0,
-                "chat.channel.create",
-                json!({"channelId": "channel-1", "name": "General", "slug": "general", "kind": "channel", "createdAtMs": 10}),
-            ),
-            (
-                1,
-                "chat.thread.create",
-                json!({"threadId": "thread-1", "title": "", "createdAtMs": 20, "channelSlug": "general", "channelWireId": "channel-1"}),
-            ),
-        ] {
-            apply_chat_envelope(engine, &envelope(origin, seq, kind, payload), &NoFaults)
-                .expect("apply chat op");
-        }
-    };
-    let message = |author_kind: &str, work: serde_json::Value| {
-        let mut message = json!({
-            "messageId": "message-1",
-            "threadId": "thread-1",
-            "authorKind": author_kind,
-            "authorDisplayName": "Nova",
-            "body": "Opened a PR",
-            "createdAtMs": 20,
-            "work": work,
-        });
-        if author_kind == "agent" {
-            message["authorOwnerDisplayName"] = json!("Ice");
-        }
-        message
-    };
-
-    let (_scratch, _path, mut engine) = open_store();
-    setup(&mut engine, "worked");
-    let op = envelope(
-        "worked",
-        2,
-        "chat.message.append",
-        message(
-            "agent",
-            json!({"status": "waiting", "url": "https://example.com/pull/7"}),
-        ),
-    );
-    assert_eq!(
-        apply_chat_envelope(&mut engine, &op, &NoFaults).expect("apply message"),
-        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
-    );
-    let chats = LinkedChatStore::new(&mut engine);
-    assert_eq!(
-        chats.get_message("ws", "message-1").expect("message").work,
-        Some(ChatWorkReport {
-            status: ChatWorkStatus::Waiting,
-            url: Some("https://example.com/pull/7".to_owned()),
-        })
-    );
-    let card = chats
-        .get_thread("ws", "thread-1")
-        .expect("thread")
-        .work
-        .expect("the thread's work card");
-    assert_eq!(card.status, ChatWorkStatus::Waiting);
-    assert_eq!(card.url.as_deref(), Some("https://example.com/pull/7"));
-    assert_eq!(card.message_id, "message-1");
-
-    for (author_kind, work) in [
-        ("human", json!({"status": "working"})),
-        ("agent", json!({"status": "paused"})),
-        ("agent", json!({"url": "https://example.com/pull/7"})),
-        (
-            "agent",
-            json!({"status": "working", "url": "file:///etc/passwd"}),
-        ),
-        (
-            "agent",
-            json!({"status": "working", "url": "https://example.com/a b"}),
-        ),
-        ("agent", json!("working")),
-    ] {
-        let (_scratch, _path, mut engine) = open_store();
-        setup(&mut engine, "bad-work");
-        let op = envelope(
-            "bad-work",
-            2,
-            "chat.message.append",
-            message(author_kind, work),
-        );
-        assert_invalid_refusal!(apply_chat_envelope(&mut engine, &op, &NoFaults));
-    }
 }
 
 /// An agent message that arrives before its thread keeps its work report when
@@ -7856,8 +4338,6 @@ fn a_parked_agent_message_keeps_its_report_and_a_bad_parked_report_is_refused() 
 fn a_parked_agent_connection_stays_on_a_link_message_and_a_bad_one_is_refused() {
     use dohc_engine_domain::{ChatMessageLinkAuthor, LinkedChatStore};
 
-    // Parks `message` before its thread exists, then plants `connection`
-    // in its payload as an older build kept it.
     fn park(engine: &mut EngineStore, message: &ReplicationEnvelope, connection: &str) {
         imported_chat_fixture(engine, "peer");
         assert_eq!(
@@ -7965,5 +4445,919 @@ fn a_parked_agent_connection_stays_on_a_link_message_and_a_bad_one_is_refused() 
             "{bad:?}"
         );
         assert_eq!(stored(&engine), 0, "{bad:?}");
+    }
+}
+
+/// A kind no build knows yet. A later build in these tests reads it as a
+/// thread read mark.
+const FUTURE_PRIVATE_KIND: &str = "chat.future.private.set";
+
+fn seed_owner_account(engine: &mut EngineStore, account: &str) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_account_read_seeds \
+                 (workspace_id, account_user_id, seeded_local, completed_at_ms) \
+                 VALUES ('ws', ?1, 0, 1)",
+                [account],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("owner account");
+}
+
+fn future_private_op(
+    origin: &str,
+    seq: i64,
+    marker: Option<serde_json::Value>,
+) -> ReplicationEnvelope {
+    let mut payload = json!({
+        "accountUserId": "owner",
+        "threadId": "thread-imported",
+        "lastReadCreatedAtMs": 20,
+        "lastReadMessageId": "message-imported",
+        "atMs": 100 + seq
+    });
+    if let Some(marker) = marker {
+        payload["ownerPrivateAccountId"] = marker;
+    }
+    envelope(origin, seq, FUTURE_PRIVATE_KIND, payload)
+}
+
+fn log_row(engine: &EngineStore, origin: &str, seq: i64) -> Option<(String, String, i64, String)> {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT op_kind, payload_json, recorded_at_ms, apply_disposition \
+                 FROM replication_log WHERE workspace_id='ws' AND origin_id=?1 AND origin_seq=?2",
+                params![origin, seq],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("log row")
+}
+
+fn pending_refusal_count(engine: &EngineStore) -> i64 {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_pending_refusals WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("pending refusals")
+}
+
+/// The fingerprint of the later build these tests stand in for: its one
+/// owner-private kind.
+const LATER_BUILD: &str = FUTURE_PRIVATE_KIND;
+
+fn stored_fingerprint(engine: &EngineStore) -> Option<String> {
+    engine
+        .read_with(crate::owner_private::stored_fingerprint)
+        .expect("fingerprint")
+}
+
+fn replay_as_later_build(
+    engine: &mut EngineStore,
+    faults: &dyn FaultInjector,
+    applies: &std::cell::Cell<usize>,
+) -> Result<usize, SyncError> {
+    crate::owner_private::replay_known(engine, faults, &[FUTURE_PRIVATE_KIND], |tx, op| {
+        applies.set(applies.get() + 1);
+        let mut known = op.clone();
+        known.op_kind = "chat.thread.read.set".to_owned();
+        crate::apply::apply_chat_lww_projection_tx(tx, &known)
+    })
+}
+
+fn assert_refused_as_unsupported(engine: &mut EngineStore, op: &ReplicationEnvelope) {
+    let outcome = apply_replication_envelope(
+        engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply");
+    assert!(
+        matches!(
+            &outcome.primary,
+            ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { reason },
+                ..
+            }) if reason == "operation kind is not supported by this client"
+        ),
+        "{}: {outcome:?}",
+        op.origin_id
+    );
+}
+
+#[test]
+fn a_marked_private_record_this_build_cannot_read_is_kept_quietly_then_replayed_once() {
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    let future = future_private_op("phone", 0, Some(json!("owner")));
+    let known = envelope(
+        "phone",
+        1,
+        "chat.message.append",
+        json!({
+            "messageId": "message-late",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Later",
+            "createdAtMs": 40
+        }),
+    );
+    let client = RelaySyncClient::new(FakeRelay {
+        pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
+            ops: vec![future.clone(), known],
+            next_cursor: 2,
+            has_more: false,
+        })),
+        ..Default::default()
+    });
+    let outcome = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_000,
+        )
+        .expect("pull");
+    let SyncPassOutcome::Complete {
+        applied,
+        refused,
+        skipped,
+        refusals,
+        pending_cursor: Some(pending_cursor),
+        ..
+    } = outcome
+    else {
+        panic!("pull must complete with a cursor: {outcome:?}");
+    };
+    assert_eq!((applied, refused, skipped), (1, 0, 1));
+    assert!(refusals.is_empty());
+    assert_eq!(pending_cursor.cursor, 2);
+    client
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &pending_cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            3_000,
+        )
+        .expect("commit cursor");
+    assert_eq!(
+        read_relay_cursor(&engine, "ws")
+            .expect("cursor")
+            .map(|cursor| cursor.cursor),
+        Some(2)
+    );
+
+    let (kind, payload, recorded_at_ms, disposition) =
+        log_row(&engine, "phone", 0).expect("the record is kept");
+    assert_eq!(kind, FUTURE_PRIVATE_KIND);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&payload).expect("payload"),
+        future.payload
+    );
+    assert_eq!(recorded_at_ms, future.recorded_at_ms);
+    assert_eq!(disposition, "refused");
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "phone").expect("ack"),
+        1
+    );
+    assert_eq!(pending_refusal_count(&engine), 0);
+    assert!(
+        list_refusal_notices(&engine, "ws")
+            .expect("notices")
+            .is_empty()
+    );
+    let later_message: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' AND message_id='message-late'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("later message");
+    assert_eq!(later_message, 1, "the next record from the origin applied");
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("redelivery"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+    assert_eq!(pending_refusal_count(&engine), 0);
+
+    drop(engine);
+    let mut reopened = EngineStore::open(&path, 3_001).expect("reopen");
+    assert_eq!(
+        replay_retained_owner_private(&mut reopened, &NoFaults).expect("replay"),
+        0
+    );
+    assert_eq!(log_row(&reopened, "phone", 0).expect("kept").3, "refused");
+
+    let applies = std::cell::Cell::new(0);
+    assert_eq!(
+        replay_as_later_build(&mut reopened, &NoFaults, &applies).expect("later build"),
+        1
+    );
+    assert_eq!(applies.get(), 1);
+    assert_eq!(
+        account_thread_mark(&reopened, "thread-imported"),
+        Some((20, "message-imported".to_owned()))
+    );
+    assert_eq!(log_row(&reopened, "phone", 0).expect("kept").3, "applied");
+    assert_eq!(pending_refusal_count(&reopened), 0);
+    assert_eq!(
+        replay_as_later_build(&mut reopened, &NoFaults, &applies).expect("again"),
+        0
+    );
+    assert_eq!(applies.get(), 1, "it never applies twice");
+}
+
+#[test]
+fn a_crash_keeps_neither_a_quiet_record_nor_its_replay() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    let future = future_private_op("phone", 0, Some(json!("owner")));
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future,
+            faults.as_ref(),
+            &NoLiveLeases,
+        )
+        .expect("crash outcome"),
+        ApplyOutcome::new(ApplyDisposition::Crashed { committed: false })
+    );
+    assert_eq!(log_row(&engine, "phone", 0), None);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "phone").expect("ack"),
+        -1
+    );
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("retry"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "phone").expect("ack"),
+        0
+    );
+
+    let applies = std::cell::Cell::new(0);
+    let crash = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
+    assert!(matches!(
+        replay_as_later_build(&mut engine, crash.as_ref(), &applies),
+        Err(SyncError::FaultCrash)
+    ));
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "refused");
+    // The fingerprint commits with the last record, so the next open scans
+    // again.
+    assert_eq!(stored_fingerprint(&engine), None);
+    assert_eq!(
+        replay_as_later_build(&mut engine, &NoFaults, &applies).expect("replay"),
+        1
+    );
+    assert_eq!(stored_fingerprint(&engine).as_deref(), Some(LATER_BUILD));
+    assert_eq!(
+        account_thread_mark(&engine, "thread-imported"),
+        Some((20, "message-imported".to_owned()))
+    );
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "applied");
+}
+
+#[test]
+fn a_changed_quiet_record_at_its_coordinate_diverges() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_owner_account(&mut engine, "owner");
+    let future = future_private_op("phone", 0, Some(json!("owner")));
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("kept"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+    let mut changed = future.clone();
+    changed.payload["atMs"] = json!(999);
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &changed,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Err(SyncError::CoordinateDiverged)
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "phone").expect("ack"),
+        0
+    );
+    let (_, payload, _, disposition) = log_row(&engine, "phone", 0).expect("kept");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&payload).expect("payload"),
+        future.payload
+    );
+    assert_eq!(disposition, "refused");
+    assert_eq!(pending_refusal_count(&engine), 0);
+}
+
+#[test]
+fn an_unknown_record_without_the_owners_marker_is_refused_visibly() {
+    let (_scratch, _path, mut engine) = open_store();
+    assert_refused_as_unsupported(
+        &mut engine,
+        &future_private_op("no-owner-yet", 0, Some(json!("owner"))),
+    );
+    seed_owner_account(&mut engine, "owner");
+    let cases = [
+        future_private_op("another-account", 0, Some(json!("someone-else"))),
+        future_private_op("absent", 0, None),
+        future_private_op("number", 0, Some(json!(7))),
+        future_private_op("empty", 0, Some(json!(""))),
+        future_private_op("null", 0, Some(serde_json::Value::Null)),
+        future_private_op("padded", 0, Some(json!(" owner"))),
+        // A kind outside chat, and lanes another account or the relay writes.
+        envelope(
+            "non-chat",
+            0,
+            "version.rename",
+            json!({"ownerPrivateAccountId": "owner"}),
+        ),
+        future_private_op("relay:share-member:member", 0, Some(json!("owner"))),
+        future_private_op("shared:share-1:peer", 0, Some(json!("owner"))),
+        future_private_op("service-host:host", 0, Some(json!("owner"))),
+    ];
+    for op in &cases {
+        let before = pending_refusal_count(&engine);
+        assert_refused_as_unsupported(&mut engine, op);
+        assert_eq!(
+            pending_refusal_count(&engine),
+            before + 1,
+            "{}",
+            op.origin_id
+        );
+    }
+    assert_eq!(
+        list_refusal_notices(&engine, "ws").expect("notices").len(),
+        cases.len() + 1
+    );
+}
+
+#[test]
+fn a_marker_never_quiets_a_known_record() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    for op in [
+        envelope(
+            "forged-chat",
+            0,
+            "chat.message.append",
+            json!({"messageId": 7, "ownerPrivateAccountId": "owner"}),
+        ),
+        envelope(
+            "forged-file",
+            0,
+            "ydoc.update",
+            json!({"ownerPrivateAccountId": "owner"}),
+        ),
+    ] {
+        let before = pending_refusal_count(&engine);
+        let outcome = apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("apply");
+        assert!(
+            matches!(outcome.primary, ApplyDisposition::Refused(_)),
+            "{}: {outcome:?}",
+            op.op_kind
+        );
+        assert_eq!(pending_refusal_count(&engine), before + 1, "{}", op.op_kind);
+    }
+
+    let mut mismatched = thread_read_op("marked", 0, "thread-imported", 20, "message-imported");
+    mismatched.payload["ownerPrivateAccountId"] = json!("someone-else");
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &mismatched, &NoFaults));
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+    let mut marked = thread_read_op("marked", 1, "thread-imported", 20, "message-imported");
+    marked.payload["ownerPrivateAccountId"] = json!("owner");
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &marked, &NoFaults).expect("marked mark"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        account_thread_mark(&engine, "thread-imported"),
+        Some((20, "message-imported".to_owned()))
+    );
+}
+
+#[test]
+fn a_share_lane_never_takes_a_marked_record() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_owner_account(&mut engine, "owner");
+    let channel = ShareBoundary {
+        share_id: "share-channel".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-allowed".to_owned()),
+        granted: None,
+    };
+    let view = ShareBoundary {
+        share_id: "share-view".to_owned(),
+        surface: ShareSurface::ShareView,
+        channel_wire_id: None,
+        granted: Some(ShareGrant {
+            paths: vec!["shared".to_owned()],
+            version_id: None,
+            access: ShareAccess::View,
+        }),
+    };
+    let future = future_private_op("peer", 0, Some(json!("owner")));
+    let mut known = thread_read_op("peer", 1, "thread-imported", 20, "message-imported");
+    known.payload["ownerPrivateAccountId"] = json!("owner");
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &channel, &future, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &channel, &known, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &view, &future, &NoFaults),
+        Err(SyncError::UnsupportedOperation)
+    ));
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &view, &known, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    let shared_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE origin_id LIKE 'shared:%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("shared rows");
+    assert_eq!(shared_rows, 0);
+}
+
+#[test]
+fn replay_leaves_visible_refusals_and_a_refused_replay_alone() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    // An older build's refusal carries no marker; another account's keeps
+    // naming that account after its Notice is dismissed.
+    assert_refused_as_unsupported(&mut engine, &future_private_op("older-build", 0, None));
+    assert_refused_as_unsupported(
+        &mut engine,
+        &future_private_op("other-account", 0, Some(json!("someone-else"))),
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM replication_pending_refusals \
+                 WHERE workspace_id='ws' AND origin_id='other-account'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("dismiss");
+    // A quiet record its later applier refuses: the right message at the
+    // wrong time.
+    let mut wrong_time = future_private_op("phone", 0, Some(json!("owner")));
+    wrong_time.payload["lastReadCreatedAtMs"] = json!(21);
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &wrong_time,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("kept"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+
+    let applies = std::cell::Cell::new(0);
+    assert_eq!(
+        replay_as_later_build(&mut engine, &NoFaults, &applies).expect("replay"),
+        0
+    );
+    assert_eq!(
+        applies.get(),
+        1,
+        "only the quiet record reaches the applier"
+    );
+    assert_eq!(pending_refusal_count(&engine), 1);
+    for origin in ["older-build", "other-account", "phone"] {
+        assert_eq!(
+            log_row(&engine, origin, 0).expect("kept").3,
+            "refused",
+            "{origin}"
+        );
+    }
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+}
+
+fn watch_log_reads(engine: &mut EngineStore) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = reads.clone();
+    engine
+        .hooks_with(|conn| {
+            conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                if matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "replication_log",
+                        ..
+                    }
+                ) {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+        })
+        .expect("watch log reads");
+    reads
+}
+
+fn log_reads(reads: &std::sync::atomic::AtomicUsize) -> usize {
+    reads.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[test]
+fn replay_reads_the_log_only_when_the_builds_kinds_change() {
+    let (_scratch, path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    // A copy that hasn't recorded its owner keeps nothing quietly, so it
+    // never scans and stores nothing.
+    let reads = watch_log_reads(&mut engine);
+    assert_eq!(
+        replay_retained_owner_private(&mut engine, &NoFaults).expect("unseeded"),
+        0
+    );
+    assert_eq!(log_reads(&reads), 0);
+    assert_eq!(stored_fingerprint(&engine), None);
+
+    seed_owner_account(&mut engine, "owner");
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future_private_op("phone", 0, Some(json!("owner"))),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("kept"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+
+    let reads = watch_log_reads(&mut engine);
+    assert_eq!(
+        replay_retained_owner_private(&mut engine, &NoFaults).expect("first open"),
+        0
+    );
+    assert!(log_reads(&reads) > 0);
+    let this_build = stored_fingerprint(&engine).expect("stored");
+    assert!(this_build.contains("chat.thread.read.set"));
+
+    // Reopened by the same build, it reads only the fingerprint.
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 3_001).expect("reopen");
+    let reads = watch_log_reads(&mut engine);
+    assert_eq!(
+        replay_retained_owner_private(&mut engine, &NoFaults).expect("same build"),
+        0
+    );
+    assert_eq!(log_reads(&reads), 0);
+
+    let applies = std::cell::Cell::new(0);
+    assert_eq!(
+        replay_as_later_build(&mut engine, &NoFaults, &applies).expect("later build"),
+        1
+    );
+    assert!(log_reads(&reads) > 0);
+    assert_eq!(stored_fingerprint(&engine).as_deref(), Some(LATER_BUILD));
+    let before = log_reads(&reads);
+    assert_eq!(
+        replay_as_later_build(&mut engine, &NoFaults, &applies).expect("later build again"),
+        0
+    );
+    assert_eq!(log_reads(&reads), before);
+    assert_eq!(applies.get(), 1);
+
+    // A crash before the fingerprint commits leaves the next open to scan
+    // again, which finds nothing left to apply.
+    let crash = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
+    assert!(matches!(
+        replay_retained_owner_private(&mut engine, crash.as_ref()),
+        Err(SyncError::FaultCrash)
+    ));
+    assert_eq!(stored_fingerprint(&engine).as_deref(), Some(LATER_BUILD));
+    let before = log_reads(&reads);
+    assert_eq!(
+        replay_retained_owner_private(&mut engine, &NoFaults).expect("rescan"),
+        0
+    );
+    assert!(log_reads(&reads) > before);
+    assert_eq!(stored_fingerprint(&engine), Some(this_build));
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "applied");
+    assert_eq!(applies.get(), 1);
+}
+
+fn replay_recording(
+    engine: &mut EngineStore,
+    kinds: &[&str],
+    tried: &std::cell::RefCell<Vec<String>>,
+) -> Result<usize, SyncError> {
+    crate::owner_private::replay_known(engine, &NoFaults, kinds, |tx, op| {
+        tried.borrow_mut().push(op.origin_id.clone());
+        let mut known = op.clone();
+        if known.op_kind == FUTURE_PRIVATE_KIND {
+            known.op_kind = "chat.thread.read.set".to_owned();
+        }
+        crate::apply::apply_chat_lww_projection_tx(tx, &known)
+    })
+}
+
+#[test]
+fn a_dismissed_visible_refusal_never_replays_even_when_it_names_the_owner() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    assert_refused_as_unsupported(
+        &mut engine,
+        &future_private_op("before-seed", 0, Some(json!("owner"))),
+    );
+    seed_owner_account(&mut engine, "owner");
+    let mut known = thread_read_op(
+        "known-private",
+        0,
+        "thread-imported",
+        21,
+        "message-imported",
+    );
+    known.payload["ownerPrivateAccountId"] = json!("owner");
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &known, &NoFaults));
+    let content = envelope(
+        "content",
+        0,
+        "chat.message.append",
+        json!({"messageId": 7, "ownerPrivateAccountId": "owner"}),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &content, &NoFaults));
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM replication_pending_refusals WHERE workspace_id='ws'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("dismiss");
+    // Even a content record somehow admitted quietly never replays: the
+    // engine's owner-private list doesn't name its kind.
+    engine
+        .write_with(&NoFaults, |tx| {
+            assert!(crate::owner_private::admit_quietly(tx, &content)?);
+            Ok::<_, SyncError>(())
+        })
+        .expect("admit the content record");
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future_private_op("phone", 0, Some(json!("owner"))),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("kept"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+
+    let tried = std::cell::RefCell::new(Vec::new());
+    assert_eq!(
+        replay_recording(&mut engine, crate::router::OWNER_PRIVATE_KINDS, &tried)
+            .expect("this build"),
+        0
+    );
+    assert!(tried.borrow().is_empty(), "{:?}", tried.borrow());
+
+    assert_eq!(
+        replay_recording(
+            &mut engine,
+            &[FUTURE_PRIVATE_KIND, "chat.thread.read.set"],
+            &tried
+        )
+        .expect("later build"),
+        1
+    );
+    assert_eq!(*tried.borrow(), vec!["phone".to_owned()]);
+    assert_eq!(
+        account_thread_mark(&engine, "thread-imported"),
+        Some((20, "message-imported".to_owned()))
+    );
+    for origin in ["before-seed", "known-private", "content"] {
+        assert_eq!(
+            log_row(&engine, origin, 0).expect("kept").3,
+            "refused",
+            "{origin}"
+        );
+    }
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "applied");
+    assert_eq!(pending_refusal_count(&engine), 0);
+    let admissions: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_requests WHERE kind='owner-private-quiet'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("admissions");
+    assert_eq!(admissions, 1, "the applied record consumed its admission");
+}
+
+#[test]
+fn a_record_that_fails_to_replay_stays_kept_and_the_rest_still_apply() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    for origin in ["broken", "phone"] {
+        assert_eq!(
+            apply_replication_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &future_private_op(origin, 0, Some(json!("owner"))),
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .expect("kept"),
+            ApplyOutcome::new(ApplyDisposition::Skipped)
+        );
+    }
+    let tried = std::cell::RefCell::new(Vec::<String>::new());
+    let replay = |engine: &mut EngineStore| {
+        crate::owner_private::replay_known(engine, &NoFaults, &[FUTURE_PRIVATE_KIND], |tx, op| {
+            tried.borrow_mut().push(op.origin_id.clone());
+            if op.origin_id == "broken" {
+                // An error that isn't a refusal.
+                return Err(SyncError::CoordinateDiverged);
+            }
+            let mut known = op.clone();
+            known.op_kind = "chat.thread.read.set".to_owned();
+            crate::apply::apply_chat_lww_projection_tx(tx, &known)
+        })
+    };
+    let attempt = |count: u32| format!("{FUTURE_PRIVATE_KIND}\nattempt:{count}");
+
+    assert_eq!(replay(&mut engine).expect("first"), 1);
+    assert_eq!(
+        *tried.borrow(),
+        vec!["broken".to_owned(), "phone".to_owned()]
+    );
+    assert_eq!(log_row(&engine, "broken", 0).expect("kept").3, "refused");
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "applied");
+    assert_eq!(pending_refusal_count(&engine), 0);
+    assert_eq!(stored_fingerprint(&engine), Some(attempt(1)));
+
+    assert_eq!(replay(&mut engine).expect("second"), 0);
+    assert_eq!(stored_fingerprint(&engine), Some(attempt(2)));
+    assert_eq!(replay(&mut engine).expect("third"), 0);
+    assert_eq!(
+        stored_fingerprint(&engine).as_deref(),
+        Some(FUTURE_PRIVATE_KIND)
+    );
+    assert_eq!(tried.borrow().len(), 4);
+    // Then the fingerprint holds: no more scans, and the record stays kept
+    // for the next build whose owner-private kinds differ.
+    assert_eq!(replay(&mut engine).expect("settled"), 0);
+    assert_eq!(tried.borrow().len(), 4);
+    assert_eq!(log_row(&engine, "broken", 0).expect("kept").3, "refused");
+}
+
+#[test]
+fn a_thread_read_with_a_null_marker_is_malformed() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    let mut read = thread_read_op("null-marker", 0, "thread-imported", 20, "message-imported");
+    read.payload["ownerPrivateAccountId"] = serde_json::Value::Null;
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &read, &NoFaults));
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+}
+
+#[test]
+fn a_feed_read_with_a_null_marker_is_malformed() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    let read = envelope(
+        "null-marker",
+        0,
+        "chat.feed.read.set",
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 20,
+            "lastSeenMessageId": "message-imported",
+            "atMs": 100,
+            "ownerPrivateAccountId": null
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &read, &NoFaults));
+    let feed_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_feed_read_state WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("feed rows");
+    assert_eq!(feed_rows, 0);
+}
+
+/// The engine's owner-private list and the relay's registry name the same
+/// kinds, and each routes to the chat applier that replays it.
+#[test]
+fn the_owner_private_kinds_match_the_relay_registry() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../services/sync-relay/src/relayLogInputs.ts"),
+    )
+    .expect("the relay's chat op policy");
+    let mut relay: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('"') && line.contains("ownerPrivate: true"))
+        .filter_map(|line| line.split('"').nth(1))
+        .collect();
+    // A wrapped entry would escape the one-line parse above, so every
+    // marked line must have been read.
+    let marked = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//") && line.contains("ownerPrivate: true"))
+        .count();
+    assert_eq!(relay.len(), marked);
+    relay.sort_unstable();
+    let mut engine = crate::router::OWNER_PRIVATE_KINDS.to_vec();
+    engine.sort_unstable();
+    assert_eq!(relay, engine);
+    for kind in crate::router::OWNER_PRIVATE_KINDS {
+        assert!(crate::router::routes_to_chat(kind), "{kind}");
     }
 }

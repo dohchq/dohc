@@ -31,7 +31,8 @@ export function throughEdit(steps: Mappable, range: Mappable): Mappable {
  *  through y-tiptap does. Its steps then place nothing. */
 export function replacesDocument(tr: Transform): boolean {
   return tr.steps.some(
-    (step, index) => step instanceof ReplaceStep && step.from === 0 && step.to === tr.docs[index]!.content.size,
+    (step, index) =>
+      step instanceof ReplaceStep && step.from === 0 && step.to === tr.docs[index]!.content.size,
   );
 }
 
@@ -56,18 +57,27 @@ export function withSteps(range: ChangedRange, tr: Transform): ChangedRange {
   if (start > end) return range;
   const to = Math.max(range.to, end);
   // Everything after the changes is the same in both documents.
-  return { from: Math.min(range.from, start), to, toBefore: to - tr.doc.content.size + tr.before.content.size };
+  return {
+    from: Math.min(range.from, start),
+    to,
+    toBefore: to - tr.doc.content.size + tr.before.content.size,
+  };
 }
 
 /** Gives each widget the owner of the widget that had its place among the
  *  range's widgets, as when every widget was keyed by its place among the
  *  blocks. The blocks before the range are the same, so their count is too. */
-export function ownersByPlace(previous: readonly Decoration[], positions: readonly number[]): Map<number, string> {
+export function ownersByPlace(
+  previous: readonly Decoration[],
+  positions: readonly number[],
+): Map<number, string> {
   const owners = new Map<number, string>();
   previous
     .filter((decoration) => typeof decoration.spec.ownerKey === "string")
     .sort((a, b) => a.from - b.from)
     .slice(0, positions.length)
-    .forEach((decoration, index) => owners.set(positions[index]!, decoration.spec.ownerKey as string));
+    .forEach((decoration, index) =>
+      owners.set(positions[index]!, decoration.spec.ownerKey as string),
+    );
   return owners;
 }

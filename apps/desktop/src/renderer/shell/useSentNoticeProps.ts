@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isRefusalNoticeKind } from "../../notices/refusalNoticeKind";
 import type { AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
-import type { ChatDispatchFailedRun, GetRelayReceivedShareResult, NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
+import type {
+  ChatDispatchFailedRun,
+  GetRelayReceivedShareResult,
+  NoticeRow,
+  WorkspaceSummary,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { opensForLiveEditing } from "../OpenSharedView";
 import { useAutomationRetry } from "../collections/useAutomationRetry";
@@ -10,8 +15,19 @@ import { workspaceName } from "../Titlebar";
 import type { SentNotice } from "../workbench/NoticeCenter";
 import { inputCount } from "../ui/inputCount";
 import type { ShellErrorKind } from "./useShellError";
-import { sentNoticeFolder, sentNoticePlace, serverRunOfNotice, type SentNoticePlace } from "../../notices/sentNoticePlace";
-import { ACCESS_ENDED_NOTE, AUTOMATION_NOTICE_KINDS, opensControls, sentNoticeTarget, targetLookupFailedNote, type NoticeTarget } from "../../notices/noticeTarget";
+import {
+  sentNoticeFolder,
+  sentNoticePlace,
+  serverRunOfNotice,
+} from "../../notices/sentNoticePlace";
+import {
+  ACCESS_ENDED_NOTE,
+  AUTOMATION_NOTICE_KINDS,
+  opensControls,
+  sentNoticeTarget,
+  targetLookupFailedNote,
+  type NoticeTarget,
+} from "../../notices/noticeTarget";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
 import { chatOnScreen } from "../workbench/chatsOnScreen";
 
@@ -24,7 +40,8 @@ export const SHARE_LOOKUP_FAILED_NOTE = "dohc could not open this share.";
 
 // The shell's error for a notice whose Open failed. A later Open of the
 // notice replaces it or takes it back.
-const openErrorIdentity = (notice: NoticeRow) => `sent-notice-open:${notice.store}:${notice.noticeId}`;
+const openErrorIdentity = (notice: NoticeRow) =>
+  `sent-notice-open:${notice.store}:${notice.noticeId}`;
 
 // Main dismisses a failed run's notice once its run is queued again.
 const nothingToReread = () => undefined;
@@ -34,9 +51,16 @@ const NO_FAILED_RUNS: ReadonlyMap<string, ChatDispatchFailedRun> = new Map();
 
 // The run an agent run's notice names, when this computer ran it in this
 // workspace.
-function agentRunOfNotice(notice: NoticeRow, workspaceId: string): { threadId: string; runId: string } | null {
+function agentRunOfNotice(
+  notice: NoticeRow,
+  workspaceId: string,
+): { threadId: string; runId: string } | null {
   const target = notice.target;
-  return notice.kind === "agent-run" && notice.postedHere && notice.workspaceId === workspaceId && target?.thread && target.run
+  return notice.kind === "agent-run" &&
+    notice.postedHere &&
+    notice.workspaceId === workspaceId &&
+    target?.thread &&
+    target.run
     ? { threadId: target.thread, runId: target.run }
     : null;
 }
@@ -53,11 +77,16 @@ export interface NoticeShare {
 
 // The workspace of this person's own, not a shared view, they opened last:
 // where a Group invitation or message request waits in Chats.
-export function lastOpenedOwnWorkspace(workspaces: readonly WorkspaceSummary[]): WorkspaceSummary | null {
+export function lastOpenedOwnWorkspace(
+  workspaces: readonly WorkspaceSummary[],
+): WorkspaceSummary | null {
   return workspaces
     .filter((candidate) => candidate.shareView === undefined)
     .reduce<WorkspaceSummary | null>(
-      (latest, candidate) => (latest === null || (candidate.lastOpenedAt ?? 0) > (latest.lastOpenedAt ?? 0) ? candidate : latest),
+      (latest, candidate) =>
+        latest === null || (candidate.lastOpenedAt ?? 0) > (latest.lastOpenedAt ?? 0)
+          ? candidate
+          : latest,
       null,
     );
 }
@@ -80,11 +109,24 @@ export function useSentNoticeProps(input: {
   openTarget: (target: NoticeTarget, signal: AbortSignal) => Promise<string | null>;
   onSwitchWorkspace: (workspace: WorkspaceSummary, open?: NoticeTarget) => void;
   onOpenShare: (share: NoticeShare) => void;
-  reportShellError: (fallback: string, error: unknown, retry?: (() => void) | null, kind?: ShellErrorKind, identity?: string) => void;
+  reportShellError: (
+    fallback: string,
+    error: unknown,
+    retry?: (() => void) | null,
+    kind?: ShellErrorKind,
+    identity?: string,
+  ) => void;
   clearShellError: (identity: string) => void;
 }) {
   const {
-    sentNotices, workspaceId, workspaces, openTarget, onSwitchWorkspace, onOpenShare, reportShellError, clearShellError,
+    sentNotices,
+    workspaceId,
+    workspaces,
+    openTarget,
+    onSwitchWorkspace,
+    onOpenShare,
+    reportShellError,
+    clearShellError,
   } = input;
 
   // Each conversation's run that didn't reply. A notice offers Try again on
@@ -95,7 +137,10 @@ export function useSentNoticeProps(input: {
   // The runs the notices name, as a key, so a new list naming the same runs
   // reads nothing again.
   const agentRunsKey = useMemo(() => {
-    const notices = [...(sentNotices?.notices ?? []), ...(sentNotices?.toast ? [sentNotices.toast] : [])];
+    const notices = [
+      ...(sentNotices?.notices ?? []),
+      ...(sentNotices?.toast ? [sentNotices.toast] : []),
+    ];
     const runs = notices.flatMap((notice) => {
       const run = agentRunOfNotice(notice, workspaceId);
       return run ? [JSON.stringify([run.threadId, run.runId])] : [];
@@ -105,63 +150,82 @@ export function useSentNoticeProps(input: {
   const failedRunReads = useRequestSequence([workspaceId]);
   useEffect(() => {
     const request = failedRunReads.next();
-    const threadIds = [...new Set((JSON.parse(agentRunsKey) as [string, string][]).map(([threadId]) => threadId))];
+    const threadIds = [
+      ...new Set((JSON.parse(agentRunsKey) as [string, string][]).map(([threadId]) => threadId)),
+    ];
     if (threadIds.length === 0) {
       setFailedRuns(NO_FAILED_RUNS);
       return;
     }
-    void Promise.all(threadIds.map(async (threadId) => {
-      try {
-        return [threadId, (await bridge().chatDispatchStateForThread({ workspaceId, threadId })).failedRun] as const;
-      } catch {
-        return [threadId, undefined] as const;
-      }
-    })).then((states) => {
+    void Promise.all(
+      threadIds.map(async (threadId) => {
+        try {
+          return [
+            threadId,
+            (await bridge().chatDispatchStateForThread({ workspaceId, threadId })).failedRun,
+          ] as const;
+        } catch {
+          return [threadId, undefined] as const;
+        }
+      }),
+    ).then((states) => {
       if (!failedRunReads.isCurrent(request)) return;
-      setFailedRuns(new Map(states.flatMap(([threadId, failed]) => (failed ? [[threadId, failed] as const] : []))));
+      setFailedRuns(
+        new Map(
+          states.flatMap(([threadId, failed]) => (failed ? [[threadId, failed] as const] : [])),
+        ),
+      );
     });
   }, [agentRunsKey, failedRunReads, failedRunsRevision, workspaceId]);
-  const retriesFailedRun = useCallback((notice: NoticeRow) => {
-    const run = agentRunOfNotice(notice, workspaceId);
-    const failed = run ? failedRuns.get(run.threadId) : undefined;
-    return failed !== undefined && failed.runId === run?.runId && failed.retryable;
-  }, [failedRuns, workspaceId]);
+  const retriesFailedRun = useCallback(
+    (notice: NoticeRow) => {
+      const run = agentRunOfNotice(notice, workspaceId);
+      const failed = run ? failedRuns.get(run.threadId) : undefined;
+      return failed !== undefined && failed.runId === run?.runId && failed.retryable;
+    },
+    [failedRuns, workspaceId],
+  );
 
   const describe = useCallback(
     (notice: NoticeRow): SentNotice => {
       const place = sentNoticePlace(notice, workspaces, workspaceId);
       // A share in this workspace's shared-with-me still comes from
       // someone else's workspace, so it names its folder.
-      const here = place.kind === "workspace" &&
+      const here =
+        place.kind === "workspace" &&
         place.workspace.workspaceId === workspaceId &&
         place.mount === null;
       return {
         notice,
         folder: here
           ? null
-          : sentNoticeFolder(notice) ??
-            (place.kind === "workspace" ? place.mount ?? workspaceName(place.workspace) : null),
-        openable: place.kind !== "none" &&
-          (place.kind !== "workspace" || sentNoticeTarget(notice, place, opensControls(notice)) !== null),
+          : (sentNoticeFolder(notice) ??
+            (place.kind === "workspace" ? (place.mount ?? workspaceName(place.workspace)) : null)),
+        openable:
+          place.kind !== "none" &&
+          (place.kind !== "workspace" ||
+            sentNoticeTarget(notice, place, opensControls(notice)) !== null),
         // Open takes a notice from another workspace there first.
-        retryable: serverRunOfNotice(notice)?.workspaceId === workspaceId || retriesFailedRun(notice),
+        retryable:
+          serverRunOfNotice(notice)?.workspaceId === workspaceId || retriesFailedRun(notice),
       };
     },
     [retriesFailedRun, workspaceId, workspaces],
   );
   const rows = useMemo(
-    () => (sentNotices?.notices ?? []).filter(notice => !isRefusalNoticeKind(notice.kind) || notice.workspaceId !== workspaceId).map(describe),
+    () =>
+      (sentNotices?.notices ?? [])
+        .filter((notice) => !isRefusalNoticeKind(notice.kind) || notice.workspaceId !== workspaceId)
+        .map(describe),
     [describe, sentNotices?.notices, workspaceId],
   );
-  // An agent run the person can already see in its chat posts no toast. A
-  // notice names its reply only when the run finished with one; that notice
-  // leaves no row once the dismiss lands. A failed run's notice says why in
-  // its body, and its row stays, read, for Copy and Try again.
   const seenRun = useMemo(() => {
     const notice = sentNotices?.toast;
     const run = notice ? agentRunOfNotice(notice, workspaceId) : null;
     const replied = notice?.target?.message !== undefined;
-    return notice && run && (replied || notice.body !== "") && chatOnScreen(run.threadId) ? { notice, replied } : null;
+    return notice && run && (replied || notice.body !== "") && chatOnScreen(run.threadId)
+      ? { notice, replied }
+      : null;
   }, [sentNotices?.toast, workspaceId]);
   const dismissNotice = sentNotices?.dismiss;
   const readNotices = sentNotices?.read;
@@ -188,19 +252,29 @@ export function useSentNoticeProps(input: {
       ...(here?.shareMounts ?? []).map((mount) => mount.shareId),
     ]);
     const refs = (sentNotices?.notices ?? [])
-      .filter((notice) => notice.kind === "share-received" && notice.readAtMs === null &&
-        notice.recipientShareId !== null && shares.has(notice.recipientShareId) &&
-        !askedRead.current.has(`${notice.store}:${notice.noticeId}`))
+      .filter(
+        (notice) =>
+          notice.kind === "share-received" &&
+          notice.readAtMs === null &&
+          notice.recipientShareId !== null &&
+          shares.has(notice.recipientShareId) &&
+          !askedRead.current.has(`${notice.store}:${notice.noticeId}`),
+      )
       .map(sentNoticeRef);
     for (const ref of refs) askedRead.current.add(`${ref.store}:${ref.noticeId}`);
     if (refs.length > 0) readNotices(refs).catch(() => undefined);
   }, [here, readNotices, sentNotices?.notices]);
   const toast = useMemo(
-    () => (sentNotices?.toast && sentNotices.toast !== seenRun?.notice && (!isRefusalNoticeKind(sentNotices.toast.kind) || sentNotices.toast.workspaceId !== workspaceId) ? describe(sentNotices.toast) : null),
+    () =>
+      sentNotices?.toast &&
+      sentNotices.toast !== seenRun?.notice &&
+      (!isRefusalNoticeKind(sentNotices.toast.kind) ||
+        sentNotices.toast.workspaceId !== workspaceId)
+        ? describe(sentNotices.toast)
+        : null,
     [describe, seenRun, sentNotices?.toast, workspaceId],
   );
 
-  // A list main could not read is a failure with a way to ask again.
   const listFailure = sentNotices?.listFailure ?? null;
   const relist = sentNotices?.relist;
   useEffect(() => {
@@ -238,25 +312,23 @@ export function useSentNoticeProps(input: {
     [reportShellError, sentNotices],
   );
 
-  // Where Open goes: the notice's file here, the workspace that holds it,
-  // or the share it came through. An automation's notice here goes to the
-  // ⚡ panel, on its switch with `controls`, else on its runs. A Group
-  // invitation or message request goes to Chats in a workspace of this
-  // person's own, where it waits with Join or Accept. A failed lookup goes to
-  // the shell's errors, whose Try again goes where Open goes again; any
-  // other outcome takes that error back. A lookup that answers once the
-  // person has left this workspace, or after a later Open of the same notice
-  // started, opens nothing, as a cancelled Open does.
   const workspace = useRequestSequence([workspaceId]);
   const latestOpens = useRef(new Map<string, number>());
   const go = useCallback(
-    async function go(notice: NoticeRow, signal: AbortSignal, controls: boolean): Promise<string | null> {
+    async function go(
+      notice: NoticeRow,
+      signal: AbortSignal,
+      controls: boolean,
+    ): Promise<string | null> {
       const identity = openErrorIdentity(notice);
       const epoch = workspace.current();
       const inputs = inputCount();
       const attempt = (latestOpens.current.get(identity) ?? 0) + 1;
       latestOpens.current.set(identity, attempt);
-      const stale = () => signal.aborted || !workspace.isCurrent(epoch) || latestOpens.current.get(identity) !== attempt;
+      const stale = () =>
+        signal.aborted ||
+        !workspace.isCurrent(epoch) ||
+        latestOpens.current.get(identity) !== attempt;
       let lookupFailed = false;
       const failed = (note: string, error: unknown): null => {
         lookupFailed = true;
@@ -264,7 +336,8 @@ export function useSentNoticeProps(input: {
         const retry = () => {
           if (!workspace.isCurrent(epoch)) return;
           void go(notice, new AbortController().signal, controls).then((again) => {
-            if (again !== null && workspace.isCurrent(epoch)) reportShellError(again, new Error(again), null, undefined, identity);
+            if (again !== null && workspace.isCurrent(epoch))
+              reportShellError(again, new Error(again), null, undefined, identity);
           });
         };
         reportShellError(note, error, retry, undefined, identity);
@@ -275,7 +348,10 @@ export function useSentNoticeProps(input: {
       return note;
 
       async function open(): Promise<string | null> {
-        const noteOf = async (opening: Promise<string | null>, failedNote: string): Promise<string | null> => {
+        const noteOf = async (
+          opening: Promise<string | null>,
+          failedNote: string,
+        ): Promise<string | null> => {
           let note: string | null;
           try {
             note = await opening;
@@ -293,17 +369,21 @@ export function useSentNoticeProps(input: {
           case "not-here":
             return NOT_HERE_NOTE;
           case "agents-settings":
-            // A notice that names a personal agent opens its page.
-            return await openTarget(place.agent === null
-              ? { to: "agents-settings" }
-              : { to: "agents-settings", agent: place.agent }, signal);
+            return await openTarget(
+              place.agent === null
+                ? { to: "agents-settings" }
+                : { to: "agents-settings", agent: place.agent },
+              signal,
+            );
           case "workspace": {
             const target = sentNoticeTarget(notice, place, controls);
             if (place.workspace.workspaceId !== workspaceId) {
               onSwitchWorkspace(place.workspace, target ?? undefined);
               return null;
             }
-            return target === null ? null : await noteOf(openTarget(target, signal), targetLookupFailedNote(target));
+            return target === null
+              ? null
+              : await noteOf(openTarget(target, signal), targetLookupFailedNote(target));
           }
           case "share": {
             let found: GetRelayReceivedShareResult;
@@ -317,20 +397,39 @@ export function useSentNoticeProps(input: {
             if ("chats" in found) {
               // A shared view holds no Chats, so Open goes to the workspace of
               // this person's own they opened last.
-              if (workspaces.some((candidate) => candidate.workspaceId === workspaceId && candidate.shareView === undefined)) {
-                return await openTarget({ to: "chats-invitation", shareId: place.shareId, inputs }, signal);
+              if (
+                workspaces.some(
+                  (candidate) =>
+                    candidate.workspaceId === workspaceId && candidate.shareView === undefined,
+                )
+              ) {
+                return await openTarget(
+                  { to: "chats-invitation", shareId: place.shareId, inputs },
+                  signal,
+                );
               }
               const own = lastOpenedOwnWorkspace(workspaces);
               if (own === null) return NO_OWN_WORKSPACE_NOTE;
               onSwitchWorkspace(own, { to: "chats-invitation", shareId: place.shareId, inputs });
               return null;
             }
-            const automation = controls && AUTOMATION_NOTICE_KINDS.has(notice.kind) ? notice.target?.automation : undefined;
+            const automation =
+              controls && AUTOMATION_NOTICE_KINDS.has(notice.kind)
+                ? notice.target?.automation
+                : undefined;
             onOpenShare({
               resolvedShare: { shareId: found.share.shareId, shareCode: found.share.shareCode },
               liveEditing: opensForLiveEditing(found.share),
               path: place.path,
-              ...(automation === undefined || place.path === null ? {} : { controls: { to: "automation-controls", automation, sharedFile: place.path } as const }),
+              ...(automation === undefined || place.path === null
+                ? {}
+                : {
+                    controls: {
+                      to: "automation-controls",
+                      automation,
+                      sharedFile: place.path,
+                    } as const,
+                  }),
             });
             return null;
           }
@@ -338,7 +437,14 @@ export function useSentNoticeProps(input: {
       }
     },
     [
-      clearShellError, onOpenShare, onSwitchWorkspace, openTarget, reportShellError, workspace, workspaceId, workspaces,
+      clearShellError,
+      onOpenShare,
+      onSwitchWorkspace,
+      openTarget,
+      reportShellError,
+      workspace,
+      workspaceId,
+      workspaces,
     ],
   );
 
@@ -360,7 +466,8 @@ export function useSentNoticeProps(input: {
     (_controls: AutomationControlsTarget, notice: NoticeRow) => {
       const epoch = workspace.current();
       void go(notice, new AbortController().signal, true).then((note) => {
-        if (note !== null && workspace.isCurrent(epoch)) reportShellError(note, new Error(note), null, undefined, openErrorIdentity(notice));
+        if (note !== null && workspace.isCurrent(epoch))
+          reportShellError(note, new Error(note), null, undefined, openErrorIdentity(notice));
       });
     },
     [go, reportShellError, workspace],
@@ -387,14 +494,17 @@ export function useSentNoticeProps(input: {
       }
       const epoch = workspace.current();
       const attempt = () => {
-        void bridge().retryStoppedRun({ workspaceId, ...run }).then(
-          () => {
-            if (workspace.isCurrent(epoch)) setFailedRunsRevision((revision) => revision + 1);
-          },
-          (error: unknown) => {
-            if (workspace.isCurrent(epoch)) reportShellError(AGENT_RUN_RETRY_FAILED, error, attempt);
-          },
-        );
+        void bridge()
+          .retryStoppedRun({ workspaceId, ...run })
+          .then(
+            () => {
+              if (workspace.isCurrent(epoch)) setFailedRunsRevision((revision) => revision + 1);
+            },
+            (error: unknown) => {
+              if (workspace.isCurrent(epoch))
+                reportShellError(AGENT_RUN_RETRY_FAILED, error, attempt);
+            },
+          );
       };
       attempt();
     },
@@ -433,7 +543,6 @@ export function useSentNoticeProps(input: {
     onReadAllSentNotices,
     onRunSentNoticeNow: runNow,
     onRetrySentNotice: retrySentNotice,
-    // The confirmation Try again asks for before a run starts over.
     retryDialog: noticeRetry.dialog,
   };
 }

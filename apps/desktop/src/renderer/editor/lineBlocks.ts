@@ -1,59 +1,25 @@
-// Search names a Markdown LINE. The editor addresses doc positions, and
+// Search names a Markdown line. The editor addresses doc positions, and
 // nothing survives the Markdown parse to carry one onto the other, so the
 // mapping is rebuilt here from the same Markdown the line was numbered
 // against: which top-level block holds that line?
 //
-// The answer is APPROXIMATE by construction. Blocks are split on blank lines,
-// with the exceptions that cover how documents are actually written. Every one
-// of them was measured against the real parse in lineBlocks.test.ts, not read
-// off CommonMark — several of these blocks are this editor's own, and the
-// tokenizer disagrees with the spec in places (see the ordered lists below).
+// The answer is approximate by construction. Blocks are split on blank lines,
+// except where a block ends at its own last line, starts without a blank line
+// above it, or runs through a blank line. The comment at each rule below
+// states it. Every rule follows the real parse as measured in
+// lineBlocks.test.ts, not CommonMark: several of these blocks are this
+// editor's own, and the tokenizer disagrees with the spec in places. That is
+// the top-level shape of an ordinary document, so a jump can land a block
+// off. It still shows the reader the passage they searched for.
 //
-//  - Some blocks END at their own last line, not at a blank one: a heading
-//    (an ATX line, or the setext underline under a paragraph), a thematic
-//    break, and a fenced code block at its closing fence.
-//  - Some blocks start without a blank line above them, interrupting what is
-//    open: a heading, a fence, a thematic break, and — under a paragraph or a
-//    TABLE only — a quote, a list or a table. An ordered list interrupts only
-//    when it counts from 1, because `2.` under a paragraph is that
-//    paragraph's own text. A heading indented into a list item is that item's
-//    heading, not a new block.
-//  - Some blocks RUN THROUGH a blank line, because the next line continues
-//    them: another item of the same list, content indented to that item's own
-//    content column, and the next chunk of an indented code block. A list's
-//    identity is its marker, its kind, and whether its items carry checkboxes.
-//    Ordered delimiters distinguish lists too. Every item continuation must
-//    reach that item's content column after a blank line.
-//  - A quote absorbs an unquoted line as a lazy continuation until something
-//    ends that. Inside it: a quoted blank or a quoted fence for any quote, and
-//    for a callout every quoted block start. On the unquoted line itself: a
-//    list marker or raw HTML, where again a callout breaks on any ordered
-//    number and a plain quote wants one that counts from 1. Those two sets
-//    were measured apart and do not match. The quote itself survives either —
-//    the next `>` line is still the same node.
-//  - A fence's contents are inert, and so are a `$$…$$` block's. Blank lines
-//    and `#` inside either are that block's own text.
-//  - A link reference definition is a paragraph of its own text, one block
-//    per definition — label, the destination under it if it is not on the
-//    label's own line, and a title under that. Like a heading it ends at its
-//    own last line, so adjacent definitions are separate blocks.
+// Indentation is counted in columns, with a tab reaching the next multiple of
+// four. That decides an indented code block and a list continuation, so the
+// kinds are read after it: `\t# H` is four columns deep, so it is code.
 //
-// That is the top-level shape of an ordinary document, not of every document
-// CommonMark can express — a jump can land a block off. It still shows the
-// reader the passage they searched for; the top of the document shows them
-// nothing.
-//
-// Indentation is counted in COLUMNS, with a tab reaching the next multiple of
-// four. That is what decides an indented code block and a list continuation,
-// and it is why the kinds are read after it: `\t# H` is four columns deep, so
-// it is code, whatever the `#` looks like.
-//
-// Not renderer/markdown/splitMarkdownBlocks.ts, which answers a different
-// question: it packs many blocks into ~4KB chunks for incremental rendering
-// and keeps no line numbers, so it cannot say which block holds a line. Its
-// segmenting is also looser — every blank line outside a fence ends a segment,
-// which is safe when each chunk is re-parsed as Markdown and wrong when the
-// count has to match the editor's top-level nodes.
+// This is not renderer/markdown/splitMarkdownBlocks.ts, which packs blocks
+// into ~4KB chunks for incremental rendering and keeps no line numbers. It
+// also ends a segment at every blank line outside a fence, which does not
+// match the editor's top-level nodes.
 //
 // DOM-free and duck-typed against plain text, same as outline.ts/findReplace.ts.
 
@@ -128,8 +94,7 @@ const DEFINITION_DESTINATION_RE =
 // paragraph, so the header is only a header when this follows it. Leading and
 // trailing pipes are both optional; a pipe somewhere is not, or `---` alone
 // would read as a one-column table instead of a break.
-const TABLE_DELIMITER_RE =
-  /^[ \t]{0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+const TABLE_DELIMITER_RE = /^[ \t]{0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
 
 /** The cells a table row declares. The outer pipes bound the row rather than
  *  dividing it, and a BACKSLASH-escaped pipe is cell text — `A \| B | C` is
@@ -199,7 +164,9 @@ function escapeCodeSpanPipes(line: string): string {
       continue;
     }
     const close = starts[closer];
-    const span = line.slice(open, close).replace(/\\\||\|/g, (pipe) => (pipe === "|" ? "\\|" : pipe));
+    const span = line
+      .slice(open, close)
+      .replace(/\\\||\|/g, (pipe) => (pipe === "|" ? "\\|" : pipe));
     result += line.slice(index, open) + span + line.slice(close, close + open - index);
     index = close + open - index;
   }
@@ -303,14 +270,11 @@ function continuationIndent(text: string): { indent: number; lazy: boolean; fenc
   const marker = columnAt(text, match[0].length);
   const content = columnAt(text, match[0].length + spaces.length);
   const body = text.slice(match[0].length).trim();
-  const indent = content - marker > 4 || !body
-    ? marker + 1
-    : content;
+  const indent = content - marker > 4 || !body ? marker + 1 : content;
   const fence = content - marker > 4 ? null : fenceOpener(body);
   return {
     indent,
-    lazy: !!body && content - marker < 4 &&
-      !body.startsWith("#") && !fence && !BREAK_RE.test(body),
+    lazy: !!body && content - marker < 4 && !body.startsWith("#") && !fence && !BREAK_RE.test(body),
     fence,
   };
 }
@@ -386,7 +350,6 @@ type LineBlock = {
  *  last block. Returns index 0 for an empty body. */
 export function blockForLine(body: string, line: number): LineBlock {
   const lines = body.split(/\r?\n/);
-  // Blocks opened so far, and the one holding `line` with its first line.
   let blocks = 0;
   let holder = 0;
   let holderStart = 0;
@@ -484,8 +447,7 @@ export function blockForLine(body: string, line: number): LineBlock {
           ? "table"
           : blockKind(text);
     const marker = listMarker(text);
-    const listOpen =
-      openKind === "bullet" || openKind === "task" || openKind === "ordered";
+    const listOpen = openKind === "bullet" || openKind === "task" || openKind === "ordered";
     let opener = fenceOpener(text);
     const mathClose = mathBlockEnd(lines, index);
     // A blank line does not end a block the next line continues: another item
@@ -494,9 +456,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     // those continuations, which is why this is read before the starts below.
     const indent = leadingColumns(text);
     const resumes =
-      (listOpen &&
-        ((kind === openKind && marker === openMarker) ||
-          indent >= openIndent)) ||
+      (listOpen && ((kind === openKind && marker === openMarker) || indent >= openIndent)) ||
       (openKind === "code" && kind === "code");
     // Indented code ends where the indentation stops, blank line or not — the
     // same "ends at its own last line" shape a heading and a fence have. It
@@ -541,10 +501,11 @@ export function blockForLine(body: string, line: number): LineBlock {
         (kind === "bullet" ||
           kind === "task" ||
           HTML_BLOCK_RE.test(text) ||
-          (kind === "ordered" &&
-            (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
+          (kind === "ordered" && (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
       // Ordinary item paragraphs accept underindented lazy continuation.
-      (open && listOpen && indent < openIndent &&
+      (open &&
+        listOpen &&
+        indent < openIndent &&
         (previousEndsLazy ||
           (indent <= Math.min(3, openIndent - 1) &&
             (/^ *#/.test(text) || /^ *<(?:[a-z].*>|!--)/i.test(text)))));
@@ -564,13 +525,15 @@ export function blockForLine(body: string, line: number): LineBlock {
       openKind = kind;
       openMarker = marker;
       quoteOpen = false;
-      quoteCallout =
-        kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));
+      quoteCallout = kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));
       quoteFence = null;
     }
-    previousEndsLazy = listOpen &&
-      (text.includes("\t") ? leadingColumns(text.replace(/\t/g, "    ")) : indent) >= openIndent + 4 ||
-      (listOpen && indent >= openIndent &&
+    previousEndsLazy =
+      (listOpen &&
+        (text.includes("\t") ? leadingColumns(text.replace(/\t/g, "    ")) : indent) >=
+          openIndent + 4) ||
+      (listOpen &&
+        indent >= openIndent &&
         indent - openIndent <= Math.min(3, openIndent - 1) &&
         /^ *#/.test(text.slice(openIndent)));
     // The item at the top level of this list sets the continuation column, so
@@ -579,11 +542,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     // what continues the list.
     if (
       (kind === "bullet" || kind === "task" || kind === "ordered") &&
-      (opens ||
-        (listOpen &&
-          kind === openKind &&
-          marker === openMarker &&
-          indent < openIndent))
+      (opens || (listOpen && kind === openKind && marker === openMarker && indent < openIndent))
     ) {
       const continuation = continuationIndent(text);
       openIndent = continuation.indent;

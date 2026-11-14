@@ -1,11 +1,20 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { StoredLiveDocumentAuthority } from "./types";
-import {serviceHostDocumentEnabled, serviceHostDocumentEnrolled} from "./serviceHostEnrollment";
+import { serviceHostDocumentEnabled, serviceHostDocumentEnrolled } from "./serviceHostEnrollment";
 import { personalReachIn, readPersonalAuthority } from "./personalAgents";
-import {ordinaryActivationBaseline,ordinaryActivationBasisCharge,persistOrdinaryActivationBasis,type VerifiedOrdinaryActivationCut} from "./ordinaryActivationSource";
-import {readOrdinaryActivationBasis} from "./ordinaryActivationBasis";
-import { allowsServiceActivation, readServiceActivation, type ServiceActivationAccess } from "./serviceActivationAccess";
+import {
+  ordinaryActivationBaseline,
+  ordinaryActivationBasisCharge,
+  persistOrdinaryActivationBasis,
+  type VerifiedOrdinaryActivationCut,
+} from "./ordinaryActivationSource";
+import { readOrdinaryActivationBasis } from "./ordinaryActivationBasis";
+import {
+  allowsServiceActivation,
+  readServiceActivation,
+  type ServiceActivationAccess,
+} from "./serviceActivationAccess";
 import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
 import { attachedLiveJournalHistoryNamespace } from "./liveJournalHistory";
 import type {
@@ -48,13 +57,13 @@ import {
   LIVE_TICKET_NULLABLE_COLUMNS,
   LIVE_TICKET_TABLE,
 } from "./schema";
-import { type LiveObjectBinding, parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import {
+  type LiveObjectBinding,
+  parseLiveObjectBinding,
+} from "@dohc/live-session-contract/live-object-binding";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { createHash } from "node:crypto";
-import {
-  type ShareSelector,
-  isLiveEditShareSelector,
-} from "../shareFilter";
+import { type ShareSelector, isLiveEditShareSelector } from "../shareFilter";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import type { StorageContext } from "./context";
 import {
@@ -69,70 +78,169 @@ import type { LiveTicketScope } from "../liveBrowserContext";
 import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
-import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./liveDeliveryReservations";
+import { SyncRelayQuotaExceededError } from "./errors";
+import {
+  prepareLiveDeliveryWorkspace,
+  registerLiveDeliveryBaseline,
+} from "./liveDeliveryReservations";
 import { nextShareDiscussionRevision } from "./discussion";
 import { liveBrowserActor } from "../liveBrowserContext";
-import { readLinkEnrollment, linkWriteRefusal, linkPrincipalLimitReached, linkPrincipalStorageBytes, commitLinkEnrollment, type LinkEnrollment } from "./linkEnrollment";
+import {
+  readLinkEnrollment,
+  linkWriteRefusal,
+  linkPrincipalLimitReached,
+  linkPrincipalStorageBytes,
+  commitLinkEnrollment,
+  type LinkEnrollment,
+} from "./linkEnrollment";
 import { agentWriteAuthorityInTransaction } from "./agentConnections";
 import { authorizeLinkShareAction } from "../shareAuthorization";
 import { createAccountlessPathProjection } from "../accountlessPathProjection";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 
-export function snapshotCurrentBindingRequest(input: CurrentLiveBindingRequest): CurrentLiveBindingRequest {
+export function snapshotCurrentBindingRequest(
+  input: CurrentLiveBindingRequest,
+): CurrentLiveBindingRequest {
   const outer = ticketRecord(input, ["document", "actor"]);
-  const document = parseLiveDocumentKey(ticketRecord(outer.document,
-    ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"]));
+  const document = parseLiveDocumentKey(
+    ticketRecord(outer.document, ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"]),
+  );
   if (document.mainVersionId !== "main") throw new TypeError("live authority requires main");
   parseLiveUpdateDigest(document.lineageClaimId);
-  if (nodeTypes.isProxy(outer.actor)) throw new TypeError("live authority actor must not be a proxy");
-  const kind = typeof outer.actor === "object" && outer.actor !== null
-    ? Object.getOwnPropertyDescriptor(outer.actor, "kind") : undefined;
-  if (!kind || !Object.hasOwn(kind, "value") || (kind.value !== "owner" && kind.value !== "named" && kind.value !== "link" && kind.value !== "personal")) {
+  if (nodeTypes.isProxy(outer.actor))
+    throw new TypeError("live authority actor must not be a proxy");
+  const kind =
+    typeof outer.actor === "object" && outer.actor !== null
+      ? Object.getOwnPropertyDescriptor(outer.actor, "kind")
+      : undefined;
+  if (
+    !kind ||
+    !Object.hasOwn(kind, "value") ||
+    (kind.value !== "owner" &&
+      kind.value !== "named" &&
+      kind.value !== "link" &&
+      kind.value !== "personal")
+  ) {
     throw new TypeError("live authority requires an authenticated actor");
   }
   if (kind.value === "personal") {
-    const actor = ticketRecord(outer.actor, ["kind", "workspaceId", "agentId", "connectionId", "accessTokenHash", "resourceHash", "fenceEpoch"]);
-    if (typeof actor.fenceEpoch !== "number" || !Number.isSafeInteger(actor.fenceEpoch) || actor.fenceEpoch < 0) throw new TypeError("live authority requires a fence epoch");
-    return { document, actor: { kind: "personal", workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID"),
-      agentId: parseLiveUpdateIdentifier(actor.agentId, "agent ID"), connectionId: parseLiveUpdateIdentifier(actor.connectionId, "connection ID"),
-      accessTokenHash: parseTicketHash(actor.accessTokenHash), resourceHash: parseTicketHash(actor.resourceHash), fenceEpoch: actor.fenceEpoch } };
+    const actor = ticketRecord(outer.actor, [
+      "kind",
+      "workspaceId",
+      "agentId",
+      "connectionId",
+      "accessTokenHash",
+      "resourceHash",
+      "fenceEpoch",
+    ]);
+    if (
+      typeof actor.fenceEpoch !== "number" ||
+      !Number.isSafeInteger(actor.fenceEpoch) ||
+      actor.fenceEpoch < 0
+    )
+      throw new TypeError("live authority requires a fence epoch");
+    return {
+      document,
+      actor: {
+        kind: "personal",
+        workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID"),
+        agentId: parseLiveUpdateIdentifier(actor.agentId, "agent ID"),
+        connectionId: parseLiveUpdateIdentifier(actor.connectionId, "connection ID"),
+        accessTokenHash: parseTicketHash(actor.accessTokenHash),
+        resourceHash: parseTicketHash(actor.resourceHash),
+        fenceEpoch: actor.fenceEpoch,
+      },
+    };
   }
-  if (kind.value === "link" && Object.getOwnPropertyDescriptor(outer.actor, "agentConnectionId") !== undefined) {
-    const actor = ticketRecord(outer.actor, ["kind", "agentConnectionId", "accessTokenHash", "resourceHash", "grantId", "workspaceId"]);
-    return { document, actor: { kind: "link", agentConnectionId: parseLiveUpdateIdentifier(actor.agentConnectionId, "agent connection ID"),
-      accessTokenHash: parseTicketHash(actor.accessTokenHash), resourceHash: parseTicketHash(actor.resourceHash),
-      grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID"), workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID") } };
+  if (
+    kind.value === "link" &&
+    Object.getOwnPropertyDescriptor(outer.actor, "agentConnectionId") !== undefined
+  ) {
+    const actor = ticketRecord(outer.actor, [
+      "kind",
+      "agentConnectionId",
+      "accessTokenHash",
+      "resourceHash",
+      "grantId",
+      "workspaceId",
+    ]);
+    return {
+      document,
+      actor: {
+        kind: "link",
+        agentConnectionId: parseLiveUpdateIdentifier(
+          actor.agentConnectionId,
+          "agent connection ID",
+        ),
+        accessTokenHash: parseTicketHash(actor.accessTokenHash),
+        resourceHash: parseTicketHash(actor.resourceHash),
+        grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID"),
+        workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID"),
+      },
+    };
   }
   if (kind.value === "link") {
-    const actor = ticketRecord(outer.actor, ["kind", "sessionId", "profileTokenHash", "grantId", "workspaceId"]);
-    return { document, actor: { kind: "link", sessionId: parseLiveUpdateIdentifier(actor.sessionId, "session ID"),
-      profileTokenHash: parseTicketHash(actor.profileTokenHash),
-      grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID"), workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID") } };
+    const actor = ticketRecord(outer.actor, [
+      "kind",
+      "sessionId",
+      "profileTokenHash",
+      "grantId",
+      "workspaceId",
+    ]);
+    return {
+      document,
+      actor: {
+        kind: "link",
+        sessionId: parseLiveUpdateIdentifier(actor.sessionId, "session ID"),
+        profileTokenHash: parseTicketHash(actor.profileTokenHash),
+        grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID"),
+        workspaceId: parseLiveUpdateIdentifier(actor.workspaceId, "workspace ID"),
+      },
+    };
   }
-  const actor = ticketRecord(outer.actor,
-    kind.value === "owner" ? ["kind", "userId"] : ["kind", "userId", "grantId"]);
+  const actor = ticketRecord(
+    outer.actor,
+    kind.value === "owner" ? ["kind", "userId"] : ["kind", "userId", "grantId"],
+  );
   if (actor.kind !== kind.value) throw new TypeError("live authority actor changed during capture");
   const userId = parseLiveUpdateIdentifier(actor.userId, "actor user ID");
-  return { document, actor: kind.value === "owner"
-    ? { kind: "owner", userId }
-    : { kind: "named", userId, grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID") } };
+  return {
+    document,
+    actor:
+      kind.value === "owner"
+        ? { kind: "owner", userId }
+        : { kind: "named", userId, grantId: parseLiveUpdateIdentifier(actor.grantId, "grant ID") },
+  };
 }
 
-export function baselineRecord(value: unknown, fields: readonly string[], allowExtra = false): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || nodeTypes.isProxy(value) || Array.isArray(value) ||
-    (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+export function baselineRecord(
+  value: unknown,
+  fields: readonly string[],
+  allowExtra = false,
+): Record<string, unknown> {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    nodeTypes.isProxy(value) ||
+    Array.isArray(value) ||
+    (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+  ) {
     throw new TypeError("Invalid baseline record.");
   }
   if (!allowExtra) {
     const keys = Reflect.ownKeys(value);
-    if (keys.length !== fields.length || keys.some(key => typeof key !== "string" || !fields.includes(key))) {
+    if (
+      keys.length !== fields.length ||
+      keys.some((key) => typeof key !== "string" || !fields.includes(key))
+    ) {
       throw new TypeError("Invalid baseline fields.");
     }
   }
   const result: Record<string, unknown> = {};
   for (const field of fields) {
     const descriptor = Object.getOwnPropertyDescriptor(value, field);
-    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid baseline field.");
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value"))
+      throw new TypeError("Invalid baseline field.");
     result[field] = descriptor.value;
   }
   return result;
@@ -140,64 +248,139 @@ export function baselineRecord(value: unknown, fields: readonly string[], allowE
 
 const baselineBytePrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
 
-export const baselineByteBuffer = Object.getOwnPropertyDescriptor(baselineBytePrototype, "buffer")!.get!;
+export const baselineByteBuffer = Object.getOwnPropertyDescriptor(
+  baselineBytePrototype,
+  "buffer",
+)!.get!;
 
-export const baselineByteOffset = Object.getOwnPropertyDescriptor(baselineBytePrototype, "byteOffset")!.get!;
+export const baselineByteOffset = Object.getOwnPropertyDescriptor(
+  baselineBytePrototype,
+  "byteOffset",
+)!.get!;
 
-export const baselineByteLength = Object.getOwnPropertyDescriptor(baselineBytePrototype, "byteLength")!.get!;
+export const baselineByteLength = Object.getOwnPropertyDescriptor(
+  baselineBytePrototype,
+  "byteLength",
+)!.get!;
 
-export const baselineBufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!;
+export const baselineBufferLength = Object.getOwnPropertyDescriptor(
+  ArrayBuffer.prototype,
+  "byteLength",
+)!.get!;
 
-export const baselineBufferResizable = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "resizable")?.get;
+export const baselineBufferResizable = Object.getOwnPropertyDescriptor(
+  ArrayBuffer.prototype,
+  "resizable",
+)?.get;
 
-function snapshotBaseline(outer: Record<string, unknown>): Omit<LiveDocumentBaselineRegistrationInput, "host"> {
-  const evidence = baselineRecord(outer.evidence,
-    ["version", "document", "currentPath", "checkpoint", "projectedMarkdownSha256", "projectedMarkdownByteLength"], true);
+function snapshotBaseline(
+  outer: Record<string, unknown>,
+): Omit<LiveDocumentBaselineRegistrationInput, "host"> {
+  const evidence = baselineRecord(
+    outer.evidence,
+    [
+      "version",
+      "document",
+      "currentPath",
+      "checkpoint",
+      "projectedMarkdownSha256",
+      "projectedMarkdownByteLength",
+    ],
+    true,
+  );
   if (evidence.version !== 1) throw new TypeError("Unknown baseline evidence version.");
-  const document = parseLiveDocumentKey(baselineRecord(evidence.document,
-    ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"]));
+  const document = parseLiveDocumentKey(
+    baselineRecord(evidence.document, [
+      "workspaceId",
+      "mainVersionId",
+      "objectId",
+      "lineageClaimId",
+    ]),
+  );
   const currentPath = evidence.currentPath;
-  const binding = parseLiveObjectBinding({ ...document, currentPath, selectorPaths: [currentPath], restoreFenceGeneration: 1 });
-  if (document.mainVersionId !== "main" || binding.currentPath !== currentPath || liveDocumentKindForPath(currentPath) !== "richdoc") {
+  const binding = parseLiveObjectBinding({
+    ...document,
+    currentPath,
+    selectorPaths: [currentPath],
+    restoreFenceGeneration: 1,
+  });
+  if (
+    document.mainVersionId !== "main" ||
+    binding.currentPath !== currentPath ||
+    liveDocumentKindForPath(currentPath) !== "richdoc"
+  ) {
     throw new TypeError("Invalid baseline path.");
   }
   const checkpoint = baselineRecord(evidence.checkpoint, ["updateDigest", "ranges"], true);
   const updateDigest = parseLiveUpdateDigest(checkpoint.updateDigest);
-  if (parseLiveUpdateDigest(document.lineageClaimId) !== updateDigest) throw new TypeError("Baseline lineage mismatch.");
+  if (parseLiveUpdateDigest(document.lineageClaimId) !== updateDigest)
+    throw new TypeError("Baseline lineage mismatch.");
   const bytes = outer.baselineBytes;
   if (!nodeTypes.isUint8Array(bytes)) throw new TypeError("Invalid baseline bytes.");
   const buffer = Reflect.apply(baselineByteBuffer, bytes, []) as ArrayBuffer;
   const offset = Reflect.apply(baselineByteOffset, bytes, []) as number;
   const length = Reflect.apply(baselineByteLength, bytes, []) as number;
   const backingLength = Reflect.apply(baselineBufferLength, buffer, []) as number;
-  if (length < 1 || length > 20_971_520 || offset > backingLength || length > backingLength - offset ||
-    (baselineBufferResizable !== undefined && Reflect.apply(baselineBufferResizable, buffer, []))) {
+  if (
+    length < 1 ||
+    length > 20_971_520 ||
+    offset > backingLength ||
+    length > backingLength - offset ||
+    (baselineBufferResizable !== undefined && Reflect.apply(baselineBufferResizable, buffer, []))
+  ) {
     throw new TypeError("Invalid baseline bytes.");
   }
   const baselineBytes = new Uint8Array(new Uint8Array(buffer, offset, length));
-  if (createHash("sha256").update(baselineBytes).digest("hex") !== updateDigest) throw new TypeError("Baseline digest mismatch.");
+  if (createHash("sha256").update(baselineBytes).digest("hex") !== updateDigest)
+    throw new TypeError("Baseline digest mismatch.");
   const rawRanges = checkpoint.ranges;
-  if (!Array.isArray(rawRanges) || nodeTypes.isProxy(rawRanges) || Object.getPrototypeOf(rawRanges) !== Array.prototype) {
+  if (
+    !Array.isArray(rawRanges) ||
+    nodeTypes.isProxy(rawRanges) ||
+    Object.getPrototypeOf(rawRanges) !== Array.prototype
+  ) {
     throw new TypeError("Invalid baseline ranges.");
   }
   const rangeCount = Object.getOwnPropertyDescriptor(rawRanges, "length")!.value as number;
-  if (Reflect.ownKeys(rawRanges).length !== rangeCount + 1) throw new TypeError("Invalid baseline ranges.");
+  if (Reflect.ownKeys(rawRanges).length !== rangeCount + 1)
+    throw new TypeError("Invalid baseline ranges.");
   const ranges: LiveUpdateStructRange[] = [];
   for (let index = 0; index < rangeCount; index++) {
     const descriptor = Object.getOwnPropertyDescriptor(rawRanges, String(index));
-    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid baseline range.");
-    const range = parseLiveUpdateStructRange(baselineRecord(descriptor.value, ["clientId", "startClock", "endClock"]));
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value"))
+      throw new TypeError("Invalid baseline range.");
+    const range = parseLiveUpdateStructRange(
+      baselineRecord(descriptor.value, ["clientId", "startClock", "endClock"]),
+    );
     const previous = ranges.at(-1);
-    if (previous && (range.clientId < previous.clientId ||
-      (range.clientId === previous.clientId && range.startClock <= previous.endClock))) throw new TypeError("Noncanonical baseline ranges.");
+    if (
+      previous &&
+      (range.clientId < previous.clientId ||
+        (range.clientId === previous.clientId && range.startClock <= previous.endClock))
+    )
+      throw new TypeError("Noncanonical baseline ranges.");
     ranges.push(range);
   }
   const projectedMarkdownSha256 = parseLiveUpdateDigest(evidence.projectedMarkdownSha256);
-  const projectedMarkdownByteLength = parseHostControlTimestamp(evidence.projectedMarkdownByteLength, "projection length");
-  if (projectedMarkdownByteLength > 2_097_152) throw new TypeError("Invalid baseline projection length.");
+  const projectedMarkdownByteLength = parseHostControlTimestamp(
+    evidence.projectedMarkdownByteLength,
+    "projection length",
+  );
+  if (projectedMarkdownByteLength > 2_097_152)
+    throw new TypeError("Invalid baseline projection length.");
   const registeredAtMs = parseHostControlTimestamp(outer.registeredAtMs, "registration timestamp");
-  return { baselineBytes, registeredAtMs, evidence: { version: 1, document, currentPath,
-    checkpoint: { updateDigest, ranges }, projectedMarkdownSha256, projectedMarkdownByteLength } };
+  return {
+    baselineBytes,
+    registeredAtMs,
+    evidence: {
+      version: 1,
+      document,
+      currentPath,
+      checkpoint: { updateDigest, ranges },
+      projectedMarkdownSha256,
+      projectedMarkdownByteLength,
+    },
+  };
 }
 
 export function authorityIntegrity(condition: unknown): asserts condition {
@@ -212,34 +395,58 @@ export function authorityInteger(value: unknown, minimum = 0): number {
 export function assertCurrentAuthorityHost(db: SqliteDb, host: HostControlSnapshot): void {
   authorityIntegrity(host.registeredConnectionId === null || host.registeredInstanceId !== null);
   authorityIntegrity(host.admissionState !== "closed" || host.registeredConnectionId === null);
-  authorityIntegrity(host.admissionState !== "open" ||
-    (host.registeredInstanceId !== null && host.registeredConnectionId !== null));
-  authorityIntegrity(host.lastCompletedTransitionId === null || host.lastTransitionGeneration !== null);
+  authorityIntegrity(
+    host.admissionState !== "open" ||
+      (host.registeredInstanceId !== null && host.registeredConnectionId !== null),
+  );
+  authorityIntegrity(
+    host.lastCompletedTransitionId === null || host.lastTransitionGeneration !== null,
+  );
   const transition = host.transition;
   if (transition === null) {
-    authorityIntegrity(host.admissionState !== "draining" &&
-      (host.admissionState === "open" || host.lastCompletedTransitionId === null));
-    const row = db.prepare(`SELECT transition_id, transition_from_mode, transition_from_host_id,
+    authorityIntegrity(
+      host.admissionState !== "draining" &&
+        (host.admissionState === "open" || host.lastCompletedTransitionId === null),
+    );
+    const row = db
+      .prepare(`SELECT transition_id, transition_from_mode, transition_from_host_id,
       transition_from_instance_id, transition_from_connection_id, transition_from_epoch,
       transition_to_mode, transition_to_host_id, transition_started_at_ms
-      FROM ${SESSION_HOST_CONTROL_TABLE} WHERE singleton_id = 1`).get();
-    authorityIntegrity(row && Object.values(row).every(value => value === null));
+      FROM ${SESSION_HOST_CONTROL_TABLE} WHERE singleton_id = 1`)
+      .get();
+    authorityIntegrity(row && Object.values(row).every((value) => value === null));
   } else {
-    authorityIntegrity(host.lastCompletedTransitionId === null && transition.fromMode !== transition.toMode);
+    authorityIntegrity(
+      host.lastCompletedTransitionId === null && transition.fromMode !== transition.toMode,
+    );
     if (transition.phase === "draining") {
-      authorityIntegrity(host.admissionState === "draining" && host.configuredMode === transition.fromMode &&
-        host.configuredHostId === transition.fromHostId && host.registeredInstanceId === transition.fromInstanceId &&
-        host.registeredConnectionId === transition.fromConnectionId && host.hostEpoch === transition.fromEpoch);
+      authorityIntegrity(
+        host.admissionState === "draining" &&
+          host.configuredMode === transition.fromMode &&
+          host.configuredHostId === transition.fromHostId &&
+          host.registeredInstanceId === transition.fromInstanceId &&
+          host.registeredConnectionId === transition.fromConnectionId &&
+          host.hostEpoch === transition.fromEpoch,
+      );
     } else {
-      authorityIntegrity(host.admissionState === "closed" && host.configuredMode === transition.toMode &&
-        host.configuredHostId === transition.toHostId && host.registeredInstanceId === null &&
-        host.registeredConnectionId === null && host.hostEpoch === transition.fromEpoch + 1);
+      authorityIntegrity(
+        host.admissionState === "closed" &&
+          host.configuredMode === transition.toMode &&
+          host.configuredHostId === transition.toHostId &&
+          host.registeredInstanceId === null &&
+          host.registeredConnectionId === null &&
+          host.hostEpoch === transition.fromEpoch + 1,
+      );
     }
   }
 }
 
-function readLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey): StoredLiveDocumentAuthority | null {
-  const row = db.prepare(`SELECT * FROM sync_relay_live_documents
+function readLiveDocumentAuthority(
+  db: SqliteDb,
+  document: LiveDocumentKey,
+): StoredLiveDocumentAuthority | null {
+  const row = db
+    .prepare(`SELECT * FROM sync_relay_live_documents
     WHERE workspace_id = ? AND main_version_id = ? AND object_id = ?
       AND (lineage_state = 'current' OR lineage_claim_id = ?)
     ORDER BY lineage_state = 'current' DESC LIMIT 1`)
@@ -253,126 +460,255 @@ function readLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey): Sto
  * lineage and admission, and its baseline's sequence. It reads no baseline
  * bytes, so their integrity stays with the readers that use them.
  */
-function readLiveDocumentBinding(db: SqliteDb, document: LiveDocumentKey): StoredLiveBinding | null {
-  const row = db.prepare(`SELECT workspace_id, main_version_id, object_id, lineage_claim_id, current_path, restore_fence_generation,
+function readLiveDocumentBinding(
+  db: SqliteDb,
+  document: LiveDocumentKey,
+): StoredLiveBinding | null {
+  const row = db
+    .prepare(`SELECT workspace_id, main_version_id, object_id, lineage_claim_id, current_path, restore_fence_generation,
       lineage_state, admission_state, baseline_moment_relay_seq FROM sync_relay_live_documents
     WHERE workspace_id = ? AND main_version_id = ? AND object_id = ?
       AND (lineage_state = 'current' OR lineage_claim_id = ?)
     ORDER BY lineage_state = 'current' DESC LIMIT 1`)
     .get(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId);
   if (!row) return null;
-  const binding = parseLiveObjectBinding({ workspaceId: row.workspace_id, mainVersionId: row.main_version_id, objectId: row.object_id,
-    lineageClaimId: row.lineage_claim_id, currentPath: row.current_path, selectorPaths: [row.current_path],
-    restoreFenceGeneration: row.restore_fence_generation });
-  authorityIntegrity(binding.mainVersionId === "main" && binding.workspaceId === document.workspaceId && binding.objectId === document.objectId);
-  return { binding, current: row.lineage_state === "current", open: row.admission_state === "open",
-    baselineSequence: authorityInteger(row.baseline_moment_relay_seq, 1) };
+  const binding = parseLiveObjectBinding({
+    workspaceId: row.workspace_id,
+    mainVersionId: row.main_version_id,
+    objectId: row.object_id,
+    lineageClaimId: row.lineage_claim_id,
+    currentPath: row.current_path,
+    selectorPaths: [row.current_path],
+    restoreFenceGeneration: row.restore_fence_generation,
+  });
+  authorityIntegrity(
+    binding.mainVersionId === "main" &&
+      binding.workspaceId === document.workspaceId &&
+      binding.objectId === document.objectId,
+  );
+  return {
+    binding,
+    current: row.lineage_state === "current",
+    open: row.admission_state === "open",
+    baselineSequence: authorityInteger(row.baseline_moment_relay_seq, 1),
+  };
 }
 
-export function decodeLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey, row: Record<string, unknown>): StoredLiveDocumentAuthority {
+export function decodeLiveDocumentAuthority(
+  db: SqliteDb,
+  document: LiveDocumentKey,
+  row: Record<string, unknown>,
+): StoredLiveDocumentAuthority {
   const stored = decodeLiveDocumentAuthorityStructure(db, document, row);
-  authorityIntegrity(createHash("sha256").update(stored.baselineBytes).digest("hex") === stored.baselineDigest);
+  authorityIntegrity(
+    createHash("sha256").update(stored.baselineBytes).digest("hex") === stored.baselineDigest,
+  );
   return stored;
 }
 
 // The caller must verify copied baseline bytes against the digest outside its writer transaction.
-export function decodeLiveDocumentAuthorityStructure(db: SqliteDb, document: LiveDocumentKey, row: Record<string, unknown>): StoredLiveDocumentAuthority {
+export function decodeLiveDocumentAuthorityStructure(
+  db: SqliteDb,
+  document: LiveDocumentKey,
+  row: Record<string, unknown>,
+): StoredLiveDocumentAuthority {
   const storedDocument = parseLiveDocumentKey({
-    workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
-    objectId: row.object_id, lineageClaimId: row.lineage_claim_id,
+    workspaceId: row.workspace_id,
+    mainVersionId: row.main_version_id,
+    objectId: row.object_id,
+    lineageClaimId: row.lineage_claim_id,
   });
   authorityIntegrity(storedDocument.mainVersionId === "main");
-  authorityIntegrity(storedDocument.workspaceId === document.workspaceId && storedDocument.objectId === document.objectId);
+  authorityIntegrity(
+    storedDocument.workspaceId === document.workspaceId &&
+      storedDocument.objectId === document.objectId,
+  );
   const baselineDigest = parseLiveUpdateDigest(row.baseline_digest);
   authorityIntegrity(parseLiveUpdateDigest(storedDocument.lineageClaimId) === baselineDigest);
   if (row.replaces_lineage_claim_id !== null) {
     authorityIntegrity(parseLiveUpdateDigest(row.replaces_lineage_claim_id) !== baselineDigest);
   }
-  const binding = parseLiveObjectBinding({ ...storedDocument, currentPath: row.current_path,
-    selectorPaths: [row.current_path], restoreFenceGeneration: row.restore_fence_generation });
-  authorityIntegrity(binding.currentPath === row.current_path && liveDocumentKindForPath(binding.currentPath) === "richdoc");
+  const binding = parseLiveObjectBinding({
+    ...storedDocument,
+    currentPath: row.current_path,
+    selectorPaths: [row.current_path],
+    restoreFenceGeneration: row.restore_fence_generation,
+  });
+  authorityIntegrity(
+    binding.currentPath === row.current_path &&
+      liveDocumentKindForPath(binding.currentPath) === "richdoc",
+  );
   const registeredAtMs = authorityInteger(row.registered_at_ms);
   authorityIntegrity(row.lineage_state === "current" || row.lineage_state === "retired");
   authorityIntegrity(row.admission_state === "open" || row.admission_state === "closed");
   if (row.lineage_state === "current") authorityIntegrity(row.retired_at_ms === null);
-  else { authorityInteger(row.retired_at_ms); authorityIntegrity(row.admission_state === "closed"); }
+  else {
+    authorityInteger(row.retired_at_ms);
+    authorityIntegrity(row.admission_state === "closed");
+  }
   const bytes = row.baseline_bytes;
-  authorityIntegrity(bytes instanceof Uint8Array && bytes.byteLength > 0 && bytes.byteLength <= 20_971_520);
+  authorityIntegrity(
+    bytes instanceof Uint8Array && bytes.byteLength > 0 && bytes.byteLength <= 20_971_520,
+  );
   const projectionDigest = parseLiveUpdateDigest(row.baseline_projected_sha256);
   const projectionLength = authorityInteger(row.baseline_projected_byte_length);
   authorityIntegrity(projectionLength <= 2_097_152);
   const baselineSequence = authorityInteger(row.baseline_moment_relay_seq, 1);
-  const ordinary=readOrdinaryActivationBasis(db,storedDocument);
-  if(ordinary){
-    authorityIntegrity(ordinary.base_relay_seq===baselineSequence&&ordinary.current_path===binding.currentPath&&
-      ordinary.projected_sha256===projectionDigest&&ordinary.projected_byte_length===projectionLength);
-    const epoch=db.prepare("SELECT replication_epoch,stream_identity,COALESCE(epoch_log_floor,0) AS log_floor FROM sync_relay_workspaces WHERE workspace_id=?").get(document.workspaceId);
+  const ordinary = readOrdinaryActivationBasis(db, storedDocument);
+  if (ordinary) {
+    authorityIntegrity(
+      ordinary.base_relay_seq === baselineSequence &&
+        ordinary.current_path === binding.currentPath &&
+        ordinary.projected_sha256 === projectionDigest &&
+        ordinary.projected_byte_length === projectionLength,
+    );
+    const epoch = db
+      .prepare(
+        "SELECT replication_epoch,stream_identity,COALESCE(epoch_log_floor,0) AS log_floor FROM sync_relay_workspaces WHERE workspace_id=?",
+      )
+      .get(document.workspaceId);
     authorityIntegrity(epoch);
-    if(baselineSequence>authorityInteger(epoch.log_floor)){
-      authorityIntegrity(epoch.replication_epoch===ordinary.replication_epoch&&epoch.stream_identity===ordinary.stream_identity);
+    if (baselineSequence > authorityInteger(epoch.log_floor)) {
+      authorityIntegrity(
+        epoch.replication_epoch === ordinary.replication_epoch &&
+          epoch.stream_identity === ordinary.stream_identity,
+      );
     }
-    const source=db.prepare(`SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=? AND origin_id=? AND origin_seq=? AND op_kind='ydoc.update'`)
-      .get(document.workspaceId,baselineSequence,ordinary.base_origin_id,ordinary.base_origin_seq);
-    authorityIntegrity(source&&typeof source.payload_json==="string");
-    const payload=JSON.parse(source.payload_json) as Record<string,unknown>;
-    authorityIntegrity(payload.versionId===storedDocument.mainVersionId&&payload.objectId===storedDocument.objectId&&payload.path===binding.currentPath&&
-      payload.contentKind==="richdoc"&&payload.isBaseState===true&&payload.lineageClaimId===baselineDigest&&payload.updateBlobSha256===baselineDigest);
-    const blob=db.prepare("SELECT byte_length,content=? AS matches FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
-      .get(bytes,document.workspaceId,baselineDigest);
-    authorityIntegrity(blob?.byte_length===bytes.length&&blob.matches===1);
-  }else{
-    const sourceMoment = db.prepare(`SELECT version_id, path, content_kind, blob_sha256, byte_length
+    const source = db
+      .prepare(
+        `SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND relay_seq=? AND origin_id=? AND origin_seq=? AND op_kind='ydoc.update'`,
+      )
+      .get(
+        document.workspaceId,
+        baselineSequence,
+        ordinary.base_origin_id,
+        ordinary.base_origin_seq,
+      );
+    authorityIntegrity(source && typeof source.payload_json === "string");
+    const payload = JSON.parse(source.payload_json) as Record<string, unknown>;
+    authorityIntegrity(
+      payload.versionId === storedDocument.mainVersionId &&
+        payload.objectId === storedDocument.objectId &&
+        payload.path === binding.currentPath &&
+        payload.contentKind === "richdoc" &&
+        payload.isBaseState === true &&
+        payload.lineageClaimId === baselineDigest &&
+        payload.updateBlobSha256 === baselineDigest,
+    );
+    const blob = db
+      .prepare(
+        "SELECT byte_length,content=? AS matches FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?",
+      )
+      .get(bytes, document.workspaceId, baselineDigest);
+    authorityIntegrity(blob?.byte_length === bytes.length && blob.matches === 1);
+  } else {
+    const sourceMoment = db
+      .prepare(`SELECT version_id, path, content_kind, blob_sha256, byte_length
       FROM sync_relay_object_moments WHERE workspace_id = ? AND object_id = ? AND relay_seq = ?`)
       .get(document.workspaceId, document.objectId, baselineSequence);
-    authorityIntegrity(sourceMoment && sourceMoment.version_id === "main" && sourceMoment.path === binding.currentPath &&
-      sourceMoment.content_kind === "text" && sourceMoment.blob_sha256 === projectionDigest && sourceMoment.byte_length === projectionLength);
+    authorityIntegrity(
+      sourceMoment &&
+        sourceMoment.version_id === "main" &&
+        sourceMoment.path === binding.currentPath &&
+        sourceMoment.content_kind === "text" &&
+        sourceMoment.blob_sha256 === projectionDigest &&
+        sourceMoment.byte_length === projectionLength,
+    );
   }
-  const ranges = db.prepare(`SELECT * FROM sync_relay_live_document_baseline_ranges
+  const ranges = db
+    .prepare(`SELECT * FROM sync_relay_live_document_baseline_ranges
     WHERE workspace_id = ? AND main_version_id = ? AND object_id = ? AND lineage_claim_id = ?
     ORDER BY client_id, start_clock`)
-    .all(document.workspaceId, document.mainVersionId, document.objectId, storedDocument.lineageClaimId);
+    .all(
+      document.workspaceId,
+      document.mainVersionId,
+      document.objectId,
+      storedDocument.lineageClaimId,
+    );
   let previous: ReturnType<typeof parseLiveUpdateStructRange> | null = null;
   const decodedRanges: LiveUpdateStructRange[] = [];
   for (const raw of ranges) {
-    authorityIntegrity(raw.workspace_id === storedDocument.workspaceId && raw.main_version_id === "main" &&
-      raw.object_id === storedDocument.objectId && raw.lineage_claim_id === storedDocument.lineageClaimId);
-    const range = parseLiveUpdateStructRange({ clientId: raw.client_id, startClock: raw.start_clock, endClock: raw.end_clock });
-    authorityIntegrity(previous === null || previous.clientId !== range.clientId || previous.endClock < range.startClock);
+    authorityIntegrity(
+      raw.workspace_id === storedDocument.workspaceId &&
+        raw.main_version_id === "main" &&
+        raw.object_id === storedDocument.objectId &&
+        raw.lineage_claim_id === storedDocument.lineageClaimId,
+    );
+    const range = parseLiveUpdateStructRange({
+      clientId: raw.client_id,
+      startClock: raw.start_clock,
+      endClock: raw.end_clock,
+    });
+    authorityIntegrity(
+      previous === null ||
+        previous.clientId !== range.clientId ||
+        previous.endClock < range.startClock,
+    );
     previous = range;
     decodedRanges.push(range);
   }
-  return { binding, current: row.lineage_state === "current", open: row.admission_state === "open",
+  return {
+    binding,
+    current: row.lineage_state === "current",
+    open: row.admission_state === "open",
     replacesLineageClaimId: row.replaces_lineage_claim_id as string | null,
-    baselineSequence, baselineDigest, baselineBytes: bytes, projectedDigest: projectionDigest,
-    projectedLength: projectionLength, ranges: decodedRanges, registeredAtMs };
+    baselineSequence,
+    baselineDigest,
+    baselineBytes: bytes,
+    projectedDigest: projectionDigest,
+    projectedLength: projectionLength,
+    ranges: decodedRanges,
+    registeredAtMs,
+  };
 }
 
 export function canonicalLiveSelector(share: SyncRelayShareRow, selector: ShareSelector): boolean {
   const raw = JSON.parse(share.selectorJson) as Record<string, unknown>;
-  if (Object.keys(raw).length !== 2 || !Object.hasOwn(raw, "paths") || !Object.hasOwn(raw, "versionId")) return false;
-  return new Set(selector.paths).size === selector.paths.length && selector.paths.every(path => {
-    const checked = validateUserWritePath(path);
-    return checked.ok && checked.normalized === path;
-  });
+  if (
+    Object.keys(raw).length !== 2 ||
+    !Object.hasOwn(raw, "paths") ||
+    !Object.hasOwn(raw, "versionId")
+  )
+    return false;
+  return (
+    new Set(selector.paths).size === selector.paths.length &&
+    selector.paths.every((path) => {
+      const checked = validateUserWritePath(path);
+      return checked.ok && checked.normalized === path;
+    })
+  );
 }
 
-export function resolveCurrentLiveDocumentBinding(storage: StorageContext, input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
-    const request = snapshotCurrentBindingRequest(input);
-    return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request, activation));
-  }
+export function resolveCurrentLiveDocumentBinding(
+  storage: StorageContext,
+  input: CurrentLiveBindingRequest,
+  activation?: ServiceActivationAccess,
+): CurrentLiveBindingResult {
+  const request = snapshotCurrentBindingRequest(input);
+  return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request, activation));
+}
 
 /**
  * The check `resolveCurrentLiveDocumentBinding` makes, from the live row's
  * metadata alone. Readiness asks it of every listed document; the callers that
  * use the baseline read its bytes and check them.
  */
-export function resolveCurrentLiveDocumentBindingFromMetadata(storage: StorageContext, input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+export function resolveCurrentLiveDocumentBindingFromMetadata(
+  storage: StorageContext,
+  input: CurrentLiveBindingRequest,
+): CurrentLiveBindingResult {
   const request = snapshotCurrentBindingRequest(input);
-  return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request, undefined, readLiveDocumentBinding));
+  return storage.readLiveAuthority(() =>
+    currentLiveDocumentBinding(storage, request, undefined, readLiveDocumentBinding),
+  );
 }
 
 export type LiveObjectHostBindingResult =
-  | { readonly kind: "current"; readonly binding: LiveObjectBinding; readonly host: LiveHostConnectionCoordinate }
+  | {
+      readonly kind: "current";
+      readonly binding: LiveObjectBinding;
+      readonly host: LiveHostConnectionCoordinate;
+    }
   | Extract<CurrentLiveBindingResult, { kind: "refused" }>;
 
 /**
@@ -381,205 +717,477 @@ export type LiveObjectHostBindingResult =
  * was replaced can keep `path` as its stored path, so the object is found
  * first.
  */
-export function currentLiveDocument(storage: StorageContext, workspaceId: string, path: string): LiveDocumentKey | null {
-  const objectId = storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path});
+export function currentLiveDocument(
+  storage: StorageContext,
+  workspaceId: string,
+  path: string,
+): LiveDocumentKey | null {
+  const objectId = storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path });
   if (objectId === undefined) return null;
-  const row = storage.db.prepare(`SELECT lineage_claim_id FROM sync_relay_live_documents
-    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'`).get(workspaceId, objectId);
-  return row ? {workspaceId, mainVersionId: "main", objectId, lineageClaimId: String(row.lineage_claim_id)} : null;
+  const row = storage.db
+    .prepare(`SELECT lineage_claim_id FROM sync_relay_live_documents
+    WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current'`)
+    .get(workspaceId, objectId);
+  return row
+    ? { workspaceId, mainVersionId: "main", objectId, lineageClaimId: String(row.lineage_claim_id) }
+    : null;
 }
 
 /** Server-owned automation writes use owner standing, never a caller-supplied binding. */
-export function automationRecordBinding(storage: StorageContext, workspaceId: string, ownerUserId: string, path: string) {
-  if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) throw new Error("Automation workspace ownership changed.");
+export function automationRecordBinding(
+  storage: StorageContext,
+  workspaceId: string,
+  ownerUserId: string,
+  path: string,
+) {
+  if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId))
+    throw new Error("Automation workspace ownership changed.");
   const document = currentLiveDocument(storage, workspaceId, path);
   if (!document) return null;
-  const current = resolveCurrentLiveDocumentBinding(storage, {document, actor: {kind: "owner", userId: ownerUserId}});
-  if (current.kind === "current") return {binding: current.binding};
+  const current = resolveCurrentLiveDocumentBinding(storage, {
+    document,
+    actor: { kind: "owner", userId: ownerUserId },
+  });
+  if (current.kind === "current") return { binding: current.binding };
   throw new Error("The shared file is unavailable. Restore access, then try again.");
 }
 
-export function resolveLiveObjectHostBinding(storage: StorageContext, value: LiveTicketScope, requestedObjectId: string): LiveObjectHostBindingResult {
-  const scope = snapshotLiveTicketScope(value), objectId = parseLiveUpdateIdentifier(requestedObjectId, "object ID");
+export function resolveLiveObjectHostBinding(
+  storage: StorageContext,
+  value: LiveTicketScope,
+  requestedObjectId: string,
+): LiveObjectHostBindingResult {
+  const scope = snapshotLiveTicketScope(value),
+    objectId = parseLiveUpdateIdentifier(requestedObjectId, "object ID");
   return storage.readLiveAuthority(() => {
     if (!ticketScopeIsCurrent(storage, scope)) return { kind: "refused", reason: "not-authorized" };
-    const row = storage.db.prepare(`SELECT lineage_claim_id FROM sync_relay_live_documents
-      WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current' LIMIT 1`).get(scope.workspaceId, objectId);
+    const row = storage.db
+      .prepare(`SELECT lineage_claim_id FROM sync_relay_live_documents
+      WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current' LIMIT 1`)
+      .get(scope.workspaceId, objectId);
     if (!row) return { kind: "refused", reason: "stale-document" };
-    const document = { workspaceId: scope.workspaceId, mainVersionId: "main", objectId,
-      lineageClaimId: parseLiveUpdateDigest(row.lineage_claim_id) };
-    if (!serviceHostDocumentEnabled(storage, document)) return {kind: "refused", reason: "host-unavailable"};
+    const document = {
+      workspaceId: scope.workspaceId,
+      mainVersionId: "main",
+      objectId,
+      lineageClaimId: parseLiveUpdateDigest(row.lineage_claim_id),
+    };
+    if (!serviceHostDocumentEnabled(storage, document))
+      return { kind: "refused", reason: "host-unavailable" };
     if (scope.kind === "named" || scope.kind === "personal") {
-      const current = currentLiveDocumentBinding(storage, { document, actor: liveBrowserActor(scope) });
-      return current.kind === "current" ? { kind: "current", binding: current.binding, host: current.host } : current;
+      const current = currentLiveDocumentBinding(storage, {
+        document,
+        actor: liveBrowserActor(scope),
+      });
+      return current.kind === "current"
+        ? { kind: "current", binding: current.binding, host: current.host }
+        : current;
     }
     const host = readLiveHostControl(storage.db);
     if (host !== null) assertCurrentAuthorityHost(storage.db, host);
-    if (host === null || host.admissionState !== "open" || host.transition !== null) return { kind: "refused", reason: "host-unavailable" };
-    const actor = liveBrowserActor(scope), link = currentLinkEdit(storage, actor);
+    if (host === null || host.admissionState !== "open" || host.transition !== null)
+      return { kind: "refused", reason: "host-unavailable" };
+    const actor = liveBrowserActor(scope),
+      link = currentLinkEdit(storage, actor);
     if (!link) return { kind: "refused", reason: "not-authorized" };
-    const bound = bindLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document), actor, link.share, link.effectiveSelector);
+    const bound = bindLiveDocument(
+      storage,
+      document,
+      readLiveDocumentAuthority(storage.db, document),
+      actor,
+      link.share,
+      link.effectiveSelector,
+    );
     if (bound.kind !== "bound") return bound;
-    return { kind: "current", binding: bound.binding,
-      host: { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
-        instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! } };
+    return {
+      kind: "current",
+      binding: bound.binding,
+      host: {
+        mode: host.configuredMode,
+        hostId: host.configuredHostId,
+        hostEpoch: host.hostEpoch,
+        instanceId: host.registeredInstanceId!,
+        connectionId: host.registeredConnectionId!,
+      },
+    };
   });
 }
 
-function currentLinkEdit(storage: StorageContext, actor: Extract<CurrentLiveBindingRequest["actor"], { kind: "link" }>) {
+function currentLinkEdit(
+  storage: StorageContext,
+  actor: Extract<CurrentLiveBindingRequest["actor"], { kind: "link" }>,
+) {
   const now = Date.now();
   if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid link authority clock.");
   let enrollment: LinkEnrollment | null;
   if ("agentConnectionId" in actor) {
-    const agent = agentWriteAuthorityInTransaction(storage, {accessTokenHash: actor.accessTokenHash, resourceHash: actor.resourceHash}, now);
-    enrollment = agent?.connection.connectionId === actor.agentConnectionId ? agent.enrollment : null;
+    const agent = agentWriteAuthorityInTransaction(
+      storage,
+      { accessTokenHash: actor.accessTokenHash, resourceHash: actor.resourceHash },
+      now,
+    );
+    enrollment =
+      agent?.connection.connectionId === actor.agentConnectionId ? agent.enrollment : null;
   } else {
-    const session = storage.db.prepare("SELECT capability_hash FROM sync_relay_link_sessions WHERE session_id=?").get(actor.sessionId);
+    const session = storage.db
+      .prepare("SELECT capability_hash FROM sync_relay_link_sessions WHERE session_id=?")
+      .get(actor.sessionId);
     if (!session) return null;
-    enrollment = readLinkEnrollment(storage, {capabilityHash: String(session.capability_hash), profileTokenHash: actor.profileTokenHash}, now);
+    enrollment = readLinkEnrollment(
+      storage,
+      { capabilityHash: String(session.capability_hash), profileTokenHash: actor.profileTokenHash },
+      now,
+    );
     if (enrollment?.authority.session_id !== actor.sessionId) return null;
   }
-  if (!enrollment || enrollment.authority.grant_id !== actor.grantId ||
-    enrollment.authority.workspace_id !== actor.workspaceId || linkWriteRefusal(enrollment)) return null;
-  const authorized = authorizeLinkShareAction({ storage, grantId: actor.grantId, action: "live-edit" });
+  if (
+    !enrollment ||
+    enrollment.authority.grant_id !== actor.grantId ||
+    enrollment.authority.workspace_id !== actor.workspaceId ||
+    linkWriteRefusal(enrollment)
+  )
+    return null;
+  const authorized = authorizeLinkShareAction({
+    storage,
+    grantId: actor.grantId,
+    action: "live-edit",
+  });
   if (!authorized.ok || !isLiveEditShareSelector(authorized.effectiveSelector)) return null;
   return { ...authorized, enrollment };
 }
 
-function parseStoredLiveTicket(row: Record<string, unknown>): { claims: LiveTicketClaims; redeemedAtMs: number | null } {
+function parseStoredLiveTicket(row: Record<string, unknown>): {
+  claims: LiveTicketClaims;
+  redeemedAtMs: number | null;
+} {
   try {
     for (const column of LIVE_TICKET_COLUMNS) {
       const value = row[column];
       if (LIVE_TICKET_NULLABLE_COLUMNS.has(column) && value === null) continue;
       if (LIVE_TICKET_INTEGER_COLUMNS.has(column)) {
-        if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error();
+        if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+          throw new Error();
       } else if (typeof value !== "string") throw new Error();
     }
     parseTicketHash(row.token_hash);
-    if ((row.principal_kind !== "personal" && row.principal_kind !== "named" && row.principal_kind !== "link") ||
-      row.main_version_id !== "main" || Number(row.restore_fence_generation) < 1) throw new Error();
+    if (
+      (row.principal_kind !== "personal" &&
+        row.principal_kind !== "named" &&
+        row.principal_kind !== "link") ||
+      row.main_version_id !== "main" ||
+      Number(row.restore_fence_generation) < 1
+    )
+      throw new Error();
     // Each kind names only its own connection. The authority parser below checks its grant.
-    const connections: Record<"personal" | "named" | "link", readonly string[]> = { personal: ["personal_connection_id"], named: [],
-      link: [row.agent_connection_id === null ? "link_session_id" : "agent_connection_id"] };
+    const connections: Record<"personal" | "named" | "link", readonly string[]> = {
+      personal: ["personal_connection_id"],
+      named: [],
+      link: [row.agent_connection_id === null ? "link_session_id" : "agent_connection_id"],
+    };
     const connection = connections[row.principal_kind as keyof typeof connections];
     for (const column of ["link_session_id", "agent_connection_id", "personal_connection_id"]) {
-      if (connection.includes(column) ? parseLiveUpdateIdentifier(row[column], column) !== row[column] : row[column] !== null) throw new Error();
+      if (
+        connection.includes(column)
+          ? parseLiveUpdateIdentifier(row[column], column) !== row[column]
+          : row[column] !== null
+      )
+        throw new Error();
     }
     parseLiveUpdateDigest(row.lineage_claim_id);
     const claims = parseLiveTicketClaims({
-      ticketId: row.ticket_id, audience: row.audience,
-      binding: { workspaceId: row.workspace_id, mainVersionId: row.main_version_id, objectId: row.object_id,
-        lineageClaimId: row.lineage_claim_id, currentPath: row.current_path,
-        selectorPaths: JSON.parse(row.selector_paths_json as string), restoreFenceGeneration: row.restore_fence_generation },
-      authority: { principalKind: row.principal_kind, principalId: row.principal_id, grantId: row.grant_id, grantGeneration: row.grant_generation },
-      hostEpoch: row.host_epoch, mintedAtMs: row.minted_at_ms, expiresAtMs: row.expires_at_ms,
+      ticketId: row.ticket_id,
+      audience: row.audience,
+      binding: {
+        workspaceId: row.workspace_id,
+        mainVersionId: row.main_version_id,
+        objectId: row.object_id,
+        lineageClaimId: row.lineage_claim_id,
+        currentPath: row.current_path,
+        selectorPaths: JSON.parse(row.selector_paths_json as string),
+        restoreFenceGeneration: row.restore_fence_generation,
+      },
+      authority: {
+        principalKind: row.principal_kind,
+        principalId: row.principal_id,
+        grantId: row.grant_id,
+        grantGeneration: row.grant_generation,
+      },
+      hostEpoch: row.host_epoch,
+      mintedAtMs: row.minted_at_ms,
+      expiresAtMs: row.expires_at_ms,
     });
-    if (claims.ticketId !== row.ticket_id || claims.audience !== row.audience || claims.binding.workspaceId !== row.workspace_id ||
-      claims.binding.objectId !== row.object_id || claims.binding.lineageClaimId !== row.lineage_claim_id ||
-      claims.binding.currentPath !== row.current_path || JSON.stringify(claims.binding.selectorPaths) !== row.selector_paths_json ||
-      claims.authority.principalId !== row.principal_id || claims.authority.grantId !== row.grant_id) throw new Error();
+    if (
+      claims.ticketId !== row.ticket_id ||
+      claims.audience !== row.audience ||
+      claims.binding.workspaceId !== row.workspace_id ||
+      claims.binding.objectId !== row.object_id ||
+      claims.binding.lineageClaimId !== row.lineage_claim_id ||
+      claims.binding.currentPath !== row.current_path ||
+      JSON.stringify(claims.binding.selectorPaths) !== row.selector_paths_json ||
+      claims.authority.principalId !== row.principal_id ||
+      claims.authority.grantId !== row.grant_id
+    )
+      throw new Error();
     const redeemedAtMs = row.redeemed_at_ms as number | null;
     if (redeemedAtMs !== null) parseRedeemedLiveTicket({ ...claims, redeemedAtMs });
     return { claims, redeemedAtMs };
-  } catch { throw new Error("stored live ticket is damaged"); }
+  } catch {
+    throw new Error("stored live ticket is damaged");
+  }
 }
 
 export const LIVE_TICKET_REFUSED = Symbol("live-ticket refused");
 
+/**
+ * A principal already holds its share of unexpired tickets, as when its tabs keep reconnecting.
+ * That passes as the tickets expire, so a mint fails like the relay's own busy state instead of
+ * refusing.
+ */
+export class LiveTicketsRetained extends Error {
+  constructor() {
+    super("The principal holds its share of live tickets.");
+  }
+}
+
 function snapshotTicketLookup(input: Record<string, unknown>): LiveTicketLookup {
-  return { tokenHash: parseTicketHash(input.tokenHash), audience: parseLiveTicketAudience(input.audience),
-    scope: snapshotLiveTicketScope(input.scope) };
+  return {
+    tokenHash: parseTicketHash(input.tokenHash),
+    audience: parseLiveTicketAudience(input.audience),
+    scope: snapshotLiveTicketScope(input.scope),
+  };
 }
 
 // A personal agent at its scope's fence, still reaching the scope's workspace at Edit in an account that owns it.
-function currentPersonalEdit(storage: StorageContext, actor: Extract<CurrentLiveBindingRequest["actor"], { kind: "personal" }>) {
+function currentPersonalEdit(
+  storage: StorageContext,
+  actor: Extract<CurrentLiveBindingRequest["actor"], { kind: "personal" }>,
+) {
   const now = Date.now();
   if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid personal authority clock.");
-  const connection = readPersonalAuthority(storage, {accessTokenHash: actor.accessTokenHash, resourceHash: actor.resourceHash}, actor.fenceEpoch, now);
-  if (!connection || connection.connectionId !== actor.connectionId || connection.agentId !== actor.agentId) return null;
-  return personalReachIn(storage, connection, actor.workspaceId)?.level === "edit" ? connection : null;
+  const connection = readPersonalAuthority(
+    storage,
+    { accessTokenHash: actor.accessTokenHash, resourceHash: actor.resourceHash },
+    actor.fenceEpoch,
+    now,
+  );
+  if (
+    !connection ||
+    connection.connectionId !== actor.connectionId ||
+    connection.agentId !== actor.agentId
+  )
+    return null;
+  return personalReachIn(storage, connection, actor.workspaceId)?.level === "edit"
+    ? connection
+    : null;
 }
 
 export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveTicketScope): boolean {
-    if (scope.kind === "personal") return currentPersonalEdit(storage, liveBrowserActor(scope)) !== null;
-    const grant = storage.getShareGrant(scope.grantId);
-    const share = grant && storage.getShare(grant.shareId);
-    return !!grant && grant.shareId === scope.shareId && !!share && share.workspaceId === scope.workspaceId &&
-      (scope.kind === "named" ? authorizeNamedLiveEditShareGrant({ storage: storage, actorUserId: scope.userId, grantId: scope.grantId }).ok :
-        ("agentConnectionId" in scope || !!storage.db.prepare("SELECT 1 FROM sync_relay_link_sessions WHERE session_id=? AND capability_hash=?")
-          .get(scope.sessionId, scope.capabilityHash)) && currentLinkEdit(storage, liveBrowserActor(scope)) !== null);
-  }
+  if (scope.kind === "personal")
+    return currentPersonalEdit(storage, liveBrowserActor(scope)) !== null;
+  const grant = storage.getShareGrant(scope.grantId);
+  const share = grant && storage.getShare(grant.shareId);
+  return (
+    !!grant &&
+    grant.shareId === scope.shareId &&
+    !!share &&
+    share.workspaceId === scope.workspaceId &&
+    (scope.kind === "named"
+      ? authorizeNamedLiveEditShareGrant({
+          storage: storage,
+          actorUserId: scope.userId,
+          grantId: scope.grantId,
+        }).ok
+      : ("agentConnectionId" in scope ||
+          !!storage.db
+            .prepare(
+              "SELECT 1 FROM sync_relay_link_sessions WHERE session_id=? AND capability_hash=?",
+            )
+            .get(scope.sessionId, scope.capabilityHash)) &&
+        currentLinkEdit(storage, liveBrowserActor(scope)) !== null)
+  );
+}
 
-export function currentTicketAuthority(storage: StorageContext, scope: LiveTicketScope, objectId: string, report: TicketHostReport):
-    Extract<CurrentLiveBindingResult, { kind: "current" }> {
-    if (report.binding.workspaceId !== scope.workspaceId || report.binding.objectId !== objectId ||
-      !ticketScopeIsCurrent(storage, scope)) throw LIVE_TICKET_REFUSED;
-    const current = currentLiveDocumentBinding(storage, {
-      document: { workspaceId: scope.workspaceId, objectId, mainVersionId: "main", lineageClaimId: report.binding.lineageClaimId },
-      actor: liveBrowserActor(scope),
-    });
-    if (current.kind !== "current" || current.authority.principalKind !== scope.kind || current.binding.restoreFenceGeneration === 0 ||
-      JSON.stringify(current.binding) !== JSON.stringify(report.binding) ||
-      JSON.stringify(current.host) !== JSON.stringify(report.connection)) throw LIVE_TICKET_REFUSED;
-    return current;
-  }
+/** Whether a link browser's ticket would enroll one browser more than its link takes. */
+export function liveLinkFull(storage: StorageContext, scope: LiveTicketScope): boolean {
+  if (scope.kind !== "link" || "agentConnectionId" in scope) return false;
+  const link = currentLinkEdit(storage, liveBrowserActor(scope));
+  return !!link && linkPrincipalLimitReached(storage, link.enrollment);
+}
 
-export function matchingTicket(storage: StorageContext, input: LiveTicketLookup, now: number): LiveTicketClaims {
-    const row = storage.db.prepare(`SELECT * FROM ${LIVE_TICKET_TABLE} WHERE token_hash = ?`).get(input.tokenHash);
-    if (!row) throw LIVE_TICKET_REFUSED;
-    const { claims, redeemedAtMs } = parseStoredLiveTicket(row);
-    if (redeemedAtMs !== null || now < claims.mintedAtMs || now >= claims.expiresAtMs || claims.audience !== input.audience ||
-      claims.binding.workspaceId !== input.scope.workspaceId || claims.authority.principalKind !== input.scope.kind ||
-      // A personal ticket opens only for the agent and connection it was minted for.
-      (input.scope.kind === "personal" ? claims.authority.principalId !== input.scope.agentId || row.personal_connection_id !== input.scope.connectionId :
-      input.scope.kind === "named" ? claims.authority.principalId !== input.scope.userId :
-        ("agentConnectionId" in input.scope ? row.agent_connection_id !== input.scope.agentConnectionId : row.link_session_id !== input.scope.sessionId) ||
-        currentLinkEdit(storage, liveBrowserActor(input.scope))?.enrollment.principal?.principalId !== claims.authority.principalId) ||
-      claims.authority.grantId !== (input.scope.kind === "personal" ? null : input.scope.grantId) ||
-      !ticketScopeIsCurrent(storage, input.scope)) throw LIVE_TICKET_REFUSED;
-    return claims;
-  }
+export function currentTicketAuthority(
+  storage: StorageContext,
+  scope: LiveTicketScope,
+  objectId: string,
+  report: TicketHostReport,
+): Extract<CurrentLiveBindingResult, { kind: "current" }> {
+  if (
+    report.binding.workspaceId !== scope.workspaceId ||
+    report.binding.objectId !== objectId ||
+    !ticketScopeIsCurrent(storage, scope)
+  )
+    throw LIVE_TICKET_REFUSED;
+  const current = currentLiveDocumentBinding(storage, {
+    document: {
+      workspaceId: scope.workspaceId,
+      objectId,
+      mainVersionId: "main",
+      lineageClaimId: report.binding.lineageClaimId,
+    },
+    actor: liveBrowserActor(scope),
+  });
+  if (
+    current.kind !== "current" ||
+    current.authority.principalKind !== scope.kind ||
+    current.binding.restoreFenceGeneration === 0 ||
+    JSON.stringify(current.binding) !== JSON.stringify(report.binding) ||
+    JSON.stringify(current.host) !== JSON.stringify(report.connection)
+  )
+    throw LIVE_TICKET_REFUSED;
+  return current;
+}
 
-export function readLiveTicketTarget(storage: StorageContext, input: LiveTicketLookup): { workspaceId: string; objectId: string } | null {
-    const owned = snapshotTicketLookup(ticketRecord(input, ["tokenHash", "scope", "audience"]));
-    return storage.ticketTransaction(now => {
-      const claims = matchingTicket(storage, owned, now);
-      return { workspaceId: claims.binding.workspaceId, objectId: claims.binding.objectId };
-    });
-  }
+export function matchingTicket(
+  storage: StorageContext,
+  input: LiveTicketLookup,
+  now: number,
+): LiveTicketClaims {
+  const row = storage.db
+    .prepare(`SELECT * FROM ${LIVE_TICKET_TABLE} WHERE token_hash = ?`)
+    .get(input.tokenHash);
+  if (!row) throw LIVE_TICKET_REFUSED;
+  const { claims, redeemedAtMs } = parseStoredLiveTicket(row);
+  if (
+    redeemedAtMs !== null ||
+    now < claims.mintedAtMs ||
+    now >= claims.expiresAtMs ||
+    claims.audience !== input.audience ||
+    claims.binding.workspaceId !== input.scope.workspaceId ||
+    claims.authority.principalKind !== input.scope.kind ||
+    // A personal ticket opens only for the agent and connection it was minted for.
+    (input.scope.kind === "personal"
+      ? claims.authority.principalId !== input.scope.agentId ||
+        row.personal_connection_id !== input.scope.connectionId
+      : input.scope.kind === "named"
+        ? claims.authority.principalId !== input.scope.userId
+        : ("agentConnectionId" in input.scope
+            ? row.agent_connection_id !== input.scope.agentConnectionId
+            : row.link_session_id !== input.scope.sessionId) ||
+          currentLinkEdit(storage, liveBrowserActor(input.scope))?.enrollment.principal
+            ?.principalId !== claims.authority.principalId) ||
+    claims.authority.grantId !== (input.scope.kind === "personal" ? null : input.scope.grantId) ||
+    !ticketScopeIsCurrent(storage, input.scope)
+  )
+    throw LIVE_TICKET_REFUSED;
+  return claims;
+}
 
-export function mintLiveTicket(storage: StorageContext, input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null {
-    const raw = ticketRecord(input, ["tokenHash", "scope", "audience", "objectId", "ticketId", "report"]);
-    const owned = snapshotTicketLookup(raw);
-    const objectId = parseLiveUpdateIdentifier(raw.objectId, "object ID");
-    const ticketId = parseLiveUpdateIdentifier(raw.ticketId, "ticket ID");
-    const report = snapshotTicketHostReport(raw.report);
-    return storage.ticketTransaction((now, policy) => {
-      if (now > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS) throw LIVE_TICKET_REFUSED;
-      if (owned.scope.kind === "link") {
-        const actor = liveBrowserActor(owned.scope);
-        const link = currentLinkEdit(storage, actor);
-        if (!link || !ticketScopeIsCurrent(storage, owned.scope) || linkPrincipalLimitReached(storage, link.enrollment)) throw LIVE_TICKET_REFUSED;
-        // An agent's connection already holds its principal; only a holder enrolls here.
-        if (!("agentConnectionId" in owned.scope)) {
-          const principalId = link.enrollment.principal?.principalId ?? parseLiveUpdateIdentifier(storage.newDiscussionId(), "link principal ID");
-          if (!link.enrollment.principal) assertWorkspaceQuota(storage, owned.scope.workspaceId,
-            linkPrincipalStorageBytes(principalId, owned.scope.grantId, owned.scope.profileTokenHash));
-          commitLinkEnrollment(storage, { ...owned.scope, enrollment: link.enrollment, principalId,
-            displayName: null, createdAtMs: now, discussionRevision: link.enrollment.principal ? Number(link.enrollment.authority.discussion_revision) : nextShareDiscussionRevision(storage, owned.scope.shareId) });
-        }
+export function readLiveTicketTarget(
+  storage: StorageContext,
+  input: LiveTicketLookup,
+): { workspaceId: string; objectId: string } | null {
+  const owned = snapshotTicketLookup(ticketRecord(input, ["tokenHash", "scope", "audience"]));
+  return storage.ticketTransaction((now) => {
+    const claims = matchingTicket(storage, owned, now);
+    return { workspaceId: claims.binding.workspaceId, objectId: claims.binding.objectId };
+  });
+}
+
+export function mintLiveTicket(
+  storage: StorageContext,
+  input: LiveTicketMint,
+): { expiresAtMs: number; publicPrincipalId?: string } | null {
+  const raw = ticketRecord(input, [
+    "tokenHash",
+    "scope",
+    "audience",
+    "objectId",
+    "ticketId",
+    "report",
+  ]);
+  const owned = snapshotTicketLookup(raw);
+  const objectId = parseLiveUpdateIdentifier(raw.objectId, "object ID");
+  const ticketId = parseLiveUpdateIdentifier(raw.ticketId, "ticket ID");
+  const report = snapshotTicketHostReport(raw.report);
+  // A full workspace refuses a ticket the way a full link does, whichever record would not fit.
+  return storage.ticketTransaction((now, policy) => {
+    try {
+      return mintInTransaction(now, policy);
+    } catch (error) {
+      throw error instanceof SyncRelayQuotaExceededError ? LIVE_TICKET_REFUSED : error;
+    }
+  });
+  function mintInTransaction(
+    now: number,
+    policy: LiveTicketStoragePolicy,
+  ): { expiresAtMs: number; publicPrincipalId?: string } {
+    if (now > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS) throw LIVE_TICKET_REFUSED;
+    if (owned.scope.kind === "link") {
+      const actor = liveBrowserActor(owned.scope);
+      const link = currentLinkEdit(storage, actor);
+      if (
+        !link ||
+        !ticketScopeIsCurrent(storage, owned.scope) ||
+        linkPrincipalLimitReached(storage, link.enrollment)
+      )
+        throw LIVE_TICKET_REFUSED;
+      // An agent's connection already holds its principal; only a holder enrolls here.
+      if (!("agentConnectionId" in owned.scope)) {
+        const principalId =
+          link.enrollment.principal?.principalId ??
+          parseLiveUpdateIdentifier(storage.newDiscussionId(), "link principal ID");
+        if (!link.enrollment.principal)
+          assertWorkspaceQuota(
+            storage,
+            owned.scope.workspaceId,
+            linkPrincipalStorageBytes(
+              principalId,
+              owned.scope.grantId,
+              owned.scope.profileTokenHash,
+            ),
+          );
+        commitLinkEnrollment(storage, {
+          ...owned.scope,
+          enrollment: link.enrollment,
+          principalId,
+          displayName: null,
+          createdAtMs: now,
+          discussionRevision: link.enrollment.principal
+            ? Number(link.enrollment.authority.discussion_revision)
+            : nextShareDiscussionRevision(storage, owned.scope.shareId),
+        });
       }
-      const current = currentTicketAuthority(storage, owned.scope, objectId, report);
-      const claims = parseLiveTicketClaims({ ticketId, audience: owned.audience, authority: current.authority,
-        binding: current.binding, hostEpoch: current.host.hostEpoch, mintedAtMs: now, expiresAtMs: now + LIVE_TICKET_LIFETIME_MS });
-      storeLiveTicketInTransaction(storage, { claims, tokenHash: owned.tokenHash,
-        linkSessionId: "sessionId" in owned.scope ? owned.scope.sessionId : null,
-        agentConnectionId: "agentConnectionId" in owned.scope ? owned.scope.agentConnectionId : null,
-        personalConnectionId: owned.scope.kind === "personal" ? owned.scope.connectionId : null }, now, policy);
-      return { expiresAtMs: claims.expiresAtMs,
-        ...(current.authority.principalKind === "link" ? {publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, current.authority)} : {}) };
+    }
+    const current = currentTicketAuthority(storage, owned.scope, objectId, report);
+    const claims = parseLiveTicketClaims({
+      ticketId,
+      audience: owned.audience,
+      authority: current.authority,
+      binding: current.binding,
+      hostEpoch: current.host.hostEpoch,
+      mintedAtMs: now,
+      expiresAtMs: now + LIVE_TICKET_LIFETIME_MS,
     });
+    storeLiveTicketInTransaction(
+      storage,
+      {
+        claims,
+        tokenHash: owned.tokenHash,
+        linkSessionId: "sessionId" in owned.scope ? owned.scope.sessionId : null,
+        agentConnectionId:
+          "agentConnectionId" in owned.scope ? owned.scope.agentConnectionId : null,
+        personalConnectionId: owned.scope.kind === "personal" ? owned.scope.connectionId : null,
+      },
+      now,
+      policy,
+    );
+    return {
+      expiresAtMs: claims.expiresAtMs,
+      ...(current.authority.principalKind === "link"
+        ? { publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, current.authority) }
+        : {}),
+    };
   }
+}
 
 /**
  * A ticket to store, with the connection that may redeem it. A personal
@@ -598,28 +1206,67 @@ export interface StoredLiveTicketInput {
  * Stores a parsed ticket inside a ticket transaction. Unexpired tickets are
  * counted per principal and grant, and a personal agent's grant is null.
  */
-export function storeLiveTicketInTransaction(storage: StorageContext, ticket: StoredLiveTicketInput, now: number, policy: LiveTicketStoragePolicy): void {
+export function storeLiveTicketInTransaction(
+  storage: StorageContext,
+  ticket: StoredLiveTicketInput,
+  now: number,
+  policy: LiveTicketStoragePolicy,
+): void {
   const { claims } = ticket;
-  if (storage.db.prepare(`SELECT 1 FROM ${LIVE_TICKET_TABLE} WHERE ticket_id = ? OR token_hash = ? LIMIT 1`).get(claims.ticketId, ticket.tokenHash)) {
+  if (
+    storage.db
+      .prepare(`SELECT 1 FROM ${LIVE_TICKET_TABLE} WHERE ticket_id = ? OR token_hash = ? LIMIT 1`)
+      .get(claims.ticketId, ticket.tokenHash)
+  ) {
     throw LIVE_TICKET_REFUSED;
   }
-  storage.db.prepare(`DELETE FROM ${LIVE_TICKET_TABLE} WHERE ticket_id IN (
+  storage.db
+    .prepare(`DELETE FROM ${LIVE_TICKET_TABLE} WHERE ticket_id IN (
     SELECT ticket_id FROM ${LIVE_TICKET_TABLE} WHERE expires_at_ms <= ? ORDER BY expires_at_ms, ticket_id LIMIT ?
-  )`).run(now, policy.expiredTicketCleanupBatchSize);
-  const count = storage.db.prepare(`SELECT count(*) AS retained_count FROM (
+  )`)
+    .run(now, policy.expiredTicketCleanupBatchSize);
+  const count = storage.db
+    .prepare(`SELECT count(*) AS retained_count FROM (
     SELECT ticket_id FROM ${LIVE_TICKET_TABLE}
     WHERE workspace_id = ? AND principal_kind = ? AND principal_id = ? AND grant_id IS ? AND expires_at_ms > ?
     ORDER BY expires_at_ms, ticket_id LIMIT ?
-  )`).get(claims.binding.workspaceId, claims.authority.principalKind, claims.authority.principalId, claims.authority.grantId, now, policy.retainedTicketsPerPrincipalGrant);
-  if (!count || Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant) throw LIVE_TICKET_REFUSED;
-  storage.db.prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`).run(
-    claims.ticketId, ticket.tokenHash, claims.audience, claims.binding.workspaceId, claims.binding.mainVersionId,
-    claims.binding.objectId, claims.binding.lineageClaimId, claims.binding.currentPath, JSON.stringify(claims.binding.selectorPaths),
-    claims.binding.restoreFenceGeneration, claims.authority.principalKind, claims.authority.principalId,
-    claims.authority.grantId, claims.authority.grantGeneration, claims.hostEpoch, claims.mintedAtMs, claims.expiresAtMs,
-    ticket.linkSessionId, ticket.agentConnectionId, ticket.personalConnectionId,
-  );
+  )`)
+    .get(
+      claims.binding.workspaceId,
+      claims.authority.principalKind,
+      claims.authority.principalId,
+      claims.authority.grantId,
+      now,
+      policy.retainedTicketsPerPrincipalGrant,
+    );
+  if (!count) throw LIVE_TICKET_REFUSED;
+  if (Number(count.retained_count) >= policy.retainedTicketsPerPrincipalGrant)
+    throw new LiveTicketsRetained();
+  storage.db
+    .prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`)
+    .run(
+      claims.ticketId,
+      ticket.tokenHash,
+      claims.audience,
+      claims.binding.workspaceId,
+      claims.binding.mainVersionId,
+      claims.binding.objectId,
+      claims.binding.lineageClaimId,
+      claims.binding.currentPath,
+      JSON.stringify(claims.binding.selectorPaths),
+      claims.binding.restoreFenceGeneration,
+      claims.authority.principalKind,
+      claims.authority.principalId,
+      claims.authority.grantId,
+      claims.authority.grantGeneration,
+      claims.hostEpoch,
+      claims.mintedAtMs,
+      claims.expiresAtMs,
+      ticket.linkSessionId,
+      ticket.agentConnectionId,
+      ticket.personalConnectionId,
+    );
 }
 
 /**
@@ -627,10 +1274,17 @@ export function storeLiveTicketInTransaction(storage: StorageContext, ticket: St
  * stored ticket's claims. Only the personal connection the ticket names, or
  * none for a browser ticket, can consume it.
  */
-export function consumeLiveTicketInTransaction(storage: StorageContext, ticket: {
-  readonly ticketId: string; readonly tokenHash: string; readonly personalConnectionId: string | null;
-}, now: number): RedeemedLiveTicket {
-  const row = storage.db.prepare(`UPDATE ${LIVE_TICKET_TABLE} SET redeemed_at_ms = ?
+export function consumeLiveTicketInTransaction(
+  storage: StorageContext,
+  ticket: {
+    readonly ticketId: string;
+    readonly tokenHash: string;
+    readonly personalConnectionId: string | null;
+  },
+  now: number,
+): RedeemedLiveTicket {
+  const row = storage.db
+    .prepare(`UPDATE ${LIVE_TICKET_TABLE} SET redeemed_at_ms = ?
     WHERE ticket_id = ? AND token_hash = ? AND personal_connection_id IS ? AND redeemed_at_ms IS NULL AND minted_at_ms <= ? AND expires_at_ms > ?
     RETURNING *`)
     .get(now, ticket.ticketId, ticket.tokenHash, ticket.personalConnectionId, now, now);
@@ -638,187 +1292,386 @@ export function consumeLiveTicketInTransaction(storage: StorageContext, ticket: 
   return parseRedeemedLiveTicket({ ...parseStoredLiveTicket(row).claims, redeemedAtMs: now });
 }
 
-export function redeemLiveTicket(storage: StorageContext, input: LiveTicketRedemption): RedeemedLiveTicket | null {
-    const raw = ticketRecord(input, ["tokenHash", "scope", "audience", "report"]);
-    const owned = snapshotTicketLookup(raw);
-    const report = snapshotTicketHostReport(raw.report);
-    return storage.ticketTransaction(now => {
-      const claims = matchingTicket(storage, owned, now);
-      const current = currentTicketAuthority(storage, owned.scope, claims.binding.objectId, report);
-      if (JSON.stringify(current.binding) !== JSON.stringify(claims.binding) ||
-        JSON.stringify(current.authority) !== JSON.stringify(claims.authority) || current.host.hostEpoch !== claims.hostEpoch) {
-        throw LIVE_TICKET_REFUSED;
-      }
-      return consumeLiveTicketInTransaction(storage, { ticketId: claims.ticketId, tokenHash: owned.tokenHash,
-        personalConnectionId: owned.scope.kind === "personal" ? owned.scope.connectionId : null }, now);
-    });
-  }
-
-export function registerLiveDocumentBaseline(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
-    return registerBaseline(storage, input, operation => storage.tx(operation));
-  }
-
-export function registerLiveDocumentBaselineInTransaction(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult {
-    return registerBaseline(storage, input, operation => operation());
-  }
-
-export function registerOrdinaryActivationBaselineInTransaction(storage:StorageContext,input:LiveDocumentBaselineRegistrationInput,cut:VerifiedOrdinaryActivationCut):RelayBaselineRegistrationResult {
-    return registerBaseline(storage,input,operation=>operation(),cut);
-  }
-
-function registerBaseline(storage: StorageContext, input: LiveDocumentBaselineRegistrationInput, run: (operation: () => RelayBaselineRegistrationResult) => RelayBaselineRegistrationResult, ordinaryCut?:VerifiedOrdinaryActivationCut): RelayBaselineRegistrationResult {
-    let outer: Record<string, unknown>;
-    try { outer = baselineRecord(input, ["host", "evidence", "baselineBytes", "registeredAtMs"]); }
-    catch { return { kind: "refused", reason: "invalid-baseline" }; }
-    let baseline: Omit<LiveDocumentBaselineRegistrationInput, "host">;
-    try { baseline = snapshotBaseline(outer); }
-    catch { return { kind: "refused", reason: "invalid-baseline" }; }
-    try {
-      let coordinate: LiveHostConnectionCoordinate;
-      try { coordinate = snapshotHostCoordinate(baselineRecord(outer.host, ["mode", "hostId", "hostEpoch", "instanceId", "connectionId"])); }
-      catch { return { kind: "refused", reason: "stale-host" }; }
-      return registerValidatedBaseline(storage, {...baseline, host: coordinate}, run, ordinaryCut);
-    } finally {
-      notifyDesktopReadiness(storage, {workspaceId: baseline.evidence.document.workspaceId, path: baseline.evidence.currentPath});
+export function redeemLiveTicket(
+  storage: StorageContext,
+  input: LiveTicketRedemption,
+): RedeemedLiveTicket | null {
+  const raw = ticketRecord(input, ["tokenHash", "scope", "audience", "report"]);
+  const owned = snapshotTicketLookup(raw);
+  const report = snapshotTicketHostReport(raw.report);
+  return storage.ticketTransaction((now) => {
+    const claims = matchingTicket(storage, owned, now);
+    const current = currentTicketAuthority(storage, owned.scope, claims.binding.objectId, report);
+    if (
+      JSON.stringify(current.binding) !== JSON.stringify(claims.binding) ||
+      JSON.stringify(current.authority) !== JSON.stringify(claims.authority) ||
+      current.host.hostEpoch !== claims.hostEpoch
+    ) {
+      throw LIVE_TICKET_REFUSED;
     }
-  }
+    return consumeLiveTicketInTransaction(
+      storage,
+      {
+        ticketId: claims.ticketId,
+        tokenHash: owned.tokenHash,
+        personalConnectionId: owned.scope.kind === "personal" ? owned.scope.connectionId : null,
+      },
+      now,
+    );
+  });
+}
 
-function registerValidatedBaseline(storage: StorageContext, owned: LiveDocumentBaselineRegistrationInput, run: (operation: () => RelayBaselineRegistrationResult) => RelayBaselineRegistrationResult, ordinaryCut?: VerifiedOrdinaryActivationCut): RelayBaselineRegistrationResult {
-    const coordinate = owned.host;
-    const { evidence, baselineBytes, registeredAtMs } = owned;
-    const { document, currentPath, checkpoint } = evidence;
-    return run(() => {
-      const host = readLiveHostControl(storage.db);
-      if (host !== null) assertCurrentAuthorityHost(storage.db, host);
-      if (host === null || host.admissionState !== "open" || host.transition !== null) {
-        return { kind: "refused", reason: "host-unavailable" };
-      }
-      if (host.configuredMode !== coordinate.mode || host.configuredHostId !== coordinate.hostId ||
-        host.hostEpoch !== coordinate.hostEpoch || host.registeredInstanceId !== coordinate.instanceId ||
-        host.registeredConnectionId !== coordinate.connectionId) return { kind: "refused", reason: "stale-host" };
-      const latest = ordinaryCut ? ordinaryActivationBaseline(storage,owned,ordinaryCut) : currentLiveDocumentMoment(storage, document, currentPath);
-      if (!latest || latest.blob_sha256 !== evidence.projectedMarkdownSha256 ||
-        latest.byte_length !== evidence.projectedMarkdownByteLength) return { kind: "refused", reason: "stale-document" };
-      const history = storage.db.prepare(`SELECT * FROM sync_relay_live_documents
-        WHERE workspace_id = ? AND main_version_id = ? AND object_id = ? ORDER BY lineage_claim_id`)
-        .all(document.workspaceId, document.mainVersionId, document.objectId)
-        .map(row => decodeLiveDocumentAuthority(storage.db, document, row));
-      const current = history.find(row => row.current);
-      if (history.length > 0) {
-        if (!current || current.binding.lineageClaimId !== document.lineageClaimId) {
-          return { kind: "refused", reason: "lineage-conflict" };
-        }
-        if (!current.open || current.replacesLineageClaimId !== null || current.binding.currentPath !== currentPath ||
-          current.baselineSequence !== latest.relay_seq || current.projectedDigest !== evidence.projectedMarkdownSha256 ||
-          current.projectedLength !== evidence.projectedMarkdownByteLength || current.baselineDigest !== checkpoint.updateDigest ||
-          Buffer.compare(current.baselineBytes, baselineBytes) !== 0 ||
-          current.ranges.length !== checkpoint.ranges.length || current.ranges.some((range, index) => {
-            const expected = checkpoint.ranges[index]!;
-            return range.clientId !== expected.clientId || range.startClock !== expected.startClock || range.endClock !== expected.endClock;
-          })) return { kind: "refused", reason: "baseline-conflict" };
-        return { kind: "registered", document: { ...document }, currentPath,
-          restoreFenceGeneration: current.binding.restoreFenceGeneration, registeredAtMs: current.registeredAtMs, replayed: true };
-      }
-      prepareLiveDeliveryWorkspace(storage, document.workspaceId, coordinate.hostId);
-      const metadata = [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId,
-        null, currentPath, latest.relay_seq as number, evidence.projectedMarkdownSha256,
-        evidence.projectedMarkdownByteLength, checkpoint.updateDigest, 'current', 'open', 1, registeredAtMs, null];
-      const rangePrefix = [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
-      const rangeBytes = checkpoint.ranges.reduce((sum, range) => sum + Buffer.byteLength(JSON.stringify([
-        ...rangePrefix, range.clientId, range.startClock, range.endClock,
-      ])), 0);
-      // Charge logical stored values, excluding SQLite pages and indexes.
-      const charge = baselineBytes.byteLength + Buffer.byteLength(JSON.stringify(metadata)) + rangeBytes+
-        (ordinaryCut?ordinaryActivationBasisCharge(storage,owned,ordinaryCut):0);
-      assertWorkspaceQuota(storage, document.workspaceId, charge);
-      storage.db.prepare(`INSERT INTO sync_relay_live_documents (
-        workspace_id, main_version_id, object_id, lineage_claim_id, replaces_lineage_claim_id, current_path,
-        baseline_moment_relay_seq, baseline_projected_sha256, baseline_projected_byte_length, baseline_digest,
-        lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms, baseline_bytes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(...metadata, baselineBytes);
-      if(ordinaryCut)persistOrdinaryActivationBasis(storage,owned,ordinaryCut);
-      const insertRange = storage.db.prepare(`INSERT INTO sync_relay_live_document_baseline_ranges
-        (workspace_id, main_version_id, object_id, lineage_claim_id, client_id, start_clock, end_clock)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`);
-      for (const range of checkpoint.ranges) {
-        insertRange.run(...rangePrefix, range.clientId, range.startClock, range.endClock);
-      }
-      storage.db.prepare(`UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + ? WHERE workspace_id = ?`)
-        .run(charge, document.workspaceId);
-      registerLiveDeliveryBaseline(storage, document, coordinate.hostId);
-      return { kind: "registered", document: { ...document }, currentPath,
-        restoreFenceGeneration: 1, registeredAtMs, replayed: false };
+export function registerLiveDocumentBaseline(
+  storage: StorageContext,
+  input: LiveDocumentBaselineRegistrationInput,
+): RelayBaselineRegistrationResult {
+  return registerBaseline(storage, input, (operation) => storage.tx(operation));
+}
+
+export function registerLiveDocumentBaselineInTransaction(
+  storage: StorageContext,
+  input: LiveDocumentBaselineRegistrationInput,
+): RelayBaselineRegistrationResult {
+  return registerBaseline(storage, input, (operation) => operation());
+}
+
+export function registerOrdinaryActivationBaselineInTransaction(
+  storage: StorageContext,
+  input: LiveDocumentBaselineRegistrationInput,
+  cut: VerifiedOrdinaryActivationCut,
+): RelayBaselineRegistrationResult {
+  return registerBaseline(storage, input, (operation) => operation(), cut);
+}
+
+function registerBaseline(
+  storage: StorageContext,
+  input: LiveDocumentBaselineRegistrationInput,
+  run: (operation: () => RelayBaselineRegistrationResult) => RelayBaselineRegistrationResult,
+  ordinaryCut?: VerifiedOrdinaryActivationCut,
+): RelayBaselineRegistrationResult {
+  let outer: Record<string, unknown>;
+  try {
+    outer = baselineRecord(input, ["host", "evidence", "baselineBytes", "registeredAtMs"]);
+  } catch {
+    return { kind: "refused", reason: "invalid-baseline" };
+  }
+  let baseline: Omit<LiveDocumentBaselineRegistrationInput, "host">;
+  try {
+    baseline = snapshotBaseline(outer);
+  } catch {
+    return { kind: "refused", reason: "invalid-baseline" };
+  }
+  try {
+    let coordinate: LiveHostConnectionCoordinate;
+    try {
+      coordinate = snapshotHostCoordinate(
+        baselineRecord(outer.host, ["mode", "hostId", "hostEpoch", "instanceId", "connectionId"]),
+      );
+    } catch {
+      return { kind: "refused", reason: "stale-host" };
+    }
+    return registerValidatedBaseline(storage, { ...baseline, host: coordinate }, run, ordinaryCut);
+  } finally {
+    notifyDesktopReadiness(storage, {
+      workspaceId: baseline.evidence.document.workspaceId,
+      path: baseline.evidence.currentPath,
     });
   }
+}
 
-export function currentLiveDocumentMoment(storage: StorageContext, document: LiveDocumentKey, currentPath: string): Record<string, unknown> | undefined {
-    const latest = storage.db.prepare(`SELECT path, content_kind, blob_sha256, byte_length, relay_seq, recorded_at_ms FROM sync_relay_object_moments
-      WHERE workspace_id = ? AND object_id = ? AND version_id = 'main' ORDER BY relay_seq DESC LIMIT 1`)
-      .get(document.workspaceId, document.objectId);
-    if (!latest || latest.path !== currentPath || latest.content_kind !== "text" ||
-      typeof latest.blob_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(latest.blob_sha256) ||
-      typeof latest.byte_length !== "number" || !Number.isSafeInteger(latest.byte_length) || latest.byte_length < 0 ||
-      typeof latest.relay_seq !== "number" || !Number.isSafeInteger(latest.relay_seq) || latest.relay_seq <= storage.getEpochLogFloor(document.workspaceId) ||
-      typeof latest.recorded_at_ms !== "number" || !Number.isSafeInteger(latest.recorded_at_ms) || latest.recorded_at_ms < 0 ||
-      storage.objectIdAtPathInVersion({ workspaceId: document.workspaceId, versionId: "main", path: currentPath }) !== document.objectId) return undefined;
-    return latest;
-  }
-
-export function currentLiveDocumentBinding(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, activation?: ServiceActivationAccess,
-    read: (db: SqliteDb, document: LiveDocumentKey) => StoredLiveBinding | null = readLiveDocumentAuthority): CurrentLiveBindingResult {
+function registerValidatedBaseline(
+  storage: StorageContext,
+  owned: LiveDocumentBaselineRegistrationInput,
+  run: (operation: () => RelayBaselineRegistrationResult) => RelayBaselineRegistrationResult,
+  ordinaryCut?: VerifiedOrdinaryActivationCut,
+): RelayBaselineRegistrationResult {
+  const coordinate = owned.host;
+  const { evidence, baselineBytes, registeredAtMs } = owned;
+  const { document, currentPath, checkpoint } = evidence;
+  return run(() => {
     const host = readLiveHostControl(storage.db);
     if (host !== null) assertCurrentAuthorityHost(storage.db, host);
     if (host === null || host.admissionState !== "open" || host.transition !== null) {
       return { kind: "refused", reason: "host-unavailable" };
     }
-    authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
-    return authorizeLiveDocument(storage, { document, actor }, host, read(storage.db, document), activation);
-  }
-
-export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,
-    stored: Pick<StoredLiveDocumentAuthority,"binding"|"current"|"open"|"baselineSequence"> | null, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
-    if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined)) return {kind: "refused", reason: "host-unavailable"};
-    let bound: BoundLiveDocument | LiveBindingRefusal;
-    let authority: ServerDerivedLiveUpdateAuthority;
-    if (actor.kind === "named") {
-      const named = authorizeNamedLiveEditShareGrant({ storage: storage, actorUserId: actor.userId, grantId: actor.grantId });
-      if (!named.ok) return { kind: "refused", reason: named.reason };
-      authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "named", principalId: actor.userId,
-        grantId: named.grant.grantId, grantGeneration: named.grant.generation });
-      bound = bindLiveDocument(storage, document, stored, actor, named.share, named.effectiveSelector);
-    } else if (actor.kind === "link") {
-      const link = currentLinkEdit(storage, actor);
-      if (!link?.enrollment.principal || link.enrollment.sessionPrincipalId !== link.enrollment.principal.principalId) {
-        return { kind: "refused", reason: "not-authorized" };
+    if (
+      host.configuredMode !== coordinate.mode ||
+      host.configuredHostId !== coordinate.hostId ||
+      host.hostEpoch !== coordinate.hostEpoch ||
+      host.registeredInstanceId !== coordinate.instanceId ||
+      host.registeredConnectionId !== coordinate.connectionId
+    )
+      return { kind: "refused", reason: "stale-host" };
+    const latest = ordinaryCut
+      ? ordinaryActivationBaseline(storage, owned, ordinaryCut)
+      : currentLiveDocumentMoment(storage, document, currentPath);
+    if (
+      !latest ||
+      latest.blob_sha256 !== evidence.projectedMarkdownSha256 ||
+      latest.byte_length !== evidence.projectedMarkdownByteLength
+    )
+      return { kind: "refused", reason: "stale-document" };
+    const history = storage.db
+      .prepare(`SELECT * FROM sync_relay_live_documents
+        WHERE workspace_id = ? AND main_version_id = ? AND object_id = ? ORDER BY lineage_claim_id`)
+      .all(document.workspaceId, document.mainVersionId, document.objectId)
+      .map((row) => decodeLiveDocumentAuthority(storage.db, document, row));
+    const current = history.find((row) => row.current);
+    if (history.length > 0) {
+      if (!current || current.binding.lineageClaimId !== document.lineageClaimId) {
+        return { kind: "refused", reason: "lineage-conflict" };
       }
-      authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "link", principalId: link.enrollment.principal.principalId,
-        grantId: link.grant.grantId, grantGeneration: link.grant.generation });
-      bound = bindLiveDocument(storage, document, stored, actor, link.share, link.effectiveSelector);
-    } else if (actor.kind === "personal") {
-      // Reach at Edit includes the account's ownership of the workspace. Only
-      // the self-hosted live host hosts documents for agents, and only those
-      // it enrolled.
-      if (document.workspaceId !== actor.workspaceId || !currentPersonalEdit(storage, actor)) return { kind: "refused", reason: "not-authorized" };
-      if (host.configuredMode !== "service" || !serviceHostDocumentEnrolled(storage, document)) return { kind: "refused", reason: "host-unavailable" };
-      authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "personal", principalId: actor.agentId,
-        grantId: null, grantGeneration: null });
-      bound = bindOwnedLiveDocument(storage, document, stored);
-    } else {
-      if (!storage.workspaceIsOwnedBy(document.workspaceId, actor.userId)) return { kind: "refused", reason: "not-authorized" };
-      authority = parseServerDerivedLiveUpdateAuthority({ principalKind: "owner", principalId: actor.userId,
-        grantId: null, grantGeneration: null });
-      bound = bindOwnedLiveDocument(storage, document, stored);
+      if (
+        !current.open ||
+        current.replacesLineageClaimId !== null ||
+        current.binding.currentPath !== currentPath ||
+        current.baselineSequence !== latest.relay_seq ||
+        current.projectedDigest !== evidence.projectedMarkdownSha256 ||
+        current.projectedLength !== evidence.projectedMarkdownByteLength ||
+        current.baselineDigest !== checkpoint.updateDigest ||
+        Buffer.compare(current.baselineBytes, baselineBytes) !== 0 ||
+        current.ranges.length !== checkpoint.ranges.length ||
+        current.ranges.some((range, index) => {
+          const expected = checkpoint.ranges[index]!;
+          return (
+            range.clientId !== expected.clientId ||
+            range.startClock !== expected.startClock ||
+            range.endClock !== expected.endClock
+          );
+        })
+      )
+        return { kind: "refused", reason: "baseline-conflict" };
+      return {
+        kind: "registered",
+        document: { ...document },
+        currentPath,
+        restoreFenceGeneration: current.binding.restoreFenceGeneration,
+        registeredAtMs: current.registeredAtMs,
+        replayed: true,
+      };
     }
-    if (bound.kind !== "bound") return bound;
-    const { binding, view } = bound;
-    const coordinate = { mode: host.configuredMode, hostId: host.configuredHostId, hostEpoch: host.hostEpoch,
-      instanceId: host.registeredInstanceId!, connectionId: host.registeredConnectionId! };
-    if (!allowsServiceActivation(storage, {document, actor}, coordinate, binding, activation)) return {kind: "refused", reason: "host-unavailable"};
-    return { kind: "current", binding, view, authority, host: coordinate };
-  }
+    prepareLiveDeliveryWorkspace(storage, document.workspaceId, coordinate.hostId);
+    const metadata = [
+      document.workspaceId,
+      document.mainVersionId,
+      document.objectId,
+      document.lineageClaimId,
+      null,
+      currentPath,
+      latest.relay_seq as number,
+      evidence.projectedMarkdownSha256,
+      evidence.projectedMarkdownByteLength,
+      checkpoint.updateDigest,
+      "current",
+      "open",
+      1,
+      registeredAtMs,
+      null,
+    ];
+    const rangePrefix = [
+      document.workspaceId,
+      document.mainVersionId,
+      document.objectId,
+      document.lineageClaimId,
+    ];
+    const rangeBytes = checkpoint.ranges.reduce(
+      (sum, range) =>
+        sum +
+        Buffer.byteLength(
+          JSON.stringify([...rangePrefix, range.clientId, range.startClock, range.endClock]),
+        ),
+      0,
+    );
+    // Charge logical stored values, excluding SQLite pages and indexes.
+    const charge =
+      baselineBytes.byteLength +
+      Buffer.byteLength(JSON.stringify(metadata)) +
+      rangeBytes +
+      (ordinaryCut ? ordinaryActivationBasisCharge(storage, owned, ordinaryCut) : 0);
+    assertWorkspaceQuota(storage, document.workspaceId, charge);
+    storage.db
+      .prepare(`INSERT INTO sync_relay_live_documents (
+        workspace_id, main_version_id, object_id, lineage_claim_id, replaces_lineage_claim_id, current_path,
+        baseline_moment_relay_seq, baseline_projected_sha256, baseline_projected_byte_length, baseline_digest,
+        lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms, baseline_bytes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(...metadata, baselineBytes);
+    if (ordinaryCut) persistOrdinaryActivationBasis(storage, owned, ordinaryCut);
+    const insertRange = storage.db.prepare(`INSERT INTO sync_relay_live_document_baseline_ranges
+        (workspace_id, main_version_id, object_id, lineage_claim_id, client_id, start_clock, end_clock)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    for (const range of checkpoint.ranges) {
+      insertRange.run(...rangePrefix, range.clientId, range.startClock, range.endClock);
+    }
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_workspace_usage SET usage_bytes = usage_bytes + ? WHERE workspace_id = ?`,
+      )
+      .run(charge, document.workspaceId);
+    registerLiveDeliveryBaseline(storage, document, coordinate.hostId);
+    return {
+      kind: "registered",
+      document: { ...document },
+      currentPath,
+      restoreFenceGeneration: 1,
+      registeredAtMs,
+      replayed: false,
+    };
+  });
+}
 
-type StoredLiveBinding = Pick<StoredLiveDocumentAuthority, "binding" | "current" | "open" | "baselineSequence">;
+export function currentLiveDocumentMoment(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  currentPath: string,
+): Record<string, unknown> | undefined {
+  const latest = storage.db
+    .prepare(`SELECT path, content_kind, blob_sha256, byte_length, relay_seq, recorded_at_ms FROM sync_relay_object_moments
+      WHERE workspace_id = ? AND object_id = ? AND version_id = 'main' ORDER BY relay_seq DESC LIMIT 1`)
+    .get(document.workspaceId, document.objectId);
+  if (
+    !latest ||
+    latest.path !== currentPath ||
+    latest.content_kind !== "text" ||
+    typeof latest.blob_sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(latest.blob_sha256) ||
+    typeof latest.byte_length !== "number" ||
+    !Number.isSafeInteger(latest.byte_length) ||
+    latest.byte_length < 0 ||
+    typeof latest.relay_seq !== "number" ||
+    !Number.isSafeInteger(latest.relay_seq) ||
+    latest.relay_seq <= storage.getEpochLogFloor(document.workspaceId) ||
+    typeof latest.recorded_at_ms !== "number" ||
+    !Number.isSafeInteger(latest.recorded_at_ms) ||
+    latest.recorded_at_ms < 0 ||
+    storage.objectIdAtPathInVersion({
+      workspaceId: document.workspaceId,
+      versionId: "main",
+      path: currentPath,
+    }) !== document.objectId
+  )
+    return undefined;
+  return latest;
+}
+
+export function currentLiveDocumentBinding(
+  storage: StorageContext,
+  { document, actor }: CurrentLiveBindingRequest,
+  activation?: ServiceActivationAccess,
+  read: (
+    db: SqliteDb,
+    document: LiveDocumentKey,
+  ) => StoredLiveBinding | null = readLiveDocumentAuthority,
+): CurrentLiveBindingResult {
+  const host = readLiveHostControl(storage.db);
+  if (host !== null) assertCurrentAuthorityHost(storage.db, host);
+  if (host === null || host.admissionState !== "open" || host.transition !== null) {
+    return { kind: "refused", reason: "host-unavailable" };
+  }
+  authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
+  return authorizeLiveDocument(
+    storage,
+    { document, actor },
+    host,
+    read(storage.db, document),
+    activation,
+  );
+}
+
+export function authorizeLiveDocument(
+  storage: StorageContext,
+  { document, actor }: CurrentLiveBindingRequest,
+  host: HostControlSnapshot,
+  stored: Pick<
+    StoredLiveDocumentAuthority,
+    "binding" | "current" | "open" | "baselineSequence"
+  > | null,
+  activation?: ServiceActivationAccess,
+): CurrentLiveBindingResult {
+  if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined))
+    return { kind: "refused", reason: "host-unavailable" };
+  let bound: BoundLiveDocument | LiveBindingRefusal;
+  let authority: ServerDerivedLiveUpdateAuthority;
+  if (actor.kind === "named") {
+    const named = authorizeNamedLiveEditShareGrant({
+      storage: storage,
+      actorUserId: actor.userId,
+      grantId: actor.grantId,
+    });
+    if (!named.ok) return { kind: "refused", reason: named.reason };
+    authority = parseServerDerivedLiveUpdateAuthority({
+      principalKind: "named",
+      principalId: actor.userId,
+      grantId: named.grant.grantId,
+      grantGeneration: named.grant.generation,
+    });
+    bound = bindLiveDocument(
+      storage,
+      document,
+      stored,
+      actor,
+      named.share,
+      named.effectiveSelector,
+    );
+  } else if (actor.kind === "link") {
+    const link = currentLinkEdit(storage, actor);
+    if (
+      !link?.enrollment.principal ||
+      link.enrollment.sessionPrincipalId !== link.enrollment.principal.principalId
+    ) {
+      return { kind: "refused", reason: "not-authorized" };
+    }
+    authority = parseServerDerivedLiveUpdateAuthority({
+      principalKind: "link",
+      principalId: link.enrollment.principal.principalId,
+      grantId: link.grant.grantId,
+      grantGeneration: link.grant.generation,
+    });
+    bound = bindLiveDocument(storage, document, stored, actor, link.share, link.effectiveSelector);
+  } else if (actor.kind === "personal") {
+    // Reach at Edit includes the account's ownership of the workspace. Only
+    // the self-hosted live host hosts documents for agents, and only those
+    // it enrolled.
+    if (document.workspaceId !== actor.workspaceId || !currentPersonalEdit(storage, actor))
+      return { kind: "refused", reason: "not-authorized" };
+    if (host.configuredMode !== "service" || !serviceHostDocumentEnrolled(storage, document))
+      return { kind: "refused", reason: "host-unavailable" };
+    authority = parseServerDerivedLiveUpdateAuthority({
+      principalKind: "personal",
+      principalId: actor.agentId,
+      grantId: null,
+      grantGeneration: null,
+    });
+    bound = bindOwnedLiveDocument(storage, document, stored);
+  } else {
+    if (!storage.workspaceIsOwnedBy(document.workspaceId, actor.userId))
+      return { kind: "refused", reason: "not-authorized" };
+    authority = parseServerDerivedLiveUpdateAuthority({
+      principalKind: "owner",
+      principalId: actor.userId,
+      grantId: null,
+      grantGeneration: null,
+    });
+    bound = bindOwnedLiveDocument(storage, document, stored);
+  }
+  if (bound.kind !== "bound") return bound;
+  const { binding, view } = bound;
+  const coordinate = {
+    mode: host.configuredMode,
+    hostId: host.configuredHostId,
+    hostEpoch: host.hostEpoch,
+    instanceId: host.registeredInstanceId!,
+    connectionId: host.registeredConnectionId!,
+  };
+  if (!allowsServiceActivation(storage, { document, actor }, coordinate, binding, activation))
+    return { kind: "refused", reason: "host-unavailable" };
+  return { kind: "current", binding, view, authority, host: coordinate };
+}
+
+type StoredLiveBinding = Pick<
+  StoredLiveDocumentAuthority,
+  "binding" | "current" | "open" | "baselineSequence"
+>;
 type LiveBindingRefusal = Extract<CurrentLiveBindingResult, { kind: "refused" }>;
 
 /**
@@ -828,61 +1681,118 @@ type LiveBindingRefusal = Extract<CurrentLiveBindingResult, { kind: "refused" }>
  * recorded; else the baseline's, which a first record copies. No share is read.
  * Null when the record names another document or path, or can't be read.
  */
-export function recordedLiveBinding(storage: StorageContext, document: LiveDocumentKey, current: LiveObjectBinding): LiveObjectBinding | null {
+export function recordedLiveBinding(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  current: LiveObjectBinding,
+): LiveObjectBinding | null {
   const activation = readServiceActivation(storage, document);
   const adoption = activation ? undefined : adoptedOwnerOrigin(storage, document);
   if (!activation && adoption === undefined) return current;
   let recorded: LiveObjectBinding;
   // A damaged record refuses its own document, not the request or pass that reached it.
-  try { recorded = parseLiveObjectBinding(activation ? JSON.parse(String(activation.binding_json)) : JSON.parse(adoption!).originalBinding); }
-  catch { return null; }
-  if (recorded.workspaceId !== current.workspaceId || recorded.mainVersionId !== current.mainVersionId || recorded.objectId !== current.objectId ||
-    recorded.lineageClaimId !== current.lineageClaimId || recorded.currentPath !== current.currentPath) return null;
-  return parseLiveObjectBinding({ ...recorded, restoreFenceGeneration: current.restoreFenceGeneration });
+  try {
+    recorded = parseLiveObjectBinding(
+      activation
+        ? JSON.parse(String(activation.binding_json))
+        : JSON.parse(adoption!).originalBinding,
+    );
+  } catch {
+    return null;
+  }
+  if (
+    recorded.workspaceId !== current.workspaceId ||
+    recorded.mainVersionId !== current.mainVersionId ||
+    recorded.objectId !== current.objectId ||
+    recorded.lineageClaimId !== current.lineageClaimId ||
+    recorded.currentPath !== current.currentPath
+  )
+    return null;
+  return parseLiveObjectBinding({
+    ...recorded,
+    restoreFenceGeneration: current.restoreFenceGeneration,
+  });
 }
 
 // This host's owner adoption of the lineage. One made while owners took a
 // share's selector recorded that selector, so every editor keeps it.
-function adoptedOwnerOrigin(storage: StorageContext, document: LiveDocumentKey): string | undefined {
-  const namespace = attachedLiveJournalHistoryNamespace(storage), host = readLiveHostControl(storage.db);
+function adoptedOwnerOrigin(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+): string | undefined {
+  const namespace = attachedLiveJournalHistoryNamespace(storage),
+    host = readLiveHostControl(storage.db);
   if (namespace === undefined || host === null) return undefined;
-  const row = storage.db.prepare(`SELECT origin_json FROM ${LIVE_DELIVERY_OWNERS} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=?
+  const row = storage.db
+    .prepare(`SELECT origin_json FROM ${LIVE_DELIVERY_OWNERS} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=?
     AND object_id=? AND lineage_claim_id=? AND host_id=?`)
-    .get(namespace, document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId, host.configuredHostId);
+    .get(
+      namespace,
+      document.workspaceId,
+      document.mainVersionId,
+      document.objectId,
+      document.lineageClaimId,
+      host.configuredHostId,
+    );
   return row === undefined ? undefined : String(row.origin_json);
 }
 
 /** An editor's binding, and what that editor is shown of it. */
 type BoundLiveDocument = { kind: "bound"; binding: LiveObjectBinding; view: LiveObjectBinding };
 
-function bindOwnedLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null):
-  BoundLiveDocument | LiveBindingRefusal {
-    if (!liveDocumentIsCurrent(storage, document, stored)) return { kind: "refused", reason: "stale-document" };
-    return bindRecordedLiveDocument(storage, document, stored);
-  }
+function bindOwnedLiveDocument(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  stored: StoredLiveBinding | null,
+): BoundLiveDocument | LiveBindingRefusal {
+  if (!liveDocumentIsCurrent(storage, document, stored))
+    return { kind: "refused", reason: "stale-document" };
+  return bindRecordedLiveDocument(storage, document, stored);
+}
 
 // An owner is shown the binding itself.
-function bindRecordedLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding):
-  BoundLiveDocument | LiveBindingRefusal {
-    const binding = recordedLiveBinding(storage, document, stored.binding);
-    return binding ? { kind: "bound", binding, view: binding } : { kind: "refused", reason: "stale-document" };
-  }
+function bindRecordedLiveDocument(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  stored: StoredLiveBinding,
+): BoundLiveDocument | LiveBindingRefusal {
+  const binding = recordedLiveBinding(storage, document, stored.binding);
+  return binding
+    ? { kind: "bound", binding, view: binding }
+    : { kind: "refused", reason: "stale-document" };
+}
 
 /**
  * The owner's binding before any service activation decides admission: the
  * binding a successor's pending row keeps, which `currentLiveDocumentBinding`
  * then authorizes in full with its access.
  */
-export function ownerLiveDocumentBinding(storage: StorageContext, document: LiveDocumentKey): LiveObjectBinding | null {
-    const bound = bindOwnedLiveDocument(storage, document, readLiveDocumentAuthority(storage.db, document));
-    return bound.kind === "bound" ? bound.binding : null;
-  }
+export function ownerLiveDocumentBinding(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+): LiveObjectBinding | null {
+  const bound = bindOwnedLiveDocument(
+    storage,
+    document,
+    readLiveDocumentAuthority(storage.db, document),
+  );
+  return bound.kind === "bound" ? bound.binding : null;
+}
 
-function liveDocumentIsCurrent(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null): stored is StoredLiveBinding {
-    return !!stored && stored.current && stored.open && stored.binding.lineageClaimId === document.lineageClaimId &&
-      stored.baselineSequence > storage.getEpochLogFloor(document.workspaceId) &&
-      !!currentLiveDocumentMoment(storage, document, stored.binding.currentPath);
-  }
+function liveDocumentIsCurrent(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  stored: StoredLiveBinding | null,
+): stored is StoredLiveBinding {
+  return (
+    !!stored &&
+    stored.current &&
+    stored.open &&
+    stored.binding.lineageClaimId === document.lineageClaimId &&
+    stored.baselineSequence > storage.getEpochLogFloor(document.workspaceId) &&
+    !!currentLiveDocumentMoment(storage, document, stored.binding.currentPath)
+  );
+}
 
 type LiveRecipient = Exclude<CurrentLiveBindingRequest["actor"], { kind: "owner" | "personal" }>;
 
@@ -892,18 +1802,28 @@ type LiveRecipient = Exclude<CurrentLiveBindingRequest["actor"], { kind: "owner"
  * owner's do. A share whose paths can't form that view refuses here, before a
  * ticket is minted or used.
  */
-function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey, stored: StoredLiveBinding | null,
-  actor: LiveRecipient, share: SyncRelayShareRow, selector: ShareSelector):
-  BoundLiveDocument | LiveBindingRefusal {
-    if (!liveDocumentIsCurrent(storage, document, stored)) return { kind: "refused", reason: "stale-document" };
-    if (share.workspaceId !== document.workspaceId) return { kind: "refused", reason: "not-authorized" };
-    if (!canonicalLiveSelector(share, selector) || visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath) {
-      return { kind: "refused", reason: "stale-selector" };
-    }
-    const bound = bindRecordedLiveDocument(storage, document, stored);
-    if (bound.kind !== "bound") return bound;
-    const view = liveRecipientView(bound.binding, actor, selector.paths);
-    return view ? { ...bound, view } : { kind: "refused", reason: "stale-selector" };
+function bindLiveDocument(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  stored: StoredLiveBinding | null,
+  actor: LiveRecipient,
+  share: SyncRelayShareRow,
+  selector: ShareSelector,
+): BoundLiveDocument | LiveBindingRefusal {
+  if (!liveDocumentIsCurrent(storage, document, stored))
+    return { kind: "refused", reason: "stale-document" };
+  if (share.workspaceId !== document.workspaceId)
+    return { kind: "refused", reason: "not-authorized" };
+  if (
+    !canonicalLiveSelector(share, selector) ||
+    visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath
+  ) {
+    return { kind: "refused", reason: "stale-selector" };
+  }
+  const bound = bindRecordedLiveDocument(storage, document, stored);
+  if (bound.kind !== "bound") return bound;
+  const view = liveRecipientView(bound.binding, actor, selector.paths);
+  return view ? { ...bound, view } : { kind: "refused", reason: "stale-selector" };
 }
 
 /**
@@ -911,11 +1831,30 @@ function bindLiveDocument(storage: StorageContext, document: LiveDocumentKey, st
  * workspace ID naming the grant. A link sees paths relative to its share.
  * Null when those paths can't form a binding.
  */
-function liveRecipientView(binding: LiveObjectBinding, actor: LiveRecipient, paths: readonly string[]): LiveObjectBinding | null {
+function liveRecipientView(
+  binding: LiveObjectBinding,
+  actor: LiveRecipient,
+  paths: readonly string[],
+): LiveObjectBinding | null {
   try {
-    if (actor.kind === "named") return parseLiveObjectBinding({ ...binding, workspaceId: `named:${actor.grantId}`, selectorPaths: paths });
-    const projection = createAccountlessPathProjection({ paths: [...paths], versionId: null, access: "edit" });
-    return parseLiveObjectBinding({ ...binding, workspaceId: `link:${actor.grantId}`,
-      currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths });
-  } catch { return null; }
+    if (actor.kind === "named")
+      return parseLiveObjectBinding({
+        ...binding,
+        workspaceId: `named:${actor.grantId}`,
+        selectorPaths: paths,
+      });
+    const projection = createAccountlessPathProjection({
+      paths: [...paths],
+      versionId: null,
+      access: "edit",
+    });
+    return parseLiveObjectBinding({
+      ...binding,
+      workspaceId: `link:${actor.grantId}`,
+      currentPath: projection.projectPath(binding.currentPath),
+      selectorPaths: projection.selector.paths,
+    });
+  } catch {
+    return null;
+  }
 }

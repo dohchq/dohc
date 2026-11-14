@@ -11,10 +11,7 @@ import {
   type PreparedShareViewFilesMount,
   type ResolvedShareViewFilesTarget,
 } from "../workspaces/shareViewFiles";
-import {
-  createShareViewLifecycle,
-  type RefreshSharedViewOutcome,
-} from "../workspaces/sharedView";
+import { createShareViewLifecycle, type RefreshSharedViewOutcome } from "../workspaces/sharedView";
 import {
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
@@ -30,9 +27,7 @@ export async function refreshStandaloneShareThroughOwnerForTest(input: {
   shareId: string;
   store: CaptureVersionedTextStore;
   pinnedSelector: unknown;
-  pull: Parameters<
-    ReturnType<typeof createShareViewLifecycle>["refreshOnce"]
-  >[0]["pull"];
+  pull: Parameters<ReturnType<typeof createShareViewLifecycle>["refreshOnce"]>[0]["pull"];
   recordRefusals: Parameters<
     ReturnType<typeof createShareViewLifecycle>["refreshOnce"]
   >[0]["recordRefusals"];
@@ -55,8 +50,7 @@ export async function refreshStandaloneShareThroughOwnerForTest(input: {
   };
   const files = createShareViewFiles({
     resolveTarget: (candidate) =>
-      candidate.kind === "standalone" &&
-      candidate.workspaceId === requested.workspaceId
+      candidate.kind === "standalone" && candidate.workspaceId === requested.workspaceId
         ? target
         : null,
     openStore: () => input.store,
@@ -69,9 +63,10 @@ export async function refreshStandaloneShareThroughOwnerForTest(input: {
         shareId: current.shareId,
         ...pullInput,
       }),
-    recordRefusals: async (_current, refusals) =>
-      input.recordRefusals([...refusals]),
-    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
+    recordRefusals: async (_current, refusals) => input.recordRefusals([...refusals]),
+    updateUnsavedPaths: async () => {
+      throw new Error("Mounted shares have no unsaved paths");
+    },
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async () => undefined,
@@ -80,9 +75,8 @@ export async function refreshStandaloneShareThroughOwnerForTest(input: {
       throw new Error("A standalone share cannot be unmounted.");
     },
   });
-  const result = await withStaleSensitiveWorkspaceOperation(
-    input.rootDir,
-    (lease) => files.reconcile(lease, requested, "refresh"),
+  const result = await withStaleSensitiveWorkspaceOperation(input.rootDir, (lease) =>
+    files.reconcile(lease, requested, "refresh"),
   );
   if (result.kind !== "refresh" || !("ok" in result.outcome)) {
     throw new Error("Standalone reconciliation returned a mount outcome.");
@@ -102,9 +96,7 @@ export async function refreshShareMountThroughOwnerForTest(input: {
   hostRoot: string;
   mount: Pick<ShareMountRecord, "shareId" | "label">;
   relay: SyncRelayConnection;
-  pull: Parameters<
-    ReturnType<typeof createShareViewLifecycle>["refreshOnce"]
-  >[0]["pull"];
+  pull: Parameters<ReturnType<typeof createShareViewLifecycle>["refreshOnce"]>[0]["pull"];
   pinnedSelector: unknown;
   recordRefusals: Parameters<
     ReturnType<typeof createShareViewLifecycle>["refreshOnce"]
@@ -118,10 +110,7 @@ export async function refreshShareMountThroughOwnerForTest(input: {
   const target: ResolvedShareViewFilesTarget = {
     kind: "mount",
     workspaceId: input.hostWorkspaceId,
-    storeWorkspaceId: mountStoreWorkspaceIdFor(
-      input.hostWorkspaceId,
-      input.mount.shareId,
-    ),
+    storeWorkspaceId: mountStoreWorkspaceIdFor(input.hostWorkspaceId, input.mount.shareId),
     schedulingRootPath: input.hostRoot,
     rootPath: mountRootFor(input.hostRoot, input.mount.label),
     shareId: input.mount.shareId,
@@ -157,14 +146,14 @@ export async function refreshShareMountThroughOwnerForTest(input: {
         shareId: current.shareId,
         ...pullInput,
       }),
-    recordRefusals: async (_current, refusals) =>
-      input.recordRefusals([...refusals]),
-    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
+    recordRefusals: async (_current, refusals) => input.recordRefusals([...refusals]),
+    updateUnsavedPaths: async () => {
+      throw new Error("Mounted shares have no unsaved paths");
+    },
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async (current) => {
-      if (!current.mountLabel)
-        throw new Error("Share mount record has no label.");
+      if (!current.mountLabel) throw new Error("Share mount record has no label.");
       await assertRealMountRoot(current.schedulingRootPath, current.mountLabel);
     },
     createMount: async () => undefined,
@@ -172,9 +161,8 @@ export async function refreshShareMountThroughOwnerForTest(input: {
       throw new Error("The refresh harness does not remove mounts.");
     },
   });
-  const result = await withStaleSensitiveWorkspaceOperation(
-    input.hostRoot,
-    (lease) => files.reconcile(lease, requested, "refresh"),
+  const result = await withStaleSensitiveWorkspaceOperation(input.hostRoot, (lease) =>
+    files.reconcile(lease, requested, "refresh"),
   );
   if (result.kind !== "refresh" || "ok" in result.outcome) {
     throw new Error("Mount reconciliation returned a standalone outcome.");
@@ -234,14 +222,13 @@ function mountMutationOwner(input: {
       throw new Error("Unexpected pull");
     },
     recordRefusals: async () => undefined,
-    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
+    updateUnsavedPaths: async () => {
+      throw new Error("Mounted shares have no unsaved paths");
+    },
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async (current) => {
-      await assertRealMountRoot(
-        current.schedulingRootPath,
-        current.mountLabel ?? "",
-      );
+      await assertRealMountRoot(current.schedulingRootPath, current.mountLabel ?? "");
     },
     createMount: async (owner) => {
       await shareViewFilesMountProjection(owner).create();
@@ -265,9 +252,7 @@ export async function createShareMountDirectoryThroughOwnerForTest(
     target,
     initiallyRegistered: false,
   });
-  await withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) =>
-    files.mount(lease, target),
-  );
+  await withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) => files.mount(lease, target));
 }
 
 export async function removeShareMountFolderThroughOwnerForTest(

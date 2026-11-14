@@ -7,7 +7,6 @@ export interface CommandContext {
   // The share view this workspace is, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;
   activeDocumentKind: string | null;
-  // Whether the active editor's file has a Share button.
   activeDocumentShareable: boolean;
   pinnedApps: readonly { root: string; label: string }[];
   updateStatus: UpdateStateEvent["status"] | null;
@@ -17,7 +16,8 @@ export const COMMAND_AVAILABILITY = {
   always: (_context: CommandContext) => true,
   workspaceWritable: (context: CommandContext) => workspaceCreateOffers(context.shareView).write,
   folderCreatable: (context: CommandContext) => workspaceCreateOffers(context.shareView).folder,
-  collectionCreatable: (context: CommandContext) => workspaceCreateOffers(context.shareView).collection,
+  collectionCreatable: (context: CommandContext) =>
+    workspaceCreateOffers(context.shareView).collection,
   activeMarkdown: (context: CommandContext) => context.activeDocumentKind === "markdown",
   activeShareable: (context: CommandContext) => context.activeDocumentShareable,
   localWorkspace: (context: CommandContext) => context.shareView === null,
@@ -37,7 +37,11 @@ export const COMMAND_ROWS = {
   "new-file": { label: "New file", availability: "workspaceWritable" },
   "new-file-at-path": { label: "New file…", availability: "workspaceWritable" },
   "new-drawing": { label: "New drawing", availability: "workspaceWritable" },
-  "new-folder": { label: "New folder", availability: "folderCreatable", capabilityId: "folder.create" },
+  "new-folder": {
+    label: "New folder",
+    availability: "folderCreatable",
+    capabilityId: "folder.create",
+  },
   "new-collection": { label: "New collection", availability: "collectionCreatable" },
   "quick-open": { label: "Go to", availability: "always" },
   "open-workspace": { label: "Open workspace folder…", availability: "always" },
@@ -48,7 +52,10 @@ export const COMMAND_ROWS = {
   "next-tab": { label: "Show next tab", availability: "always" },
   "previous-tab": { label: "Show previous tab", availability: "always" },
   "new-editor-group-right": { label: "New editor group right", availability: "always" },
-  "toggle-markdown-source": { label: "Toggle markdown source view", availability: "activeMarkdown" },
+  "toggle-markdown-source": {
+    label: "Toggle markdown source view",
+    availability: "activeMarkdown",
+  },
   "share-file": { label: "Share…", availability: "activeShareable" },
   "toggle-about": { label: "Toggle About", availability: "always" },
   "show-explorer": { label: "View: Explorer", availability: "always" },
@@ -58,7 +65,7 @@ export const COMMAND_ROWS = {
   "show-history": { label: "View: History", availability: "always" },
   "open-versions": { label: "Show all versions", availability: "localWorkspace" },
   "connect-cloud": { label: "Connect server", availability: "always" },
-  "settings": { label: "Settings", availability: "always" },
+  settings: { label: "Settings", availability: "always" },
   "settings-appearance": { label: "Settings: Open Appearance", availability: "always" },
   "settings-agents": { label: "Settings: Open Agents (MCP)", availability: "always" },
   "check-updates": { label: "Check for updates", availability: "always" },
@@ -102,11 +109,13 @@ export function paletteCommandRows(context: CommandContext): CommandRow[] {
   const rows: CommandRow[] = [];
   for (const id of Object.keys(COMMAND_ROWS) as StaticCommandId[]) {
     if (id === "connect-cloud") {
-      rows.push(...context.pinnedApps.map((app) => ({
-        id: pinnedAppCommandId(app.root),
-        label: `View: ${app.label}`,
-        availability: "pinnedApp" as const,
-      })));
+      rows.push(
+        ...context.pinnedApps.map((app) => ({
+          id: pinnedAppCommandId(app.root),
+          label: `View: ${app.label}`,
+          availability: "pinnedApp" as const,
+        })),
+      );
     }
     const row: StaticRow = COMMAND_ROWS[id];
     if (isCommandAvailable(id, context)) rows.push({ id, ...row });

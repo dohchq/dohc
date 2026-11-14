@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { ChevronsRight, Maximize2 } from "lucide-react";
 import { IconButton, SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
@@ -74,7 +81,6 @@ export interface RecordPanelProps {
    * first, which saves the name.
    */
   onNameAbandoned?: (text: string) => void;
-  /** What shows under the name, such as a change to it the host has not confirmed. */
   nameNote?: ReactNode;
   /** Opens the record as a page. Absent, the record has no page. */
   onOpenAsPage?: () => void;
@@ -84,7 +90,6 @@ export interface RecordPanelProps {
   loading?: boolean;
   /** Why the panel cannot show the record, in one line, as for a record deleted since it opened. It replaces what is under the top bar. */
   unavailable?: string;
-  /** The record's fields. */
   properties?: ReactNode;
   /**
    * What the record holds under its fields, such as a page's text. Escape
@@ -115,13 +120,25 @@ export function isRecordBodyTextKey(event: { nativeEvent: Event }): boolean {
 }
 function typesText(target: EventTarget): boolean {
   if (target instanceof HTMLTextAreaElement) return !target.readOnly;
-  if (target instanceof HTMLInputElement) return !target.readOnly && !["button", "checkbox", "radio", "submit"].includes(target.type);
+  if (target instanceof HTMLInputElement)
+    return !target.readOnly && !["button", "checkbox", "radio", "submit"].includes(target.type);
   const editable = target instanceof Element ? target.closest("[contenteditable]") : null;
   return editable !== null && editable.getAttribute("contenteditable") !== "false";
 }
 
 /** The record's name: a heading, and where the host lets it change, the control that opens it for typing. */
-function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "canRename" | "onNameChange" | "nameLabel" | "onNameAbandoned" | "startRenaming">) {
+function PanelName(
+  props: Pick<
+    RecordPanelProps,
+    | "name"
+    | "nameText"
+    | "canRename"
+    | "onNameChange"
+    | "nameLabel"
+    | "onNameAbandoned"
+    | "startRenaming"
+  >,
+) {
   const { canRename = false, onNameChange } = props;
   const name = props.nameText ?? props.name;
   const [editing, setEditing] = useState(() => props.startRenaming === true && canRename);
@@ -144,7 +161,8 @@ function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "canRenam
     const node = input.current;
     // The input is off the page with text in it only when the panel, or the name's field, went first.
     return () => {
-      if (node && !node.isConnected && typed.current && !done.current) abandoned.current?.(node.value);
+      if (node && !node.isConnected && typed.current && !done.current)
+        abandoned.current?.(node.value);
     };
   }, [editing]);
   const close = (focused: boolean) => {
@@ -161,7 +179,8 @@ function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "canRenam
   // The record's title, not a panel title, so the type scale's panel title recipe does not apply: 20px, to stand out from the Collection's name above it.
   const heading = "m-0 min-w-0 text-xl font-semibold leading-tight tracking-tight text-ink";
   const shown = name.trim() === "" ? <span className="text-subtle">Untitled</span> : name;
-  if (!editing && !canRename) return <h2 className={`${heading} whitespace-pre-wrap break-words`}>{shown}</h2>;
+  if (!editing && !canRename)
+    return <h2 className={`${heading} whitespace-pre-wrap break-words`}>{shown}</h2>;
   const save = (value: string, focused: boolean) => {
     if (done.current) return;
     close(focused);
@@ -229,7 +248,13 @@ export function RecordPanel(props: RecordPanelProps) {
     return () => observer.disconnect();
   }, []);
   const over = room !== null && room < RECORD_PANEL_MIN_WIDTH + VIEW_MIN_WIDTH;
-  const widest = room === null ? RECORD_PANEL_MAX_WIDTH : Math.max(Math.min(RECORD_PANEL_MAX_WIDTH, over ? room : room - VIEW_MIN_WIDTH), Math.min(RECORD_PANEL_MIN_WIDTH, room));
+  const widest =
+    room === null
+      ? RECORD_PANEL_MAX_WIDTH
+      : Math.max(
+          Math.min(RECORD_PANEL_MAX_WIDTH, over ? room : room - VIEW_MIN_WIDTH),
+          Math.min(RECORD_PANEL_MIN_WIDTH, room),
+        );
   const narrowest = Math.min(RECORD_PANEL_MIN_WIDTH, widest);
   const clamp = (width: number) => Math.round(Math.min(widest, Math.max(narrowest, width)));
   const dragRight = useRef<number | null>(null);
@@ -237,15 +262,17 @@ export function RecordPanel(props: RecordPanelProps) {
   const width = clamp(resize.previewValue ?? props.width);
 
   const name = props.name || "Record";
-  const items: MenuItem[] = (unavailable === undefined && !loading ? commands ?? [] : []).map((command) => ({
-    id: command.id,
-    label: command.label,
-    icon: command.icon,
-    danger: command.danger,
-    disabled: command.disabled,
-    description: command.disabled ? command.reason : undefined,
-    onSelect: command.onSelect,
-  }));
+  const items: MenuItem[] = (unavailable === undefined && !loading ? (commands ?? []) : []).map(
+    (command) => ({
+      id: command.id,
+      label: command.label,
+      icon: command.icon,
+      danger: command.danger,
+      disabled: command.disabled,
+      description: command.disabled ? command.reason : undefined,
+      onSelect: command.onSelect,
+    }),
+  );
 
   return (
     <aside
@@ -265,7 +292,13 @@ export function RecordPanel(props: RecordPanelProps) {
       className={`flex shrink-0 flex-col border-l border-line bg-bg ${over ? "dohc-popover absolute inset-y-0 right-0 z-20" : "relative"}`}
       onKeyDown={(event) => {
         // An open editor, the open name and the menu each take their own Escape first.
-        if (event.key !== "Escape" || event.defaultPrevented || isComposingKey(event) || isRecordBodyTextKey(event)) return;
+        if (
+          event.key !== "Escape" ||
+          event.defaultPrevented ||
+          isComposingKey(event) ||
+          isRecordBodyTextKey(event)
+        )
+          return;
         event.preventDefault();
         onClose();
       }}
@@ -281,13 +314,19 @@ export function RecordPanel(props: RecordPanelProps) {
         aria-valuenow={width}
         onKeyDown={(event) => {
           const next =
-            event.key === "Home" ? narrowest
-            : event.key === "End" ? widest
-            : event.key === "PageUp" ? clamp(width + KEYBOARD_RESIZE_PAGE_STEP)
-            : event.key === "PageDown" ? clamp(width - KEYBOARD_RESIZE_PAGE_STEP)
-            : event.key === "ArrowLeft" ? clamp(width + KEYBOARD_RESIZE_STEP)
-            : event.key === "ArrowRight" ? clamp(width - KEYBOARD_RESIZE_STEP)
-            : null;
+            event.key === "Home"
+              ? narrowest
+              : event.key === "End"
+                ? widest
+                : event.key === "PageUp"
+                  ? clamp(width + KEYBOARD_RESIZE_PAGE_STEP)
+                  : event.key === "PageDown"
+                    ? clamp(width - KEYBOARD_RESIZE_PAGE_STEP)
+                    : event.key === "ArrowLeft"
+                      ? clamp(width + KEYBOARD_RESIZE_STEP)
+                      : event.key === "ArrowRight"
+                        ? clamp(width - KEYBOARD_RESIZE_STEP)
+                        : null;
           if (next === null) return;
           event.preventDefault();
           props.onWidthChange(next);
@@ -317,12 +356,24 @@ export function RecordPanel(props: RecordPanelProps) {
             <Maximize2 size={13} strokeWidth={1.9} aria-hidden />
           </IconButton>
         ) : null}
-        <span className="min-w-0 flex-1 truncate px-1 text-[12px] text-muted">{collectionName}</span>
-        {items.length > 0 ? <Menu label="Record actions" open={menuOpen} onOpenChange={setMenuOpen} width={208} items={items} /> : null}
+        <span className="min-w-0 flex-1 truncate px-1 text-[12px] text-muted">
+          {collectionName}
+        </span>
+        {items.length > 0 ? (
+          <Menu
+            label="Record actions"
+            open={menuOpen}
+            onOpenChange={setMenuOpen}
+            width={208}
+            items={items}
+          />
+        ) : null}
       </div>
       {unavailable !== undefined ? (
         <div className="flex flex-col items-start gap-3 px-3 py-2">
-          <p role="status" className="m-0 text-[13px] text-muted">{unavailable}</p>
+          <p role="status" className="m-0 text-[13px] text-muted">
+            {unavailable}
+          </p>
           <SecondaryButton onClick={onClose}>Close</SecondaryButton>
         </div>
       ) : loading ? (
@@ -332,7 +383,16 @@ export function RecordPanel(props: RecordPanelProps) {
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-4">
             <div className="flex flex-col gap-1 pb-3 pt-1">
               {/* Another field as the name is another name: an input open on the first goes with it. */}
-              <PanelName key={props.nameField ?? ""} name={name} nameText={props.nameText} canRename={props.canRename} onNameChange={props.onNameChange} nameLabel={props.nameLabel} onNameAbandoned={props.onNameAbandoned} startRenaming={props.startRenaming} />
+              <PanelName
+                key={props.nameField ?? ""}
+                name={name}
+                nameText={props.nameText}
+                canRename={props.canRename}
+                onNameChange={props.onNameChange}
+                nameLabel={props.nameLabel}
+                onNameAbandoned={props.onNameAbandoned}
+                startRenaming={props.startRenaming}
+              />
               {props.nameNote}
             </div>
             {props.properties}
@@ -343,15 +403,27 @@ export function RecordPanel(props: RecordPanelProps) {
                 data-record-body=""
                 className="-mx-3 mt-3 flex min-h-60 flex-1 flex-col [--dohc-editor-gutter:32px]"
                 onKeyDown={(event) => {
-                  if (event.key === "Escape" && typesText(event.target)) bodyTextKeys.add(event.nativeEvent);
+                  if (event.key === "Escape" && typesText(event.target))
+                    bodyTextKeys.add(event.nativeEvent);
                 }}
               >
                 {props.body}
               </div>
             )}
           </div>
-          {props.footer ? <footer className="shrink-0 border-t border-line px-3 py-2 text-[12px] text-muted">{props.footer}</footer> : null}
-          {props.actions ? <div data-record-actions="" className="flex shrink-0 flex-col gap-2 border-t border-line px-3 py-3">{props.actions}</div> : null}
+          {props.footer ? (
+            <footer className="shrink-0 border-t border-line px-3 py-2 text-[12px] text-muted">
+              {props.footer}
+            </footer>
+          ) : null}
+          {props.actions ? (
+            <div
+              data-record-actions=""
+              className="flex shrink-0 flex-col gap-2 border-t border-line px-3 py-3"
+            >
+              {props.actions}
+            </div>
+          ) : null}
         </>
       )}
     </aside>

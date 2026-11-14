@@ -6,11 +6,6 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const requiredSteps = [
-  // Without this row the log cannot say which tree produced it, and a run
-  // whose HEAD moved mid-way reports FAIL here rather than a green verdict
-  // over two commits. Requiring the row is what makes the provenance
-  // load-bearing: a log from a gate that never checked would otherwise read
-  // exactly as green as one that did.
   "tree provenance",
   // Without this row the platform in the verdict line is Node's unverified
   // claim, which is what the line was before the gate asked rustc.
@@ -28,12 +23,6 @@ const requiredSteps = [
   "doctests",
   "build daemon",
   "cargo-deny",
-  // cargo-audit was deliberately absent from this list because CI did not
-  // install the tool, so the gate probed for it and reported SKIP -- which
-  // meant every PR showed "cargo-audit=SKIP" beside a row of PASSes and no
-  // advisory scan ever ran. The workflow now installs a pinned cargo-audit,
-  // so a SKIP here is a regression in the install, not an honest absence,
-  // and must fail the gate rather than read as green.
   "cargo-audit",
   "scratch leak",
 ];
@@ -65,8 +54,7 @@ const ROW_HEAD = /(?<name>[^=]+)=(?<status>PASS|FAIL|SKIP)/y;
 // gate reads the tree at every step boundary and reports how many readings
 // agreed. It does not watch the tree between them, and a stamp that omitted
 // the count would read as if it had.
-const HEAD_STAMP =
-  / head (?<sha>[0-9a-f]{8,40}) (?:clean|dirty\(\d+\)), (?<reads>\d+) reads\)$/;
+const HEAD_STAMP = / head (?<sha>[0-9a-f]{8,40}) (?:clean|dirty\(\d+\)), (?<reads>\d+) reads\)$/;
 
 /** `name -> [status, ...]`, one entry per row, or a throw if this is no list. */
 function parseStepRows(summary) {
@@ -125,9 +113,7 @@ export function requireCiPassVerdict(log, resolveHead) {
       "requireCiPassVerdict needs a resolveHead() to check the stamped commit against; a verdict cannot be verified without the commit it is being accepted for",
     );
   }
-  const verdictLines = log
-    .split(/\r?\n/)
-    .filter((line) => line.includes("| run-rust-checks |"));
+  const verdictLines = log.split(/\r?\n/).filter((line) => line.includes("| run-rust-checks |"));
 
   if (verdictLines.length !== 1) {
     throw new Error(
@@ -215,9 +201,7 @@ export function requireCiPassVerdict(log, resolveHead) {
       );
     }
     if (statuses[0] !== "PASS") {
-      throw new Error(
-        `required CI gate step did not report PASS: ${step}=${statuses[0]}`,
-      );
+      throw new Error(`required CI gate step did not report PASS: ${step}=${statuses[0]}`);
     }
   }
 }
@@ -225,7 +209,10 @@ export function requireCiPassVerdict(log, resolveHead) {
 // The checkout this verdict is being accepted for. A git that cannot answer
 // throws with stderr, which refuses the verdict rather than skipping the check.
 function resolveCheckoutHead() {
-  const head = readGit(["rev-parse", "HEAD"], resolve(dirname(fileURLToPath(import.meta.url)), "../..")).trim();
+  const head = readGit(
+    ["rev-parse", "HEAD"],
+    resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
+  ).trim();
   return /^[0-9a-f]{40}$/.test(head) ? head : null;
 }
 

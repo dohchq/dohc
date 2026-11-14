@@ -35,7 +35,9 @@ function numberColumns(columns: readonly DataGridColumn[]): CSSProperties {
 const headerStyles: CSSProperties[] = [];
 const cellStyles: CSSProperties[] = [];
 const headerStyle = (column: number) =>
-  (headerStyles[column] ??= { textAlign: `var(${columnVar("align", column)})` as CSSProperties["textAlign"] });
+  (headerStyles[column] ??= {
+    textAlign: `var(${columnVar("align", column)})` as CSSProperties["textAlign"],
+  });
 const cellStyle = (column: number) =>
   (cellStyles[column] ??= {
     textAlign: `var(${columnVar("align", column)})` as CSSProperties["textAlign"],
@@ -80,8 +82,17 @@ export function DataGrid({
 export const STICKY_HEADER = "sticky top-0 z-10 shadow-[0_1px_0_var(--dohc-line)]";
 
 // The header's first cell, over the row numbers.
-export function DataGridGutterHeader({ wide, className, ...props }: ComponentPropsWithoutRef<"th"> & { wide?: boolean }) {
-  return <th {...props} className={`${STICKY_HEADER} ${wide ? "w-10" : "w-8"} bg-panel-2 p-0 ${className ?? ""}`} />;
+export function DataGridGutterHeader({
+  wide,
+  className,
+  ...props
+}: ComponentPropsWithoutRef<"th"> & { wide?: boolean }) {
+  return (
+    <th
+      {...props}
+      className={`${STICKY_HEADER} ${wide ? "w-10" : "w-8"} bg-panel-2 p-0 ${className ?? ""}`}
+    />
+  );
 }
 
 // A column's header. Its actions show on hover or focus (DataGridColumnAction).
@@ -113,7 +124,12 @@ export function DataGridColumnAction(props: { children: ReactNode }) {
 }
 
 export function DataGridRow({ className, ...props }: ComponentPropsWithoutRef<"tr">) {
-  return <tr {...props} className={`group/row transition-colors duration-75 hover:bg-panel-2 ${className ?? ""}`} />;
+  return (
+    <tr
+      {...props}
+      className={`group/row transition-colors duration-75 hover:bg-panel-2 ${className ?? ""}`}
+    />
+  );
 }
 
 // A row's number. A row action, such as Delete row, replaces the number in
@@ -124,7 +140,11 @@ export function DataGridGutter({
   wide,
   className,
   ...props
-}: Omit<ComponentPropsWithoutRef<"td">, "children"> & { number?: number; action?: ReactNode; wide?: boolean }) {
+}: Omit<ComponentPropsWithoutRef<"td">, "children"> & {
+  number?: number;
+  action?: ReactNode;
+  wide?: boolean;
+}) {
   return (
     <td
       {...props}
@@ -169,10 +189,13 @@ export function DataGridCell({
 // sans otherwise. Where no canvas can measure (a test DOM), it counts
 // characters.
 export function cellMeasure(numeric: boolean): (text: string) => number {
-  const context = typeof OffscreenCanvas === "undefined" ? null : new OffscreenCanvas(1, 1).getContext("2d");
+  const context =
+    typeof OffscreenCanvas === "undefined" ? null : new OffscreenCanvas(1, 1).getContext("2d");
   if (!context) return (text) => text.length;
   const root = getComputedStyle(document.documentElement);
-  context.font = numeric ? `12px ${root.getPropertyValue("--font-mono")}` : `13px ${root.getPropertyValue("--font-sans")}`;
+  context.font = numeric
+    ? `12px ${root.getPropertyValue("--font-mono")}`
+    : `13px ${root.getPropertyValue("--font-sans")}`;
   return (text) => context.measureText(text).width;
 }
 
@@ -198,7 +221,9 @@ const ColumnWidths = memo(function ColumnWidths(props: {
             >
               {text.header}
             </div>
-            <div className="box-content h-0 min-w-16 max-w-80 overflow-hidden whitespace-pre px-2.5">{text.cell}</div>
+            <div className="box-content h-0 min-w-16 max-w-80 overflow-hidden whitespace-pre px-2.5">
+              {text.cell}
+            </div>
           </td>
         ))}
         {props.trailing ? <td className="p-0" /> : null}

@@ -1,60 +1,29 @@
-//! Cutover-blocking fuzz family 2/3: Y.Doc update ingestion.
+//! Fuzz coverage for Y.Doc update ingestion.
 //!
 //! Surface under test: `dohc_engine_collab::ydoc::Ydoc::apply` /
 //! `Ydoc::validate_update` -- the entry point for an arbitrary byte payload
 //! purporting to be a Yjs v1 CRDT update.
 //!
-//! # YRS-ABORT-SAFETY: the R14 hard-abort is closed (was: CRITICAL FINDING)
+//! Malformed Y.Doc updates must be rejected before yrs decodes them. yrs
+//! 0.27.3's `Update::decode_v1` casts length-prefixed bytes to `&str` without
+//! validating them, and the undefined behavior that follows aborts the whole
+//! process where `std::panic::catch_unwind` cannot catch it.
+//! `dohc_engine_collab::replay_parity::scan_v1` runs first at every
+//! `Update::decode_v1` call site and documents the decoder hazard.
 //!
-//! R14's seeded property-based fuzzing (`StdRng::seed_from_u64(42)`, uniform
-//! random byte vectors 0..64 bytes) found that yrs 0.27.3's `Update::decode_v1`
-//! (called identically by both `Ydoc::apply` and `Ydoc::validate_update`) could
-//! be driven into Rust's debug-mode "unsafe precondition violated" checker,
-//! which **aborted the whole process** (`STATUS_STACK_BUFFER_OVERRUN` on
-//! Windows) rather than unwinding -- `std::panic::catch_unwind` cannot catch
-//! this. Root cause (confirmed by reading yrs 0.27.3's source,
-//! `encoding/read.rs`'s default `Read::read_string`): every string-bearing v1
-//! decode (`Any::decode`, `Decoder::read_key`/`read_json`, `TypeRef::decode`'s
-//! XML tag, `Options::decode`'s guid) casts raw length-prefixed bytes straight
-//! to `&str` via `std::str::from_utf8_unchecked`, WITHOUT validating them.
-//! Malformed bytes produce a `&str` that violates Rust's UTF-8 invariant; the
-//! first `.chars()` iteration over it can synthesize an out-of-range/surrogate
-//! `u32` and hand it to an unchecked `char` construction -- UB, uncatchable.
-//!
-//! The fix: `dohc_engine_collab::replay_parity::scan_v1` (already used for the
-//! replay-parity gate) is a from-scratch manual walk of the v1 wire that NEVER
-//! calls `Update::decode_v1` and NEVER uses yrs' own unsafe string decode --
-//! every string-bearing field is read via `read_buf` (safe, bounds-checked)
-//! and validated with the CHECKED `std::str::from_utf8` (which by construction
-//! can never accept a surrogate or out-of-range scalar). `Ydoc::apply`,
-//! `Ydoc::validate_update`, and `merge_updates` -- the crate's
-//! `Update::decode_v1` call sites -- each run this pre-validator FIRST, so
-//! malformed/adversarial bytes are rejected fail-closed, before `decode_v1`
-//! (or anything else unsafe) ever sees them. `scan_v1` also bounds `Any`
-//! container nesting (`MAX_ANY_DEPTH`) so a deeply-nested `ContentAny`/sub-doc
-//! payload cannot overflow the stack (an uncatchable abort) inside the
-//! validator or the downstream decode. The durable choke point
-//! (`durable::validate_update_bytes`, shared by the local edit path and the
-//! remote replication path) also runs it explicitly as a second, redundant
-//! guard at the policy layer.
-//!
-//! The deterministic 41-byte witness below now returns a clean `Err` and the
-//! process survives -- see `known_crash_witness_yrs_char_decode_ub`, no longer
-//! `#[ignore]`d. The broad property tests further down replay the same random-
-//! byte search R14 used (uniform bytes, 0..128 length); the fact that a
-//! proptest run COMPLETES (an abort would kill the whole test process, not
-//! just fail one case) is itself the "no abort on a random corpus" evidence.
-//! The gate runs them at the default case count; the shard's evidence run
-//! scaled them to 20,000 cases per property via `PROPTEST_CASES`.
+//! The tests include a byte-exact 41-byte witness of that abort, a
+//! `ContentDeleted` length of `u32::MAX`, valid seed updates, and property
+//! tests over uniform bytes (0..128 length), mutated valid updates,
+//! structured `Any` content, and deep `Any` nesting. A property run that
+//! completes is the evidence, because an abort kills the whole test process
+//! instead of failing one case. The gate runs the properties at the default
+//! case count.
 
 use dohc_engine_collab::ydoc::Ydoc;
 use proptest::prelude::*;
 
-/// Deterministic, byte-exact regression witness for the yrs 0.27.3 `char`-
-/// decode UB abort described above. Was `#[ignore]`d because running it used
-/// to abort the whole test process by design; now that the pre-validator
-/// guards `Ydoc::apply`, this is an ordinary passing test: a clean `Err`, not
-/// an abort. Kept byte-exact as a permanent regression pin.
+/// Byte-exact witness for the yrs 0.27.3 `char`-decode abort described above.
+/// The pre-validator that guards `Ydoc::apply` must reject it with an `Err`.
 #[test]
 fn known_crash_witness_yrs_char_decode_ub() {
     let bytes: [u8; 41] = [
@@ -63,10 +32,9 @@ fn known_crash_witness_yrs_char_decode_ub() {
         0xf6, 0xfc, 0xae, 0x1d, 0xbd, 0x17, 0xee, 0x48, 0x42, 0xb4, 0x02,
     ];
     let doc = Ydoc::wire();
-    // Previously: this call aborted the process (UB precondition violation
-    // inside yrs). Now: the pre-validator rejects the malformed bytes before
-    // `Update::decode_v1` ever runs -- a clean, fail-closed `Err`, and the
-    // process survives to make (and pass) this assertion.
+    // The pre-validator rejects the malformed bytes before
+    // `Update::decode_v1` runs, so the process survives to make this
+    // assertion.
     let result = doc.apply(&bytes);
     assert!(
         result.is_err(),
@@ -77,14 +45,12 @@ fn known_crash_witness_yrs_char_decode_ub() {
     assert!(Ydoc::validate_update(&bytes).is_err());
 }
 
-/// Deterministic regression witness for the `ContentDeleted` decode OOM the
-/// YRS-ABORT-SAFETY hotfix closes. A `ContentDeleted` item declares its span as
-/// a single wire varint (up to `u32::MAX`) that yrs stores as one count; the
-/// pre-validator (`replay_parity::scan_v1`, run first by `Ydoc::apply`) used to
-/// materialize one tombstone identity PER CLOCK, so this ~15-byte update drove
-/// ~4.29 billion `BTreeMap` inserts — an unbounded-memory blow-up reachable from
-/// untrusted peer bytes. It must now return (accept or reject) in constant
-/// memory, near-instantly, and the process must survive to make this assertion.
+/// A `ContentDeleted` item declares its span as one wire varint (up to
+/// `u32::MAX`) that yrs stores as one count. The pre-validator
+/// (`replay_parity::scan_v1`, run first by `Ydoc::apply`) must not
+/// materialize one tombstone identity per clock: this ~15-byte update would
+/// drive ~4.29 billion `BTreeMap` inserts from untrusted peer bytes. It must
+/// return, accepting or rejecting, in constant memory.
 #[test]
 fn deleted_content_huge_len_does_not_exhaust_memory() {
     let bytes: Vec<u8> = vec![
@@ -214,7 +180,6 @@ fn emit_any(out: &mut Vec<u8>, script: &[u8], pos: &mut usize, depth: usize) {
             *pos += 1;
             push_varint(out, n);
             for i in 0..n {
-                // Key: a short ASCII string (always valid UTF-8).
                 let key = [b'k', b'0' + (i as u8 % 10)];
                 push_varint(out, key.len() as u64);
                 out.extend_from_slice(&key);
@@ -246,7 +211,7 @@ fn next_u32(script: &[u8], pos: &mut usize) -> u32 {
 /// content block of `kind`, whose payload is generated by `emit_any` from
 /// `script`. Covers `ContentAny` (kind 8) and `ContentDoc`/sub-document options
 /// (kind 9 -- a guid string plus an options `Any`), the two content kinds
-/// CodeRabbit flagged that random corpora almost never reach.
+/// that random corpora almost never reach.
 fn structured_update(kind: u8, script: &[u8], depth: usize) -> Vec<u8> {
     let mut out: Vec<u8> = vec![
         0x01, // clients_len
@@ -284,10 +249,8 @@ fn structured_update(kind: u8, script: &[u8], depth: usize) -> Vec<u8> {
 
 proptest! {
     // Default case count (256, like `replication_envelope.rs`) so the required
-    // `cargo test --workspace` gate stays fast; `ProptestConfig::default()`
-    // honors the standard `PROPTEST_CASES` env var, which is how the
-    // YRS-ABORT-SAFETY evidence run scaled this family to a 20,000-case
-    // malformed corpus per property (recorded in the shard's PR/EXECUTION_LOG).
+    // `cargo test --workspace` gate stays fast. `ProptestConfig::default()`
+    // honors the standard `PROPTEST_CASES` env var for larger runs.
     #![proptest_config(ProptestConfig::default())]
 
     /// Structure-aware never-abort: valid-outer-frame updates whose CONTENT is a
@@ -318,14 +281,11 @@ proptest! {
         let _ = doc.apply(&bytes);
     }
 
-    /// The R14 property under test, now actually provable: arbitrary bytes
-    /// through `Ydoc::apply` NEVER abort the process. A random byte vector is
-    /// either cleanly rejected (`Err`) or -- on the rare chance it happens to
-    /// be a structurally valid update -- applies cleanly (`Ok`); either
-    /// outcome is fine. What matters, and what this test's mere COMPLETION
-    /// proves (an abort kills the whole binary, it does not fail one case),
-    /// is that none of the generated cases reached yrs' uncatchable
-    /// `Update::decode_v1` UB.
+    /// Arbitrary bytes through `Ydoc::apply` never abort the process. A random
+    /// byte vector is either rejected (`Err`) or, when it happens to be a
+    /// structurally valid update, applies (`Ok`). Completing the test proves
+    /// that no generated case reached yrs' uncatchable `Update::decode_v1`
+    /// undefined behavior, because an abort kills the whole binary.
     #[test]
     fn arbitrary_bytes_never_abort_ydoc_apply(bytes in prop::collection::vec(any::<u8>(), 0..128)) {
         let doc = Ydoc::wire();

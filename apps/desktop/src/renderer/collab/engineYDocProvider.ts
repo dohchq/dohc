@@ -1,26 +1,13 @@
 import { registerYDocDelivery } from "../pendingYDocDeliveries";
 import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
-// WS-G2-C-2 — the ENGINE Y.Doc provider (renderer half of the bridge).
-//
-// The live engine Y.Doc lives in MAIN (the engine driver is node-only). The
-// renderer's format editor binds to a mirror Y.Doc that this provider keeps
-// convergent with the main session over a transport (IPC in production, a mock
-// in tests). It exposes a Y.Doc that the Collaboration extension binds to via
-// its "body" XmlFragment. Solo editing runs purely on the
-// engine, and co-editing rides the same channel because main forwards remote
-// ydoc.update deltas through onRemoteUpdate.
-//
-// The echo guard mirrors the main core's origin contract. Every engine-sourced
-// update (the initial state + every forwarded remote delta) is applied to the
-// mirror doc under ENGINE_SOURCED_ORIGIN; the update observer that ships local
-// edits to main skips that origin, so an engine-applied update is never bounced
-// back to main (which would double-journal / echo-storm). A real editor edit
-// carries the editor's own (non-ENGINE) origin and IS shipped.
 
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
-import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
+import {
+  YDOC_PENDING_MAX_BYTES,
+  YDOC_PENDING_MAX_RECORDS,
+} from "@dohc/workspace-engine-client/ydoc-limits";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 
 // Applied to the mirror doc for every update that originated in the engine
@@ -51,12 +38,16 @@ export interface EngineYDocDelivery {
   head?: EngineYDocHead;
 }
 
-const WITNESS_KEYS = ["dohcMarkdownSource", "dohcMarkdownSourceSha256", "dohcMarkdownSourceProjectionSha256"] as const;
+const WITNESS_KEYS = [
+  "dohcMarkdownSource",
+  "dohcMarkdownSourceSha256",
+  "dohcMarkdownSourceProjectionSha256",
+] as const;
 
 // The saved source a document records, which the lossy-note check reads with its head.
 function sourceWitness(doc: Y.Doc): unknown[] {
   const meta = doc.getMap("meta");
-  return WITNESS_KEYS.map(key => meta.get(key));
+  return WITNESS_KEYS.map((key) => meta.get(key));
 }
 
 function sameWitness(left: unknown[], right: unknown[]): boolean {
@@ -203,26 +194,19 @@ interface EngineYDocBindOptions {
   // returned as data). The mirror's edits can no longer reach the engine, so
   // the full canonical state is handed over before anything destroys it. The
   // queue halts until a lineage replacement installs a writable winner.
-  onDeliveryFailure?: (
-    snapshot: Uint8Array,
-    error: unknown,
-    source: Y.Doc,
-  ) => void | Promise<void>;
+  onDeliveryFailure?: (snapshot: Uint8Array, error: unknown, source: Y.Doc) => void | Promise<void>;
   // Main can report a later update as saved while earlier edits still sit in
   // the batch queue or an unacknowledged delivery. Keep the owner informed
   // until every accepted local update has been acknowledged.
   onDeliveryPendingChange?: (pending: boolean) => void;
   checkpointForExit?: () => Promise<void>;
-  hasUnresolvedCheckpoint?:()=>boolean;
+  hasUnresolvedCheckpoint?: () => boolean;
   // Starts before delivery and recovery await the replacement acknowledgement.
   onDocumentReplacementStarted?: () => void;
   // Runs after the losing mirror stops shipping updates and before main
   // accepts the winner generation. The desktop uses this boundary to persist
   // state that existed only in the losing renderer mirror.
-  onDocumentReplacing?: (
-    retired: Y.Doc,
-    recoveredPaths: string[],
-  ) => void | Promise<void>;
+  onDocumentReplacing?: (retired: Y.Doc, recoveredPaths: string[]) => void | Promise<void>;
   // Runs right before main is told to accept the winner. Throwing keeps the
   // retired mirror, as a failed onDocumentReplacing does: the retired mirror
   // can take an edit while onDocumentReplacing settles.
@@ -295,9 +279,7 @@ export interface EngineYDocBinding {
     descriptor: ArtifactAssetDescriptor;
     bytes: Uint8Array;
   }>;
-  onDocumentReplaced(
-    listener: (doc: Y.Doc, recoveredPaths: string[]) => void,
-  ): () => void;
+  onDocumentReplaced(listener: (doc: Y.Doc, recoveredPaths: string[]) => void): () => void;
   // Force every accepted local edit through the transport and wait for main's
   // acknowledgement. Path mutations use this barrier before main settles and
   // closes the old-path session.
@@ -324,8 +306,7 @@ export async function bindEngineYDoc(
     lineageGeneration: number;
   };
   const replacementsBeforeOpen: LineageReplacement[] = [];
-  let acceptReplacement: ((input: LineageReplacement) => Promise<void>) | null =
-    null;
+  let acceptReplacement: ((input: LineageReplacement) => Promise<void>) | null = null;
   // Main can announce a winner after it creates the session but before the
   // open invoke resolves in the renderer. Subscribe first so that event is
   // held until the initial mirror and generation are installed.
@@ -367,9 +348,7 @@ export async function bindEngineYDoc(
       },
       readArtifactAsset(descriptor) {
         return Promise.reject(
-          new Error(
-            `Artifact asset ${descriptor.id} cannot load without a live document session.`,
-          ),
+          new Error(`Artifact asset ${descriptor.id} cannot load without a live document session.`),
         );
       },
       onDocumentReplaced() {
@@ -378,7 +357,9 @@ export async function bindEngineYDoc(
       flushPendingLocalUpdates() {
         return Promise.resolve();
       },
-      adoptOwner() { return Promise.reject(new Error("Owner session is unavailable.")); },
+      adoptOwner() {
+        return Promise.reject(new Error("Owner session is unavailable."));
+      },
       async destroy() {
         // Best-effort close even on the unavailable path: main may have taken a
         // reservation before deciding not to serve (it should not, but never
@@ -473,11 +454,14 @@ export async function bindEngineYDoc(
     }
   };
 
-  const applyLocalUpdateUntilAcknowledged = async (batch: {
-    update: Uint8Array;
-    sequence: number;
-    requestId: string;
-  }, batchGeneration: number): Promise<void> => {
+  const applyLocalUpdateUntilAcknowledged = async (
+    batch: {
+      update: Uint8Array;
+      sequence: number;
+      requestId: string;
+    },
+    batchGeneration: number,
+  ): Promise<void> => {
     try {
       await deliverBatchUntilAcknowledged(batch, batchGeneration);
     } finally {
@@ -488,16 +472,17 @@ export async function bindEngineYDoc(
     }
   };
 
-  const deliverBatchUntilAcknowledged = async (batch: {
-    update: Uint8Array;
-    sequence: number;
-    requestId: string;
-  }, batchGeneration: number): Promise<void> => {
+  const deliverBatchUntilAcknowledged = async (
+    batch: {
+      update: Uint8Array;
+      sequence: number;
+      requestId: string;
+    },
+    batchGeneration: number,
+  ): Promise<void> => {
     if (localUpdatesRefused) return;
     if (batch.update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) {
-      refuseLocalUpdates(
-        new EngineYDocUpdateTooLargeError(batch.update.byteLength),
-      );
+      refuseLocalUpdates(new EngineYDocUpdateTooLargeError(batch.update.byteLength));
       return;
     }
     for (;;) {
@@ -547,12 +532,17 @@ export async function bindEngineYDoc(
 
   let drainRevision = 0;
   let drainedRevision = 0;
-  const unregisterDelivery = registerYDocDelivery({pending: () => deliveryPending || (options.hasUnresolvedCheckpoint?.() === true && drainedRevision !== drainRevision), flush: async () => {
-    const revision = drainRevision;
-    await flushPendingLocalUpdates();
-    if(options.hasUnresolvedCheckpoint?.() === true) await options.checkpointForExit?.();
-    drainedRevision = revision;
-  }});
+  const unregisterDelivery = registerYDocDelivery({
+    pending: () =>
+      deliveryPending ||
+      (options.hasUnresolvedCheckpoint?.() === true && drainedRevision !== drainRevision),
+    flush: async () => {
+      const revision = drainRevision;
+      await flushPendingLocalUpdates();
+      if (options.hasUnresolvedCheckpoint?.() === true) await options.checkpointForExit?.();
+      drainedRevision = revision;
+    },
+  });
 
   const flushStagedUpdates = (): Promise<void> => {
     if (scheduledFlush !== null) {
@@ -567,15 +557,15 @@ export async function bindEngineYDoc(
     // These edits belong to the same renderer owner. Assign an immutable
     // delivery identity only after merging; retries retain its bytes and id.
     const batch = {
-      update: updates.length === 1
-        ? updates[0]!.update
-        : Y.mergeUpdates(updates.map(({ update }) => update)),
+      update:
+        updates.length === 1
+          ? updates[0]!.update
+          : Y.mergeUpdates(updates.map(({ update }) => update)),
       sequence: updates.at(-1)!.sequence,
       requestId: crypto.randomUUID(),
     };
-    retainedBytes += batch.update.byteLength - updates.reduce(
-      (total, { update }) => total + update.byteLength, 0,
-    );
+    retainedBytes +=
+      batch.update.byteLength - updates.reduce((total, { update }) => total + update.byteLength, 0);
     retainedRecords += 1 - updates.length;
     const batchGeneration = lineageGeneration;
     // Preserve batch order even when the transport is asynchronous. A failed
@@ -583,20 +573,19 @@ export async function bindEngineYDoc(
     // chain remains pending during retries, so teardown cannot settle and
     // close a session that still has renderer-only edits.
     unacknowledgedBatches += 1;
-    sendChain = sendChain.then(() =>
-      applyLocalUpdateUntilAcknowledged(batch, batchGeneration),
-    );
+    sendChain = sendChain.then(() => applyLocalUpdateUntilAcknowledged(batch, batchGeneration));
     return sendChain;
   };
 
   const scheduleLocalUpdateFlush = (): void => {
     if (scheduledFlush !== null || ownerHandoffActive) return;
-    scheduledFlush = batchScheduler.schedule(() => {
-      scheduledFlush = null;
-      void flushPendingLocalUpdates();
-    }, doc.share.has(EXCALIDRAW_SCENE_ROOTS.revisions)
-      ? SCENE_UPDATE_FLUSH_DELAY_MS
-      : 0);
+    scheduledFlush = batchScheduler.schedule(
+      () => {
+        scheduledFlush = null;
+        void flushPendingLocalUpdates();
+      },
+      doc.share.has(EXCALIDRAW_SCENE_ROOTS.revisions) ? SCENE_UPDATE_FLUSH_DELAY_MS : 0,
+    );
   };
 
   // Retain each original editor update before scheduling transport. An
@@ -631,10 +620,15 @@ export async function bindEngineYDoc(
   // the one it came with, else the current one unless it changed the source.
   // It records a save's receipt, and counts a state with a head other than
   // the newest save's.
-  const install = (target: Y.Doc, current: typeof head, delivery: EngineYDocDelivery): typeof head => {
+  const install = (
+    target: Y.Doc,
+    current: typeof head,
+    delivery: EngineYDocDelivery,
+  ): typeof head => {
     const before = sourceWitness(target);
     Y.applyUpdate(target, delivery.update, ENGINE_SOURCED_ORIGIN);
-    if (delivery.head === undefined) return sameWitness(before, sourceWitness(target)) ? current : undefined;
+    if (delivery.head === undefined)
+      return sameWitness(before, sourceWitness(target)) ? current : undefined;
     const { sha256, committed } = delivery.head;
     // State whose head is unknown waits for the read that pairs one with it.
     if (sha256 === undefined) return undefined;
@@ -660,9 +654,7 @@ export async function bindEngineYDoc(
     for (const listener of headListeners) listener();
   });
 
-  const replacementListeners = new Set<
-    (replacement: Y.Doc, recoveredPaths: string[]) => void
-  >();
+  const replacementListeners = new Set<(replacement: Y.Doc, recoveredPaths: string[]) => void>();
   const retiredDocs = new Set<Y.Doc>();
   let replacementHandoff: Promise<void> | null = null;
   let artifactAssets = opened.artifactAssets ?? [];
@@ -705,9 +697,7 @@ export async function bindEngineYDoc(
           await options.onDocumentReplacing(retired, input.recoveredPaths);
         }
         options.beforeReplacementAcknowledged?.();
-        bufferedUpdates = await transport.acknowledgeLineageReplacement(
-          input.lineageGeneration,
-        );
+        bufferedUpdates = await transport.acknowledgeLineageReplacement(input.lineageGeneration);
       } catch (error) {
         replacement.destroy();
         if (!destroyed) {
@@ -740,9 +730,7 @@ export async function bindEngineYDoc(
       }
     };
     // A failed handoff does not skip a newer one queued behind it.
-    const handoff = replacementHandoff
-      ? replacementHandoff.then(replace, replace)
-      : replace();
+    const handoff = replacementHandoff ? replacementHandoff.then(replace, replace) : replace();
     replacementHandoff = handoff;
     void handoff.catch((error: unknown) => {
       // Stay frozen on a failed handoff. Reattaching the losing observer would
@@ -793,9 +781,7 @@ export async function bindEngineYDoc(
     },
     readArtifactAsset(descriptor) {
       if (!transport.readArtifactAsset) {
-        return Promise.reject(
-          new Error("This document transport cannot load artifact assets."),
-        );
+        return Promise.reject(new Error("This document transport cannot load artifact assets."));
       }
       return transport.readArtifactAsset(descriptor);
     },
@@ -806,20 +792,43 @@ export async function bindEngineYDoc(
     flushPendingLocalUpdates,
     adoptOwner() {
       if (ownerHandoff) return ownerHandoff;
-      if (!transport.adoptOwner || destroyed || destroyRequested || replacementInProgress || localUpdatesRefused) return Promise.reject(new Error("Owner handoff is unavailable."));
-      const capturedDoc = doc, generation = lineageGeneration;
+      if (
+        !transport.adoptOwner ||
+        destroyed ||
+        destroyRequested ||
+        replacementInProgress ||
+        localUpdatesRefused
+      )
+        return Promise.reject(new Error("Owner handoff is unavailable."));
+      const capturedDoc = doc,
+        generation = lineageGeneration;
       ownerHandoffActive = true;
       const drain = flushStagedUpdates();
       ownerHandoff = (async () => {
         try {
           await drain;
-          if (destroyed || destroyRequested || replacementInProgress || generation !== lineageGeneration || capturedDoc !== doc || localUpdatesRefused) throw new Error("Owner handoff session changed.");
+          if (
+            destroyed ||
+            destroyRequested ||
+            replacementInProgress ||
+            generation !== lineageGeneration ||
+            capturedDoc !== doc ||
+            localUpdatesRefused
+          )
+            throw new Error("Owner handoff session changed.");
           await transport.adoptOwner!(generation);
-          if (destroyed || replacementInProgress || generation !== lineageGeneration || capturedDoc !== doc) throw new Error("Owner handoff session changed.");
+          if (
+            destroyed ||
+            replacementInProgress ||
+            generation !== lineageGeneration ||
+            capturedDoc !== doc
+          )
+            throw new Error("Owner handoff session changed.");
         } finally {
           ownerHandoffActive = false;
           ownerHandoff = null;
-          if (!destroyed && !replacementInProgress && !localUpdatesRefused) await flushStagedUpdates();
+          if (!destroyed && !replacementInProgress && !localUpdatesRefused)
+            await flushStagedUpdates();
         }
       })();
       return ownerHandoff;
@@ -856,9 +865,12 @@ export async function bindEngineYDoc(
       return destroyPromise;
     },
   };
-  const unsubscribeOwnerHandoff = transport.onOwnerHandoff?.(generation => {
-    if (generation !== lineageGeneration) return;
-    void binding.adoptOwner().catch(error => console.error("[desktop] owner handoff failed:",error));
-  }) ?? (() => undefined);
+  const unsubscribeOwnerHandoff =
+    transport.onOwnerHandoff?.((generation) => {
+      if (generation !== lineageGeneration) return;
+      void binding
+        .adoptOwner()
+        .catch((error) => console.error("[desktop] owner handoff failed:", error));
+    }) ?? (() => undefined);
   return binding;
 }

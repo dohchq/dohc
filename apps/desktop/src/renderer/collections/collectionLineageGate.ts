@@ -28,9 +28,7 @@ export async function beginCollectionLineageOperation(
     await flushDrafts?.();
     const settled = await operation.settled;
     if (settled.stalled) {
-      throw new Error(
-        "dohc could not finish saving a collection change. Try again.",
-      );
+      throw new Error("dohc could not finish saving a collection change. Try again.");
     }
     const failed = collectionWriteFailures().filter(
       (failure) => failure.workspaceId === workspaceId,

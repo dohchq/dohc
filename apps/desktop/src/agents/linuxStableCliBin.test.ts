@@ -28,7 +28,13 @@ const pinned = vi.hoisted(() => ({ sha256: "" }));
 const fsEvents = vi.hoisted((): string[] => []);
 
 vi.mock("../../scripts/pinned-node.mjs", () => ({
-  PINNED_NODE: { "linux-x64": { get sha256() { return pinned.sha256; } } },
+  PINNED_NODE: {
+    "linux-x64": {
+      get sha256() {
+        return pinned.sha256;
+      },
+    },
+  },
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -37,7 +43,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return {
     ...actual,
     writeFile: (async (...args: Parameters<typeof actual.writeFile>) => {
-      if (failLauncherPublish && /^dohc-mcp\.tmp-/.test(basename(String(args[0])))) {
+      if (failLauncherPublish && basename(String(args[0])).startsWith("dohc-mcp.tmp-")) {
         await actual.writeFile(args[0], "partial-launcher");
         throw new Error("launcher publish failed");
       }
@@ -99,9 +105,7 @@ describe("syncLinuxStableCliBin", () => {
     const firstModule = referencedModuleName(targetDir);
     expect(firstModule).toMatch(/^dohc-mcp-[a-f0-9]{16}\.mjs$/);
     expect(readFileSync(join(targetDir, firstModule), "utf8")).toBe("module-v1");
-    expect(readFileSync(join(targetDir, "dohc-mcp"), "utf8")).toBe(
-      posixMcpLauncher(firstModule),
-    );
+    expect(readFileSync(join(targetDir, "dohc-mcp"), "utf8")).toBe(posixMcpLauncher(firstModule));
     if (process.platform !== "win32") {
       expect(statSync(join(targetDir, "dohc-mcp")).mode & 0o777).toBe(0o755);
     }
@@ -132,9 +136,9 @@ describe("syncLinuxStableCliBin", () => {
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v2");
     failLauncherPublish = true;
 
-    await expect(syncLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64" })).rejects.toThrow(
-      "launcher publish failed",
-    );
+    await expect(
+      syncLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64" }),
+    ).rejects.toThrow("launcher publish failed");
     const secondModule = publishedModuleNames(targetDir).find((name) => name !== firstModule);
     expect(secondModule).toBeDefined();
     expect(readFileSync(targetLauncher, "utf8")).toBe(firstLauncher);
@@ -150,7 +154,7 @@ describe("syncLinuxStableCliBin", () => {
 
 // A stand-in for dohc's Node.js that prints its arguments, so the launcher
 // can run with no Node.js on PATH.
-const RUNTIME = "#!/bin/sh\necho \"runtime $*\"\n";
+const RUNTIME = '#!/bin/sh\necho "runtime $*"\n';
 
 function x64Fixture(runtime = RUNTIME) {
   const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
@@ -170,11 +174,16 @@ describe("syncLinuxStableCliBin on Linux x64", () => {
     const f = x64Fixture();
     await syncLinuxStableCliBin(f);
     const moduleFileName = publishedModuleNames(f.targetDir)[0]!;
-    expect(readFileSync(join(f.targetDir, "dohc-mcp"), "utf8")).toBe(bundledPosixLauncher(moduleFileName, f.nodeFileName));
+    expect(readFileSync(join(f.targetDir, "dohc-mcp"), "utf8")).toBe(
+      bundledPosixLauncher(moduleFileName, f.nodeFileName),
+    );
     expect(readFileSync(join(f.targetDir, f.nodeFileName), "utf8")).toBe(RUNTIME);
     expect(await hasIntactStableCliBin(f.targetDir)).toBe(true);
     if (process.platform === "win32") return;
-    const run = spawnSync(join(f.targetDir, "dohc-mcp"), ["--workspace", "/w"], { env: { PATH: "" }, encoding: "utf8" });
+    const run = spawnSync(join(f.targetDir, "dohc-mcp"), ["--workspace", "/w"], {
+      env: { PATH: "" },
+      encoding: "utf8",
+    });
     expect(run.status).toBe(0);
     expect(run.stdout).toBe(`runtime ${join(f.targetDir, moduleFileName)} --workspace /w\n`);
   });
@@ -197,9 +206,13 @@ describe("syncLinuxStableCliBin on Linux x64", () => {
     writeFileSync(join(f.resourcesCliBinDir, "..", "app-compiler", "node"), changed);
     pinned.sha256 = createHash("sha256").update("the pinned release").digest("hex");
 
-    await expect(syncLinuxStableCliBin(f)).rejects.toThrow("dohc's Node.js does not match its pinned release.");
+    await expect(syncLinuxStableCliBin(f)).rejects.toThrow(
+      "dohc's Node.js does not match its pinned release.",
+    );
     expect(readFileSync(join(f.targetDir, "dohc-mcp"), "utf8")).toBe(launcher);
-    expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([f.nodeFileName]);
+    expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([
+      f.nodeFileName,
+    ]);
     expect(readdirSync(f.targetDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
     expect(await refreshLinuxStableCliBin({ ...f, onError: () => {} })).toBe(f.targetDir);
   });
@@ -213,24 +226,35 @@ describe("syncLinuxStableCliBin on Linux x64", () => {
 
     await syncLinuxStableCliBin(f);
     expect(readdirSync(f.targetDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
-    expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([f.nodeFileName]);
+    expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([
+      f.nodeFileName,
+    ]);
   });
 
   it("keeps the Node.js its launcher names when the launcher can't be read, so a failed refresh still has it", async () => {
     const f = x64Fixture();
     await syncLinuxStableCliBin(f);
     const launcher = readFileSync(join(f.targetDir, "dohc-mcp"), "utf8");
-    writeFileSync(join(f.resourcesCliBinDir, "..", "app-compiler", "node"), `${RUNTIME}# changed\n`);
+    writeFileSync(
+      join(f.resourcesCliBinDir, "..", "app-compiler", "node"),
+      `${RUNTIME}# changed\n`,
+    );
     pinned.sha256 = createHash("sha256").update("the pinned release").digest("hex");
     failNextLauncherRead = true;
     const onError = vi.fn();
 
     const result = await refreshLinuxStableCliBin({ ...f, onError });
     expect(failNextLauncherRead, "the launcher read failed with EIO").toBe(false);
-    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: "dohc's Node.js does not match its pinned release." }));
-    expect(result, "after EIO and a failed publish, the previous launcher still works").toBe(f.targetDir);
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "dohc's Node.js does not match its pinned release." }),
+    );
+    expect(result, "after EIO and a failed publish, the previous launcher still works").toBe(
+      f.targetDir,
+    );
     expect(readFileSync(join(f.targetDir, "dohc-mcp"), "utf8")).toBe(launcher);
-    expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([f.nodeFileName]);
+    expect(readdirSync(f.targetDir).filter((name) => name.startsWith("node-"))).toEqual([
+      f.nodeFileName,
+    ]);
   });
 
   it("is not intact when the Node.js its launcher names is missing", async () => {
@@ -247,10 +271,13 @@ describe("syncLinuxStableCliBin on Linux x64", () => {
     const next = `${RUNTIME}# next release\n`;
     writeFileSync(join(f.resourcesCliBinDir, "..", "app-compiler", "node"), next);
     pinned.sha256 = createHash("sha256").update(next).digest("hex");
-    const nodeFiles = () => readdirSync(f.targetDir).filter((name) => name.startsWith("node-")).sort();
+    const nodeFiles = () =>
+      readdirSync(f.targetDir)
+        .filter((name) => name.startsWith("node-"))
+        .sort();
 
+    expect(readFileSync(join(f.targetDir, "dohc-mcp"), "utf8")).toContain(f.nodeFileName);
     await syncLinuxStableCliBin(f);
-    // The launcher still named the first release's Node.js when this refresh began.
     expect(nodeFiles()).toEqual([f.nodeFileName, `node-${pinned.sha256}`].sort());
     await syncLinuxStableCliBin(f);
     expect(nodeFiles()).toEqual([`node-${pinned.sha256}`]);
@@ -269,9 +296,15 @@ describe("syncLinuxStableCliBin on Linux x64", () => {
     await syncLinuxStableCliBin(f);
     const moduleFileName = publishedModuleNames(f.targetDir)[0]!;
     expect(fsEvents).toEqual([
-      `flush ${moduleFileName}.tmp`, `rename ${moduleFileName}`, "flush cli-bin",
-      `flush ${f.nodeFileName}.tmp`, `rename ${f.nodeFileName}`, "flush cli-bin",
-      "flush dohc-mcp.tmp", "rename dohc-mcp", "flush cli-bin",
+      `flush ${moduleFileName}.tmp`,
+      `rename ${moduleFileName}`,
+      "flush cli-bin",
+      `flush ${f.nodeFileName}.tmp`,
+      `rename ${f.nodeFileName}`,
+      "flush cli-bin",
+      "flush dohc-mcp.tmp",
+      "rename dohc-mcp",
+      "flush cli-bin",
     ]);
   });
 });
@@ -300,10 +333,7 @@ describe("hasIntactStableCliBin", () => {
     scratchDirs.push(root);
     const targetDir = join(root, "state", "cli-bin");
     mkdirSync(targetDir, { recursive: true });
-    writeFileSync(
-      join(targetDir, "dohc-mcp"),
-      posixMcpLauncher("dohc-mcp-missing-generation.mjs"),
-    );
+    writeFileSync(join(targetDir, "dohc-mcp"), posixMcpLauncher("dohc-mcp-missing-generation.mjs"));
     writeFileSync(join(targetDir, "dohc-mcp.mjs"), "a different generation");
 
     expect(await hasIntactStableCliBin(targetDir)).toBe(false);
@@ -339,7 +369,12 @@ describe("refreshLinuxStableCliBin", () => {
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
 
     const onError = vi.fn();
-    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64", onError });
+    const result = await refreshLinuxStableCliBin({
+      resourcesCliBinDir,
+      targetDir,
+      arch: "arm64",
+      onError,
+    });
     expect(result).toBe(targetDir);
     expect(onError).not.toHaveBeenCalled();
   });
@@ -363,7 +398,12 @@ describe("refreshLinuxStableCliBin", () => {
     failLauncherPublish = true;
 
     const onError = vi.fn();
-    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64", onError });
+    const result = await refreshLinuxStableCliBin({
+      resourcesCliBinDir,
+      targetDir,
+      arch: "arm64",
+      onError,
+    });
     expect(result).toBe(targetDir);
     expect(onError).toHaveBeenCalledOnce();
     const secondModule = publishedModuleNames(targetDir).find((name) => name !== firstModule);
@@ -384,7 +424,12 @@ describe("refreshLinuxStableCliBin", () => {
     const targetDir = join(root, "state", "cli-bin");
 
     const onError = vi.fn();
-    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, arch: "arm64", onError });
+    const result = await refreshLinuxStableCliBin({
+      resourcesCliBinDir,
+      targetDir,
+      arch: "arm64",
+      onError,
+    });
     expect(result).toBeUndefined();
     expect(onError).toHaveBeenCalledOnce();
   });

@@ -22,16 +22,11 @@ describe("Rust engine packaging gate", () => {
 
     const gate = spawnSync(
       process.execPath,
-      [
-        join(desktopDir, "scripts", "require-workspace-engine.mjs"),
-        emptyResourceDir,
-      ],
+      [join(desktopDir, "scripts", "require-workspace-engine.mjs"), emptyResourceDir],
       { encoding: "utf8" },
     );
 
     expect(gate.status).not.toBe(0);
-    expect(gate.stderr).toContain(
-      "Refusing to package without the Rust workspace engine binary",
-    );
+    expect(gate.stderr).toContain("Refusing to package without the Rust workspace engine binary");
   });
 });

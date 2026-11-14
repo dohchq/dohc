@@ -7,7 +7,7 @@ const electron = vi.hoisted(() => ({
   app: {
     isPackaged: true,
     getVersion: vi.fn(() => "1.0.0"),
-    getPath: vi.fn(() => "C:\profile"),
+    getPath: vi.fn(() => "C:profile"),
     whenReady: vi.fn(async () => undefined),
     quit: vi.fn(),
     on: vi.fn(),
@@ -16,15 +16,28 @@ const electron = vi.hoisted(() => ({
 }));
 const updater = vi.hoisted(() => {
   const controller = {
-    awaitUpdate: vi.fn(async (_bounds: unknown, _confirmDownload: (version: string) => Promise<boolean>): Promise<string | null> => "1.0.1"),
+    awaitUpdate: vi.fn(
+      async (
+        _bounds: unknown,
+        _confirmDownload: (version: string) => Promise<boolean>,
+      ): Promise<string | null> => "1.0.1",
+    ),
     installUpdate: vi.fn(async () => ({ accepted: true })),
     stop: vi.fn(),
   };
-  return { controller, startAutoUpdates: vi.fn(async (_options: StartOptions): Promise<typeof controller | null> => controller) };
+  return {
+    controller,
+    startAutoUpdates: vi.fn(
+      async (_options: StartOptions): Promise<typeof controller | null> => controller,
+    ),
+  };
 });
 
 vi.mock("electron", () => electron);
-vi.mock("../updates/electronUpdater", () => ({ startAutoUpdates: updater.startAutoUpdates, installsOnQuit: () => true }));
+vi.mock("../updates/electronUpdater", () => ({
+  startAutoUpdates: updater.startAutoUpdates,
+  installsOnQuit: () => true,
+}));
 
 const { checkForUpdateBeforeMain } = await import("./launchRecovery");
 
@@ -39,7 +52,10 @@ describe("update check before main loads", () => {
   it("restarts into an update the person accepts, waiting less for the feed than after a visible failure", async () => {
     await expect(checkForUpdateBeforeMain("unfinished-launch")).resolves.toBe(true);
     expect(updater.controller.awaitUpdate).toHaveBeenCalledWith(
-      { verdictMs: 5_000, downloadMs: 300_000 }, expect.any(Function), expect.any(Function));
+      { verdictMs: 5_000, downloadMs: 300_000 },
+      expect.any(Function),
+      expect.any(Function),
+    );
     expect(updater.controller.installUpdate).toHaveBeenCalledOnce();
     expect(updater.controller.stop).toHaveBeenCalledOnce();
     expect(electron.app.quit).not.toHaveBeenCalled();
@@ -52,7 +68,10 @@ describe("update check before main loads", () => {
     expect(electron.app.quit).toHaveBeenCalledOnce();
     const handler = vi.fn();
     options.onQuit(handler);
-    const [eventName, listener] = electron.app.on.mock.calls[0]! as [string, (event: unknown, exitCode: number) => void];
+    const [eventName, listener] = electron.app.on.mock.calls[0]! as [
+      string,
+      (event: unknown, exitCode: number) => void,
+    ];
     expect(eventName).toBe("quit");
     listener({}, 0);
     expect(handler).toHaveBeenCalledExactlyOnceWith(0);
@@ -67,11 +86,15 @@ describe("update check before main loads", () => {
 
   it("asks before downloading, and leaves the exit to the entry when the person declines", async () => {
     electron.dialog.showMessageBox.mockResolvedValue({ response: 1, checkboxChecked: false });
-    updater.controller.awaitUpdate.mockImplementation(async (_bounds: unknown, confirmDownload: (version: string) => Promise<boolean>) =>
-      await confirmDownload("1.0.1") ? "1.0.1" : null);
+    updater.controller.awaitUpdate.mockImplementation(
+      async (_bounds: unknown, confirmDownload: (version: string) => Promise<boolean>) =>
+        (await confirmDownload("1.0.1")) ? "1.0.1" : null,
+    );
     await expect(checkForUpdateBeforeMain("unfinished-launch")).resolves.toBe(false);
     expect(electron.dialog.showMessageBox).toHaveBeenCalledOnce();
-    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ buttons: ["Download", "Not now"] }));
+    expect(electron.dialog.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ buttons: ["Download", "Not now"] }),
+    );
     expect(electron.app.quit).not.toHaveBeenCalled();
   });
 
@@ -82,5 +105,4 @@ describe("update check before main loads", () => {
     await expect(checkForUpdateBeforeMain("startup")).resolves.toBe(false);
     expect(electron.app.quit).not.toHaveBeenCalled();
   });
-
 });

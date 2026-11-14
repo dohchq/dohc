@@ -6,5 +6,7 @@ import { createRequire } from "node:module";
 // so its lines go to stderr, which the runner reads line by line.
 const require = createRequire(import.meta.url);
 export const builderRequire = createRequire(require.resolve("electron-builder/package.json"));
-export const { log: builderLog } = createRequire(builderRequire.resolve("app-builder-lib/package.json"))("builder-util");
+export const { log: builderLog } = createRequire(
+  builderRequire.resolve("app-builder-lib/package.json"),
+)("builder-util");
 builderLog.stream = process.stderr;

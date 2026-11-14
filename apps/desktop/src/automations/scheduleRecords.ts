@@ -16,8 +16,15 @@ const isTime = (value: unknown): value is number | null =>
 
 function isRecordedSchedule(value: unknown): value is ScheduleRecord["schedules"][number] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const { automationId, collectionPath, name, scheduleHash, enabledSince, throughMs, trigger } = value as Record<string, unknown>;
-  if (typeof automationId !== "string" || typeof collectionPath !== "string" || typeof name !== "string" || typeof scheduleHash !== "string") return false;
+  const { automationId, collectionPath, name, scheduleHash, enabledSince, throughMs, trigger } =
+    value as Record<string, unknown>;
+  if (
+    typeof automationId !== "string" ||
+    typeof collectionPath !== "string" ||
+    typeof name !== "string" ||
+    typeof scheduleHash !== "string"
+  )
+    return false;
   if (!isTime(enabledSince) || !isTime(throughMs)) return false;
   if (!trigger || typeof trigger !== "object" || Array.isArray(trigger)) return false;
   const { kind, every, at, timezone, days } = trigger as Record<string, unknown>;
@@ -27,7 +34,9 @@ function isRecordedSchedule(value: unknown): value is ScheduleRecord["schedules"
 }
 
 /** A record read from disk, or null when it is not one dohc wrote. */
-export function parseScheduleRecord(text: string): { workspaceId: string; record: ScheduleRecord } | null {
+export function parseScheduleRecord(
+  text: string,
+): { workspaceId: string; record: ScheduleRecord } | null {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -42,7 +51,8 @@ export function parseScheduleRecord(text: string): { workspaceId: string; record
 }
 
 export function createScheduleRecords(directory: string) {
-  const fileOf = (workspaceId: string) => join(directory, `${encodeURIComponent(workspaceId)}.json`);
+  const fileOf = (workspaceId: string) =>
+    join(directory, `${encodeURIComponent(workspaceId)}.json`);
   // Writes go one at a time, so the last one lands last.
   let queue: Promise<unknown> = Promise.resolve();
 
@@ -56,7 +66,12 @@ export function createScheduleRecords(directory: string) {
           return;
         }
         await mkdir(directory, { recursive: true });
-        await atomicReplaceFile(file, (temporary) => writeFile(temporary, `${JSON.stringify({ version: 1, workspaceId, schedules: record.schedules })}\n`));
+        await atomicReplaceFile(file, (temporary) =>
+          writeFile(
+            temporary,
+            `${JSON.stringify({ version: 1, workspaceId, schedules: record.schedules })}\n`,
+          ),
+        );
       });
       queue = write.catch(() => undefined);
       return write;

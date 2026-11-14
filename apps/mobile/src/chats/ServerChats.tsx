@@ -16,13 +16,17 @@ import { SectionHeader } from "./SectionHeader";
 import { useWorkspaces } from "./Workspaces";
 
 type Item =
-  | { type: "header"; key: string; title: string; collapsed: boolean; unread: boolean; first: boolean }
+  | {
+      type: "header";
+      key: string;
+      title: string;
+      collapsed: boolean;
+      unread: boolean;
+      first: boolean;
+    }
   | { type: "row"; key: string; row: ChatRowData }
   | { type: "state"; key: string };
 
-// Chats in a signed-in build: the header, with the switcher and Settings, then the open workspace's groups, people and
-// agents, as the server lists them, unread by the account's read marks. A chat opens its stream. The list reads again
-// when the feed reports a chat change, as when a mark from this phone or the account's computer reaches the server.
 export function ServerChats() {
   const theme = useTheme();
   const { current } = useWorkspaces();
@@ -32,7 +36,14 @@ export function ServerChats() {
       <Stack.Screen options={{ headerShown: false }} />
       <ChatsHeader workspace={current} scrolled={scrolled} />
       <NoWorkspace />
-      {current ? <ChatList key={current.id} workspaceId={current.id} workspace={current.name} onScrolled={setScrolled} /> : null}
+      {current ? (
+        <ChatList
+          key={current.id}
+          workspaceId={current.id}
+          workspace={current.name}
+          onScrolled={setScrolled}
+        />
+      ) : null}
     </View>
   );
 }
@@ -52,11 +63,32 @@ function chatRow(group: ChatGroup): ChatRowData {
   const count = unread ? { count: group.unreadCount } : {};
   if (kind === "agent") return { id: group.id, kind, name: group.name, unread, ...count };
   const hash = [...group.id].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 0);
-  const initials = group.name.split(/\s+/).filter(Boolean).slice(0, 2).map(word => [...word][0]?.toUpperCase() ?? "").join("");
-  return { id: group.id, kind, name: group.name, unread, ...count, initials, hue: workspaceMarkFills[hash % workspaceMarkFills.length]! };
+  const initials = group.name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((word) => [...word][0]?.toUpperCase() ?? "")
+    .join("");
+  return {
+    id: group.id,
+    kind,
+    name: group.name,
+    unread,
+    ...count,
+    initials,
+    hue: workspaceMarkFills[hash % workspaceMarkFills.length]!,
+  };
 }
 
-function ChatList({ workspaceId, workspace, onScrolled }: { workspaceId: string; workspace: string; onScrolled(scrolled: boolean): void }) {
+function ChatList({
+  workspaceId,
+  workspace,
+  onScrolled,
+}: {
+  workspaceId: string;
+  workspace: string;
+  onScrolled(scrolled: boolean): void;
+}) {
   const router = useRouter();
   const { state, retry } = useView(views.chats);
   const failed = workspaceWords.chatsFailed(workspace);
@@ -64,42 +96,71 @@ function ChatList({ workspaceId, workspace, onScrolled }: { workspaceId: string;
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const items = useMemo<Item[]>(() => {
     if (!state.value) return [{ type: "state", key: "state" }];
-    const sections = SECTIONS.map(section => ({ ...section, rows: state.value?.filter(group => group.kind === section.key).map(chatRow) ?? [] }))
-      .filter(section => section.rows.length > 0);
+    const sections = SECTIONS.map((section) => ({
+      ...section,
+      rows: state.value?.filter((group) => group.kind === section.key).map(chatRow) ?? [],
+    })).filter((section) => section.rows.length > 0);
     if (sections.length === 0) return [{ type: "state", key: "state" }];
     return sections.flatMap((section, index) => {
       const closed = collapsed.has(section.key);
       return [
-        { type: "header" as const, key: `h-${section.key}`, title: section.title, collapsed: closed, unread: section.rows.some(row => row.unread),
-          first: index === 0 },
-        ...closed ? [] : section.rows.map(row => ({ type: "row" as const, key: row.id, row })),
+        {
+          type: "header" as const,
+          key: `h-${section.key}`,
+          title: section.title,
+          collapsed: closed,
+          unread: section.rows.some((row) => row.unread),
+          first: index === 0,
+        },
+        ...(closed ? [] : section.rows.map((row) => ({ type: "row" as const, key: row.id, row }))),
       ];
     });
   }, [state.value, collapsed]);
   const toggle = useCallback((key: string) => {
     void Haptics.selectionAsync();
-    setCollapsed(previous => {
+    setCollapsed((previous) => {
       const next = new Set(previous);
       if (!next.delete(key)) next.add(key);
       return next;
     });
   }, []);
-  const open = useCallback((row: ChatRowData) => router.push({ pathname: "/chat/[id]", params: { id: row.id, name: row.name } }), [router]);
-  // Until the first answer, one row's height, or Try again once a read has failed; then the empty line, if it's empty.
-  const placeholder = state.value ? <EmptyLine text={workspaceWords.noChats} /> : state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
+  const open = useCallback(
+    (row: ChatRowData) =>
+      router.push({ pathname: "/chat/[id]", params: { id: row.id, name: row.name } }),
+    [router],
+  );
+  const placeholder = state.value ? (
+    <EmptyLine text={workspaceWords.noChats} />
+  ) : state.problem ? (
+    <RetryRow label={failed} onRetry={retry} />
+  ) : (
+    <HoldRow />
+  );
   return (
     <LegendList
       data={items}
-      keyExtractor={item => item.key}
-      getItemType={item => item.type}
+      keyExtractor={(item) => item.key}
+      getItemType={(item) => item.type}
       estimatedItemSize={44}
       recycleItems
       scrollEventThrottle={32}
-      onScroll={event => onScrolled(event.nativeEvent.contentOffset.y > 0)}
+      onScroll={(event) => onScrolled(event.nativeEvent.contentOffset.y > 0)}
       contentContainerStyle={{ paddingTop: 0, paddingBottom: 120 }}
-      renderItem={({ item }) => item.type === "header"
-        ? <SectionHeader title={item.title} collapsed={item.collapsed} unread={item.unread} first={item.first} onToggle={() => toggle(item.key.slice(2))} />
-        : item.type === "row" ? <ChatRow row={item.row} onPress={open} /> : placeholder}
+      renderItem={({ item }) =>
+        item.type === "header" ? (
+          <SectionHeader
+            title={item.title}
+            collapsed={item.collapsed}
+            unread={item.unread}
+            first={item.first}
+            onToggle={() => toggle(item.key.slice(2))}
+          />
+        ) : item.type === "row" ? (
+          <ChatRow row={item.row} onPress={open} />
+        ) : (
+          placeholder
+        )
+      }
     />
   );
 }

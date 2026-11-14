@@ -2,16 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use dohc_engine_domain::chats::{
-    CHAT_THREAD_HEADER_MESSAGE_ID, chat_thread_display_title, upsert_chat_search_index_row,
-};
+use dohc_engine_domain::chats::CHAT_THREAD_HEADER_MESSAGE_ID;
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
-    ChatChannelKind, ChatReactionState, ChatThreadLane, CreateFileThread, DeleteTextFile,
-    FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES,
-    MAX_TEXT_BYTES, RenameTextFile, ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, VersionedTextStore,
-    WriteBinary, attachment_id_for, channel_slug_for_name,
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, ChatActorKind, ChatChannelKind, ChatReactionState,
+    ChatThreadLane, DeleteTextFile, FollowState, FollowTargetKind, LinkedChatStore,
+    MAX_SECRET_FILE_BYTES, MAX_TEXT_BYTES, RenameTextFile, ResolveDecision, SECRET_IV_BYTES,
+    SECRET_TAG_BYTES, SendMessage, SetFollow, SetReaction, StartChannelThread, VersionedTextStore,
+    attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_files::MaterializeOptions;
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
@@ -25,8 +22,6 @@ use sha2::{Digest, Sha256};
 use crate::apply::apply_chat_tx;
 use crate::*;
 
-/// A relay-acked envelope for workspace `ws`, recorded at 2_000 ms, whose
-/// relay sequence equals its origin sequence.
 fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> ReplicationEnvelope {
     ReplicationEnvelope {
         settlement_admission: None,
@@ -397,98 +392,6 @@ impl RelayTransport for FakeRelay {
     }
     fn share_blob(&self, _req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
         Err(RelayError::ShareUnavailable)
-    }
-
-    fn share_blob_upload(&self, _req: ShareBlobUploadRequest) -> Result<(), RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-
-    fn share_proposal_submit(
-        &self,
-        _req: ShareProposalSubmitRequest,
-    ) -> Result<ShareProposalSubmitResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-
-    fn share_collection_write(
-        &self,
-        _req: ShareCollectionWriteRequest,
-    ) -> Result<ShareCollectionWriteResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-}
-
-#[derive(Default)]
-struct KeyConflictRelay {
-    uploads: Mutex<Vec<KeyEnvelopeRequest>>,
-    downloads: Mutex<usize>,
-}
-
-impl RelayTransport for KeyConflictRelay {
-    fn push(&self, _req: PushRequest) -> Result<PushResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn pull(&self, _req: PullRequest) -> Result<PullResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn lookup_log_coordinate(
-        &self,
-        _req: LogCoordinateRequest,
-    ) -> Result<LogCoordinateResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn claim_workspace(&self, _req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn rotate_epoch(&self, _req: EpochRequest) -> Result<EpochResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn blobs_have(&self, _req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn download_blobs(
-        &self,
-        _req: BlobDownloadBatchRequest,
-    ) -> Result<BlobDownloadBatchResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn upload_key_envelope(
-        &self,
-        req: KeyEnvelopeRequest,
-    ) -> Result<KeyEnvelopeResponse, RelayError> {
-        self.uploads.lock().expect("key uploads").push(req);
-        Err(RelayError::Conflict)
-    }
-    fn download_key_envelope(
-        &self,
-        _req: KeyEnvelopeDownloadRequest,
-    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
-        *self.downloads.lock().expect("key downloads") += 1;
-        Ok(KeyEnvelopeDownloadResponse {
-            envelope_json: r#"{"winner":true}"#.to_owned(),
-            etag: "winner-etag".to_owned(),
-        })
-    }
-    fn shared_channel_pull(
-        &self,
-        _req: SharedChannelRequest,
-    ) -> Result<SharedChannelResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn share_log_push(&self, _req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn share_view_pull(&self, _req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
-    fn share_blob(&self, _req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
     }
 
     fn share_blob_upload(&self, _req: ShareBlobUploadRequest) -> Result<(), RelayError> {

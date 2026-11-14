@@ -56,7 +56,17 @@ export {
 } from "./ydoc/ydocWireContract";
 
 export { ChatsLiveAdapter } from "./chats/chatsLiveAdapter";
-export { CHATS_METHOD, decodeChatsResult, type ChatChannel, type ChatChannelSummary, type ChatDispatch, type ChatDispatchClaim, type ChatRecoveriesPage, type ChatRunMessagesPage, type ChatUnreadFileThread } from "./chats/chatsWireContract";
+export {
+  CHATS_METHOD,
+  decodeChatsResult,
+  type ChatChannel,
+  type ChatChannelSummary,
+  type ChatDispatch,
+  type ChatDispatchClaim,
+  type ChatRecoveriesPage,
+  type ChatRunMessagesPage,
+  type ChatUnreadFileThread,
+} from "./chats/chatsWireContract";
 
 export { VersionedLiveAdapter } from "./versioned/versionedLiveAdapter";
 export {
@@ -85,7 +95,44 @@ export {
   type OrdinaryPublicationState,
 } from "./relay/ordinarySyncWireContract";
 
-export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeAutomationGroupHandover, decodeCollectionValue, decodeWorkspaceResult, encodeCollectionValue, type AutomationChangeKind, type AutomationClaim, type AutomationClaimMessage, type AutomationClaimSummary, type AutomationGroupHandover, type AutomationGroupRelayRecord, type AutomationPressActor, type AutomationReleaseGroupsResult, type AutomationWatchGroupsParams, type CaptureMoveFileResult, type CaptureRecoveryImportParams, type CaptureRecoveryImportResult, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type HeldChange, type KeptCopy, type KeptCopySaveResult, type RetainedCopiesDeleteResult, type RetainedCopiesListResult, type RetainedCopiesSummary, type RetainedCopy, type SearchQueryPageParams, type SearchResult, type SharedChangeAuthor, type WatcherStatusResult } from "./workspace/workspaceWireContract";
+export {
+  AUTOMATION_CLAIMED_EVENT,
+  MAX_GRANULAR_CHAT_QUERY_CHARS,
+  WORKSPACE_METHOD,
+  decodeAutomationGroupHandover,
+  decodeCollectionValue,
+  decodeWorkspaceResult,
+  encodeCollectionValue,
+  type AutomationChangeKind,
+  type AutomationClaim,
+  type AutomationClaimMessage,
+  type AutomationClaimSummary,
+  type AutomationGroupHandover,
+  type AutomationGroupRelayRecord,
+  type AutomationPressActor,
+  type AutomationReleaseGroupsResult,
+  type AutomationWatchGroupsParams,
+  type CaptureMoveFileResult,
+  type CaptureRecoveryImportParams,
+  type CaptureRecoveryImportResult,
+  type CollectionPendingAdoptionCursor,
+  type CollectionPendingAdoptionsPage,
+  type ConflictFileState,
+  type ConflictRecord,
+  type GranularChatMessageSearchResponse,
+  type GranularChatMessageSearchResult,
+  type HeldChange,
+  type KeptCopy,
+  type KeptCopySaveResult,
+  type RetainedCopiesDeleteResult,
+  type RetainedCopiesListResult,
+  type RetainedCopiesSummary,
+  type RetainedCopy,
+  type SearchQueryPageParams,
+  type SearchResult,
+  type SharedChangeAuthor,
+  type WatcherStatusResult,
+} from "./workspace/workspaceWireContract";
 
 export {
   OwnerYDocOutbox,

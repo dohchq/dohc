@@ -9,41 +9,70 @@ import { PostCard, type PostData } from "./PostCard";
 afterEach(cleanup);
 
 const thread: ChannelThreadRecord = {
-  id: "thread-1", title: "Finished Book hotel", createdAtMs: 1, updatedAtMs: 2, channelId: "channel-1",
-  messageCount: 1, lastReadSequence: 0, unreadCount: 1,
+  id: "thread-1",
+  title: "Finished Book hotel",
+  createdAtMs: 1,
+  updatedAtMs: 2,
+  channelId: "channel-1",
+  messageCount: 1,
+  lastReadSequence: 0,
+  unreadCount: 1,
 };
 
 function card(data: PostData, onOpenPath?: (path: string) => void, onOpen = vi.fn()) {
-  render(<PostCard
-    thread={thread}
-    data={data}
-    reactionControls={{ reactions: [], viewerAuthorId: "ice", onToggle: vi.fn() }}
-    onOpen={onOpen}
-    {...(onOpenPath ? { onOpenPath } : {})}
-  />);
+  render(
+    <PostCard
+      thread={thread}
+      data={data}
+      reactionControls={{ reactions: [], viewerAuthorId: "ice", onToggle: vi.fn() }}
+      onOpen={onOpen}
+      {...(onOpenPath ? { onOpenPath } : {})}
+    />,
+  );
   return onOpen;
 }
 
-const opening = { presentation: { group: "fixture", hue: null, self: false },
-  id: "message-1", authorKind: "automation" as const, authorDisplayName: "Stamp the finish date",
-  authorOwnerDisplayName: "Ice", createdAtMs: 1, bodySnippet: "Finished Book hotel",
+const opening = {
+  presentation: { group: "fixture", hue: null, self: false },
+  id: "message-1",
+  authorKind: "automation" as const,
+  authorDisplayName: "Stamp the finish date",
+  authorOwnerDisplayName: "Ice",
+  createdAtMs: 1,
+  bodySnippet: "Finished Book hotel",
 };
 
 describe("PostCard for an automation's post", () => {
   it("draws the automation's mark and opens the automation that ran here without opening the post", () => {
     const onOpenPath = vi.fn();
-    const onOpen = card({
-      openingMessage: { ...opening, automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" } },
-      reactions: [], viewerAuthorId: "ice",
-    }, onOpenPath);
-    expect(screen.getByTitle("Stamp the finish date").querySelector("svg.lucide-zap")).not.toBeNull();
+    const onOpen = card(
+      {
+        openingMessage: {
+          ...opening,
+          automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+        },
+        reactions: [],
+        viewerAuthorId: "ice",
+      },
+      onOpenPath,
+    );
+    expect(
+      screen.getByTitle("Stamp the finish date").querySelector("svg.lucide-zap"),
+    ).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open automation" }));
     expect(onOpenPath).toHaveBeenCalledWith("Trip/Tasks/automations.yaml");
     expect(onOpen).not.toHaveBeenCalled();
   });
 
   it("names an automation from another computer without offering to open it", () => {
-    card({ openingMessage: { ...opening, authorUserId: "ana", authorOwnerDisplayName: "Ana" }, reactions: [], viewerAuthorId: "ice" }, vi.fn());
+    card(
+      {
+        openingMessage: { ...opening, authorUserId: "ana", authorOwnerDisplayName: "Ana" },
+        reactions: [],
+        viewerAuthorId: "ice",
+      },
+      vi.fn(),
+    );
     expect(screen.queryByRole("button", { name: "Open automation" })).toBeNull();
     fireEvent.focus(screen.getByTestId("chats-post-automation-badge"));
     expect(screen.getByRole("tooltip").textContent).toContain("Ran on Ana's computer");
@@ -52,45 +81,84 @@ describe("PostCard for an automation's post", () => {
 
 describe("PostCard as a feed row", () => {
   const at = new Date(2026, 6, 8, 14, 43).getTime();
-  const sam = { id: "message-sam", authorKind: "human" as const, authorDisplayName: "Sam", createdAtMs: at };
-  function row(overrides: Partial<ChannelThreadRecord>, bodySnippet: string, reactions: PostData["reactions"] = []) {
-    render(<PostCard
-      thread={{ ...thread, unreadCount: 0, ...overrides }}
-      data={{ openingMessage: { ...sam, bodySnippet }, reactions, viewerAuthorId: "ice" }}
-      reactionControls={{ reactions, viewerAuthorId: "ice", onToggle: vi.fn() }}
-      onOpen={vi.fn()}
-      onToggleBookmark={vi.fn()}
-    />);
+  const sam = {
+    id: "message-sam",
+    authorKind: "human" as const,
+    authorDisplayName: "Sam",
+    createdAtMs: at,
+  };
+  function row(
+    overrides: Partial<ChannelThreadRecord>,
+    bodySnippet: string,
+    reactions: PostData["reactions"] = [],
+  ) {
+    render(
+      <PostCard
+        thread={{ ...thread, unreadCount: 0, ...overrides }}
+        data={{ openingMessage: { ...sam, bodySnippet }, reactions, viewerAuthorId: "ice" }}
+        reactionControls={{ reactions, viewerAuthorId: "ice", onToggle: vi.fn() }}
+        onOpen={vi.fn()}
+        onToggleBookmark={vi.fn()}
+      />,
+    );
   }
 
   it("shows the thread's Work card on the meta line, and names the agent when someone else posted", () => {
-    row({
-      title: "Fix the login redirect",
-      work: { status: "working", url: "https://example.com/threads/7", messageId: "message-nova", authorDisplayName: "Nova", authorOwnerDisplayName: "Ada", reportedAtMs: at },
-    }, "Fix the login redirect");
+    row(
+      {
+        title: "Fix the login redirect",
+        work: {
+          status: "working",
+          url: "https://example.com/threads/7",
+          messageId: "message-nova",
+          authorDisplayName: "Nova",
+          authorOwnerDisplayName: "Ada",
+          reportedAtMs: at,
+        },
+      },
+      "Fix the login redirect",
+    );
     const footer = screen.getByTestId("chats-post-footer");
     const status = screen.getByTestId("chats-post-work");
     expect(footer.contains(status)).toBe(true);
     expect(status.getAttribute("data-status")).toBe("working");
     expect(status.textContent).toContain("Working");
     expect(screen.getByTestId("chats-post-work-reporter").textContent).toBe("Nova");
-    expect(screen.getByTitle(`As reported by Nova, Ada's agent, ${formatChatTime(at).label}`)).not.toBeNull();
+    expect(
+      screen.getByTitle(`As reported by Nova, Ada's agent, ${formatChatTime(at).label}`),
+    ).not.toBeNull();
     expect(screen.getByRole("button", { name: "Open example.com, as reported" })).not.toBeNull();
   });
 
   it("names the reporter by the report's message, so a same-named agent's later report is still named", () => {
-    row({
-      title: "Fix the login redirect",
-      work: { status: "waiting", messageId: "message-later", authorDisplayName: "Sam", reportedAtMs: at },
-    }, "Fix the login redirect");
+    row(
+      {
+        title: "Fix the login redirect",
+        work: {
+          status: "waiting",
+          messageId: "message-later",
+          authorDisplayName: "Sam",
+          reportedAtMs: at,
+        },
+      },
+      "Fix the login redirect",
+    );
     expect(screen.getByTestId("chats-post-work-reporter").textContent).toBe("Sam");
   });
 
   it("leaves the agent's name off its own post's Work card", () => {
-    row({
-      title: "Fix the login redirect",
-      work: { status: "done", messageId: "message-sam", authorDisplayName: "Sam", reportedAtMs: at },
-    }, "Fix the login redirect");
+    row(
+      {
+        title: "Fix the login redirect",
+        work: {
+          status: "done",
+          messageId: "message-sam",
+          authorDisplayName: "Sam",
+          reportedAtMs: at,
+        },
+      },
+      "Fix the login redirect",
+    );
     expect(screen.getByTestId("chats-post-work").textContent).toContain("Done");
     expect(screen.queryByTestId("chats-post-work-reporter")).toBeNull();
     expect(screen.queryByTestId("chats-post-work-open")).toBeNull();
@@ -125,11 +193,22 @@ describe("PostCard as a feed row", () => {
   });
 
   it("shows reactions on the meta line and names one comment in the singular", () => {
-    row({ messageCount: 2 }, "Launch checklist", [{
-      reactionId: "reaction-1", messageId: "message-sam", threadId: "thread-1", emoji: "👍",
-      authorId: "ana", authorKind: "human", authorDisplayName: "Ana",
-    }]);
-    expect(screen.getByTestId("chats-post-footer").contains(screen.getByTestId("chats-post-reaction-pill"))).toBe(true);
+    row({ messageCount: 2 }, "Launch checklist", [
+      {
+        reactionId: "reaction-1",
+        messageId: "message-sam",
+        threadId: "thread-1",
+        emoji: "👍",
+        authorId: "ana",
+        authorKind: "human",
+        authorDisplayName: "Ana",
+      },
+    ]);
+    expect(
+      screen
+        .getByTestId("chats-post-footer")
+        .contains(screen.getByTestId("chats-post-reaction-pill")),
+    ).toBe(true);
     expect(screen.getByRole("img", { name: "1 comment" })).toBeTruthy();
   });
 
@@ -138,11 +217,11 @@ describe("PostCard as a feed row", () => {
     row({}, "Launch checklist");
     const toolbar = screen.getByTestId("chats-post-message-toolbar");
     const classes = toolbar.className.split(/\s+/);
-    // Hidden, the toolbar takes no pointer; the conditions that show it
-    // also let it take one.
     expect(classes).toEqual(expect.arrayContaining(["opacity-0", "pointer-events-none"]));
     for (const shown of ["group-hover", "group-focus-within", "has-[[popover]]"]) {
-      expect(classes).toEqual(expect.arrayContaining([`${shown}:opacity-100`, `${shown}:pointer-events-auto`]));
+      expect(classes).toEqual(
+        expect.arrayContaining([`${shown}:opacity-100`, `${shown}:pointer-events-auto`]),
+      );
     }
     // Inside the row's own box: the list paints each row in its own box.
     expect(classes).toEqual(expect.arrayContaining(["top-1", "right-9"]));

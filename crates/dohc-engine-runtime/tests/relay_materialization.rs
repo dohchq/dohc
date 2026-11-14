@@ -92,7 +92,6 @@ async fn relay_page_materializes_native_state_and_preserves_retry_after_blocked_
         )
         .await
         .expect("idempotent replay");
-    // A page from another version must never use this active version's head.
     std::fs::write(scratch.path().join("notes/work.md"), "current disk state")
         .expect("current disk");
     actor

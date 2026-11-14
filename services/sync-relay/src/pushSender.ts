@@ -2,25 +2,59 @@ import { createCipheriv, createECDH, hkdfSync, randomBytes, sign } from "node:cr
 import { Resolver } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
-import { pushMessageAccess, pushPlainText, readPushMessage, type PushMessage } from "./chatMessageInterest";
+import { withholdChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
+import {
+  pushMessageAccess,
+  pushPlainText,
+  readPushMessage,
+  type PushMessage,
+} from "./chatMessageInterest";
 import type { PushConfig } from "./pushConfig";
 import { pushEndpointUrl } from "./pushEndpoints";
 import { observeRelayWrites } from "./relayWriteChanges";
 import type { StorageContext } from "./storage/context";
-import { claimPushDelivery, finishPushDelivery, nextPushDeliveryAt, ownsPushLease, type PushDelivery } from "./storage/pushDeliveries";
-import { readPushSubscription, removePushSubscriptionGeneration, type PushSubscriptionRow } from "./storage/pushSubscriptions";
+import {
+  claimPushDelivery,
+  finishPushDelivery,
+  nextPushDeliveryAt,
+  ownsPushLease,
+  type PushDelivery,
+} from "./storage/pushDeliveries";
+import {
+  readPushSubscription,
+  removePushSubscriptionGeneration,
+  type PushSubscriptionRow,
+} from "./storage/pushSubscriptions";
 
 const SEND_TIMEOUT_MS = 10_000;
 export const PUSH_DELIVERY_TTL_SECONDS = 60;
 const blocked = new BlockList();
-for (const [address, prefix] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
-  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.88.99.0", 24],
-  ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 3]] as const) {
+for (const [address, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 3],
+] as const) {
   blocked.addSubnet(address, prefix, "ipv4");
 }
 const globalV6 = new BlockList();
 globalV6.addSubnet("2000::", 3, "ipv6");
-for (const [address, prefix] of [["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20]] as const) {
+for (const [address, prefix] of [
+  ["2001::", 23],
+  ["2001:db8::", 32],
+  ["2002::", 16],
+  ["3fff::", 20],
+] as const) {
   blocked.addSubnet(address, prefix, "ipv6");
 }
 
@@ -30,7 +64,7 @@ export function isPublicPushAddress(address: string): boolean {
   return family === 6 && globalV6.check(address, "ipv6") && !blocked.check(address, "ipv6");
 }
 
-export type PushLookup = (hostname: string) => Promise<Array<{address: string; family: number}>>;
+export type PushLookup = (hostname: string) => Promise<Array<{ address: string; family: number }>>;
 export interface PushDestination {
   url: URL;
   address: string;
@@ -40,17 +74,24 @@ const unsafeEndpoint = () => new TypeError("Unsafe push endpoint");
 
 async function resolvePushAddresses(hostname: string, signal: AbortSignal): ReturnType<PushLookup> {
   signal.throwIfAborted();
-  const resolver = new Resolver({timeout: 2000, tries: 1});
+  const resolver = new Resolver({ timeout: 2000, tries: 1 });
   const cancel = () => resolver.cancel();
-  signal.addEventListener("abort", cancel, {once: true});
+  signal.addEventListener("abort", cancel, { once: true });
   try {
-    const results = await Promise.allSettled([resolver.resolve4(hostname), resolver.resolve6(hostname)]);
+    const results = await Promise.allSettled([
+      resolver.resolve4(hostname),
+      resolver.resolve6(hostname),
+    ]);
     signal.throwIfAborted();
-    const addresses: Array<{address: string; family: number}> = [];
+    const addresses: Array<{ address: string; family: number }> = [];
     for (const [index, result] of results.entries()) {
       if (result.status === "fulfilled") {
-        addresses.push(...result.value.map(address => ({address, family: index === 0 ? 4 : 6})));
-      } else if (!["ENODATA", "ENOTFOUND"].includes(String((result.reason as NodeJS.ErrnoException)?.code))) {
+        addresses.push(
+          ...result.value.map((address) => ({ address, family: index === 0 ? 4 : 6 })),
+        );
+      } else if (
+        !["ENODATA", "ENOTFOUND"].includes(String((result.reason as NodeJS.ErrnoException)?.code))
+      ) {
         throw Error("Push DNS lookup failed");
       }
     }
@@ -60,13 +101,21 @@ async function resolvePushAddresses(hostname: string, signal: AbortSignal): Retu
   }
 }
 
-export async function validatePushEndpoint(endpoint: string, hosts: ReadonlySet<string>, lookup: PushLookup): Promise<PushDestination> {
+export async function validatePushEndpoint(
+  endpoint: string,
+  hosts: ReadonlySet<string>,
+  lookup: PushLookup,
+): Promise<PushDestination> {
   const url = pushEndpointUrl(endpoint, hosts);
   if (!url) throw unsafeEndpoint();
   const addresses = await lookup(url.hostname);
-  if (!addresses.length || addresses.some(row => !isPublicPushAddress(row.address) || isIP(row.address) !== row.family)) throw unsafeEndpoint();
+  if (
+    !addresses.length ||
+    addresses.some((row) => !isPublicPushAddress(row.address) || isIP(row.address) !== row.family)
+  )
+    throw unsafeEndpoint();
   const address = addresses[0]!;
-  return {url, address: address.address, family: address.family as 4 | 6};
+  return { url, address: address.address, family: address.family as 4 | 6 };
 }
 
 export interface PreparedPushRequest {
@@ -77,41 +126,63 @@ export interface PreparedPushRequest {
 export type PushTransport = (request: PreparedPushRequest, signal: AbortSignal) => Promise<number>;
 
 /** HTTPS uses the validated address for the connection and the provider hostname for TLS. It never follows redirects. */
-export const sendPushRequest: PushTransport = (prepared, signal) => new Promise((resolve, reject) => {
-  const {destination, body, headers} = prepared;
-  let completedStatus: number | undefined;
-  let failure: Error | undefined;
-  const request = httpsRequest(destination.url, {method: "POST", headers, signal, agent: false,
-    lookup: (_hostname, options, callback) => {
-      // The address cannot be looked up again between the policy check and connect.
-      if (options.all) callback(null, [{address: destination.address, family: destination.family}]);
-      else callback(null, destination.address, destination.family);
-    }, maxHeaderSize: 8192}, response => {
-    const status = response.statusCode ?? 0;
-    response.on("error", error => {
+export const sendPushRequest: PushTransport = (prepared, signal) =>
+  new Promise((resolve, reject) => {
+    const { destination, body, headers } = prepared;
+    let completedStatus: number | undefined;
+    let failure: Error | undefined;
+    const request = httpsRequest(
+      destination.url,
+      {
+        method: "POST",
+        headers,
+        signal,
+        agent: false,
+        lookup: (_hostname, options, callback) => {
+          // The address cannot be looked up again between the policy check and connect.
+          if (options.all)
+            callback(null, [{ address: destination.address, family: destination.family }]);
+          else callback(null, destination.address, destination.family);
+        },
+        maxHeaderSize: 8192,
+      },
+      (response) => {
+        const status = response.statusCode ?? 0;
+        response.on("error", (error) => {
+          failure ??= error;
+          request.destroy(error);
+        });
+        response.on("aborted", () => request.destroy(Error("Push response interrupted")));
+        let received = 0;
+        response.on("data", (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > 8192) request.destroy(Error("Push response too large"));
+        });
+        response.on("end", () => {
+          completedStatus = status;
+        });
+      },
+    );
+    request.on("error", (error) => {
       failure ??= error;
-      request.destroy(error);
     });
-    response.on("aborted", () => request.destroy(Error("Push response interrupted")));
-    let received = 0;
-    response.on("data", (chunk: Buffer) => {
-      received += chunk.length;
-      if (received > 8192) request.destroy(Error("Push response too large"));
+    request.on("close", () => {
+      if (failure) reject(failure);
+      else if (completedStatus === undefined) reject(Error("Push response interrupted"));
+      else resolve(completedStatus);
     });
-    response.on("end", () => {completedStatus = status;});
+    request.end(body);
   });
-  request.on("error", error => {failure ??= error;});
-  request.on("close", () => {
-    if (failure) reject(failure);
-    else if (completedStatus === undefined) reject(Error("Push response interrupted"));
-    else resolve(completedStatus);
-  });
-  request.end(body);
-});
 
 /** RFC 8291 aes128gcm, one record, with RFC 8292 VAPID authentication. */
-export function preparePushRequest(config: PushConfig, subscription: PushSubscriptionRow, destination: PushDestination,
-  payload: Record<string, unknown>, nowMs: number, ttlSeconds = PUSH_DELIVERY_TTL_SECONDS): PreparedPushRequest {
+export function preparePushRequest(
+  config: PushConfig,
+  subscription: PushSubscriptionRow,
+  destination: PushDestination,
+  payload: Record<string, unknown>,
+  nowMs: number,
+  ttlSeconds = PUSH_DELIVERY_TTL_SECONDS,
+): PreparedPushRequest {
   const clear = Buffer.from(JSON.stringify(payload));
   if (clear.length > 2048) throw new RangeError("Push payload too large");
   const sender = createECDH("prime256v1");
@@ -119,34 +190,73 @@ export function preparePushRequest(config: PushConfig, subscription: PushSubscri
   const receiverKey = Buffer.from(subscription.p256dh, "base64url");
   const senderKey = sender.getPublicKey();
   const shared = sender.computeSecret(receiverKey);
-  const ikm = Buffer.from(hkdfSync("sha256", shared, Buffer.from(subscription.auth, "base64url"),
-    Buffer.concat([Buffer.from("WebPush: info\0"), receiverKey, senderKey]), 32));
+  const ikm = Buffer.from(
+    hkdfSync(
+      "sha256",
+      shared,
+      Buffer.from(subscription.auth, "base64url"),
+      Buffer.concat([Buffer.from("WebPush: info\0"), receiverKey, senderKey]),
+      32,
+    ),
+  );
   const salt = randomBytes(16);
-  const cek = Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: aes128gcm\0"), 16));
-  const nonce = Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: nonce\0"), 12));
+  const cek = Buffer.from(
+    hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: aes128gcm\0"), 16),
+  );
+  const nonce = Buffer.from(
+    hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: nonce\0"), 12),
+  );
   const cipher = createCipheriv("aes-128-gcm", cek, nonce);
-  const encrypted = Buffer.concat([cipher.update(Buffer.concat([clear, Buffer.from([2])])), cipher.final(), cipher.getAuthTag()]);
+  const encrypted = Buffer.concat([
+    cipher.update(Buffer.concat([clear, Buffer.from([2])])),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
   const header = Buffer.alloc(21);
   salt.copy(header);
   header.writeUInt32BE(4096, 16);
   header[20] = senderKey.length;
   const body = Buffer.concat([header, senderKey, encrypted]);
-  const jwtHeader = Buffer.from(JSON.stringify({typ: "JWT", alg: "ES256"})).toString("base64url");
-  const jwtClaims = Buffer.from(JSON.stringify({aud: destination.url.origin, exp: Math.floor(nowMs / 1000) + 3600, sub: config.subject})).toString("base64url");
+  const jwtHeader = Buffer.from(JSON.stringify({ typ: "JWT", alg: "ES256" })).toString("base64url");
+  const jwtClaims = Buffer.from(
+    JSON.stringify({
+      aud: destination.url.origin,
+      exp: Math.floor(nowMs / 1000) + 3600,
+      sub: config.subject,
+    }),
+  ).toString("base64url");
   const unsigned = `${jwtHeader}.${jwtClaims}`;
-  const signature = sign("sha256", Buffer.from(unsigned), {key: config.privateKey, dsaEncoding: "ieee-p1363"}).toString("base64url");
-  return {destination, body, headers: {authorization: `vapid t=${unsigned}.${signature}, k=${config.publicKey}`,
-    "content-encoding": "aes128gcm", "content-type": "application/octet-stream", "content-length": String(body.length),
-    TTL: String(ttlSeconds), urgency: "normal"}};
+  const signature = sign("sha256", Buffer.from(unsigned), {
+    key: config.privateKey,
+    dsaEncoding: "ieee-p1363",
+  }).toString("base64url");
+  return {
+    destination,
+    body,
+    headers: {
+      authorization: `vapid t=${unsigned}.${signature}, k=${config.publicKey}`,
+      "content-encoding": "aes128gcm",
+      "content-type": "application/octet-stream",
+      "content-length": String(body.length),
+      TTL: String(ttlSeconds),
+      urgency: "normal",
+    },
+  };
 }
 
-export type ResolvePushAlertLink = (message: Pick<PushMessage, "workspaceId" | "threadId" | "messageId">, recipientUserId: string) => string | null;
+export type ResolvePushAlertLink = (
+  message: Pick<PushMessage, "workspaceId" | "threadId" | "messageId">,
+  recipientUserId: string,
+) => string | null;
 export const noPushAlertLink: ResolvePushAlertLink = () => null;
 
 export function createPushSender(options: {
   storage: StorageContext;
   config: PushConfig | undefined;
-  sessionIsValid(session: {userId: string; sessionId: string}, signal: AbortSignal): Promise<boolean>;
+  sessionIsValid(
+    session: { userId: string; sessionId: string },
+    signal: AbortSignal,
+  ): Promise<boolean>;
   lookupAccountName(userId: string, signal: AbortSignal): Promise<string | null> | string | null;
   resolveAlertLink?: ResolvePushAlertLink;
   lookup?: PushLookup;
@@ -154,7 +264,7 @@ export function createPushSender(options: {
   now?: () => number;
   onError?: () => void;
 }) {
-  const {storage, config} = options;
+  const { storage, config } = options;
   const now = options.now ?? Date.now;
   let closed = false;
   let started = false;
@@ -164,10 +274,18 @@ export function createPushSender(options: {
   const current = (delivery: PushDelivery) => {
     const subscription = readPushSubscription(storage, delivery.installationId);
     const message = readPushMessage(storage, delivery.relaySeq);
-    if (!subscription || !message || subscription.userId !== delivery.userId || subscription.generation !== delivery.generation ||
-      subscription.expiresAtMs <= now() || subscription.vapidKeyId !== config?.keyId || !ownsPushLease(storage, delivery, now())) return null;
+    if (
+      !subscription ||
+      !message ||
+      subscription.userId !== delivery.userId ||
+      subscription.generation !== delivery.generation ||
+      subscription.expiresAtMs <= now() ||
+      subscription.vapidKeyId !== config?.keyId ||
+      !ownsPushLease(storage, delivery, now())
+    )
+      return null;
     const access = pushMessageAccess(storage, message, delivery.userId);
-    return access ? {subscription, message, access} : null;
+    return access ? { subscription, message, access } : null;
   };
   const attempt = async (): Promise<boolean> => {
     if (!config || closed) return false;
@@ -181,8 +299,11 @@ export function createPushSender(options: {
         finishPushDelivery(storage, delivery, "dropped", now());
         return true;
       }
-      const destination = await validatePushEndpoint(before.subscription.endpoint, config.hosts,
-        options.lookup ?? (hostname => resolvePushAddresses(hostname, controller.signal)));
+      const destination = await validatePushEndpoint(
+        before.subscription.endpoint,
+        config.hosts,
+        options.lookup ?? ((hostname) => resolvePushAddresses(hostname, controller.signal)),
+      );
       controller.signal.throwIfAborted();
       const accountName = before.message.authorUserId
         ? await options.lookupAccountName(before.message.authorUserId, controller.signal)
@@ -207,23 +328,58 @@ export function createPushSender(options: {
       }
       const ownerName = pushPlainText(accountName, "Someone");
       const authorKind = fresh.message.authorKind;
-      const sender = authorKind === "agent" || authorKind === "automation"
-        ? `${fresh.message.senderLabel} (${ownerName}'s ${authorKind})`
-        : fresh.message.authorUserId ? ownerName : fresh.message.senderLabel;
+      const sender =
+        authorKind === "agent" || authorKind === "automation"
+          ? `${fresh.message.senderLabel} (${ownerName}'s ${authorKind})`
+          : fresh.message.authorUserId
+            ? ownerName
+            : fresh.message.senderLabel;
       const place = fresh.access.place;
-      const label = delivery.reason === "mention" ? `${sender} mentioned you in ${place}` :
-        delivery.reason === "dm" ? `${sender} sent you a message` : `${sender} replied in ${place}`;
-      const prepared = preparePushRequest(config, fresh.subscription, destination, {
-        label, link, reason: delivery.reason, deliveryId: delivery.deliveryId, generation: delivery.generation, tag: `dohc-${delivery.deliveryId}`,
-      }, now(), Math.max(1, Math.min(PUSH_DELIVERY_TTL_SECONDS, Math.floor((delivery.expiresAtMs - now()) / 1000))));
+      // A push names no share, so its words keep no file link.
+      const label = withholdChatFileLinks(
+        delivery.reason === "mention"
+          ? `${sender} mentioned you in ${place}`
+          : delivery.reason === "dm"
+            ? `${sender} sent you a message`
+            : `${sender} replied in ${place}`,
+        () => false,
+      );
+      const prepared = preparePushRequest(
+        config,
+        fresh.subscription,
+        destination,
+        {
+          label,
+          link,
+          reason: delivery.reason,
+          deliveryId: delivery.deliveryId,
+          generation: delivery.generation,
+          tag: `dohc-${delivery.deliveryId}`,
+        },
+        now(),
+        Math.max(
+          1,
+          Math.min(PUSH_DELIVERY_TTL_SECONDS, Math.floor((delivery.expiresAtMs - now()) / 1000)),
+        ),
+      );
       const status = await (options.transport ?? sendPushRequest)(prepared, controller.signal);
       if (status === 404 || status === 410) removePushSubscriptionGeneration(storage, delivery);
-      const outcome = status >= 200 && status < 300 ? "sent" : status === 429 || status >= 500 ? "retry" : "dropped";
+      const outcome =
+        status >= 200 && status < 300
+          ? "sent"
+          : status === 429 || status >= 500
+            ? "retry"
+            : "dropped";
       finishPushDelivery(storage, delivery, outcome, now());
     } catch (error) {
       // Provider errors can contain endpoint secrets. Report only a fixed message upstream.
       options.onError?.();
-      finishPushDelivery(storage, delivery, error instanceof TypeError ? "dropped" : "retry", now());
+      finishPushDelivery(
+        storage,
+        delivery,
+        error instanceof TypeError ? "dropped" : "retry",
+        now(),
+      );
     } finally {
       clearTimeout(timeout);
     }
@@ -231,7 +387,10 @@ export function createPushSender(options: {
   };
   const runOnce = (): Promise<boolean> => {
     if (closed || !config) return Promise.resolve(false);
-    if (!active) active = attempt().finally(() => {active = undefined;});
+    if (!active)
+      active = attempt().finally(() => {
+        active = undefined;
+      });
     return active;
   };
   const schedule = (atMs: number | null): void => {
@@ -244,12 +403,14 @@ export function createPushSender(options: {
   const tick = (): void => {
     timer = undefined;
     if (closed || !config) return;
-    void runOnce().catch(() => {
-      options.onError?.();
-      return false;
-    }).then(() => {
-      if (!closed) schedule(storage.readTx(() => nextPushDeliveryAt(storage, now())));
-    });
+    void runOnce()
+      .catch(() => {
+        options.onError?.();
+        return false;
+      })
+      .then(() => {
+        if (!closed) schedule(storage.readTx(() => nextPushDeliveryAt(storage, now())));
+      });
   };
   return {
     runOnce,

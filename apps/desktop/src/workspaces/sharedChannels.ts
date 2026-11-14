@@ -7,17 +7,20 @@ import {
   type PushSharedChannelResult,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
-import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
+import {
+  RELAY_API_VERSION,
+  RELAY_API_VERSION_HEADER,
+} from "@dohc/workspace-contracts/relay-values";
 import type { JoinedChannelAnswer } from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 
-// MU-C4 shared channels — the desktop's refresh pass over a bounded window of
+// Shared channels: the desktop's refresh pass over a bounded window of
 // the shared channels a workspace has joined: push the member's locally-authored
 // channel ops through the share's member-append route, then pull everyone else's.
 // Best-effort by design: one failing share never blocks the others (or the
 // workspace's own sync pass), and a revoked share is reported as ended so the
 // caller can mark it in the registry — the local copy stays readable, it just
-// stops updating (PR-18's honest end-of-share).
+// stops updating.
 
 export const RELAY_FETCH_TIMEOUT_MS = 15_000;
 
@@ -39,15 +42,24 @@ export function relayFetchWithTimeout(
 // one error that says whether dohc or the server needs the update.
 export function relayApiFetch(baseFetch: typeof fetch = fetch): typeof fetch {
   return async (input, init) => {
-    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
     headers.set(RELAY_API_VERSION_HEADER, String(RELAY_API_VERSION));
     const response = await baseFetch(input, { ...init, headers });
     if (response.status !== 400) return response;
-    const body: unknown = await response.clone().json().catch(() => null);
-    const code = typeof body === "object" && body !== null && "code" in body ? body.code : undefined;
-    const update: RelayApiUpdate | undefined = code === "api_version_too_old" ? "app"
-      : code === "api_version_too_new" ? "server"
-      : undefined;
+    const body: unknown = await response
+      .clone()
+      .json()
+      .catch(() => null);
+    const code =
+      typeof body === "object" && body !== null && "code" in body ? body.code : undefined;
+    const update: RelayApiUpdate | undefined =
+      code === "api_version_too_old"
+        ? "app"
+        : code === "api_version_too_new"
+          ? "server"
+          : undefined;
     if (update === undefined) return response;
     // The refusal replaces the response, so nobody else can release its body.
     await response.body?.cancel().catch(() => undefined);
@@ -100,18 +112,16 @@ export function scopeJoinedChannels(
   });
 }
 
-// Registry merge for the join flow (CodeRabbit Data Integrity): a re-join of
-// the same channel under a new share id (revoked + re-granted) must replace
-// the stale row, not sit beside it — matching on shareId alone left the
-// channel listed and synced twice.
+// Registry merge for the join flow: a re-join of the same channel under a new
+// share id (revoked + re-granted) must replace the stale row, not sit beside
+// it. Matching on shareId alone would leave the channel listed and synced
+// twice.
 //
-// It refuses nothing. The join gate this used to carry existed to bound the
-// joined-lane response, and the scoped read bounds that now. A desktop
-// that refused a join could not stop the relay granting one either — it could
-// only make the user's own channel unreachable, which is how the same cap
-// produced three permanent-refusal defects in one review cycle.
+// It refuses nothing. The scoped read bounds the joined-lane response. A
+// desktop that refused a join could not stop the relay granting one. It could
+// only make the user's own channel unreachable.
 //
-// The replacement happens IN PLACE. A re-granted channel is the same channel,
+// The replacement happens in place. A re-granted channel is the same channel,
 // and the sync rotation reads its position from this array — appending it would
 // move it to the end, which strands every row the rotation had not reached yet.
 // Only a channel this workspace has never joined is appended.
@@ -122,10 +132,7 @@ export function mergeJoinedChannel(
   const merged: JoinedSharedChannel[] = [];
   let replaced = false;
   for (const channel of existing) {
-    if (
-      channel.shareId !== joined.shareId &&
-      channel.channelWireId !== joined.channelWireId
-    ) {
+    if (channel.shareId !== joined.shareId && channel.channelWireId !== joined.channelWireId) {
       merged.push(channel);
       continue;
     }
@@ -152,8 +159,8 @@ export function endJoinedChannel(
   );
 }
 
-// MU-C4 write gate (CodeRabbit security; product invariant "agent writes must
-// respect sharing boundaries"): a READ-ONLY or ended shared-channel grant must
+// Write gate (product invariant "agent writes must
+// respect sharing boundaries"): a read-only or ended shared-channel grant must
 // reject chat writes before any durable local mutation. The renderer disabling
 // its composers is honesty, not authorization — main is the boundary; without
 // this gate a crafted IPC call would mint durable local messages/reactions
@@ -168,10 +175,7 @@ interface SharedChannelTargetInput {
   workspaceId: string;
   sharedChannels: readonly JoinedSharedChannel[] | undefined;
   store: {
-    findThreadChannelId(input: {
-      workspaceId: string;
-      threadId: string;
-    }): Promise<string | null>;
+    findThreadChannelId(input: { workspaceId: string; threadId: string }): Promise<string | null>;
     getChannelWireId(input: { workspaceId: string; channelId: string }): Promise<string | null>;
   };
   target: { channelId: string } | { threadId: string };
@@ -204,9 +208,7 @@ export function joinedSharedChannelForWireId(
   sharedChannels: readonly JoinedSharedChannel[] | undefined,
   wireId: string | null,
 ): JoinedSharedChannel | null {
-  const matching = (sharedChannels ?? []).filter(
-    (channel) => channel.channelWireId === wireId,
-  );
+  const matching = (sharedChannels ?? []).filter((channel) => channel.channelWireId === wireId);
   return (
     matching.find((channel) => channel.access === "read-only" || channel.ended === true) ??
     matching[0] ??
@@ -214,9 +216,7 @@ export function joinedSharedChannelForWireId(
   );
 }
 
-export async function assertSharedChannelWritable(
-  input: SharedChannelTargetInput,
-): Promise<void> {
+export async function assertSharedChannelWritable(input: SharedChannelTargetInput): Promise<void> {
   assertJoinedChannelWritable(await joinedSharedChannelForTarget(input));
 }
 
@@ -248,12 +248,7 @@ export const SHARED_CHANNEL_SYNC_PASS_ROWS = 16;
 // repeats only when the remainder changes.
 export function createPassCoverageReporter(
   report: (message: string) => void,
-): (input: {
-  workspaceId: string;
-  live: number;
-  uncovered: number;
-  passRows: number;
-}) => void {
+): (input: { workspaceId: string; live: number; uncovered: number; passRows: number }) => void {
   const reported = new Map<string, number>();
   return ({ workspaceId, live, uncovered, passRows }) => {
     if (uncovered <= 0) {
@@ -344,9 +339,7 @@ export async function syncJoinedSharedChannels(input: {
   // loses that place the moment the cursor's own channel is revoked, and the
   // next pass restarts at the front, re-covering the prefix it just did.
   const registryPosition = new Map(
-    input.registryOrder.map(
-      (channel, index) => [channel.channelWireId, index] as const,
-    ),
+    input.registryOrder.map((channel, index) => [channel.channelWireId, index] as const),
   );
   const cursorPosition = input.resumeAfterChannelWireId
     ? (registryPosition.get(input.resumeAfterChannelWireId) ?? -1)
@@ -355,8 +348,7 @@ export async function syncJoinedSharedChannels(input: {
     cursorPosition < 0
       ? -1
       : live.findIndex(
-          (channel) =>
-            (registryPosition.get(channel.channelWireId) ?? -1) > cursorPosition,
+          (channel) => (registryPosition.get(channel.channelWireId) ?? -1) > cursorPosition,
         );
   const startIndex = afterCursor < 0 ? 0 : afterCursor;
   // The rotation always gets the whole window. A write's own share is extra
@@ -366,9 +358,7 @@ export async function syncJoinedSharedChannels(input: {
   // passRows + 1 rows, and ceil(live / passRows) holds whatever the writes do.
   const rotationBudget = Math.min(Math.max(input.passRows, 0), live.length);
   const priority = input.priorityChannelWireId
-    ? (live.find(
-        (channel) => channel.channelWireId === input.priorityChannelWireId,
-      ) ?? null)
+    ? (live.find((channel) => channel.channelWireId === input.priorityChannelWireId) ?? null)
     : null;
   const rotation: JoinedSharedChannel[] = [];
   for (let offset = 0; rotation.length < rotationBudget && offset < live.length; offset += 1) {
@@ -418,10 +408,7 @@ export async function syncJoinedSharedChannels(input: {
       // the next pass; they must not fail the workspace's own sync. The row
       // keeps its place in the rotation and is reported as unrefreshed.
       failedRows += 1;
-      console.error(
-        `[desktop] shared channel sync failed (share ${channel.shareId}):`,
-        error,
-      );
+      console.error(`[desktop] shared channel sync failed (share ${channel.shareId}):`, error);
     }
   }
   return {

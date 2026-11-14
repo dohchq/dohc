@@ -23,11 +23,10 @@ import {
   type CaptureVersionedTextStore,
 } from "../../src/workspaces/workspaceEngineCaptureLiveStore";
 
-// Post-cutover the daemon refuses stores created by the retired TS engine,
-// so e2e seeding must happen the way the product writes: over RPC to the
-// real engine daemon (the same debug binary the app under test spawns).
-// Seed before launching the app — the daemon is stopped afterwards so the
-// app's own daemon owns the store exclusively.
+// E2E seeding happens the way the product writes: over RPC to the real
+// engine daemon (the same debug binary the app under test spawns). Seed
+// before launching the app. The daemon is stopped afterwards so the app's
+// own daemon owns the store exclusively.
 //
 // Binary discovery lives in src/testing/engineBinary so the src/** daemon
 // suites and these e2e helpers agree on where the daemon is.
@@ -55,15 +54,17 @@ function attachWorkspace(workspace: {
 }): AttachedEngineWorkspace {
   return {
     ...workspace,
-    attachmentId: Symbol(
-      `test-workspace-attachment:${workspace.workspaceId}`,
-    ),
+    attachmentId: Symbol(`test-workspace-attachment:${workspace.workspaceId}`),
   };
 }
 
 export async function openLiveDaemonWorkspace(
   workspace: { workspaceId: string; rootPath: string },
-  options: { maxRestarts?: number; allowInsecureLoopbackForTests?: boolean; privateOwnerHost?: EngineDaemonLifecycleOptions["privateOwnerHost"] } = {},
+  options: {
+    maxRestarts?: number;
+    allowInsecureLoopbackForTests?: boolean;
+    privateOwnerHost?: EngineDaemonLifecycleOptions["privateOwnerHost"];
+  } = {},
 ): Promise<LiveDaemonWorkspace> {
   const lifecycle = createRealDaemonLifecycle({
     command: resolveEngineBinary(),
@@ -88,7 +89,8 @@ export async function openLiveDaemonWorkspace(
     sessions,
     nativeClient() {
       const client = lifecycle.currentClient();
-      if (!(client instanceof EngineClient)) throw new Error("Native delivery requires the daemon client.");
+      if (!(client instanceof EngineClient))
+        throw new Error("Native delivery requires the daemon client.");
       return client;
     },
     close: async (step: CloseStep = (_name, work) => work) => {

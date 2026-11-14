@@ -72,13 +72,14 @@ it("leaves the title for the body on a press anywhere below it", async () => {
   expect((screen.getByLabelText("Page body") as HTMLTextAreaElement).value).toBe("Day one");
 });
 
-// The hint keeps one voice whether or not the body has the caret, so it shows
-// under the title and stays where it is when the caret arrives.
 it("shows the empty body's hint while the title has the caret, and keeps it when the caret moves in", async () => {
   const user = userEvent.setup();
   renderPage();
   const body = screen.getByLabelText("Page body") as HTMLTextAreaElement;
-  const hint = () => [body.placeholder, [...body.classList].filter((name) => name.includes("placeholder:"))];
+  const hint = () => [
+    body.placeholder,
+    [...body.classList].filter((name) => name.includes("placeholder:")),
+  ];
   expect(screen.getByLabelText("Page title")).toBe(document.activeElement);
   expect(hint()).toEqual(["Type '/' for commands", ["placeholder:text-subtle"]]);
   await user.keyboard("{Enter}");
@@ -96,7 +97,10 @@ it("hands the title, the body and its caret to the editor at once, and steps asi
   const live = pageEditor();
   page.editorReady(live);
   expect(live.setIdentity).toHaveBeenCalledWith({ title: "Lisbon", icon: "" });
-  expect(live.editor.insertTypedText).toHaveBeenCalledWith("Day one\nTram 28 ", "Day one\nTram 28 ".length);
+  expect(live.editor.insertTypedText).toHaveBeenCalledWith(
+    "Day one\nTram 28 ",
+    "Day one\nTram 28 ".length,
+  );
   expect(live.editor.focus).toHaveBeenCalledWith(undefined);
   expect(screen.queryByTestId("new-page")).toBeNull();
   expect(screen.getByTestId("file-view").parentElement!.hasAttribute("inert")).toBe(false);
@@ -129,8 +133,6 @@ it("shows a file that opens with no editor", async () => {
   expect(page.onHandedOff.mock.calls).toEqual([[false]]);
 });
 
-// The shell keeps what the page holds, so a page that unmounts before its
-// editor is ready gets it back when it mounts again.
 it("reports the body as it is typed, and starts from the body it held", async () => {
   const user = userEvent.setup();
   const page = renderPage({ draft: "---\ntitle: Lisbon\n---\n", body: "Day one" });

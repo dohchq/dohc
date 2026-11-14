@@ -1,6 +1,15 @@
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { Link2Off } from "lucide-react";
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { withErrorWords } from "../../ipc/errorWords";
 import { RetryRow } from "../ui/controls";
 import { Ref } from "../ui/Ref";
@@ -43,7 +52,11 @@ export function AboutConversationPanel(props: {
 }) {
   const { conversation, onToggleSection } = props;
   return (
-    <div data-testid="about-panel" data-conversation-kind={conversation.kind} className="flex min-h-0 flex-1 flex-col">
+    <div
+      data-testid="about-panel"
+      data-conversation-kind={conversation.kind}
+      className="flex min-h-0 flex-1 flex-col"
+    >
       <AboutHeader subject={conversation} />
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
         <AboutConversationLinks
@@ -67,8 +80,6 @@ export function AboutConversationPanel(props: {
     </div>
   );
 }
-
-// ---- Links ----
 
 type Page = NonNullable<ChatLinksPage>;
 type Author = Page["entries"][number]["author"];
@@ -101,11 +112,17 @@ export function mentionedFiles(pages: readonly Page[]): MentionedFile[] {
   for (const page of pages) {
     for (const entry of page.entries) {
       let file = files.get(entry.file.objectId);
-      if (!file) files.set(entry.file.objectId, (file = { path: entry.file.path, authors: new Map() }));
-      if (!file.authors.has(authorKey(entry.author))) file.authors.set(authorKey(entry.author), entry.author);
+      if (!file)
+        files.set(entry.file.objectId, (file = { path: entry.file.path, authors: new Map() }));
+      if (!file.authors.has(authorKey(entry.author)))
+        file.authors.set(authorKey(entry.author), entry.author);
     }
   }
-  return [...files].map(([objectId, file]) => ({ objectId, path: file.path, authors: [...file.authors.values()] }));
+  return [...files].map(([objectId, file]) => ({
+    objectId,
+    path: file.path,
+    authors: [...file.authors.values()],
+  }));
 }
 
 function AboutConversationLinks(props: {
@@ -123,10 +140,18 @@ function AboutConversationLinks(props: {
   // page did not fail.
   const [failed, setFailed] = useState<string | null>(null);
   const retry = useRef(() => {});
-  const onError = useCallback((error: unknown) => {
-    setFailed(key);
-    notices.report({ identity, message: withErrorWords(LINKS_FAILED, error), cause: error, retry: () => retry.current() });
-  }, [identity, key, notices]);
+  const onError = useCallback(
+    (error: unknown) => {
+      setFailed(key);
+      notices.report({
+        identity,
+        message: withErrorWords(LINKS_FAILED, error),
+        cause: error,
+        retry: () => retry.current(),
+      });
+    },
+    [identity, key, notices],
+  );
   const { pages, status, load, loadMore } = useChatLinks({ workspaceId, channelWireId, onError });
   const read = useCallback(() => {
     setFailed(null);
@@ -165,7 +190,9 @@ function AboutConversationLinks(props: {
   const files = useMemo(() => mentionedFiles(pages), [pages]);
   const view: ConversationLinksView =
     pages.length === 0
-      ? status === "unavailable" ? { status: failed === key ? "failed" : "unlisted" } : { status: "loading" }
+      ? status === "unavailable"
+        ? { status: failed === key ? "failed" : "unlisted" }
+        : { status: "loading" }
       : {
           status: "ready",
           files,
@@ -201,28 +228,51 @@ export function AboutConversationLinksView(props: {
   const ready = view.status === "ready" ? view : null;
   const ownToggle = useRef<HTMLButtonElement>(null);
   const toggleRef = props.toggleRef ?? ownToggle;
-  const focusAdded = useFocusAddedRow(ready?.files ?? null, fileKey, toggleRef, '[data-testid="about-conversation-link"]');
+  const focusAdded = useFocusAddedRow(
+    ready?.files ?? null,
+    fileKey,
+    toggleRef,
+    '[data-testid="about-conversation-link"]',
+  );
   return (
-    <AboutSection id="links" label="Links"
+    <AboutSection
+      id="links"
+      label="Links"
       count={ready ? `${ready.files.length}${ready.more || ready.building ? "+" : ""}` : undefined}
-      empty={ready !== null && ready.files.length === 0 && !ready.more && !ready.building && !ready.partial}
-      expanded={props.expanded} onToggle={props.onToggle} toggleRef={toggleRef}>
+      empty={
+        ready !== null &&
+        ready.files.length === 0 &&
+        !ready.more &&
+        !ready.building &&
+        !ready.partial
+      }
+      expanded={props.expanded}
+      onToggle={props.onToggle}
+      toggleRef={toggleRef}
+    >
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
       ) : view.status === "failed" ? (
-        <RetryRow testId="about-conversation-links-failed" onRetry={props.onRetry}>{LINKS_FAILED}</RetryRow>
+        <RetryRow testId="about-conversation-links-failed" onRetry={props.onRetry}>
+          {LINKS_FAILED}
+        </RetryRow>
       ) : view.status === "unlisted" ? (
         <AboutNote testId="about-conversation-links-unlisted" icon={Link2Off}>
           dohc does not list links in this conversation yet.
         </AboutNote>
       ) : (
         <>
-          {view.files.length > 0 ? <MentionedFileList files={view.files} onOpenFile={props.onOpenFile} /> : null}
+          {view.files.length > 0 ? (
+            <MentionedFileList files={view.files} onOpenFile={props.onOpenFile} />
+          ) : null}
           {view.more ? (
-            <AboutMore testId="about-conversation-links-more" onMore={(focused) => {
-              if (focused) focusAdded();
-              props.onMore();
-            }} />
+            <AboutMore
+              testId="about-conversation-links-more"
+              onMore={(focused) => {
+                if (focused) focusAdded();
+                props.onMore();
+              }}
+            />
           ) : null}
           {/* Under the list, what it may still be missing. Files the reader
               cannot open never reach it, so they are never counted here. A
@@ -231,7 +281,9 @@ export function AboutConversationLinksView(props: {
           {view.building ? (
             <AboutGathering testId="about-conversation-links-gathering" />
           ) : view.partial ? (
-            <AboutNote testId="about-conversation-links-partial">This list may not include every file mentioned here.</AboutNote>
+            <AboutNote testId="about-conversation-links-partial">
+              This list may not include every file mentioned here.
+            </AboutNote>
           ) : null}
         </>
       )}
@@ -272,8 +324,15 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
         <span className="flex min-w-0 max-w-full items-center gap-1.5 text-[12px] leading-4">
           <span className="flex shrink-0">
             {file.authors.slice(0, 3).map((author) => (
-              <ChatAvatar key={authorKey(author)} name={author.displayName} kind={author.kind} linkAgent={author.linkAgent === true}
-                presentation={author.presentation} size="strip" className="-ml-1 first:ml-0" />
+              <ChatAvatar
+                key={authorKey(author)}
+                name={author.displayName}
+                kind={author.kind}
+                linkAgent={author.linkAgent === true}
+                presentation={author.presentation}
+                size="strip"
+                className="-ml-1 first:ml-0"
+              />
             ))}
           </span>
           <span data-testid="about-conversation-link-authors" className="min-w-0 truncate">
@@ -281,8 +340,16 @@ function MentionedFileRow(props: { file: MentionedFile; onOpen: () => void }) {
             {file.authors.map((author, index) => (
               <Fragment key={authorKey(author)}>
                 {index > 0 ? ", " : null}
-                {author.kind === "human" ? null : <span className="sr-only">{authorKindLabel(author)} </span>}
-                <AgentName kind={author.kind} presentation={author.presentation} linkAgent={author.linkAgent === true}>{author.displayName}</AgentName>
+                {author.kind === "human" ? null : (
+                  <span className="sr-only">{authorKindLabel(author)} </span>
+                )}
+                <AgentName
+                  kind={author.kind}
+                  presentation={author.presentation}
+                  linkAgent={author.linkAgent === true}
+                >
+                  {author.displayName}
+                </AgentName>
               </Fragment>
             ))}
           </span>

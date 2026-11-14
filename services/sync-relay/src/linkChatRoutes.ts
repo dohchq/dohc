@@ -5,8 +5,16 @@ import { badRequest, notFound, relayError } from "./errors";
 import { linkRefusal } from "./linkRefusal";
 import { isAgentRequest, type LinkAuthorityResolver, type LinkJsonResponse } from "./linkAuthority";
 import { hashLinkProfileSecret } from "./linkSecurity";
-import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE, messageFromOp, readSharedChannelPage, type NamedChatMessage } from "./namedRecipientChat";
+import {
+  MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE,
+  messageFromOp,
+  readSharedChannelPage,
+  type NamedChatMessage,
+} from "./namedRecipientChat";
 import { parseString } from "./requestInputs";
+import { projectChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
+import { createAccountlessPathProjection } from "./accountlessPathProjection";
+import { fileSideOf, type AnyShareSelector } from "./shareFilter";
 import { authorizeLinkChatAction } from "./shareAuthorization";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
@@ -40,20 +48,51 @@ export function linkChatMessage(message: NamedChatMessage): LinkChatMessage {
   };
 }
 
-export function refusePost(reason: Exclude<AppendLinkChatPostResult, { ok: true }>["reason"]): Response {
+// A link reader's files show each path from the shared folder down, so the
+// folders above it stay hidden. A file link its share covers reads the same
+// way; filterOpForShare has already withheld the rest.
+export function linkReaderChatMessage(
+  selector: AnyShareSelector,
+): (message: NamedChatMessage) => LinkChatMessage {
+  const files = fileSideOf(selector);
+  const projection = files ? createAccountlessPathProjection(files) : null;
+  const read = (text: string) =>
+    projectChatFileLinks(text, (path) => projection?.projectPath(path) ?? null);
+  const readOrNull = (text: string | null) => (text === null ? null : read(text));
+  return (message) => ({
+    ...linkChatMessage(message),
+    authorDisplayName: read(message.authorDisplayName),
+    authorOwnerDisplayName: readOrNull(message.authorOwnerDisplayName),
+    body: readOrNull(message.body),
+  });
+}
+
+export function refusePost(
+  reason: Exclude<AppendLinkChatPostResult, { ok: true }>["reason"],
+): Response {
   switch (reason) {
-    case "read-only": return linkRefusal("link_view_access");
-    case "paused": throw relayError("link_discussion_paused");
-    case "blocked": throw relayError("link_discussion_blocked");
-    case "rate-limit": throw relayError("link_read_rate_limited");
+    case "read-only":
+      return linkRefusal("link_view_access");
+    case "paused":
+      throw relayError("link_discussion_paused");
+    case "blocked":
+      throw relayError("link_discussion_blocked");
+    case "rate-limit":
+      throw relayError("link_read_rate_limited");
     case "principal-limit":
     case "lifetime-limit":
-    case "share-limit": throw relayError("discussion_limit_reached", "chat message limit reached");
-    case "workspace-quota": throw relayError("quota_exceeded");
-    case "name-already-set": throw relayError("link_name_already_set");
-    case "idempotency-conflict": throw relayError("conflict", "idempotency key was already used for a different message");
-    case "invalid-input": throw badRequest("chat message is invalid");
-    case "not-authorized": throw notFound();
+    case "share-limit":
+      throw relayError("discussion_limit_reached", "chat message limit reached");
+    case "workspace-quota":
+      throw relayError("quota_exceeded");
+    case "name-already-set":
+      throw relayError("link_name_already_set");
+    case "idempotency-conflict":
+      throw relayError("conflict", "idempotency key was already used for a different message");
+    case "invalid-input":
+      throw badRequest("chat message is invalid");
+    case "not-authorized":
+      throw notFound();
   }
 }
 
@@ -62,7 +101,8 @@ export function refusePost(reason: Exclude<AppendLinkChatPostResult, { ok: true 
 // IDs, the members, other channels, reactions, or attachments. A read-write
 // link also posts there, as its link principal.
 export function createLinkChatRoutes(options: {
-  storage: Pick<SyncRelayStorage,
+  storage: Pick<
+    SyncRelayStorage,
     | "appendLinkChatPost"
     | "fetchChatMessages"
     | "findChannelCreateKind"
@@ -87,17 +127,31 @@ export function createLinkChatRoutes(options: {
   const followsByGrant = new Map<string, number>();
   const release = (counts: Map<string, number>, key: string) => {
     const count = (counts.get(key) ?? 1) - 1;
-    if (count === 0) counts.delete(key); else counts.set(key, count);
+    if (count === 0) counts.delete(key);
+    else counts.set(key, count);
   };
   // Who posts comes from the capability and the profile secret alone. The
   // request names no workspace, share, grant or author, and an account
   // cookie is refused, so it can never change who the author is.
   const post = async (request: Request): Promise<Response> => {
     const secret = request.headers.get("x-dohc-link-profile-secret");
-    if (!options.linkKey || request.headers.has("cookie") || new URL(request.url).search !== "" ||
-        !secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
-    const capability = options.linkAuthority.require(request, options.readLimiters.capability, options.readLimiters.grant);
-    if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+    if (
+      !options.linkKey ||
+      request.headers.has("cookie") ||
+      new URL(request.url).search !== "" ||
+      !secret ||
+      !LINK_SECRET_PATTERN.test(secret)
+    )
+      throw notFound();
+    const capability = options.linkAuthority.require(
+      request,
+      options.readLimiters.capability,
+      options.readLimiters.grant,
+    );
+    if (
+      request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
+      "application/json"
+    ) {
       throw badRequest("invalid request");
     }
     let value: unknown;
@@ -105,16 +159,27 @@ export function createLinkChatRoutes(options: {
       value = await readBoundedJson(request, LINK_CHAT_MAX_POST_BYTES, request.signal);
     } catch (error) {
       if (request.signal.aborted) throw error;
-      throw error instanceof RangeError ? relayError("payload_too_large") : badRequest("invalid request");
+      throw error instanceof RangeError
+        ? relayError("payload_too_large")
+        : badRequest("invalid request");
     }
-    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !POST_FIELDS.has(key))) {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).some((key) => !POST_FIELDS.has(key))
+    ) {
       throw badRequest("invalid request");
     }
     const input = value as Record<string, unknown>;
     const { body, idempotencyKey, threadId, claimedName } = input;
-    if (typeof body !== "string" || typeof idempotencyKey !== "string" ||
-        (threadId !== undefined && typeof threadId !== "string") ||
-        (claimedName !== undefined && typeof claimedName !== "string")) throw badRequest("invalid request");
+    if (
+      typeof body !== "string" ||
+      typeof idempotencyKey !== "string" ||
+      (threadId !== undefined && typeof threadId !== "string") ||
+      (claimedName !== undefined && typeof claimedName !== "string")
+    )
+      throw badRequest("invalid request");
     const channelWireId = parseString(input.channelWireId, "channelWireId", 256);
     const fresh = options.linkAuthority.fresh(capability);
     // An agent posts through agent chat, under its connection.
@@ -134,10 +199,20 @@ export function createLinkChatRoutes(options: {
     if (!result.ok) return refusePost(result.reason);
     if (!result.replayed) options.activity.wakeLog(result.workspaceId);
     if (result.enrolled) options.activity.wake(result.shareId);
-    const message = messageFromOp({ relaySeq: result.row.relaySeq, opKind: result.row.opKind, payload: JSON.parse(result.row.payloadJson) },
-      result.row.originId);
+    const message = messageFromOp(
+      {
+        relaySeq: result.row.relaySeq,
+        opKind: result.row.opKind,
+        payload: JSON.parse(result.row.payloadJson),
+      },
+      result.row.originId,
+    );
     if (!message) throw new Error("stored link post is not a chat message");
-    const response = options.linkJsonResponse(fresh, { shareId: fresh.shareId, channelWireId, message: linkChatMessage(message) }, request.signal);
+    const response = options.linkJsonResponse(
+      fresh,
+      { shareId: fresh.shareId, channelWireId, message: linkChatMessage(message) },
+      request.signal,
+    );
     response.headers.set("cache-control", "private, no-store");
     return response;
   };
@@ -151,14 +226,22 @@ export function createLinkChatRoutes(options: {
     if (channels && isAgentRequest(request)) throw notFound();
     const capability = options.linkAuthority.require(request, limiters.capability, limiters.grant);
     const allowed = channels ? [] : ["channelWireId", "before", "since", "hold", "limit"];
-    if ([...url.searchParams.keys()].some(key => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1)) {
+    if (
+      [...url.searchParams.keys()].some(
+        (key) => !allowed.includes(key) || url.searchParams.getAll(key).length !== 1,
+      )
+    ) {
       throw badRequest("invalid query");
     }
     // Revoking or rotating the link, or the channel ceasing to be an
     // ordinary channel, fails this on the next read.
     const current = () => {
       const fresh = options.linkAuthority.fresh(capability);
-      const authorized = authorizeLinkChatAction({ storage, grantId: fresh.grantId, action: "read" });
+      const authorized = authorizeLinkChatAction({
+        storage,
+        grantId: fresh.grantId,
+        action: "read",
+      });
       if (!authorized.ok) throw notFound();
       return authorized;
     };
@@ -172,36 +255,60 @@ export function createLinkChatRoutes(options: {
     };
     if (channels) {
       // The name this browser or agent already set, so it is not asked again.
-      const profile = request.headers.get("x-dohc-link-profile-secret"), { linkKey } = options;
+      const profile = request.headers.get("x-dohc-link-profile-secret"),
+        { linkKey } = options;
       if (profile !== null && (!linkKey || !LINK_SECRET_PATTERN.test(profile))) throw notFound();
-      const profileName = profile === null || !linkKey ? null
-        : storage.getLinkPrincipalForGrantProfile(capability.grantId, hashLinkProfileSecret(profile, linkKey))?.displayName ?? null;
-      const name = storage.getShareLabels(share.shareId).subjectName;
+      const profileName =
+        profile === null || !linkKey
+          ? null
+          : (storage.getLinkPrincipalForGrantProfile(
+              capability.grantId,
+              hashLinkProfileSecret(profile, linkKey),
+            )?.displayName ?? null);
+      const name = storage.getShareLabels(share.shareId, "link").subjectName;
       const fresh = current();
-      return respond({ shareId: share.shareId, profileName, channels: [{ channelWireId, name, access: fresh.effectiveSelector.access }] });
+      return respond({
+        shareId: share.shareId,
+        profileName,
+        channels: [{ channelWireId, name, access: fresh.effectiveSelector.access }],
+      });
     }
-    if (parseString(url.searchParams.get("channelWireId"), "channelWireId", 256) !== channelWireId) throw notFound();
+    if (parseString(url.searchParams.get("channelWireId"), "channelWireId", 256) !== channelWireId)
+      throw notFound();
     const following = url.searchParams.has("since");
     if (following) {
       const count = followsByWorkspace.get(share.workspaceId) ?? 0;
       const linkCount = followsByGrant.get(capability.grantId) ?? 0;
-      if (count >= MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE || linkCount >= MAX_LINK_CHAT_FOLLOWS_PER_GRANT) {
+      if (
+        count >= MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE ||
+        linkCount >= MAX_LINK_CHAT_FOLLOWS_PER_GRANT
+      ) {
         throw relayError("link_read_rate_limited");
       }
       followsByWorkspace.set(share.workspaceId, count + 1);
       followsByGrant.set(capability.grantId, linkCount + 1);
     }
     try {
-      return respond(await readSharedChannelPage({
-        storage, resolver: options.reads.chatResolverFor(share.workspaceId), selector: authority.effectiveSelector,
-        workspaceId: share.workspaceId, shareId: share.shareId, channelWireId, query: url.searchParams,
-        recheck: () => {
-          if (current().effectiveSelector.channelWireId !== channelWireId) throw notFound();
-        },
-        activity: options.activity, waiter: `link:${capability.callerKey}`, signal: request.signal,
-        maxResponseBytes: options.maxResponseBytes ?? LINK_CHAT_MAX_RESPONSE_BYTES, busyCode: "link_read_rate_limited",
-        project: linkChatMessage,
-      }));
+      return respond(
+        await readSharedChannelPage({
+          storage,
+          resolver: options.reads.chatResolverFor(share.workspaceId),
+          selector: authority.effectiveSelector,
+          workspaceId: share.workspaceId,
+          shareId: share.shareId,
+          channelWireId,
+          query: url.searchParams,
+          recheck: () => {
+            if (current().effectiveSelector.channelWireId !== channelWireId) throw notFound();
+          },
+          activity: options.activity,
+          waiter: `link:${capability.callerKey}`,
+          signal: request.signal,
+          maxResponseBytes: options.maxResponseBytes ?? LINK_CHAT_MAX_RESPONSE_BYTES,
+          busyCode: "link_read_rate_limited",
+          project: linkReaderChatMessage(authority.effectiveSelector),
+        }),
+      );
     } finally {
       if (following) {
         release(followsByWorkspace, share.workspaceId);

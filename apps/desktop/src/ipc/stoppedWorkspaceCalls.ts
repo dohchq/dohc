@@ -12,7 +12,11 @@ import { chatOperations } from "./chatOperations";
 import { datasetOperations } from "./datasetOperations";
 import type { StoppedWorkspaceCall } from "./errorWords";
 import { settingsOperations } from "./settingsOperations";
-import { relayShareOperations, sharedChannelOperations, shareProposalOperations } from "./shareOperations";
+import {
+  relayShareOperations,
+  sharedChannelOperations,
+  shareProposalOperations,
+} from "./shareOperations";
 import { workspaceFileOperations } from "./workspaceFileOperations";
 
 // Workspace reads that change nothing. A window repeats them after workspace
@@ -57,7 +61,7 @@ const READ_CHANNELS: ReadonlySet<string> = new Set([
     captureRecoveryOperations.getCaptureRecoveryStatus,
     liveDraftRecoveryOperations.listLiveDraftRecovery,
     agentRunStateOperations.readAgentRunState,
-  ].map(row => row.channel),
+  ].map((row) => row.channel),
   CHANNELS.chatDispatchStateForThread,
   CHANNELS.chatRunRecordsForThread,
   CHANNELS.findAutomationCollection,
@@ -88,10 +92,14 @@ const READ_CHANNELS: ReadonlySet<string> = new Set([
   CHANNELS.readWorkspaceDatabasePage,
 ]);
 
-// The dataset operation's actions that change nothing. Its other actions
-// change a Collection.
 const DATASET_READS: ReadonlySet<unknown> = new Set([
-  "list", "describe", "history", "historyRevision", "lifecycle", "pendingAttempts", "permissions",
+  "list",
+  "describe",
+  "history",
+  "historyRevision",
+  "lifecycle",
+  "pendingAttempts",
+  "permissions",
 ]);
 
 const field = (payload: unknown, name: string): unknown =>
@@ -108,8 +116,9 @@ export function stoppedWorkspaceCall(
 ): StoppedWorkspaceCall | undefined {
   const workspaceId = field(payload, "workspaceId");
   if (typeof workspaceId !== "string" || workspaceId !== stoppedWorkspaceId()) return undefined;
-  const read = channel === datasetOperations.dataset.channel
-    ? DATASET_READS.has(field(payload, "action"))
-    : READ_CHANNELS.has(channel);
+  const read =
+    channel === datasetOperations.dataset.channel
+      ? DATASET_READS.has(field(payload, "action"))
+      : READ_CHANNELS.has(channel);
   return read ? "read" : "call";
 }

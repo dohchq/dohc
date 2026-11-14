@@ -1,4 +1,12 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { dirname } from "node:path";
@@ -8,7 +16,11 @@ export function observationKey(parts: readonly string[]): string {
 }
 
 export function readObservationFile(file: string): unknown {
-  try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; }
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 /** A failed write leaves the previous observation intact. */
@@ -25,17 +37,27 @@ export function writeObservationFile(file: string, value: unknown): void {
       failed = true;
       throw error;
     } finally {
-      try { closeSync(fd); } catch (error) { if (!failed) throw error; }
+      try {
+        closeSync(fd);
+      } catch (error) {
+        if (!failed) throw error;
+      }
     }
   });
   if (process.platform !== "win32") {
     const directoryFd = openSync(directory, "r");
-    try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
+    try {
+      fsyncSync(directoryFd);
+    } finally {
+      closeSync(directoryFd);
+    }
   }
 }
 
 export function removeObservationFile(file: string): void {
-  try { unlinkSync(file); } catch (error) {
+  try {
+    unlinkSync(file);
+  } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }

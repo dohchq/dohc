@@ -16,7 +16,10 @@ for (const line of read("CaseFolding.txt").split(/\r?\n/)) {
 }
 const ignorables = [];
 for (const line of read("DerivedCoreProperties.txt").split(/\r?\n/)) {
-  const [range, property] = line.split("#", 1)[0].split(";").map((part) => part.trim());
+  const [range, property] = line
+    .split("#", 1)[0]
+    .split(";")
+    .map((part) => part.trim());
   if (property !== "Default_Ignorable_Code_Point") continue;
   const [start, end = start] = range.split("..").map((value) => parseInt(value, 16));
   const previous = ignorables.at(-1);
@@ -24,7 +27,12 @@ for (const line of read("DerivedCoreProperties.txt").split(/\r?\n/)) {
   else ignorables.push([start, end]);
 }
 const canonical = new URL("../crates/dohc-engine-files/src/pathFoldData.json", import.meta.url);
-writeFileSync(canonical,
-  `${JSON.stringify({ source, license: "https://www.unicode.org/license.txt", mappings, ignorables }, null, 2)}\n`);
+writeFileSync(
+  canonical,
+  `${JSON.stringify({ source, license: "https://www.unicode.org/license.txt", mappings, ignorables }, null, 2)}\n`,
+);
 // Keep the TypeScript runtime self-contained; pathFloor.test.ts checks drift.
-copyFileSync(canonical, new URL("../packages/workspace-contracts/src/pathFoldData.json", import.meta.url));
+copyFileSync(
+  canonical,
+  new URL("../packages/workspace-contracts/src/pathFoldData.json", import.meta.url),
+);

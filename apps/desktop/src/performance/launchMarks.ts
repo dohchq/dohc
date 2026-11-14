@@ -1,7 +1,3 @@
-// Launch instrumentation, alive from the first scaffold per the plan's
-// continuous performance enforcement: later phases append marks, Phase 16
-// turns the numbers into a hard gate.
-
 const processStart = Date.now();
 
 interface LaunchMarks {

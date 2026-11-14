@@ -4,8 +4,7 @@
 //! parsing, and the transport seams (including the in-process direct-call
 //! transport).
 //!
-//! Design summary (full rationale in
-//! this crate's own types):
+//! Design summary:
 //!
 //! - **Envelope encoding**: length-framed JSON control frames. The frame
 //!   header is codec-agnostic; a future CBOR envelope encoding can be
@@ -16,17 +15,16 @@
 //!   JSON tree is bounded by [`limits::WireLimits`]; violations are typed
 //!   errors, enforced by both encoder and decoder.
 //! - **No panics on malformed input**: [`frame::FrameDecoder`] and
-//!   [`wire::decode_control`] return typed errors for arbitrary input. This
-//!   is the future fuzz target.
-//! - **Transports**: [`transport::EngineTransport`] is implemented both by a
-//!   framed IPC client (future) and by [`transport::InProcessTransport`],
-//!   which passes typed structs to the service directly — same-process
-//!   callers never serialize.
+//!   [`wire::decode_control`] return typed errors for arbitrary input.
+//! - **Transports**: [`transport::EngineTransport`] is the client-side trait.
+//!   [`transport::InProcessTransport`] implements it and passes typed structs
+//!   to the service directly, so same-process callers never serialize. The
+//!   framed IPC client is TypeScript (`EngineClient` in
+//!   `packages/workspace-engine-client`), so it does not implement this trait.
 //! - **Supervision**: [`supervisor::Supervisor`] (feature `supervisor`) is a
-//!   tokio-based bounded dispatch skeleton — bounded queue + bounded
+//!   tokio-based bounded dispatch skeleton: bounded queue + bounded
 //!   in-flight concurrency, deadlines, cooperative cancellation, and typed
-//!   `OVERLOADED` backpressure errors — replacing the retired accelerator
-//!   spike's thread-per-request model.
+//!   `OVERLOADED` backpressure errors.
 
 #![forbid(unsafe_code)]
 

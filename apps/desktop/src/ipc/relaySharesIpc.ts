@@ -1,8 +1,15 @@
 import type { relayShareOperations } from "./shareOperations";
-import { readLiveStopRefusal, liveStopHostCopy, liveStopError, liveStopRefusalForRow, liveStopWaitingError, type LiveStopRefusal } from "./liveEditingStop";
+import {
+  readLiveStopRefusal,
+  liveStopHostCopy,
+  liveStopError,
+  liveStopRefusalForRow,
+  liveStopWaitingError,
+  type LiveStopRefusal,
+} from "./liveEditingStop";
 import type { OperationHandlers } from "./operationTable";
-import {withOwnerLiveStopTransition, type OwnerLiveStop} from "../workspaces/ownerLiveStop";
-import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
+import { withOwnerLiveStopTransition, type OwnerLiveStop } from "../workspaces/ownerLiveStop";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {
   OwnerLiveRefusalsResult,
   OwnerLiveDocument,
@@ -53,7 +60,7 @@ import {
   UnblockRelayShareDiscussionPrincipalResult,
 } from "./bridgeContract";
 import { z } from "zod";
-import {OwnerRestoreActionResponse, OwnerRestoreRelayReview} from "./ownerRestoreContract";
+import { OwnerRestoreActionResponse, OwnerRestoreRelayReview } from "./ownerRestoreContract";
 import { assertOriginalWorkspace, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { createShareLinkAgentActions } from "./shareLinkAgentActions";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
@@ -68,29 +75,63 @@ import type { ChangeAuthor } from "@dohc/workspace-contracts/change-author";
 import { liveChangeOutcome, type LiveDocumentStatus } from "@dohc/workspace-contracts/live-changes";
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
-const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
-const rawLiveDocuments = z.array(liveDocumentStatus.extend({status: z.string(), reason: z.string().optional()})).max(64);
-function knownLiveDocuments<Row extends z.ZodType>(rows: z.infer<typeof rawLiveDocuments>, schema: Row) {
-  return rows.flatMap(row => {const parsed = schema.safeParse(row); return parsed.success ? [parsed.data] : [];});
+const liveDocumentStatus = OwnerLiveDocument.omit({ canResume: true }).strip();
+const rawLiveDocuments = z
+  .array(
+    liveDocumentStatus.extend({
+      status: z.string(),
+      reason: z.string().optional(),
+      failure: z.unknown().optional(),
+    }),
+  )
+  .max(64);
+function knownLiveDocuments<Row extends z.ZodType>(
+  rows: z.infer<typeof rawLiveDocuments>,
+  schema: Row,
+) {
+  return rows.flatMap((row) => {
+    const parsed = schema.safeParse(row);
+    if (parsed.success) return [parsed.data];
+    // A reason this build doesn't know, from a newer server, leaves the row by its status alone, so the row never disappears.
+    const { reason, failure, ...generic } = row;
+    const known = reason === undefined ? parsed : schema.safeParse(generic);
+    return known.success ? [known.data] : [];
+  });
 }
-const activeLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments}).transform(page => ({
-  ...page, documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({
-  status: z.enum(["ready", "preparing", "paused", "unavailable"]),
-  })),
-}));
-const retiredLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments,
-  nextCursor: OwnerLiveDocumentsResult.shape.nextCursor}).transform(page => ({
-  ...page, lastPath: page.documents.at(-1)?.path,
-  documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({status: z.literal("retired")})),
-}));
+const activeLiveDocuments = z
+  .object({ ok: z.literal(true), documents: rawLiveDocuments })
+  .transform((page) => ({
+    ...page,
+    documents: knownLiveDocuments(
+      page.documents,
+      liveDocumentStatus.extend({
+        status: z.enum(["ready", "preparing", "paused", "unavailable"]),
+      }),
+    ),
+  }));
+const retiredLiveDocuments = z
+  .object({
+    ok: z.literal(true),
+    documents: rawLiveDocuments,
+    nextCursor: OwnerLiveDocumentsResult.shape.nextCursor,
+  })
+  .transform((page) => ({
+    ...page,
+    lastPath: page.documents.at(-1)?.path,
+    documents: knownLiveDocuments(
+      page.documents,
+      liveDocumentStatus.extend({ status: z.literal("retired") }),
+    ),
+  }));
 
 interface RelayShareRequest {
-  <Result>(credentials: CloudCredentials, path: string, init: RequestInit | undefined, options: {retainRestoreConflict: true}): Promise<Result>;
   <Result>(
     credentials: CloudCredentials,
     path: string,
-    init?: RequestInit,
+    init: RequestInit | undefined,
+    options: { retainRestoreConflict: true },
   ): Promise<Result>;
+  <Result>(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<Result>;
   <Result>(
     credentials: CloudCredentials,
     path: string,
@@ -110,27 +151,48 @@ interface RelayShareRequest {
 
 /** What Stop and Resume of one live document need, for the window and for agents alike. */
 export interface OwnerLiveDocumentActionDependencies<Workspace> {
-  remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{
+  remoteForWorkspace(
+    workspace: Workspace,
+    options?: { allowPaused: boolean },
+  ): Promise<{
     credentials: CloudCredentials;
     credentialGeneration: number;
   }>;
   currentCredentialGeneration(): number;
   relayShareJsonWithCredentials: RelayShareRequest;
   // A request names its document; a release its binding.
-  ownerLiveStop(workspace: Workspace, action: "request" | "release" | "clear" | "retired", path: string, binding?: LiveObjectBinding | OwnerLiveStop["document"], acceptedCursor?: number): Promise<OwnerLiveStop | undefined>;
+  ownerLiveStop(
+    workspace: Workspace,
+    action: "request" | "release" | "clear" | "retired",
+    path: string,
+    binding?: LiveObjectBinding | OwnerLiveStop["document"],
+    acceptedCursor?: number,
+  ): Promise<OwnerLiveStop | undefined>;
   // Sends everything sync recorded for an open workspace. Rejects when a pass fails.
   pushRecorded(workspaceId: string): Promise<void>;
   // The document at a path now, or where an object's document is now. Null when there is none.
-  liveDocument(workspace: Workspace, target: {path: string} | {objectId: string}): Promise<OwnerLiveStop["document"] | null>;
+  liveDocument(
+    workspace: Workspace,
+    target: { path: string } | { objectId: string },
+  ): Promise<OwnerLiveStop["document"] | null>;
   // Holds off editors of the path while the change runs: refused while one holds it.
-  withoutEditors<Result>(workspace: Workspace, path: string, change: () => Promise<Result>): Promise<Result>;
+  withoutEditors<Result>(
+    workspace: Workspace,
+    path: string,
+    change: () => Promise<Result>,
+  ): Promise<Result>;
   // Documents whose edits the server refused for good, as this computer last read them.
   ownerLiveQuarantines(workspace: Workspace): readonly OwnerLiveQuarantine[];
   // Stops that took refused edits but could not write the file, from their own records.
-  unwrittenOwnerLiveReleases(workspace: Workspace): Promise<readonly {objectId: string; path: string; retry: boolean}[]>;
+  unwrittenOwnerLiveReleases(
+    workspace: Workspace,
+  ): Promise<readonly { objectId: string; path: string; retry: boolean }[]>;
   // Settles again a release that took refused edits but could not write the file. Undefined when no release
   // remains; "requested" when that release never committed, so its Stop still waits for one.
-  retryOwnerLiveRelease(workspace: Workspace, objectId: string): Promise<OwnerLiveStop | "requested" | undefined>;
+  retryOwnerLiveRelease(
+    workspace: Workspace,
+    objectId: string,
+  ): Promise<OwnerLiveStop | "requested" | undefined>;
   // This computer's Stops, as the engine holds them.
   listOwnerLiveStops(workspace: Workspace): Promise<OwnerLiveStop[]>;
   // Who stopped or resumed a document, as this computer's engine records it. Absent where nothing records it.
@@ -146,9 +208,30 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
  * the action goes on regardless.
  */
 export interface OwnerLiveChangeRecord<Workspace> {
-  begin(workspace: Workspace, input: {objectId: string; path: string; action: "stopped" | "resumed"; author: ChangeAuthor; before: LiveDocumentStatus}): Promise<{changeId: string} | null>;
-  finish(workspace: Workspace, input: {objectId: string; changeId: string; outcome: "applied" | "unrecorded"}): Promise<boolean>;
-  list(workspace: Workspace, objectIds: readonly string[]): Promise<readonly {objectId: string; pending?: {changeId: string; action: "stopped" | "resumed"}; last?: {action: "stopped" | "resumed"; atMs: number; author: ChangeAuthor}}[]>;
+  begin(
+    workspace: Workspace,
+    input: {
+      objectId: string;
+      path: string;
+      action: "stopped" | "resumed";
+      author: ChangeAuthor;
+      before: LiveDocumentStatus;
+    },
+  ): Promise<{ changeId: string } | null>;
+  finish(
+    workspace: Workspace,
+    input: { objectId: string; changeId: string; outcome: "applied" | "unrecorded" },
+  ): Promise<boolean>;
+  list(
+    workspace: Workspace,
+    objectIds: readonly string[],
+  ): Promise<
+    readonly {
+      objectId: string;
+      pending?: { changeId: string; action: "stopped" | "resumed" };
+      last?: { action: "stopped" | "resumed"; atMs: number; author: ChangeAuthor };
+    }[]
+  >;
 }
 
 /**
@@ -161,8 +244,14 @@ async function pushRecordedFirst(push: () => Promise<void>): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      Promise.resolve().then(push).catch((error: unknown) => console.warn("[desktop] sync before live hosting failed:", error)),
-      new Promise<void>(resolve => {timer = setTimeout(resolve, 10_000);}),
+      Promise.resolve()
+        .then(push)
+        .catch((error: unknown) =>
+          console.warn("[desktop] sync before live hosting failed:", error),
+        ),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 10_000);
+      }),
     ]);
   } finally {
     clearTimeout(timer);
@@ -170,16 +259,25 @@ async function pushRecordedFirst(push: () => Promise<void>): Promise<void> {
 }
 
 /** The kept edits a Stop again was asked for: its document, and whether its Stop waits or its release could not write the file. */
-export type OwnerLiveStopAgain = {objectId: string; recovery: "not-written" | "stopping"};
+export type OwnerLiveStopAgain = { objectId: string; recovery: "not-written" | "stopping" };
 
 /** The server has not loaded the document or applied its edits yet, and no Resume or other step is needed. */
 function liveStopWaits(refusal: LiveStopRefusal): boolean {
-  return refusal.code === "host-not-loaded" || (refusal.code === "edits-pending" && !refusal.resume && !refusal.pending);
+  return (
+    refusal.code === "host-not-loaded" ||
+    (refusal.code === "edits-pending" && !refusal.resume && !refusal.pending)
+  );
 }
 
-function ownerLiveDocumentCanResume(document: {reason?: string; status: string}): boolean {
-  return document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
-    document.reason === "live-edit-unadmitted" || (!document.reason && (document.status === "retired" || document.status === "paused"));
+function ownerLiveDocumentCanResume(document: { reason?: string; status: string }): boolean {
+  return (
+    document.reason === "session-host-refused" ||
+    document.reason === "live-document-without-lineage" ||
+    document.reason === "live-edit-unadmitted" ||
+    document.reason === "live-start-failing" ||
+    document.reason === "live-history-over-budget" ||
+    (!document.reason && (document.status === "retired" || document.status === "paused"))
+  );
 }
 
 /**
@@ -192,25 +290,45 @@ export function createOwnerLiveDocumentActions<
   Workspace extends { workspaceId: string; shareView?: unknown },
   Operation extends { workspace: Workspace; assertCurrent(): void },
 >(dependencies: OwnerLiveDocumentActionDependencies<Workspace>) {
-  const {remoteForWorkspace, currentCredentialGeneration, relayShareJsonWithCredentials} = dependencies;
-  const ownerRelayShareOperation = createOwnerRelayShareOperation<Workspace, Operation, CloudCredentials>({
-    remoteForWorkspace, credentialGeneration: currentCredentialGeneration,
+  const { remoteForWorkspace, currentCredentialGeneration, relayShareJsonWithCredentials } =
+    dependencies;
+  const ownerRelayShareOperation = createOwnerRelayShareOperation<
+    Workspace,
+    Operation,
+    CloudCredentials
+  >({
+    remoteForWorkspace,
+    credentialGeneration: currentCredentialGeneration,
   });
   const changed = () => new Error("This document changed. Open Live documents to check it.");
   // A Stop reports "recovered" only when the engine says settlement wrote the
   // refused edits into the file. Otherwise they stay kept: in their queue, or
   // in the document with a record that its file still needs them.
-  const keptEditsOf = (released: OwnerLiveStop | undefined): StopOwnerLiveDocumentResult["keptEdits"] =>
+  const keptEditsOf = (
+    released: OwnerLiveStop | undefined,
+  ): StopOwnerLiveDocumentResult["keptEdits"] =>
     released?.materialized === true && !released.deferred ? "recovered" : "kept";
   // The server's live document list, as one owner request.
-  const liveHost = async (operation: Operation, method: "DELETE" | "POST" | "GET", body?: object, query = "") => {
-    const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
-    if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
-    const result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host${query}`,{
-      method,...(body === undefined ? {} : {body:JSON.stringify(body)}),
-    });
+  const liveHost = async (
+    operation: Operation,
+    method: "DELETE" | "POST" | "GET",
+    body?: object,
+    query = "",
+  ) => {
+    const { credentials, credentialGeneration } = await remoteForWorkspace(operation.workspace);
+    if (credentialGeneration !== currentCredentialGeneration())
+      throw new Error("Sharing account changed.");
+    const result = await relayShareJsonWithCredentials<unknown>(
+      credentials,
+      `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host${query}`,
+      {
+        method,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      },
+    );
     operation.assertCurrent();
-    if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
+    if (credentialGeneration !== currentCredentialGeneration())
+      throw new Error("Sharing account changed.");
     return result;
   };
   // Who asked for each Stop and Resume. A change is credited only when the server's own answer says
@@ -220,48 +338,103 @@ export function createOwnerLiveDocumentActions<
   const inFlight = record ? inFlightChanges(record) : new Set<string>();
   // The server's row for a document, by its object or by its path, from its live list and the first page of
   // its stopped one. Null when it lists none; "unread" when the server could not be asked.
-  const serverRow = async (operation: Operation, match: {objectId: string} | {path: string}) => {
+  const serverRow = async (
+    operation: Operation,
+    match: { objectId: string } | { path: string },
+  ) => {
     try {
-      const [active, retired] = await Promise.all([liveHost(operation, "GET"), liveHost(operation, "GET", undefined, "?retired=1")]);
-      const rows = [...activeLiveDocuments.parse(active).documents, ...retiredLiveDocuments.parse(retired).documents];
-      return rows.find(row => "objectId" in match ? row.objectId === match.objectId : row.path === match.path) ?? null;
-    } catch {operation.assertCurrent(); return "unread" as const;}
+      const [active, retired] = await Promise.all([
+        liveHost(operation, "GET"),
+        liveHost(operation, "GET", undefined, "?retired=1"),
+      ]);
+      const rows = [
+        ...activeLiveDocuments.parse(active).documents,
+        ...retiredLiveDocuments.parse(retired).documents,
+      ];
+      return (
+        rows.find((row) =>
+          "objectId" in match ? row.objectId === match.objectId : row.path === match.path,
+        ) ?? null
+      );
+    } catch {
+      operation.assertCurrent();
+      return "unread" as const;
+    }
   };
-  const beginChange = async (operation: Operation, author: ChangeAuthor | undefined, change: {objectId: string; path: string; action: "stopped" | "resumed"},
-    before: LiveDocumentStatus) => {
+  const beginChange = async (
+    operation: Operation,
+    author: ChangeAuthor | undefined,
+    change: { objectId: string; path: string; action: "stopped" | "resumed" },
+    before: LiveDocumentStatus,
+  ) => {
     if (!record || !author) return null;
-    let begun: {changeId: string} | null = null;
-    try {begun = await record.begin(operation.workspace, {...change, author, before});}
-    catch (error) {console.error("[desktop] dohc could not record who changed live editing:", error);}
+    let begun: { changeId: string } | null = null;
+    try {
+      begun = await record.begin(operation.workspace, { ...change, author, before });
+    } catch (error) {
+      console.error("[desktop] dohc could not record who changed live editing:", error);
+    }
     operation.assertCurrent();
     if (begun) inFlight.add(begun.changeId);
     return begun;
   };
   // A Stop's record, for the document it names. Its state before comes from the server when it can be read.
-  const beginStop = async (operation: Operation, author: ChangeAuthor | undefined, objectId: string, path: string) => {
+  const beginStop = async (
+    operation: Operation,
+    author: ChangeAuthor | undefined,
+    objectId: string,
+    path: string,
+  ) => {
     if (!record || !author) return null;
-    const row = await serverRow(operation, {objectId});
-    return beginChange(operation, author, {objectId, path, action: "stopped"}, row === "unread" ? "unavailable" : row?.status ?? "absent");
+    const row = await serverRow(operation, { objectId });
+    return beginChange(
+      operation,
+      author,
+      { objectId, path, action: "stopped" },
+      row === "unread" ? "unavailable" : (row?.status ?? "absent"),
+    );
   };
   // Settles a begun change, or with "pending" leaves it for Stop reconciliation and a later list.
-  const finishChange = async (operation: Operation, begun: {changeId: string} | null, objectId: string, outcome: "applied" | "unrecorded" | "pending") => {
+  const finishChange = async (
+    operation: Operation,
+    begun: { changeId: string } | null,
+    objectId: string,
+    outcome: "applied" | "unrecorded" | "pending",
+  ) => {
     // The caller's finally clears it from the changes still being made, once this finish has returned.
     if (!begun || !record || outcome === "pending") return;
-    try {await record.finish(operation.workspace, {objectId, changeId: begun.changeId, outcome});}
-    catch (error) {console.error("[desktop] dohc could not finish its record of who changed live editing:", error);}
+    try {
+      await record.finish(operation.workspace, { objectId, changeId: begun.changeId, outcome });
+    } catch (error) {
+      console.error(
+        "[desktop] dohc could not finish its record of who changed live editing:",
+        error,
+      );
+    }
   };
   // The server's answer says whether this request made the change. A server without the field credits no one.
   const changedBy = (result: unknown) => {
-    const changed = (result as {changed?: unknown} | null)?.changed;
-    return changed === true ? "applied" as const : changed === false ? "already" as const : "unknown" as const;
+    const changed = (result as { changed?: unknown } | null)?.changed;
+    return changed === true
+      ? ("applied" as const)
+      : changed === false
+        ? ("already" as const)
+        : ("unknown" as const);
   };
   // Edits that have not reached the server get the reason the server's list gives for them.
-  const stopAnswer = async (operation: Operation, objectId: string, refusal: LiveStopRefusal): Promise<LiveStopRefusal> => {
+  const stopAnswer = async (
+    operation: Operation,
+    objectId: string,
+    refusal: LiveStopRefusal,
+  ): Promise<LiveStopRefusal> => {
     if (refusal.code !== "edits-pending") return refusal;
     try {
       const page = activeLiveDocuments.parse(await liveHost(operation, "GET"));
-      const row = page.documents.find(row => row.objectId === objectId);
-      refusal = liveStopRefusalForRow(refusal, row && {...row, canResume: ownerLiveDocumentCanResume(row)});
+      const row = page.documents.find((row) => row.objectId === objectId);
+      refusal = liveStopRefusalForRow(
+        refusal,
+        row && { ...row, canResume: ownerLiveDocumentCanResume(row) },
+      );
     } catch {
       // An unproven list adds no explanation of why edits could not reach the server.
     }
@@ -270,131 +443,271 @@ export function createOwnerLiveDocumentActions<
   };
   // The server's document that this computer no longer has: only the server
   // stops live editing for it. Edits kept here stay for Save recovery copy.
-  const stopOnServer = (input: {workspaceId: string; path: string; objectId: string; author?: ChangeAuthor}, operation: Operation) =>
-    withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<StopOwnerLiveDocumentResult> => {
-      if (await dependencies.liveDocument(operation.workspace,{objectId:input.objectId})) throw changed();
-      operation.assertCurrent();
-      const begun=await beginStop(operation,input.author,input.objectId,input.path);
-      try {
-      let result: unknown;
-      try {result=await liveHost(operation,"DELETE",{path:input.path,objectId:input.objectId,retire:true});}
-      catch (error) {
-        // This computer keeps no Stop to send again, so the record ends here.
-        await finishChange(operation,begun,input.objectId,"unrecorded");
+  const stopOnServer = (
+    input: { workspaceId: string; path: string; objectId: string; author?: ChangeAuthor },
+    operation: Operation,
+  ) =>
+    withOwnerLiveStopTransition(
+      input.workspaceId,
+      input.path,
+      async (): Promise<StopOwnerLiveDocumentResult> => {
+        if (await dependencies.liveDocument(operation.workspace, { objectId: input.objectId }))
+          throw changed();
         operation.assertCurrent();
-        const refusal = readLiveStopRefusal(error);
-        if (refusal) {
-          if (refusal.code === "edits-pending") throw liveStopError({code: "edits-pending"});
-          const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
-          console.warn(`[desktop] ${copy}`);
-          throw liveStopError(refusal);
+        const begun = await beginStop(operation, input.author, input.objectId, input.path);
+        try {
+          let result: unknown;
+          try {
+            result = await liveHost(operation, "DELETE", {
+              path: input.path,
+              objectId: input.objectId,
+              retire: true,
+            });
+          } catch (error) {
+            // This computer keeps no Stop to send again, so the record ends here.
+            await finishChange(operation, begun, input.objectId, "unrecorded");
+            operation.assertCurrent();
+            const refusal = readLiveStopRefusal(error);
+            if (refusal) {
+              if (refusal.code === "edits-pending") throw liveStopError({ code: "edits-pending" });
+              const copy = liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path);
+              console.warn(`[desktop] ${copy}`);
+              throw liveStopError(refusal);
+            }
+            throw error;
+          }
+          // The server names its document's current path, which a rename there may have changed.
+          z.object({
+            ok: z.literal(true),
+            objectId: z.literal(input.objectId),
+            path: z.string().min(1),
+            status: z.literal("retired"),
+            acceptedCursor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+          }).parse(result);
+          const answer = changedBy(result);
+          await finishChange(
+            operation,
+            begun,
+            input.objectId,
+            answer === "applied" ? "applied" : "unrecorded",
+          );
+          return {
+            keptEdits: dependencies
+              .ownerLiveQuarantines(operation.workspace)
+              .some((row) => row.objectId === input.objectId)
+              ? "kept"
+              : "none",
+            ...(answer === "already" ? { already: true as const } : {}),
+          };
+        } finally {
+          if (begun) inFlight.delete(begun.changeId);
         }
-        throw error;
-      }
-      // The server names its document's current path, which a rename there may have changed.
-      z.object({ok:z.literal(true),objectId:z.literal(input.objectId),path:z.string().min(1),status:z.literal("retired"),
-        acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);
-      const answer=changedBy(result);
-      await finishChange(operation,begun,input.objectId,answer==="applied" ? "applied" : "unrecorded");
-      return {keptEdits:dependencies.ownerLiveQuarantines(operation.workspace).some(row => row.objectId===input.objectId) ? "kept" : "none",
-        ...(answer==="already" ? {already:true as const} : {})};
-      } finally {if (begun) inFlight.delete(begun.changeId);}
-    });
+      },
+    );
   /**
    * A Stop names its document before it changes anything: the document at the
    * path now, or with `again` the document its row names, wherever it is now.
    * A list row's `objectId` names the server's document, which the one at the
    * path must be. A record, or a document that left the path, never stands in for it.
    */
-  const stop = async (input: {workspaceId: string; path: string; objectId?: string; again?: OwnerLiveStopAgain; author?: ChangeAuthor}, operation: Operation): Promise<StopOwnerLiveDocumentResult> => {
-    operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
-    const {again}=input, target=again ? {objectId:again.objectId} : {path:input.path};
-    const document=await dependencies.liveDocument(operation.workspace,target);
+  const stop = async (
+    input: {
+      workspaceId: string;
+      path: string;
+      objectId?: string;
+      again?: OwnerLiveStopAgain;
+      author?: ChangeAuthor;
+    },
+    operation: Operation,
+  ): Promise<StopOwnerLiveDocumentResult> => {
     operation.assertCurrent();
-    if (!document && !again && input.objectId!==undefined) return stopOnServer({workspaceId:input.workspaceId,path:input.path,objectId:input.objectId,author:input.author},operation);
-    if (!document || (!again && input.objectId!==undefined && document.objectId!==input.objectId)) throw changed();
+    assertOriginalWorkspace(operation.workspace);
+    const { again } = input,
+      target = again ? { objectId: again.objectId } : { path: input.path };
+    const document = await dependencies.liveDocument(operation.workspace, target);
+    operation.assertCurrent();
+    if (!document && !again && input.objectId !== undefined)
+      return stopOnServer(
+        {
+          workspaceId: input.workspaceId,
+          path: input.path,
+          objectId: input.objectId,
+          author: input.author,
+        },
+        operation,
+      );
+    if (
+      !document ||
+      (!again && input.objectId !== undefined && document.objectId !== input.objectId)
+    )
+      throw changed();
     // Still that document, at that path: a rename while the Stop waits acts on nothing it did not hold.
-    const unchanged=async () => {
-      const now=await dependencies.liveDocument(operation.workspace,target);
+    const unchanged = async () => {
+      const now = await dependencies.liveDocument(operation.workspace, target);
       operation.assertCurrent();
-      if (now?.objectId!==document.objectId || now.mainVersionId!==document.mainVersionId || now.currentPath!==document.currentPath) throw changed();
+      if (
+        now?.objectId !== document.objectId ||
+        now.mainVersionId !== document.mainVersionId ||
+        now.currentPath !== document.currentPath
+      )
+        throw changed();
     };
-    return dependencies.withoutEditors(operation.workspace,document.currentPath,() => withOwnerLiveStopTransition(input.workspaceId,document.currentPath,async (): Promise<StopOwnerLiveDocumentResult> => {
-      await unchanged();
-      // Stop again writes the file a finished release could not, from that release alone. The records
-      // decide, never a list not yet read, so no ordinary Stop starts over a release the file still needs.
-      // A release the engine no longer holds keeps its edits for Save recovery copy.
-      const unwritten=again?.recovery==="stopping" ? undefined : (await dependencies.unwrittenOwnerLiveReleases(operation.workspace))
-        .find(record => record.retry && record.objectId===document.objectId);
-      operation.assertCurrent();
-      if (again?.recovery==="not-written" && !unwritten) throw changed();
-      if (unwritten) {
-        const released=await dependencies.retryOwnerLiveRelease(operation.workspace,document.objectId);
-        operation.assertCurrent();
-        // A release that never committed: its Stop goes on below, and its release records the same edits.
-        if (released!=="requested") return {keptEdits:released ? keptEditsOf(released) : "kept"};
-      }
-      // Who asked is recorded before anything changes: then the local request, the server's Stop, and the release.
-      const begun=await beginStop(operation,input.author,document.objectId,document.currentPath);
-      // A change that ends without a finish stays pending for a list, which settles it without credit.
-      try {
-      let result: unknown, local: OwnerLiveStop | undefined, quarantined=false, onServer=false;
-      try {
-        local=await dependencies.ownerLiveStop(operation.workspace,"request",document.currentPath,document);
-        operation.assertCurrent();
-        if (local?.document.objectId!==document.objectId) throw changed();
-        // This computer's release can write only the edits it keeps. Edits the server keeps stay there,
-        // and edits an earlier release could not write are not this Stop's to claim.
-        const kept=dependencies.ownerLiveQuarantines(operation.workspace).find(row => row.objectId===document.objectId && row.recovery!=="cannot-write" && !row.saveOnly);
-        quarantined=kept?.storedOn==="this-computer"; onServer=kept?.storedOn==="server";
-        if (!local.retirementOwed) {
-          await finishChange(operation,begun,document.objectId,"unrecorded");
-          return {keptEdits:quarantined || onServer ? "kept" : "none"};
-        }
-        result=await liveHost(operation,"DELETE",{path:local.document.currentPath,objectId:local.document.objectId,retire:true,
-          ...(local.binding ? {restoreFenceGeneration:local.binding.restoreFenceGeneration} : {})});
-      } catch (error) {
-        operation.assertCurrent();
-        const refused = readLiveStopRefusal(error);
-        const refusal = local && refused && await stopAnswer(operation, local.document.objectId, refused);
-        // An answer that means only "not yet" keeps the request, and Stop
-        // reconciliation sends it again. Its record waits for that. One the person must act on ends it.
-        if (local?.document.objectId===document.objectId && local.retirementOwed && (!refusal || liveStopWaits(refusal))) {
-          // Electron drops the cause, so the log is where a timeout and a restore differ.
-          console.warn("[desktop] owner live Stop is waiting for the server:", error);
-          await finishChange(operation,begun,document.objectId,"pending");
-          throw liveStopWaitingError(error);
-        }
-        await finishChange(operation,begun,document.objectId,"unrecorded");
-        if (!refusal || !local) throw error;
-        await dependencies.ownerLiveStop(operation.workspace, "clear", local.document.currentPath, local.document);
-        operation.assertCurrent();
-        if (refusal.code !== "edits-pending") console.warn(`[desktop] ${liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path)}`);
-        throw liveStopError(refusal);
-      }
-      const response=z.object({ok:z.literal(true),objectId:z.literal(local.document.objectId),path:z.string().min(1),status:z.literal("retired"),
-        acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(result);
-      // Only this request's own answer credits it. The release's outcome changes nothing about who stopped it.
-      const answer=changedBy(result);
-      await finishChange(operation,begun,document.objectId,answer==="applied" ? "applied" : "unrecorded");
-      const already=answer==="already" ? {already:true as const} : {};
-      let released: OwnerLiveStop | undefined;
-      try {
-        await unchanged();
-        released=await dependencies.ownerLiveStop(operation.workspace,local.binding ? "release" : "retired",document.currentPath,local.binding ?? local.document,response.acceptedCursor);
-      } catch (error) {
-        // The server already stopped live editing, so the Stop did. A release
-        // that did not run or commit kept its Stop row, and Stop reconciliation
-        // sends it again; one that committed left a record that the file still
-        // needs the edits. A file deleted outside dohc refuses the release's write.
-        operation.assertCurrent();
-        console.error("[desktop] owner live release failed after the server stopped live editing:",error);
-        return {keptEdits:quarantined || onServer ? "kept" : "none",...already};
-      }
-      operation.assertCurrent();
-      return {keptEdits:onServer ? "kept" : !quarantined ? "none" : keptEditsOf(released),...already};
-      } finally {if (begun) inFlight.delete(begun.changeId);}
-    }));
+    return dependencies.withoutEditors(operation.workspace, document.currentPath, () =>
+      withOwnerLiveStopTransition(
+        input.workspaceId,
+        document.currentPath,
+        async (): Promise<StopOwnerLiveDocumentResult> => {
+          await unchanged();
+          // Stop again writes the file a finished release could not, from that release alone. The records
+          // decide, never a list not yet read, so no ordinary Stop starts over a release the file still needs.
+          // A release the engine no longer holds keeps its edits for Save recovery copy.
+          const unwritten =
+            again?.recovery === "stopping"
+              ? undefined
+              : (await dependencies.unwrittenOwnerLiveReleases(operation.workspace)).find(
+                  (record) => record.retry && record.objectId === document.objectId,
+                );
+          operation.assertCurrent();
+          if (again?.recovery === "not-written" && !unwritten) throw changed();
+          if (unwritten) {
+            const released = await dependencies.retryOwnerLiveRelease(
+              operation.workspace,
+              document.objectId,
+            );
+            operation.assertCurrent();
+            // A release that never committed: its Stop goes on below, and its release records the same edits.
+            if (released !== "requested")
+              return { keptEdits: released ? keptEditsOf(released) : "kept" };
+          }
+          // Who asked is recorded before anything changes: then the local request, the server's Stop, and the release.
+          const begun = await beginStop(
+            operation,
+            input.author,
+            document.objectId,
+            document.currentPath,
+          );
+          // A change that ends without a finish stays pending for a list, which settles it without credit.
+          try {
+            let result: unknown,
+              local: OwnerLiveStop | undefined,
+              quarantined = false,
+              onServer = false;
+            try {
+              local = await dependencies.ownerLiveStop(
+                operation.workspace,
+                "request",
+                document.currentPath,
+                document,
+              );
+              operation.assertCurrent();
+              if (local?.document.objectId !== document.objectId) throw changed();
+              // This computer's release can write only the edits it keeps. Edits the server keeps stay there,
+              // and edits an earlier release could not write are not this Stop's to claim.
+              const kept = dependencies
+                .ownerLiveQuarantines(operation.workspace)
+                .find(
+                  (row) =>
+                    row.objectId === document.objectId &&
+                    row.recovery !== "cannot-write" &&
+                    !row.saveOnly,
+                );
+              quarantined = kept?.storedOn === "this-computer";
+              onServer = kept?.storedOn === "server";
+              if (!local.retirementOwed) {
+                await finishChange(operation, begun, document.objectId, "unrecorded");
+                return { keptEdits: quarantined || onServer ? "kept" : "none" };
+              }
+              result = await liveHost(operation, "DELETE", {
+                path: local.document.currentPath,
+                objectId: local.document.objectId,
+                retire: true,
+                ...(local.binding
+                  ? { restoreFenceGeneration: local.binding.restoreFenceGeneration }
+                  : {}),
+              });
+            } catch (error) {
+              operation.assertCurrent();
+              const refused = readLiveStopRefusal(error);
+              const refusal =
+                local && refused && (await stopAnswer(operation, local.document.objectId, refused));
+              // An answer that means only "not yet" keeps the request, and Stop
+              // reconciliation sends it again. Its record waits for that. One the person must act on ends it.
+              if (
+                local?.document.objectId === document.objectId &&
+                local.retirementOwed &&
+                (!refusal || liveStopWaits(refusal))
+              ) {
+                // Electron drops the cause, so the log is where a timeout and a restore differ.
+                console.warn("[desktop] owner live Stop is waiting for the server:", error);
+                await finishChange(operation, begun, document.objectId, "pending");
+                throw liveStopWaitingError(error);
+              }
+              await finishChange(operation, begun, document.objectId, "unrecorded");
+              if (!refusal || !local) throw error;
+              await dependencies.ownerLiveStop(
+                operation.workspace,
+                "clear",
+                local.document.currentPath,
+                local.document,
+              );
+              operation.assertCurrent();
+              if (refusal.code !== "edits-pending")
+                console.warn(
+                  `[desktop] ${liveStopHostCopy(refusal.code, refusal.sessionHost, refusal.path)}`,
+                );
+              throw liveStopError(refusal);
+            }
+            const response = z
+              .object({
+                ok: z.literal(true),
+                objectId: z.literal(local.document.objectId),
+                path: z.string().min(1),
+                status: z.literal("retired"),
+                acceptedCursor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+              })
+              .parse(result);
+            // Only this request's own answer credits it. The release's outcome changes nothing about who stopped it.
+            const answer = changedBy(result);
+            await finishChange(
+              operation,
+              begun,
+              document.objectId,
+              answer === "applied" ? "applied" : "unrecorded",
+            );
+            const already = answer === "already" ? { already: true as const } : {};
+            let released: OwnerLiveStop | undefined;
+            try {
+              await unchanged();
+              released = await dependencies.ownerLiveStop(
+                operation.workspace,
+                local.binding ? "release" : "retired",
+                document.currentPath,
+                local.binding ?? local.document,
+                response.acceptedCursor,
+              );
+            } catch (error) {
+              // The server already stopped live editing, so the Stop did. A release
+              // that did not run or commit kept its Stop row, and Stop reconciliation
+              // sends it again; one that committed left a record that the file still
+              // needs the edits. A file deleted outside dohc refuses the release's write.
+              operation.assertCurrent();
+              console.error(
+                "[desktop] owner live release failed after the server stopped live editing:",
+                error,
+              );
+              return { keptEdits: quarantined || onServer ? "kept" : "none", ...already };
+            }
+            operation.assertCurrent();
+            return {
+              keptEdits: onServer ? "kept" : !quarantined ? "none" : keptEditsOf(released),
+              ...already,
+            };
+          } finally {
+            if (begun) inFlight.delete(begun.changeId);
+          }
+        },
+      ),
+    );
   };
   /**
    * Resume clears the Stop of the document the server resumed, wherever this
@@ -402,37 +715,86 @@ export function createOwnerLiveDocumentActions<
    * own Stop. For one this computer no longer has, it clears that document's
    * Stop as the engine holds it, so no later pass stops it again.
    */
-  const resume = async (input: {workspaceId: string; path: string; author?: ChangeAuthor}, operation: Operation): Promise<ResumeOwnerLiveDocumentResult> => {
-    operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
+  const resume = async (
+    input: { workspaceId: string; path: string; author?: ChangeAuthor },
+    operation: Operation,
+  ): Promise<ResumeOwnerLiveDocumentResult> => {
+    operation.assertCurrent();
+    assertOriginalWorkspace(operation.workspace);
     await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
     operation.assertCurrent();
-    return withOwnerLiveStopTransition(input.workspaceId,input.path,async (): Promise<ResumeOwnerLiveDocumentResult> => {
-      // A Resume names its document by path, and the server resumes its own document there: the record names that one.
-      const row=record && input.author ? await serverRow(operation,{path:input.path}) : null;
-      const named=row && row!=="unread" ? row : null;
-      const begun=named ? await beginChange(operation,input.author,{objectId:named.objectId,path:input.path,action:"resumed"},named.status) : null;
-      try {
-      let result: unknown;
-      try {result=await liveHost(operation,"POST",{path:input.path});}
-      catch (error) {
-        if (named) await finishChange(operation,begun,named.objectId,"unrecorded");
-        operation.assertCurrent();throw error;
-      }
-      const response=z.object({ok:z.literal(true),objectId:OwnerLiveDocument.shape.objectId,path:z.literal(input.path),
-        status:z.enum(["ready","preparing","unavailable"])}).parse(result);
-      // Credit only the document this request resumed, and only when the server's answer says it did.
-      const answer=changedBy(result);
-      if (named) await finishChange(operation,begun,named.objectId,
-        answer==="applied" && response.status!=="unavailable" && response.objectId===named.objectId ? "applied" : "unrecorded");
-      if (response.status==="unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
-      const document=await dependencies.liveDocument(operation.workspace,{objectId:response.objectId}) ??
-        (await dependencies.listOwnerLiveStops(operation.workspace)).find(stop => stop.document.objectId===response.objectId)?.document;
-      operation.assertCurrent();
-      if (document) await dependencies.ownerLiveStop(operation.workspace,"clear",document.currentPath,document);
-      operation.assertCurrent();
-      return answer==="already" ? {already:true} : {};
-      } finally {if (begun) inFlight.delete(begun.changeId);}
-    });
+    return withOwnerLiveStopTransition(
+      input.workspaceId,
+      input.path,
+      async (): Promise<ResumeOwnerLiveDocumentResult> => {
+        // A Resume names its document by path, and the server resumes its own document there: the record names that one.
+        const row =
+          record && input.author ? await serverRow(operation, { path: input.path }) : null;
+        const named = row && row !== "unread" ? row : null;
+        const begun = named
+          ? await beginChange(
+              operation,
+              input.author,
+              { objectId: named.objectId, path: input.path, action: "resumed" },
+              named.status,
+            )
+          : null;
+        try {
+          let result: unknown;
+          try {
+            result = await liveHost(operation, "POST", { path: input.path });
+          } catch (error) {
+            if (named) await finishChange(operation, begun, named.objectId, "unrecorded");
+            operation.assertCurrent();
+            throw error;
+          }
+          const response = z
+            .object({
+              ok: z.literal(true),
+              objectId: OwnerLiveDocument.shape.objectId,
+              path: z.literal(input.path),
+              status: z.enum(["ready", "preparing", "unavailable"]),
+            })
+            .parse(result);
+          // Credit only the document this request resumed, and only when the server's answer says it did.
+          const answer = changedBy(result);
+          if (named)
+            await finishChange(
+              operation,
+              begun,
+              named.objectId,
+              answer === "applied" &&
+                response.status !== "unavailable" &&
+                response.objectId === named.objectId
+                ? "applied"
+                : "unrecorded",
+            );
+          if (response.status === "unavailable")
+            throw new Error(
+              "This document could not resume live editing. Refresh the list and try again.",
+            );
+          const document =
+            (await dependencies.liveDocument(operation.workspace, {
+              objectId: response.objectId,
+            })) ??
+            (await dependencies.listOwnerLiveStops(operation.workspace)).find(
+              (stop) => stop.document.objectId === response.objectId,
+            )?.document;
+          operation.assertCurrent();
+          if (document)
+            await dependencies.ownerLiveStop(
+              operation.workspace,
+              "clear",
+              document.currentPath,
+              document,
+            );
+          operation.assertCurrent();
+          return answer === "already" ? { already: true } : {};
+        } finally {
+          if (begun) inFlight.delete(begun.changeId);
+        }
+      },
+    );
   };
   /**
    * Settles a change an interrupted action left pending. Recovery never credits anyone: a Stop this
@@ -440,65 +802,130 @@ export function createOwnerLiveDocumentActions<
    * this dohc is still making are left alone. Rows name no author yet: a record of this computer's last
    * change can't tell whether another computer changed the document since.
    */
-  const settleLiveChanges = async (operation: Operation, objectIds: readonly string[], localStops: readonly OwnerLiveStop[]) => {
-    const owed = new Set(localStops.filter(stop => stop.state === "requested" || stop.retirementOwed || stop.deferred).map(stop => stop.document.objectId));
+  const settleLiveChanges = async (
+    operation: Operation,
+    objectIds: readonly string[],
+    localStops: readonly OwnerLiveStop[],
+  ) => {
+    const owed = new Set(
+      localStops
+        .filter((stop) => stop.state === "requested" || stop.retirementOwed || stop.deferred)
+        .map((stop) => stop.document.objectId),
+    );
     try {
       const changes = await record!.list(operation.workspace, objectIds.slice(0, 200));
       operation.assertCurrent();
       for (const change of changes) {
         const pending = change.pending;
-        if (!pending || inFlight.has(pending.changeId) || liveChangeOutcome(pending, {stopOwed: owed.has(change.objectId)}) === null) continue;
-        await record!.finish(operation.workspace, {objectId: change.objectId, changeId: pending.changeId, outcome: "unrecorded"});
+        if (
+          !pending ||
+          inFlight.has(pending.changeId) ||
+          liveChangeOutcome(pending, { stopOwed: owed.has(change.objectId) }) === null
+        )
+          continue;
+        await record!.finish(operation.workspace, {
+          objectId: change.objectId,
+          changeId: pending.changeId,
+          outcome: "unrecorded",
+        });
         operation.assertCurrent();
       }
     } catch (error) {
       operation.assertCurrent();
-      console.error("[desktop] dohc could not settle its record of who changed live editing:", error);
+      console.error(
+        "[desktop] dohc could not settle its record of who changed live editing:",
+        error,
+      );
     }
   };
   /** The Live documents list: the server's documents with this computer's Stops and kept edits, for the window and agents alike. */
-  const list = async (input: {retiredAfter?: string}, operation: Operation): Promise<OwnerLiveDocumentsResult> => {
-    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
-      const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`;
-      const after = input.retiredAfter === undefined ? "" : `&after=${encodeURIComponent(input.retiredAfter)}`;
-      const [active, retired] = await session.run(() => Promise.all([
-        relayShareJsonWithCredentials<unknown>(credentials, path),
-        relayShareJsonWithCredentials<unknown>(credentials, `${path}?retired=1${after}`),
-      ]));
-      const current = activeLiveDocuments.parse(active);
-      const stopped = retiredLiveDocuments.parse(retired);
-      const localStops = await dependencies.listOwnerLiveStops(operation.workspace);
-      operation.assertCurrent();
-      if (stopped.nextCursor !== null && (stopped.nextCursor !== stopped.lastPath ||
-        stopped.nextCursor === input.retiredAfter)) {
-        throw new Error("The live document list changed. Refresh the list and try again.");
-      }
-      // Concurrent list reads may see a document in both sets. The current
-      // enrollment wins; all bindings and server-only credentials stay in main.
-      // Resume is also how the owner tries again a document the server refused,
-      // one it could not start until the owner opened it, or one whose server
-      // copy is missing an owner edit: Resume retires the held session so the
-      // edit can apply.
-      const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
-        ...document, canResume: ownerLiveDocumentCanResume(document),
-      }]));
-      // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
-      const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
-      for (const row of documents.values()) {
-        // Each row speaks for the server's document, never for another that had or has its path.
-        const deferred = localStops.find(stop => stop.document.objectId === row.objectId)?.deferred;
-        if (deferred) Object.assign(row, {deferredStop: deferred,
-          canResume: row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld" && row.reason !== "live-history-over-budget"});
-        // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
-        const kept = quarantines.filter(candidate => candidate.objectId === row.objectId && !candidate.saveOnly);
-        const quarantine = kept.find(candidate => candidate.recovery === "not-written" || candidate.recovery === "cannot-write") ?? kept[0];
-        if (quarantine) Object.assign(row, {quarantine: quarantine.recovery, storedOn: quarantine.storedOn, incident: quarantine.incident,
-          ...(quarantine.earlier ? {earlier: true} : {})});
-      }
-      if (record) await settleLiveChanges(operation, [...documents.values()].map(row => row.objectId), localStops);
-      return OwnerLiveDocumentsResult.parse({documents: [...documents.values(), ...saveOnlyLiveDocuments(quarantines)],
-        nextCursor: stopped.nextCursor});
-    }, assertOriginalWorkspace);
+  const list = async (
+    input: { retiredAfter?: string },
+    operation: Operation,
+  ): Promise<OwnerLiveDocumentsResult> => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`;
+        const after =
+          input.retiredAfter === undefined
+            ? ""
+            : `&after=${encodeURIComponent(input.retiredAfter)}`;
+        const [active, retired] = await session.run(() =>
+          Promise.all([
+            relayShareJsonWithCredentials<unknown>(credentials, path),
+            relayShareJsonWithCredentials<unknown>(credentials, `${path}?retired=1${after}`),
+          ]),
+        );
+        const current = activeLiveDocuments.parse(active);
+        const stopped = retiredLiveDocuments.parse(retired);
+        const localStops = await dependencies.listOwnerLiveStops(operation.workspace);
+        operation.assertCurrent();
+        if (
+          stopped.nextCursor !== null &&
+          (stopped.nextCursor !== stopped.lastPath || stopped.nextCursor === input.retiredAfter)
+        ) {
+          throw new Error("The live document list changed. Refresh the list and try again.");
+        }
+        // Concurrent list reads may see a document in both sets. The current
+        // enrollment wins; all bindings and server-only credentials stay in main.
+        // Resume is also how the owner tries again a document the server refused,
+        // one it could not start until the owner opened it, or one whose server
+        // copy is missing an owner edit: Resume retires the held session so the
+        // edit can apply. For one whose start keeps failing, or whose history is
+        // too long to check, Resume tries now.
+        const documents = new Map(
+          [...stopped.documents, ...current.documents].map((document) => [
+            document.path,
+            {
+              ...document,
+              canResume: ownerLiveDocumentCanResume(document),
+            },
+          ]),
+        );
+        // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
+        const quarantines = dependencies.ownerLiveQuarantines(operation.workspace);
+        for (const row of documents.values()) {
+          // Each row speaks for the server's document, never for another that had or has its path.
+          const deferred = localStops.find(
+            (stop) => stop.document.objectId === row.objectId,
+          )?.deferred;
+          if (deferred)
+            Object.assign(row, {
+              deferredStop: deferred,
+              canResume:
+                row.reason !== "session-host-diverged" && row.reason !== "conflict-parent-withheld",
+            });
+          // A record of edits a Stop could not write goes first: it holds the next Stop until it is saved.
+          const kept = quarantines.filter(
+            (candidate) => candidate.objectId === row.objectId && !candidate.saveOnly,
+          );
+          const quarantine =
+            kept.find(
+              (candidate) =>
+                candidate.recovery === "not-written" || candidate.recovery === "cannot-write",
+            ) ?? kept[0];
+          if (quarantine)
+            Object.assign(row, {
+              quarantine: quarantine.recovery,
+              storedOn: quarantine.storedOn,
+              incident: quarantine.incident,
+              ...(quarantine.earlier ? { earlier: true } : {}),
+            });
+        }
+        if (record)
+          await settleLiveChanges(
+            operation,
+            [...documents.values()].map((row) => row.objectId),
+            localStops,
+          );
+        return OwnerLiveDocumentsResult.parse({
+          documents: [...documents.values(), ...saveOnlyLiveDocuments(quarantines)],
+          nextCursor: stopped.nextCursor,
+        });
+      },
+      assertOriginalWorkspace,
+    );
   };
   return {
     list,
@@ -512,7 +939,7 @@ export function createOwnerLiveDocumentActions<
 const changesInFlight = new WeakMap<object, Set<string>>();
 function inFlightChanges(record: object): Set<string> {
   let changes = changesInFlight.get(record);
-  if (!changes) changesInFlight.set(record, changes = new Set());
+  if (!changes) changesInFlight.set(record, (changes = new Set()));
   return changes;
 }
 
@@ -527,16 +954,31 @@ export async function stopNamedOwnerLiveDocument<
 >(
   actions: ReturnType<typeof createOwnerLiveDocumentActions<Workspace, Operation>>,
   dependencies: Pick<OwnerLiveDocumentActionDependencies<Workspace>, "liveDocument"> & {
-    sendRendererActivity(scope: {workspaceId: string; liveDocumentStopped: string}): void;
+    sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
   },
-  input: {workspaceId: string; path: string; objectId?: string; again?: OwnerLiveStopAgain; author?: ChangeAuthor},
+  input: {
+    workspaceId: string;
+    path: string;
+    objectId?: string;
+    again?: OwnerLiveStopAgain;
+    author?: ChangeAuthor;
+  },
   operation: Operation,
 ): Promise<StopOwnerLiveDocumentResult> {
-  const objectId = input.again?.objectId ?? input.objectId ??
-    (await dependencies.liveDocument(operation.workspace, {path: input.path}))?.objectId;
+  const objectId =
+    input.again?.objectId ??
+    input.objectId ??
+    (await dependencies.liveDocument(operation.workspace, { path: input.path }))?.objectId;
   operation.assertCurrent();
-  const result = await actions.stop({...input, ...(objectId !== undefined ? {objectId} : {})}, operation);
-  if (objectId !== undefined) dependencies.sendRendererActivity({workspaceId: operation.workspace.workspaceId, liveDocumentStopped: objectId});
+  const result = await actions.stop(
+    { ...input, ...(objectId !== undefined ? { objectId } : {}) },
+    operation,
+  );
+  if (objectId !== undefined)
+    dependencies.sendRendererActivity({
+      workspaceId: operation.workspace.workspaceId,
+      liveDocumentStopped: objectId,
+    });
   return result;
 }
 
@@ -545,27 +987,34 @@ export function createRelaySharesIpcHandlers<
   Event extends { sender: Sender },
   Workspace extends { workspaceId: string; shareView?: unknown },
   Operation extends { workspace: Workspace; assertCurrent(): void },
->(dependencies: OwnerLiveDocumentActionDependencies<Workspace> & {
-  currentCredentials(): CloudCredentials | null;
-  warmCredentialCache(): Promise<void>;
-  relayShareJson<Result>(path: string, init?: RequestInit): Promise<Result>;
-  relayShareErrorCopy(
-    status: number,
-    data: { error?: string; code?: string } | null,
-  ): string;
-  relayShareDiscussionActivityPolls: Pick<
-    ReturnType<typeof createPresencePollRegistry>,
-    "begin" | "cancel"
-  >;
-  retryOwnerLiveQuarantine(workspace: Workspace, objectId: string, incident: string): Promise<void>;
-  saveOwnerLiveRecoveryCopy(workspace: Workspace, path: string, incident?: string): Promise<SaveOwnerLiveRecoveryCopyResult>;
-  // A grant changed on the relay. Null when the change names no workspace.
-  sharesChanged(workspaceId: string | null): void;
-  sendRendererActivity(scope: {workspaceId: string; liveDocumentStopped: string}): void;
-  // An authenticated account listing, applied to this machine's received
-  // shares so a share the owner restored resumes.
-  reconcileReceivedShares(listing: unknown): Promise<void>;
-}): OperationHandlers<typeof relayShareOperations, Event, Operation> {
+>(
+  dependencies: OwnerLiveDocumentActionDependencies<Workspace> & {
+    currentCredentials(): CloudCredentials | null;
+    warmCredentialCache(): Promise<void>;
+    relayShareJson<Result>(path: string, init?: RequestInit): Promise<Result>;
+    relayShareErrorCopy(status: number, data: { error?: string; code?: string } | null): string;
+    relayShareDiscussionActivityPolls: Pick<
+      ReturnType<typeof createPresencePollRegistry>,
+      "begin" | "cancel"
+    >;
+    retryOwnerLiveQuarantine(
+      workspace: Workspace,
+      objectId: string,
+      incident: string,
+    ): Promise<void>;
+    saveOwnerLiveRecoveryCopy(
+      workspace: Workspace,
+      path: string,
+      incident?: string,
+    ): Promise<SaveOwnerLiveRecoveryCopyResult>;
+    // A grant changed on the relay. Null when the change names no workspace.
+    sharesChanged(workspaceId: string | null): void;
+    sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
+    // An authenticated account listing, applied to this machine's received
+    // shares so a share the owner restored resumes.
+    reconcileReceivedShares(listing: unknown): Promise<void>;
+  },
+): OperationHandlers<typeof relayShareOperations, Event, Operation> {
   type Handlers = OperationHandlers<typeof relayShareOperations, Event, Operation>;
   const {
     remoteForWorkspace,
@@ -579,101 +1028,204 @@ export function createRelaySharesIpcHandlers<
     sharesChanged,
     reconcileReceivedShares,
   } = dependencies;
-  const ownerRelayShareOperation = createOwnerRelayShareOperation<Workspace, Operation, CloudCredentials>({
+  const ownerRelayShareOperation = createOwnerRelayShareOperation<
+    Workspace,
+    Operation,
+    CloudCredentials
+  >({
     remoteForWorkspace,
     credentialGeneration: currentCredentialGeneration,
   });
   // A relay call that can change who holds a grant on the workspace. The
   // share roster refreshes as soon as the relay answers, before any check
   // that this window is still current, because the change happened anyway.
-  const changingGrants = <Result>(workspaceId: string, call: () => Promise<Result>) =>
+  const changingGrants =
+    <Result>(workspaceId: string, call: () => Promise<Result>) =>
     async (): Promise<Result> => {
       const result = await call();
       sharesChanged(workspaceId);
       return result;
     };
   const listOwnerLiveRefusals: Handlers["listOwnerLiveRefusals"] = async (input, { operation }) => {
-    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
-      const after = input.after === undefined ? "" : `&after=${encodeURIComponent(input.after)}`;
-      const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
-        `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host?refusals=1${after}`));
-      const response = OwnerLiveRefusalsResult.extend({ok: z.literal(true)}).parse(result);
-      if (response.nextCursor !== null && response.nextCursor === input.after) {
-        throw new Error("The live document list changed. Refresh the list and try again.");
-      }
-      return OwnerLiveRefusalsResult.parse({refusals: response.refusals, nextCursor: response.nextCursor});
-    }, assertOriginalWorkspace);
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const after = input.after === undefined ? "" : `&after=${encodeURIComponent(input.after)}`;
+        const result = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(
+            credentials,
+            `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host?refusals=1${after}`,
+          ),
+        );
+        const response = OwnerLiveRefusalsResult.extend({ ok: z.literal(true) }).parse(result);
+        if (response.nextCursor !== null && response.nextCursor === input.after) {
+          throw new Error("The live document list changed. Refresh the list and try again.");
+        }
+        return OwnerLiveRefusalsResult.parse({
+          refusals: response.refusals,
+          nextCursor: response.nextCursor,
+        });
+      },
+      assertOriginalWorkspace,
+    );
   };
 
   const retryOwnerLiveShare: Handlers["retryOwnerLiveShare"] = async (input, { operation }) => {
-    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
-      await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
-      const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
-        `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`, {
-          method: "POST", body: JSON.stringify({shareId: input.shareId, retry: true}),
-        }));
-      const response = activeLiveDocuments.parse(result);
-      if (response.documents.some(document => document.status === "unavailable" || document.status === "paused")) {
-        throw new Error("Some documents could not start live editing. Refresh the list and try again.");
-      }
-    }, assertOriginalWorkspace);
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        await pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId));
+        const result = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(
+            credentials,
+            `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`,
+            {
+              method: "POST",
+              body: JSON.stringify({ shareId: input.shareId, retry: true }),
+            },
+          ),
+        );
+        const response = activeLiveDocuments.parse(result);
+        if (
+          response.documents.some(
+            (document) => document.status === "unavailable" || document.status === "paused",
+          )
+        ) {
+          throw new Error(
+            "Some documents could not start live editing. Refresh the list and try again.",
+          );
+        }
+      },
+      assertOriginalWorkspace,
+    );
   };
 
   const ownerLiveDocuments = createOwnerLiveDocumentActions<Workspace, Operation>(dependencies);
 
   const ownerRestore: Handlers["ownerRestore"] = async (input, { operation }) => {
-    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
-      const prefix = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-restores`;
-      let path: string, body: unknown;
-      if (input.action === "options") {
-        path = `${prefix}/options`; body = {path: input.path, ...(input.beforeCursor === undefined ? {} : {beforeCursor: input.beforeCursor}),
-          ...(input.grantCursor === undefined ? {} : {grantCursor: input.grantCursor})};
-      } else if (input.action === "plan") {
-        if (input.document.workspaceId !== input.workspaceId) throw new Error("The restore belongs to another workspace.");
-        path = `${prefix}/plan`; body = {document: input.document, shareId: input.shareId, grantId: input.grantId,
-          restorePointCursor: input.restorePointCursor, restorePointReceiptDigest: input.restorePointReceiptDigest};
-      } else if (input.action === "begin") {
-        if (input.intent.document.workspaceId !== input.workspaceId) throw new Error("The restore belongs to another workspace.");
-        path = prefix; body = {intent: input.intent};
-      } else if (input.action === "unfinished") {
-        path = `${prefix}/unfinished${input.after === undefined ? "" : `?after=${encodeURIComponent(input.after)}`}`; body = undefined;
-      } else {
-        path = `${prefix}/${encodeURIComponent(input.operationId)}${input.action === "status" ? "" : `/${input.action}`}`;
-        body = input.action === "status" ? undefined : input.action === "confirm" ? {proposalDigest: input.proposalDigest} : {};
-      }
-      const raw = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials, path,
-        body === undefined ? undefined : {method: "POST", body: JSON.stringify(body)}, {retainRestoreConflict: true}));
-      // The relay answered this account as the workspace's owner.
-      const result = input.action === "review"
-        ? {...OwnerRestoreRelayReview.parse(raw), owner: {userId: credentials.userId, email: credentials.email}}
-        : OwnerRestoreActionResponse[input.action].parse(raw);
-      const coordinate = "status" in result ? result.status : "intent" in result ? result.intent : result;
-      if ("document" in coordinate && coordinate.document.workspaceId !== input.workspaceId) throw new Error("The restore response belongs to another workspace.");
-      if ("operationId" in input && "operationId" in coordinate && coordinate.operationId !== input.operationId) throw new Error("The restore response belongs to another operation.");
-      const documentKey = (value: {workspaceId: string; mainVersionId: string; objectId: string; lineageClaimId: string}) =>
-        JSON.stringify([value.workspaceId, value.mainVersionId, value.objectId, value.lineageClaimId]);
-      if (input.action === "options" && "path" in result && result.path !== input.path) throw new Error("The restore response belongs to another file.");
-      if (input.action === "plan" && "intent" in result && (
-        documentKey(result.intent.document) !== documentKey(input.document) || result.intent.shareId !== input.shareId || result.intent.grantId !== input.grantId ||
-        result.intent.restorePointCursor !== input.restorePointCursor || result.intent.restorePointReceiptDigest !== input.restorePointReceiptDigest)) {
-        throw new Error("The selected restore point or access changed. Review it again.");
-      }
-      if (input.action === "begin" && "intent" in result && JSON.stringify(result.intent) !== JSON.stringify(input.intent)) {
-        throw new Error("The restore response belongs to another operation.");
-      }
-      if ("status" in result && result.status.operationId !== result.status.intent.operationId) throw new Error("The restore status changed. Review it again.");
-      if (input.action === "review" && "result" in result && result.result && "binding" in result.result &&
-        (result.result.operationId !== input.operationId || result.result.workspaceId !== input.workspaceId ||
-          documentKey(result.result.binding) !== documentKey(result.status.document))) throw new Error("The restore review belongs to another file.");
-      return result;
-    }, assertOriginalWorkspace);
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const prefix = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-restores`;
+        let path: string, body: unknown;
+        if (input.action === "options") {
+          path = `${prefix}/options`;
+          body = {
+            path: input.path,
+            ...(input.beforeCursor === undefined ? {} : { beforeCursor: input.beforeCursor }),
+            ...(input.grantCursor === undefined ? {} : { grantCursor: input.grantCursor }),
+          };
+        } else if (input.action === "plan") {
+          if (input.document.workspaceId !== input.workspaceId)
+            throw new Error("The restore belongs to another workspace.");
+          path = `${prefix}/plan`;
+          body = {
+            document: input.document,
+            shareId: input.shareId,
+            grantId: input.grantId,
+            restorePointCursor: input.restorePointCursor,
+            restorePointReceiptDigest: input.restorePointReceiptDigest,
+          };
+        } else if (input.action === "begin") {
+          if (input.intent.document.workspaceId !== input.workspaceId)
+            throw new Error("The restore belongs to another workspace.");
+          path = prefix;
+          body = { intent: input.intent };
+        } else if (input.action === "unfinished") {
+          path = `${prefix}/unfinished${input.after === undefined ? "" : `?after=${encodeURIComponent(input.after)}`}`;
+          body = undefined;
+        } else {
+          path = `${prefix}/${encodeURIComponent(input.operationId)}${input.action === "status" ? "" : `/${input.action}`}`;
+          body =
+            input.action === "status"
+              ? undefined
+              : input.action === "confirm"
+                ? { proposalDigest: input.proposalDigest }
+                : {};
+        }
+        const raw = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(
+            credentials,
+            path,
+            body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) },
+            { retainRestoreConflict: true },
+          ),
+        );
+        // The relay answered this account as the workspace's owner.
+        const result =
+          input.action === "review"
+            ? {
+                ...OwnerRestoreRelayReview.parse(raw),
+                owner: { userId: credentials.userId, email: credentials.email },
+              }
+            : OwnerRestoreActionResponse[input.action].parse(raw);
+        const coordinate =
+          "status" in result ? result.status : "intent" in result ? result.intent : result;
+        if ("document" in coordinate && coordinate.document.workspaceId !== input.workspaceId)
+          throw new Error("The restore response belongs to another workspace.");
+        if (
+          "operationId" in input &&
+          "operationId" in coordinate &&
+          coordinate.operationId !== input.operationId
+        )
+          throw new Error("The restore response belongs to another operation.");
+        const documentKey = (value: {
+          workspaceId: string;
+          mainVersionId: string;
+          objectId: string;
+          lineageClaimId: string;
+        }) =>
+          JSON.stringify([
+            value.workspaceId,
+            value.mainVersionId,
+            value.objectId,
+            value.lineageClaimId,
+          ]);
+        if (input.action === "options" && "path" in result && result.path !== input.path)
+          throw new Error("The restore response belongs to another file.");
+        if (
+          input.action === "plan" &&
+          "intent" in result &&
+          (documentKey(result.intent.document) !== documentKey(input.document) ||
+            result.intent.shareId !== input.shareId ||
+            result.intent.grantId !== input.grantId ||
+            result.intent.restorePointCursor !== input.restorePointCursor ||
+            result.intent.restorePointReceiptDigest !== input.restorePointReceiptDigest)
+        ) {
+          throw new Error("The selected restore point or access changed. Review it again.");
+        }
+        if (
+          input.action === "begin" &&
+          "intent" in result &&
+          JSON.stringify(result.intent) !== JSON.stringify(input.intent)
+        ) {
+          throw new Error("The restore response belongs to another operation.");
+        }
+        if ("status" in result && result.status.operationId !== result.status.intent.operationId)
+          throw new Error("The restore status changed. Review it again.");
+        if (
+          input.action === "review" &&
+          "result" in result &&
+          result.result &&
+          "binding" in result.result &&
+          (result.result.operationId !== input.operationId ||
+            result.result.workspaceId !== input.workspaceId ||
+            documentKey(result.result.binding) !== documentKey(result.status.document))
+        )
+          throw new Error("The restore review belongs to another file.");
+        return result;
+      },
+      assertOriginalWorkspace,
+    );
   };
 
   // ---- Relay shares ----
 
   // Edit access hosts the shared notes for live editing.
   const beforeEditHosting = (operation: Operation, access: string) =>
-    access === "edit" ? pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId)) : Promise.resolve();
+    access === "edit"
+      ? pushRecordedFirst(() => dependencies.pushRecorded(operation.workspace.workspaceId))
+      : Promise.resolve();
 
   // Grant side: create a share on the SYNC RELAY for a synced workspace.
   // Selector validation (secret refusal, traversal, caps) is server-side —
@@ -695,11 +1247,13 @@ export function createRelaySharesIpcHandlers<
       async (operation, credentials, session) => {
         await beforeEditHosting(operation, input.access);
         const workspace = operation.workspace;
-        const created = await session.run(changingGrants(workspace.workspaceId, () =>
-          relayShareJsonWithCredentials<{ shareId: string; grantId: string; browserInvitationUrl?: string }>(
-            credentials,
-            `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
-            {
+        const created = await session.run(
+          changingGrants(workspace.workspaceId, () =>
+            relayShareJsonWithCredentials<{
+              shareId: string;
+              grantId: string;
+              browserInvitationUrl?: string;
+            }>(credentials, `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`, {
               method: "POST",
               body: JSON.stringify({
                 recipientEmail: input.recipientEmail,
@@ -707,9 +1261,9 @@ export function createRelaySharesIpcHandlers<
                 ...(input.paths ? { paths: input.paths } : {}),
                 ...(input.versionId ? { versionId: input.versionId } : {}),
               }),
-            },
+            }),
           ),
-        ));
+        );
         const shareCode = buildShareCode({
           shareId: created.shareId,
           relayUrl: credentials.relayUrl!,
@@ -730,15 +1284,18 @@ export function createRelaySharesIpcHandlers<
     await warmCredentialCache();
     const capturedGeneration = currentCredentialGeneration();
     const result = await awaitCredentialGeneration({
-      capturedGeneration, currentGeneration: currentCredentialGeneration,
-      run: () => relayShareJson<{
-        granted: Array<Record<string, unknown>>;
-        received?: Array<Record<string, unknown>>;
-        removed?: unknown;
-      }>("/sync/shares"),
+      capturedGeneration,
+      currentGeneration: currentCredentialGeneration,
+      run: () =>
+        relayShareJson<{
+          granted: Array<Record<string, unknown>>;
+          received?: Array<Record<string, unknown>>;
+          removed?: unknown;
+        }>("/sync/shares"),
     });
     await awaitCredentialGeneration({
-      capturedGeneration, currentGeneration: currentCredentialGeneration,
+      capturedGeneration,
+      currentGeneration: currentCredentialGeneration,
       run: () => reconcileReceivedShares(result),
     });
     const relayUrl = currentCredentials()?.relayUrl;
@@ -775,14 +1332,13 @@ export function createRelaySharesIpcHandlers<
     if (result.kind === "missing") {
       if (!result.removed) return GetRelayReceivedShareResult.parse({ found: false });
       return GetRelayReceivedShareResult.parse({
-        found: false, removed: { message: "The owner removed your access." },
+        found: false,
+        removed: { message: "The owner removed your access." },
       });
     }
     const body = result.body;
     const row: Record<string, unknown> =
-      body !== null && typeof body === "object" && !Array.isArray(body)
-        ? { ...body }
-        : {};
+      body !== null && typeof body === "object" && !Array.isArray(body) ? { ...body } : {};
     if (row.shareId !== input.shareId) {
       throw new Error("Invalid exact received share response.");
     }
@@ -923,25 +1479,25 @@ export function createRelaySharesIpcHandlers<
       async (operation, credentials, session) => {
         await beforeEditHosting(operation, input.access);
         // A new level applies to the link's dependents too.
-        const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
-          relayShareJsonWithCredentials<unknown>(
-            credentials,
-            `/sync/shares/${encodeURIComponent(input.shareId)}/links/${encodeURIComponent(input.grantId)}/retune`,
-            {
-              method: "POST",
-              body: JSON.stringify({
-                workspaceId: operation.workspace.workspaceId,
-                access: input.access,
-                expectedDependentGrantIds: input.expectedDependentGrantIds,
-              }),
-            },
-            { retainDependentSetConflict: true },
+        const relayResult = await session.run(
+          changingGrants(operation.workspace.workspaceId, () =>
+            relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/links/${encodeURIComponent(input.grantId)}/retune`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  access: input.access,
+                  expectedDependentGrantIds: input.expectedDependentGrantIds,
+                }),
+              },
+              { retainDependentSetConflict: true },
+            ),
           ),
-        ));
+        );
         if (relayResult.kind === "dependents-changed") {
-          const conflict = RelayShareLinkDependentConflict.safeParse(
-            relayResult.body,
-          );
+          const conflict = RelayShareLinkDependentConflict.safeParse(relayResult.body);
           if (!conflict.success) {
             throw new Error(relayShareErrorCopy(relayResult.status, null));
           }
@@ -950,9 +1506,7 @@ export function createRelaySharesIpcHandlers<
             dependents: conflict.data.dependents,
           });
         }
-        const widened = RelayShareLinkRetuneWidenResponse.safeParse(
-          relayResult.body,
-        );
+        const widened = RelayShareLinkRetuneWidenResponse.safeParse(relayResult.body);
         if (widened.success) {
           if (widened.data.access !== input.access) {
             throw new Error(relayShareErrorCopy(500, null));
@@ -962,9 +1516,7 @@ export function createRelaySharesIpcHandlers<
             url: widened.data.url,
           });
         }
-        const narrowed = RelayShareLinkRetuneNarrowResponse.safeParse(
-          relayResult.body,
-        );
+        const narrowed = RelayShareLinkRetuneNarrowResponse.safeParse(relayResult.body);
         if (!narrowed.success || narrowed.data.access !== input.access) {
           throw new Error(relayShareErrorCopy(500, null));
         }
@@ -993,9 +1545,7 @@ export function createRelaySharesIpcHandlers<
           ),
         );
         if (relayResult.kind === "dependents-changed") {
-          const conflict = RelayShareLinkDependentConflict.safeParse(
-            relayResult.body,
-          );
+          const conflict = RelayShareLinkDependentConflict.safeParse(relayResult.body);
           if (!conflict.success) {
             throw new Error(relayShareErrorCopy(relayResult.status, null));
           }
@@ -1022,25 +1572,25 @@ export function createRelaySharesIpcHandlers<
       operation,
       async (operation, credentials, session) => {
         // Ending a link ends its dependents.
-        const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
-          relayShareJsonWithCredentials<unknown>(
-            credentials,
-            `/sync/shares/${encodeURIComponent(input.shareId)}/revoke`,
-            {
-              method: "POST",
-              body: JSON.stringify({
-                grantId: input.grantId,
-                workspaceId: operation.workspace.workspaceId,
-                expectedDependentGrantIds: input.expectedDependentGrantIds,
-              }),
-            },
-            { retainDependentSetConflict: true },
+        const relayResult = await session.run(
+          changingGrants(operation.workspace.workspaceId, () =>
+            relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/revoke`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  grantId: input.grantId,
+                  workspaceId: operation.workspace.workspaceId,
+                  expectedDependentGrantIds: input.expectedDependentGrantIds,
+                }),
+              },
+              { retainDependentSetConflict: true },
+            ),
           ),
-        ));
+        );
         if (relayResult.kind === "dependents-changed") {
-          const conflict = RelayShareLinkDependentConflict.safeParse(
-            relayResult.body,
-          );
+          const conflict = RelayShareLinkDependentConflict.safeParse(relayResult.body);
           if (!conflict.success) {
             throw new Error(relayShareErrorCopy(relayResult.status, null));
           }
@@ -1068,12 +1618,19 @@ export function createRelaySharesIpcHandlers<
     relayJson: relayShareJsonWithCredentials,
     relayShareErrorCopy,
   });
-  const listRelayShareLinkAgents: Handlers["listRelayShareLinkAgents"] = ({ workspaceId: _workspaceId, ...input }, { operation }) =>
-    linkAgents.list(operation, input);
-  const disconnectRelayShareLinkAgent: Handlers["disconnectRelayShareLinkAgent"] = ({ workspaceId: _workspaceId, ...input }, { operation }) =>
-    linkAgents.disconnect(operation, input);
+  const listRelayShareLinkAgents: Handlers["listRelayShareLinkAgents"] = (
+    { workspaceId: _workspaceId, ...input },
+    { operation },
+  ) => linkAgents.list(operation, input);
+  const disconnectRelayShareLinkAgent: Handlers["disconnectRelayShareLinkAgent"] = (
+    { workspaceId: _workspaceId, ...input },
+    { operation },
+  ) => linkAgents.disconnect(operation, input);
 
-  const listRelayShareDiscussion: Handlers["listRelayShareDiscussion"] = async (input, { operation }) => {
+  const listRelayShareDiscussion: Handlers["listRelayShareDiscussion"] = async (
+    input,
+    { operation },
+  ) => {
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
@@ -1099,25 +1656,22 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
-  const pollRelayShareDiscussionActivity: Handlers["pollRelayShareDiscussionActivity"] = async (input, { event, operation }) => {
+  const pollRelayShareDiscussionActivity: Handlers["pollRelayShareDiscussionActivity"] = async (
+    input,
+    { event, operation },
+  ) => {
     const poll = relayShareDiscussionActivityPolls.begin(
       event.sender.id,
       input.pollId,
       JSON.stringify([input.workspaceId, input.shareId]),
     );
-    const safety = setTimeout(
-      () => poll.abort(),
-      RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS,
-    );
+    const safety = setTimeout(() => poll.abort(), RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS);
     try {
       operation.assertCurrent();
       if (shareViewIsPresent(operation.workspace.shareView)) {
-        throw new Error(
-          "This is a shared view — only the original workspace can be shared.",
-        );
+        throw new Error("This is a shared view — only the original workspace can be shared.");
       }
-      const { credentials, credentialGeneration } =
-        await remoteForWorkspace(operation.workspace);
+      const { credentials, credentialGeneration } = await remoteForWorkspace(operation.workspace);
       operation.assertCurrent();
       if (poll.signal.aborted) throw new Error("aborted");
       const relayResult = await awaitCredentialGeneration({
@@ -1135,8 +1689,7 @@ export function createRelaySharesIpcHandlers<
       });
       operation.assertCurrent();
       if (poll.signal.aborted) throw new Error("aborted");
-      const parsed =
-        RelayShareDiscussionActivityResponse.safeParse(relayResult);
+      const parsed = RelayShareDiscussionActivityResponse.safeParse(relayResult);
       if (!parsed.success) {
         throw new Error(relayShareErrorCopy(500, null));
       }
@@ -1159,12 +1712,18 @@ export function createRelaySharesIpcHandlers<
     }
   };
 
-  const cancelRelayShareDiscussionActivity: Handlers["cancelRelayShareDiscussionActivity"] = (input, { event }) => {
+  const cancelRelayShareDiscussionActivity: Handlers["cancelRelayShareDiscussionActivity"] = (
+    input,
+    { event },
+  ) => {
     relayShareDiscussionActivityPolls.cancel(event.sender.id, input.pollId);
     return undefined;
   };
 
-  const appendRelayShareDiscussion: Handlers["appendRelayShareDiscussion"] = async (input, { operation }) => {
+  const appendRelayShareDiscussion: Handlers["appendRelayShareDiscussion"] = async (
+    input,
+    { operation },
+  ) => {
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
@@ -1194,7 +1753,10 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
-  const deleteRelayShareDiscussionMessage: Handlers["deleteRelayShareDiscussionMessage"] = async (input, { operation }) => {
+  const deleteRelayShareDiscussionMessage: Handlers["deleteRelayShareDiscussionMessage"] = async (
+    input,
+    { operation },
+  ) => {
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
@@ -1212,8 +1774,7 @@ export function createRelaySharesIpcHandlers<
             },
           ),
         );
-        const parsed =
-          RelayShareDiscussionDeleteResponse.safeParse(relayResult);
+        const parsed = RelayShareDiscussionDeleteResponse.safeParse(relayResult);
         if (!parsed.success) {
           throw new Error(relayShareErrorCopy(500, null));
         }
@@ -1225,7 +1786,10 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
-  const blockRelayShareDiscussionPrincipal: Handlers["blockRelayShareDiscussionPrincipal"] = async (input, { operation }) => {
+  const blockRelayShareDiscussionPrincipal: Handlers["blockRelayShareDiscussionPrincipal"] = async (
+    input,
+    { operation },
+  ) => {
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
@@ -1255,37 +1819,41 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
-  const unblockRelayShareDiscussionPrincipal: Handlers["unblockRelayShareDiscussionPrincipal"] = async (input, { operation }) => {
-    return ownerRelayShareOperation(
-      operation,
-      async (operation, credentials, session) => {
-        const relayResult = await session.run(() =>
-          relayShareJsonWithCredentials<unknown>(
-            credentials,
-            `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
-            {
-              method: "POST",
-              body: JSON.stringify({
-                workspaceId: operation.workspace.workspaceId,
-                action: "unblock",
-                principalId: input.principalId,
-              }),
-            },
-          ),
-        );
-        const parsed = RelayShareDiscussionBlockResponse.safeParse(relayResult);
-        if (!parsed.success || parsed.data.blocked) {
-          throw new Error(relayShareErrorCopy(500, null));
-        }
-        return UnblockRelayShareDiscussionPrincipalResult.parse({
-          blocked: false,
-        });
-      },
-      assertOriginalWorkspace,
-    );
-  };
+  const unblockRelayShareDiscussionPrincipal: Handlers["unblockRelayShareDiscussionPrincipal"] =
+    async (input, { operation }) => {
+      return ownerRelayShareOperation(
+        operation,
+        async (operation, credentials, session) => {
+          const relayResult = await session.run(() =>
+            relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  action: "unblock",
+                  principalId: input.principalId,
+                }),
+              },
+            ),
+          );
+          const parsed = RelayShareDiscussionBlockResponse.safeParse(relayResult);
+          if (!parsed.success || parsed.data.blocked) {
+            throw new Error(relayShareErrorCopy(500, null));
+          }
+          return UnblockRelayShareDiscussionPrincipalResult.parse({
+            blocked: false,
+          });
+        },
+        assertOriginalWorkspace,
+      );
+    };
 
-  const pauseRelayShareDiscussion: Handlers["pauseRelayShareDiscussion"] = async (input, { operation }) => {
+  const pauseRelayShareDiscussion: Handlers["pauseRelayShareDiscussion"] = async (
+    input,
+    { operation },
+  ) => {
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
@@ -1314,7 +1882,10 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
-  const resumeRelayShareDiscussion: Handlers["resumeRelayShareDiscussion"] = async (input, { operation }) => {
+  const resumeRelayShareDiscussion: Handlers["resumeRelayShareDiscussion"] = async (
+    input,
+    { operation },
+  ) => {
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
@@ -1343,24 +1914,29 @@ export function createRelaySharesIpcHandlers<
     );
   };
 
-  const promoteRelayShareGrant: Handlers["promoteRelayShareGrant"] = async (input, { operation }) => {
+  const promoteRelayShareGrant: Handlers["promoteRelayShareGrant"] = async (
+    input,
+    { operation },
+  ) => {
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
-        const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
-          relayShareJsonWithCredentials<unknown>(
-            credentials,
-            `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/promote`,
-            {
-              method: "POST",
-              body: JSON.stringify({
-                workspaceId: operation.workspace.workspaceId,
-                expectedParentGrantId: input.expectedParentGrantId,
-                expectedParentGeneration: input.expectedParentGeneration,
-              }),
-            },
+        const relayResult = await session.run(
+          changingGrants(operation.workspace.workspaceId, () =>
+            relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/promote`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                  expectedParentGrantId: input.expectedParentGrantId,
+                  expectedParentGeneration: input.expectedParentGeneration,
+                }),
+              },
+            ),
           ),
-        ));
+        );
         const parsed = RelayShareGrantPromotionResponse.safeParse(relayResult);
         if (!parsed.success) {
           throw new Error(relayShareErrorCopy(500, null));
@@ -1382,18 +1958,20 @@ export function createRelaySharesIpcHandlers<
     return ownerRelayShareOperation(
       operation,
       async (operation, credentials, session) => {
-        const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
-          relayShareJsonWithCredentials<unknown>(
-            credentials,
-            `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/revoke`,
-            {
-              method: "POST",
-              body: JSON.stringify({
-                workspaceId: operation.workspace.workspaceId,
-              }),
-            },
+        const relayResult = await session.run(
+          changingGrants(operation.workspace.workspaceId, () =>
+            relayShareJsonWithCredentials<unknown>(
+              credentials,
+              `/sync/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/revoke`,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  workspaceId: operation.workspace.workspaceId,
+                }),
+              },
+            ),
           ),
-        ));
+        );
         const parsed = RelayShareGrantRevokeResponse.safeParse(relayResult);
         if (!parsed.success) {
           throw new Error(relayShareErrorCopy(500, null));
@@ -1418,19 +1996,39 @@ export function createRelaySharesIpcHandlers<
     listOwnerLiveDocuments: (input, { operation }) => ownerLiveDocuments.list(input, operation),
     listOwnerLiveRefusals,
     retryOwnerLiveShare,
-    stopOwnerLiveDocument: (input, { operation }) => stopNamedOwnerLiveDocument(ownerLiveDocuments, dependencies, {...input, author: dependencies.person?.()}, operation),
-    resumeOwnerLiveDocument: async (input, { operation }) => {await ownerLiveDocuments.resume({...input, author: dependencies.person?.()}, operation);},
+    stopOwnerLiveDocument: (input, { operation }) =>
+      stopNamedOwnerLiveDocument(
+        ownerLiveDocuments,
+        dependencies,
+        { ...input, author: dependencies.person?.() },
+        operation,
+      ),
+    resumeOwnerLiveDocument: async (input, { operation }) => {
+      await ownerLiveDocuments.resume({ ...input, author: dependencies.person?.() }, operation);
+    },
     retryOwnerLiveQuarantine: async (input, { operation }) => {
-      operation.assertCurrent(); assertOriginalWorkspace(operation.workspace);
-      await dependencies.retryOwnerLiveQuarantine(operation.workspace, input.objectId, input.incident);
+      operation.assertCurrent();
+      assertOriginalWorkspace(operation.workspace);
+      await dependencies.retryOwnerLiveQuarantine(
+        operation.workspace,
+        input.objectId,
+        input.incident,
+      );
       operation.assertCurrent();
     },
     // Main finds the kept edits from the path, and the row's incident, in
     // this computer's own state; the renderer names nothing else. It works
     // while live editing is stopped.
     saveOwnerLiveRecoveryCopy: async (input, { operation }) => {
-      operation.assertCurrent(); assertOriginalWorkspace(operation.workspace);
-      const saved = SaveOwnerLiveRecoveryCopyResult.parse(await dependencies.saveOwnerLiveRecoveryCopy(operation.workspace, input.path, input.incident));
+      operation.assertCurrent();
+      assertOriginalWorkspace(operation.workspace);
+      const saved = SaveOwnerLiveRecoveryCopyResult.parse(
+        await dependencies.saveOwnerLiveRecoveryCopy(
+          operation.workspace,
+          input.path,
+          input.incident,
+        ),
+      );
       operation.assertCurrent();
       return saved;
     },

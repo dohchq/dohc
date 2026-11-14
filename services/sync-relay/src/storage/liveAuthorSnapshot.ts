@@ -1,6 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext, type LiveAuthorEntry, type LiveAuthorSnapshot } from "@dohc/live-session-contract";
-import { admitsLiveAuthorship, parseLiveUpdateIdentifier, type ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
+import {
+  parseLiveAuthorContext,
+  parseLiveAuthorSnapshot,
+  type LiveAuthorContext,
+  type LiveAuthorEntry,
+  type LiveAuthorSnapshot,
+} from "@dohc/live-session-contract";
+import {
+  admitsLiveAuthorship,
+  parseLiveUpdateIdentifier,
+  type ServerDerivedLiveUpdateAuthority,
+} from "@dohc/live-session-contract/live-update-admission";
 import { isPersonalAgentId } from "../relayLogInputs";
 import type { StorageContext } from "./context";
 import { assertWorkspaceQuota, workspaceOwner } from "./workspaces";
@@ -11,23 +21,42 @@ export interface TrustedLiveAccount {
 }
 
 /** The caller holds the transaction that admits the update or enrolls the link principal. */
-export function ensureLiveLinkPublicPrincipal(storage: StorageContext, authority: Extract<ServerDerivedLiveUpdateAuthority, {principalKind: "named" | "link"}>): string {
+export function ensureLiveLinkPublicPrincipal(
+  storage: StorageContext,
+  authority: Extract<ServerDerivedLiveUpdateAuthority, { principalKind: "named" | "link" }>,
+): string {
   if (authority.principalKind !== "link") throw new TypeError("A link principal is required.");
   const principal = storage.getLinkPrincipal(authority.principalId);
   const grant = storage.getShareGrant(authority.grantId);
   const share = grant && storage.getShare(grant.shareId);
-  if (!principal || principal.grantId !== authority.grantId || grant?.principalKind !== "link" || !share) throw new TypeError("The enrolled link principal is unavailable.");
-  const mapping = storage.db.prepare("SELECT workspace_id,public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?")
-    .get(authority.grantId,authority.principalId);
+  if (
+    !principal ||
+    principal.grantId !== authority.grantId ||
+    grant?.principalKind !== "link" ||
+    !share
+  )
+    throw new TypeError("The enrolled link principal is unavailable.");
+  const mapping = storage.db
+    .prepare(
+      "SELECT workspace_id,public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?",
+    )
+    .get(authority.grantId, authority.principalId);
   if (mapping) {
-    if (mapping.workspace_id !== share.workspaceId) throw new Error("The public link principal mapping is damaged.");
+    if (mapping.workspace_id !== share.workspaceId)
+      throw new Error("The public link principal mapping is damaged.");
     return parseLiveUpdateIdentifier(mapping.public_principal_id);
   }
   const publicId = `public_${randomUUID()}`;
-  const storageBytes = Buffer.byteLength(JSON.stringify([share.workspaceId,authority.grantId,authority.principalId,publicId]))+128;
-  assertWorkspaceQuota(storage,share.workspaceId,storageBytes);
-  storage.db.prepare("INSERT INTO sync_relay_app_public_principals(workspace_id,grant_id,principal_id,public_principal_id,storage_bytes) VALUES(?,?,?,?,?)")
-    .run(share.workspaceId,authority.grantId,authority.principalId,publicId,storageBytes);
+  const storageBytes =
+    Buffer.byteLength(
+      JSON.stringify([share.workspaceId, authority.grantId, authority.principalId, publicId]),
+    ) + 128;
+  assertWorkspaceQuota(storage, share.workspaceId, storageBytes);
+  storage.db
+    .prepare(
+      "INSERT INTO sync_relay_app_public_principals(workspace_id,grant_id,principal_id,public_principal_id,storage_bytes) VALUES(?,?,?,?,?)",
+    )
+    .run(share.workspaceId, authority.grantId, authority.principalId, publicId, storageBytes);
   return publicId;
 }
 
@@ -39,7 +68,10 @@ export function ensureLiveLinkPublicPrincipal(storage: StorageContext, authority
 export function claimsPersonalAgent(recordingContext: LiveAuthorContext | undefined): boolean {
   if (recordingContext === undefined) return false;
   const context = parseLiveAuthorContext(recordingContext);
-  return (context.kind === "account" || context.kind === "link") && isPersonalAgentId(context.agent?.agentId);
+  return (
+    (context.kind === "account" || context.kind === "link") &&
+    isPersonalAgentId(context.agent?.agentId)
+  );
 }
 
 /**
@@ -47,44 +79,81 @@ export function claimsPersonalAgent(recordingContext: LiveAuthorContext | undefi
  * earns a snapshot. Callers refuse a context that `claimsPersonalAgent` first.
  * A personal agent's snapshot comes from its authority, never from a context.
  */
-export function deriveLiveAuthorSnapshot(storage: StorageContext, authority: ServerDerivedLiveUpdateAuthority,
-  recordingContext: LiveAuthorContext | undefined, trustedAccount?: TrustedLiveAccount): LiveAuthorSnapshot {
-  if (authority.principalKind === "personal") throw new TypeError("A personal agent's snapshot comes from its authority.");
+export function deriveLiveAuthorSnapshot(
+  storage: StorageContext,
+  authority: ServerDerivedLiveUpdateAuthority,
+  recordingContext: LiveAuthorContext | undefined,
+  trustedAccount?: TrustedLiveAccount,
+): LiveAuthorSnapshot {
+  if (authority.principalKind === "personal")
+    throw new TypeError("A personal agent's snapshot comes from its authority.");
   if (recordingContext === undefined) return [];
-  if (claimsPersonalAgent(recordingContext)) throw new TypeError("A recording context cannot declare a personal agent.");
+  if (claimsPersonalAgent(recordingContext))
+    throw new TypeError("A recording context cannot declare a personal agent.");
   const context = parseLiveAuthorContext(recordingContext);
   const authors: LiveAuthorEntry[] = [];
   if (context.kind === "account") {
-    if (authority.principalKind === "link" || context.accountId !== authority.principalId ||
-        trustedAccount?.accountId !== authority.principalId) return [];
+    if (
+      authority.principalKind === "link" ||
+      context.accountId !== authority.principalId ||
+      trustedAccount?.accountId !== authority.principalId
+    )
+      return [];
     let humanName = trustedAccount.name;
-    try { parseLiveUpdateIdentifier(humanName); } catch { humanName = "Unnamed"; }
-    authors.push({kind: "human",humanId: trustedAccount.accountId,humanName});
+    try {
+      parseLiveUpdateIdentifier(humanName);
+    } catch {
+      humanName = "Unnamed";
+    }
+    authors.push({ kind: "human", humanId: trustedAccount.accountId, humanName });
   } else if (context.kind === "link") {
     if (authority.principalKind !== "link") return [];
-    const mapping = storage.db.prepare("SELECT public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?")
-      .get(authority.grantId,authority.principalId);
+    const mapping = storage.db
+      .prepare(
+        "SELECT public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?",
+      )
+      .get(authority.grantId, authority.principalId);
     if (!mapping || context.publicPrincipalId !== mapping.public_principal_id) return [];
     const principal = storage.getLinkPrincipal(authority.principalId);
-    if (!principal || principal.grantId !== authority.grantId) throw new Error("The enrolled link principal changed.");
-    authors.push({kind: "link",publicPrincipalId: context.publicPrincipalId,label: principal.displayName ?? "Anonymous"});
+    if (!principal || principal.grantId !== authority.grantId)
+      throw new Error("The enrolled link principal changed.");
+    authors.push({
+      kind: "link",
+      publicPrincipalId: context.publicPrincipalId,
+      label: principal.displayName ?? "Anonymous",
+    });
   } else return [];
-  if (context.agent) authors.push({kind: "agent",...context.agent,
-    onBehalfOf: context.kind === "link" ? context.publicPrincipalId : authority.principalId});
+  if (context.agent)
+    authors.push({
+      kind: "agent",
+      ...context.agent,
+      onBehalfOf: context.kind === "link" ? context.publicPrincipalId : authority.principalId,
+    });
   return parseLiveAuthorSnapshot(authors);
 }
 
 /**
  * A personal agent's snapshot, from its authority alone: the agent, by the
- * name it has now, on behalf of the account that owns it. An agent the relay
- * doesn't know gets none, which admission refuses.
+ * name it has now, on behalf of the account that owns it. It names no depth,
+ * as History names none for an agent at depth 0. An agent the relay doesn't
+ * know gets none, which admission refuses.
  */
-export function personalLiveAuthorSnapshot(storage: StorageContext,
-  authority: Extract<ServerDerivedLiveUpdateAuthority, {principalKind: "personal"}>): LiveAuthorSnapshot {
-  const agent = storage.db.prepare("SELECT owner_user_id,name FROM sync_relay_personal_agents WHERE agent_id=?").get(authority.principalId);
+export function personalLiveAuthorSnapshot(
+  storage: StorageContext,
+  authority: Extract<ServerDerivedLiveUpdateAuthority, { principalKind: "personal" }>,
+): LiveAuthorSnapshot {
+  const agent = storage.db
+    .prepare("SELECT owner_user_id,name FROM sync_relay_personal_agents WHERE agent_id=?")
+    .get(authority.principalId);
   if (!agent) return [];
-  return parseLiveAuthorSnapshot([{kind: "agent", agentId: authority.principalId, agentName: String(agent.name),
-    onBehalfOf: String(agent.owner_user_id), depth: 0}]);
+  return parseLiveAuthorSnapshot([
+    {
+      kind: "agent",
+      agentId: authority.principalId,
+      agentName: String(agent.name),
+      onBehalfOf: String(agent.owner_user_id),
+    },
+  ]);
 }
 
 /**
@@ -92,8 +161,12 @@ export function personalLiveAuthorSnapshot(storage: StorageContext,
  * `authority`. A personal agent edits only in its owner's workspace, so it
  * acts on behalf of that workspace's owner.
  */
-export function admitsWorkspaceLiveAuthorship(storage: StorageContext, workspaceId: string,
-  authority: ServerDerivedLiveUpdateAuthority, authors: LiveAuthorSnapshot): boolean {
+export function admitsWorkspaceLiveAuthorship(
+  storage: StorageContext,
+  workspaceId: string,
+  authority: ServerDerivedLiveUpdateAuthority,
+  authors: LiveAuthorSnapshot,
+): boolean {
   if (!admitsLiveAuthorship(authority, authors)) return false;
   if (authority.principalKind !== "personal") return true;
   const [agent] = authors;

@@ -5,25 +5,18 @@ import { Plugin, PluginKey } from "@tiptap/pm/state";
 
 const SKIP_TRAILING_NODE_META = "skipTrailingNode";
 
-export function canAppendTrailingNode(
-  doc: ProseMirrorNode,
-  nodeType: NodeType,
-): boolean {
+export function canAppendTrailingNode(doc: ProseMirrorNode, nodeType: NodeType): boolean {
   const trailingNode = nodeType.createAndFill();
   if (!trailingNode) return false;
 
   // Markdown and Y.Doc updates can briefly expose a structurally incomplete
   // document while an editor is being replaced. ProseMirror's canReplace()
   // assumes the existing document is valid and throws from contentMatchAt()
-  // otherwise, which used to tear down the entire React renderer.
+  // otherwise, which would tear down the entire React renderer.
   if (!doc.type.validContent(doc.content)) return false;
 
   try {
-    return doc.canReplace(
-      doc.childCount,
-      doc.childCount,
-      Fragment.from(trailingNode),
-    );
+    return doc.canReplace(doc.childCount, doc.childCount, Fragment.from(trailingNode));
   } catch {
     return false;
   }
@@ -43,10 +36,7 @@ export const SafeTrailingNode = Extension.create({
     const pluginKey = new PluginKey<boolean>(this.name);
     const defaultNodeName = this.options.node || "paragraph";
     const defaultNodeType = this.editor.schema.nodes[defaultNodeName];
-    const disabledNodeNames = new Set<string>([
-      defaultNodeName,
-      ...(this.options.notAfter ?? []),
-    ]);
+    const disabledNodeNames = new Set<string>([defaultNodeName, ...(this.options.notAfter ?? [])]);
 
     if (!defaultNodeType) return [];
 
@@ -66,9 +56,7 @@ export const SafeTrailingNode = Extension.create({
         },
         appendTransaction: (transactions, _oldState, state) => {
           if (
-            transactions.some((transaction) =>
-              transaction.getMeta(SKIP_TRAILING_NODE_META),
-            ) ||
+            transactions.some((transaction) => transaction.getMeta(SKIP_TRAILING_NODE_META)) ||
             !pluginKey.getState(state) ||
             !canAppendTrailingNode(state.doc, defaultNodeType)
           ) {
@@ -77,9 +65,7 @@ export const SafeTrailingNode = Extension.create({
 
           try {
             const trailingNode = defaultNodeType.createAndFill();
-            return trailingNode
-              ? state.tr.insert(state.doc.content.size, trailingNode)
-              : undefined;
+            return trailingNode ? state.tr.insert(state.doc.content.size, trailingNode) : undefined;
           } catch {
             // A concurrent teardown/update can invalidate the state between the
             // guard and insert. Skipping one convenience paragraph is always

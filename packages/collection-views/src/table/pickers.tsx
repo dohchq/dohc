@@ -69,7 +69,11 @@ function paused(element: Element): boolean {
  * holds and closes it. Tab does the same and moves the selection sideways,
  * as in a text cell. Escape closes it and saves nothing.
  */
-function PickerFrame({ save, close, children }: {
+function PickerFrame({
+  save,
+  close,
+  children,
+}: {
   /** Saves picks the picker still holds. A picker that saves each pick has none. */
   save?: () => void;
   close: CellClose;
@@ -128,18 +132,34 @@ interface PickRow {
   /** The row is the cell's value, or one of its values. */
   checked?: boolean;
   pick: () => void;
-  /** The option's color, where the host lets people change it. */
   color?: { option: string; value: OptionColor; change: (color: OptionColor) => void };
 }
 
-const ROW_ICON = { size: 14, strokeWidth: 1.9, "aria-hidden": true, className: "shrink-0" } as const;
+const ROW_ICON = {
+  size: 14,
+  strokeWidth: 1.9,
+  "aria-hidden": true,
+  className: "shrink-0",
+} as const;
 
 /**
  * A search box over a list of rows. Focus stays in the box: the arrow keys
  * move a highlight through the rows, the pointer moves it too, and Enter
  * picks the highlighted row.
  */
-function SearchList({ searchLabel, listLabel, multi = false, query, onQuery, rows, startAt = 0, chips, onBackspaceEmpty, empty, footer }: {
+function SearchList({
+  searchLabel,
+  listLabel,
+  multi = false,
+  query,
+  onQuery,
+  rows,
+  startAt = 0,
+  chips,
+  onBackspaceEmpty,
+  empty,
+  footer,
+}: {
   searchLabel: string;
   listLabel: string;
   multi?: boolean;
@@ -217,7 +237,11 @@ function SearchList({ searchLabel, listLabel, multi = false, query, onQuery, row
           // Open colors take the first Escape. The next one closes the picker.
           event.stopPropagation();
           setColoring(null);
-        } else if (key === "ArrowRight" && row?.color && event.currentTarget.selectionStart === query.length) {
+        } else if (
+          key === "ArrowRight" &&
+          row?.color &&
+          event.currentTarget.selectionStart === query.length
+        ) {
           // As in a menu, the right arrow opens what the row's button opens.
           event.preventDefault();
           setColoring({ key: row.key, byKey: true });
@@ -225,8 +249,8 @@ function SearchList({ searchLabel, listLabel, multi = false, query, onQuery, row
       }}
       className={
         chips
-          // The band's border shows focus, as a text field's does.
-          ? "h-5 min-w-12 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-subtle"
+          ? // The band's border shows focus, as a text field's does.
+            "h-5 min-w-12 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-subtle"
           : "w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
       }
     />
@@ -241,7 +265,9 @@ function SearchList({ searchLabel, listLabel, multi = false, query, onQuery, row
           {chips}
           {search}
         </div>
-      ) : search}
+      ) : (
+        search
+      )}
       <div
         id={listId}
         role="listbox"
@@ -277,7 +303,9 @@ function SearchList({ searchLabel, listLabel, multi = false, query, onQuery, row
                   aria-label={`${row.color.option} options`}
                   title={`${row.color.option} options`}
                   aria-expanded={coloring?.key === row.key}
-                  onClick={() => setColoring(coloring?.key === row.key ? null : { key: row.key, byKey: false })}
+                  onClick={() =>
+                    setColoring(coloring?.key === row.key ? null : { key: row.key, byKey: false })
+                  }
                   className="mr-1 grid size-6 shrink-0 place-items-center rounded-md text-subtle opacity-0 transition-opacity duration-75 hover:bg-hover hover:text-ink aria-expanded:opacity-100 in-data-[active]:opacity-100"
                 >
                   <MoreHorizontal {...ROW_ICON} />
@@ -331,7 +359,9 @@ function optionRow(
     content: <OptionPill label={option} color={color} dot={field.type === "select"} />,
     checked,
     pick,
-    ...(onColor ? { color: { option, value: color, change: (next: OptionColor) => onColor(option, next) } } : {}),
+    ...(onColor
+      ? { color: { option, value: color, change: (next: OptionColor) => onColor(option, next) } }
+      : {}),
   };
 }
 
@@ -348,7 +378,9 @@ function createContent(field: OptionField, name: string): ReactNode {
 
 function noOptions(name: string, canCreate: boolean): string {
   if (name !== "") return `No options match "${name}".`;
-  return canCreate ? "No options yet. Type a name to create one." : "This field has no options yet.";
+  return canCreate
+    ? "No options yet. Type a name to create one."
+    : "This field has no options yet.";
 }
 
 interface OptionPickerProps {
@@ -363,7 +395,16 @@ interface OptionPickerProps {
 }
 
 /** One option for a select field. A pick saves and closes. */
-export function OptionPicker({ field, label, current, typed, emit, close, onCreateOption, onColor }: OptionPickerProps & {
+export function OptionPicker({
+  field,
+  label,
+  current,
+  typed,
+  emit,
+  close,
+  onCreateOption,
+  onColor,
+}: OptionPickerProps & {
   current: string | null;
   emit: (value: CollectionValue) => number;
   onCreateOption?: (option: string, nextValue: CollectionValue) => void;
@@ -389,7 +430,16 @@ export function OptionPicker({ field, label, current, typed, emit, close, onCrea
   }
   // A search shows only what it matches, so Enter never clears by surprise.
   if (current !== null && name === "") {
-    rows.push({ key: "clear", content: <><X {...ROW_ICON} />Clear</>, pick: () => pick(null) });
+    rows.push({
+      key: "clear",
+      content: (
+        <>
+          <X {...ROW_ICON} />
+          Clear
+        </>
+      ),
+      pick: () => pick(null),
+    });
   }
   return (
     <PickerFrame close={close}>
@@ -400,14 +450,20 @@ export function OptionPicker({ field, label, current, typed, emit, close, onCrea
         onQuery={setQuery}
         rows={rows}
         // Enter on a picker just opened keeps the value it has.
-        startAt={current === null || typed !== undefined ? 0 : Math.max(0, field.options.indexOf(current))}
+        startAt={
+          current === null || typed !== undefined ? 0 : Math.max(0, field.options.indexOf(current))
+        }
         empty={noOptions(name, onCreateOption !== undefined)}
       />
     </PickerFrame>
   );
 }
 
-const NO_PICKS: { added: string[]; removed: string[]; created: string | null } = { added: [], removed: [], created: null };
+const NO_PICKS: { added: string[]; removed: string[]; created: string | null } = {
+  added: [],
+  removed: [],
+  created: null,
+};
 
 /**
  * Any number of options for a multi-select field. Picks change only what
@@ -436,42 +492,71 @@ export function TagsPicker({
   carried?: CarriedSelection;
   emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
   /** Returns the save's edit id when the host has one, so a second edit starts from this one. */
-  onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => number | void;
+  onCreateOption?: (
+    option: string,
+    nextValue: CollectionValue,
+    previousValues?: readonly CollectionValue[],
+  ) => number | void;
 }) {
-  const { selected, select } = useAcknowledgedSelection({ value, ids, acknowledgedWriteId, subscribeToDiscardedWrites, emit, carried });
+  const { selected, select } = useAcknowledgedSelection({
+    value,
+    ids,
+    acknowledgedWriteId,
+    subscribeToDiscardedWrites,
+    emit,
+    carried,
+  });
   const [query, setQuery] = useState(typed ?? "");
   const [draft, setDraft] = useState(NO_PICKS);
   // Chips keep the order they were picked in: the saved ones, then the new.
   const kept = selected.filter((option) => !draft.removed.includes(option));
   const picks = [...kept, ...draft.added.filter((option) => !kept.includes(option))];
   // One edit can add one option: the host adds it, then writes the value.
-  const created = draft.created !== null && picks.includes(draft.created) && !field.options.includes(draft.created)
-    ? draft.created
-    : null;
+  const created =
+    draft.created !== null &&
+    picks.includes(draft.created) &&
+    !field.options.includes(draft.created)
+      ? draft.created
+      : null;
   const options = created === null ? field.options : [...field.options, created];
   const name = query.trim();
   const toggle = (option: string) => {
     setQuery("");
-    setDraft(picks.includes(option)
-      ? {
-          ...draft,
-          added: draft.added.filter((entry) => entry !== option),
-          removed: selected.includes(option) && !draft.removed.includes(option) ? [...draft.removed, option] : draft.removed,
-        }
-      : { ...draft, added: [...draft.added, option] });
+    setDraft(
+      picks.includes(option)
+        ? {
+            ...draft,
+            added: draft.added.filter((entry) => entry !== option),
+            removed:
+              selected.includes(option) && !draft.removed.includes(option)
+                ? [...draft.removed, option]
+                : draft.removed,
+          }
+        : { ...draft, added: [...draft.added, option] },
+    );
   };
   const save = () => {
     if (sameSelection(picks, selected)) return;
     select(
       picks,
-      created === null || !onCreateOption ? undefined : (next, previousValues) => onCreateOption(created, next, previousValues),
+      created === null || !onCreateOption
+        ? undefined
+        : (next, previousValues) => onCreateOption(created, next, previousValues),
     );
     setDraft(NO_PICKS);
   };
   const rows = options
     .filter((option) => matches(option, name.toLowerCase()))
     // An option that is not saved yet has no color to change.
-    .map((option) => optionRow(field, option, picks.includes(option), () => toggle(option), option === created ? undefined : onColor));
+    .map((option) =>
+      optionRow(
+        field,
+        option,
+        picks.includes(option),
+        () => toggle(option),
+        option === created ? undefined : onColor,
+      ),
+    );
   const creates = onCreateOption !== undefined && name !== "" && !options.includes(name);
   if (creates && created === null) {
     rows.push({
@@ -493,19 +578,33 @@ export function TagsPicker({
         onQuery={setQuery}
         rows={rows}
         chips={picks.map((option) => (
-          <OptionPill key={option} label={option} color={optionColor(field, option)} onRemove={() => toggle(option)} />
+          <OptionPill
+            key={option}
+            label={option}
+            color={optionColor(field, option)}
+            onRemove={() => toggle(option)}
+          />
         ))}
         onBackspaceEmpty={() => {
           const last = picks.at(-1);
           if (last !== undefined) toggle(last);
         }}
         empty={noOptions(name, onCreateOption !== undefined)}
-        footer={creates && created !== null ? (
-          <div role="option" aria-selected={false} aria-disabled="true" className="flex flex-col gap-1 px-2 py-1">
-            <span className="flex items-center gap-2 text-[13px] text-subtle">{createContent(field, name)}</span>
-            <span className="text-[12px] text-muted">Click away to save "{created}" first.</span>
-          </div>
-        ) : null}
+        footer={
+          creates && created !== null ? (
+            <div
+              role="option"
+              aria-selected={false}
+              aria-disabled="true"
+              className="flex flex-col gap-1 px-2 py-1"
+            >
+              <span className="flex items-center gap-2 text-[13px] text-subtle">
+                {createContent(field, name)}
+              </span>
+              <span className="text-[12px] text-muted">Click away to save "{created}" first.</span>
+            </div>
+          ) : null
+        }
       />
     </PickerFrame>
   );
@@ -515,7 +614,14 @@ export function TagsPicker({
  * One person for a person field, from the people the host lists. An id the
  * list does not have still shows as the current value.
  */
-export function PeoplePicker({ people, label, current, typed, emit, close }: {
+export function PeoplePicker({
+  people,
+  label,
+  current,
+  typed,
+  emit,
+  close,
+}: {
   people: readonly TablePerson[];
   label: string;
   current: string | null;
@@ -529,9 +635,10 @@ export function PeoplePicker({ people, label, current, typed, emit, close }: {
     if (next !== current) emit(next);
     close();
   };
-  const listed = current === null || people.some((person) => person.id === current)
-    ? people
-    : [{ id: current, name: current }, ...people];
+  const listed =
+    current === null || people.some((person) => person.id === current)
+      ? people
+      : [{ id: current, name: current }, ...people];
   const rows: PickRow[] = listed
     .filter((person) => matches(person.name, name.toLowerCase()))
     .map((person) => ({
@@ -541,7 +648,16 @@ export function PeoplePicker({ people, label, current, typed, emit, close }: {
       pick: () => pick(person.id),
     }));
   if (current !== null && name === "") {
-    rows.push({ key: "clear", content: <><X {...ROW_ICON} />No one</>, pick: () => pick(null) });
+    rows.push({
+      key: "clear",
+      content: (
+        <>
+          <X {...ROW_ICON} />
+          No one
+        </>
+      ),
+      pick: () => pick(null),
+    });
   }
   return (
     <PickerFrame close={close}>
@@ -551,7 +667,14 @@ export function PeoplePicker({ people, label, current, typed, emit, close }: {
         query={query}
         onQuery={setQuery}
         rows={rows}
-        startAt={typed !== undefined ? 0 : Math.max(0, listed.findIndex((person) => person.id === current))}
+        startAt={
+          typed !== undefined
+            ? 0
+            : Math.max(
+                0,
+                listed.findIndex((person) => person.id === current),
+              )
+        }
         empty={name === "" ? "No people to choose from yet." : `No people match "${name}".`}
       />
     </PickerFrame>
@@ -559,15 +682,22 @@ export function PeoplePicker({ people, label, current, typed, emit, close }: {
 }
 
 const DATE_VALUE_FORMAT = "yyyy-MM-dd";
-const DAY_ROW = "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
-const MONTH_BUTTON = "grid size-6 place-items-center rounded-md text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
+const DAY_ROW =
+  "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
+const MONTH_BUTTON =
+  "grid size-6 place-items-center rounded-md text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
 
 /**
  * A month of days for a date field. A pick saves and closes. Focus stays on
  * the month: the arrow keys move a day or a week, Page Up and Page Down
  * change the month, and Enter picks the highlighted day.
  */
-export function DatePicker({ label, current, emit, close }: {
+export function DatePicker({
+  label,
+  current,
+  emit,
+  close,
+}: {
   label: string;
   /** The stored value. Anything that is not a date opens on today. */
   current: string | null;
@@ -587,17 +717,36 @@ export function DatePicker({ label, current, emit, close }: {
     close();
   };
   // The week starts where the calendar view's does.
-  const days = eachDayOfInterval({ start: startOfWeek(startOfMonth(cursor)), end: endOfWeek(endOfMonth(cursor)) });
-  const weeks = Array.from({ length: days.length / 7 }, (_, week) => days.slice(week * 7, week * 7 + 7));
+  const days = eachDayOfInterval({
+    start: startOfWeek(startOfMonth(cursor)),
+    end: endOfWeek(endOfMonth(cursor)),
+  });
+  const weeks = Array.from({ length: days.length / 7 }, (_, week) =>
+    days.slice(week * 7, week * 7 + 7),
+  );
   return (
     <PickerFrame close={close}>
       <div className="flex items-center gap-1 px-2 pt-1">
         <span className="text-[13px] font-semibold text-ink">{format(cursor, "MMMM yyyy")}</span>
         <span className="flex-1" />
-        <button type="button" tabIndex={-1} aria-label="Previous month" title="Previous month" className={MONTH_BUTTON} onClick={() => setCursor(addMonths(cursor, -1))}>
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label="Previous month"
+          title="Previous month"
+          className={MONTH_BUTTON}
+          onClick={() => setCursor(addMonths(cursor, -1))}
+        >
           <ChevronLeft {...ROW_ICON} />
         </button>
-        <button type="button" tabIndex={-1} aria-label="Next month" title="Next month" className={MONTH_BUTTON} onClick={() => setCursor(addMonths(cursor, 1))}>
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label="Next month"
+          title="Next month"
+          className={MONTH_BUTTON}
+          onClick={() => setCursor(addMonths(cursor, 1))}
+        >
           <ChevronRight {...ROW_ICON} />
         </button>
       </div>
@@ -611,7 +760,16 @@ export function DatePicker({ label, current, emit, close }: {
         className="flex flex-col px-1 outline-none"
         onKeyDown={(event) => {
           const { key } = event;
-          const step = key === "ArrowLeft" ? -1 : key === "ArrowRight" ? 1 : key === "ArrowUp" ? -7 : key === "ArrowDown" ? 7 : 0;
+          const step =
+            key === "ArrowLeft"
+              ? -1
+              : key === "ArrowRight"
+                ? 1
+                : key === "ArrowUp"
+                  ? -7
+                  : key === "ArrowDown"
+                    ? 7
+                    : 0;
           const months = key === "PageUp" ? -1 : key === "PageDown" ? 1 : 0;
           if (step !== 0) setCursor(addDays(cursor, step));
           else if (months !== 0) setCursor(addMonths(cursor, months));
@@ -622,7 +780,12 @@ export function DatePicker({ label, current, emit, close }: {
       >
         <div role="row" className="grid grid-cols-7">
           {weeks[0]?.map((day) => (
-            <span key={day.getDay()} role="columnheader" aria-label={format(day, "EEEE")} className="grid h-6 place-items-center text-[11px] text-subtle">
+            <span
+              key={day.getDay()}
+              role="columnheader"
+              aria-label={format(day, "EEEE")}
+              className="grid h-6 place-items-center text-[11px] text-subtle"
+            >
               {format(day, "EEEEE")}
             </span>
           ))}
@@ -657,7 +820,12 @@ export function DatePicker({ label, current, emit, close }: {
         ))}
       </div>
       <div className="flex flex-col">
-        <button type="button" tabIndex={-1} className={DAY_ROW} onClick={() => pick(format(today, DATE_VALUE_FORMAT))}>
+        <button
+          type="button"
+          tabIndex={-1}
+          className={DAY_ROW}
+          onClick={() => pick(format(today, DATE_VALUE_FORMAT))}
+        >
           Today
         </button>
         {current !== null ? (

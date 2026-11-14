@@ -115,7 +115,10 @@ describe("AddAgentForm", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-add-agent-check").textContent).toBe("Checking…"),
     );
-    expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "default" });
+    expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      agentId: "default",
+    });
     expectDismissBlocked(onCancel);
 
     await act(async () => {
@@ -128,7 +131,6 @@ describe("AddAgentForm", () => {
   });
 
   it("puts the title and actions in bands with a rule only while the body overflows", () => {
-    // ResizeObservers that report a resize when the test says so.
     const observed = new Set<Element>();
     const live = new Set<() => void>();
     vi.stubGlobal(
@@ -163,7 +165,10 @@ describe("AddAgentForm", () => {
     let contentHeight = 300;
     Object.defineProperty(body, "clientHeight", { configurable: true, value: 400 });
     Object.defineProperty(body, "scrollHeight", { configurable: true, get: () => contentHeight });
-    const banded = () => form.hasAttribute("data-scrolls") && header.classList.contains("border-b") && footer.classList.contains("border-t");
+    const banded = () =>
+      form.hasAttribute("data-scrolls") &&
+      header.classList.contains("border-b") &&
+      footer.classList.contains("border-t");
 
     report();
     expect(form.hasAttribute("data-scrolls")).toBe(false);
@@ -174,7 +179,6 @@ describe("AddAgentForm", () => {
     contentHeight = 520;
     report();
     expect(banded()).toBe(true);
-    // The bands keep the dialog's 20px inset.
     expect(body.classList.contains("px-5")).toBe(true);
     expect(header.classList.contains("px-5") && header.classList.contains("pt-5")).toBe(true);
     expect(footer.classList.contains("px-5") && footer.classList.contains("pb-5")).toBe(true);

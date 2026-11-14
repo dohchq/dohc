@@ -1,37 +1,3 @@
-// The commit a gate run examined, and whether that claim is trustworthy.
-//
-// A verdict that cannot name the tree it read is not evidence. Two runs
-// sharing one worktree once reported PASS and FAIL for the same commit, and
-// neither log could say which tree it had actually examined — the checks had
-// straddled a `git checkout` performed by the other run.
-//
-// The gate reads the tree at every step boundary and this decides what that
-// series proves. Reading it twice — once before the run and once after — does
-// not: a tree that changes and changes back reads identical at both ends
-// while the steps between them ran against something else. Sampling per step
-// narrows the unobserved window to one step and names the step that straddled
-// a change, which is what a reader needs in order to know what to re-run.
-//
-// Sampling alone cannot see a change made and undone INSIDE one step, and no
-// sample rate removes that — between any two readings there is an interval
-// nothing observes. For the founding case, git removes it instead: every HEAD
-// move is written to this checkout's HEAD reflog, so a run that checks out
-// another commit and restores it leaves two entries behind while
-// `git rev-parse HEAD` reads identical at both ends. A reading counts that
-// log, and a step whose bracketing readings agree on the commit but disagree
-// on the count is refused. The observation is exact and needs no watcher: the
-// record is already there when the step returns.
-//
-// What is left is a worktree edit made and undone inside one step, with no
-// HEAD move. Git keeps no record of that, and removing it needs isolation —
-// a checkout nothing else can reach — not a faster sample rate. The stamp
-// reports how many readings agreed for that reason, rather than claiming the
-// run was clean throughout. A weaker true claim beats a stronger unverifiable
-// one.
-//
-// The classifier is pure so it can be tested without a repository: the gate
-// reads the tree state, this decides what those states prove.
-
 const UNATTRIBUTABLE = "UNATTRIBUTABLE";
 
 /**
@@ -56,24 +22,15 @@ export const HEAD_REFLOG_RECOVERY = [
 const short = (head) => head.slice(0, 8);
 
 function unattributable(reason) {
-  // A run that cannot name its tree must not print a stamp that names one.
-  // The stamp and the judgement come from the same call for that reason: a
-  // reader who trusts `<sha> clean` beside a FAIL row is reading the defect
-  // this module exists to catch.
   return { status: "FAIL", reason, stamp: UNATTRIBUTABLE };
 }
 
-/** The `git status` entries that appeared or vanished between two readings. */
 function changedEntries(before, after) {
   const wasThere = new Set(before);
   const stillThere = new Set(after);
   return [
-    ...after
-      .filter((entry) => !wasThere.has(entry))
-      .map((entry) => `appeared ${entry.trim()}`),
-    ...before
-      .filter((entry) => !stillThere.has(entry))
-      .map((entry) => `vanished ${entry.trim()}`),
+    ...after.filter((entry) => !wasThere.has(entry)).map((entry) => `appeared ${entry.trim()}`),
+    ...before.filter((entry) => !stillThere.has(entry)).map((entry) => `vanished ${entry.trim()}`),
   ];
 }
 
@@ -117,49 +74,39 @@ function nameSome(entries) {
  * Judge a run's provenance from the tree readings taken across it.
  *
  * `readings` is `[{ step, state }, ...]` in order: the state read before the
- * first step, then the state read after each step, labelled with the step it
- * followed.
+ * first step, then the state read after each step, labelled with that step.
  *
- * A tree that MOVED between two readings FAILS — the step between them
- * straddles two trees and its row describes neither. That covers HEAD moving
- * and the worktree being edited, which are one corruption reached two ways.
- * The reason names the step, so a reader knows what to re-run.
+ * - A tree that moved between two readings fails. The step between them
+ *   straddles two trees, so its row describes neither. This covers a HEAD
+ *   move and a worktree edit alike. The reason names the step to re-run.
+ * - A tree that is already dirty at the first reading does not fail, because
+ *   running the gate over uncommitted work is the normal local loop. It is
+ *   recorded, so the reader knows the commit does not describe everything
+ *   that ran.
+ * - A HEAD that moved and returned inside one step fails too. Both readings
+ *   name the same commit, so only this checkout's HEAD reflog shows it. A
+ *   checkout with no HEAD log of its own is refused, because the fallback
+ *   git offers cannot see that switch.
  *
- * A tree that is ALREADY dirty at the first reading does NOT fail — running
- * the gate over uncommitted work is the normal local loop, and a check that
- * forbids it just gets removed. It is recorded instead, so the reader knows
- * the commit does not describe everything that ran.
+ * Three limits remain.
+ * - Nothing observes the tree between two readings. A worktree edit made and
+ *   undone inside one step, with no HEAD move, is invisible. The stamp
+ *   therefore reports how many readings agreed, not that the run was clean
+ *   throughout. Removing this limit needs a checkout nothing else can reach.
+ * - A reading lists paths and their status codes, not their contents, so a
+ *   second edit to an already dirty path leaves it identical. From a clean
+ *   start a pass covers every path. From a dirty start it covers every path
+ *   except the ones already listed. The stamp carries `dirty(N)` to show
+ *   which.
+ * - The named step can be off by one. A reading is taken when the step's own
+ *   process exits, so work that outlives it lands in the next interval, and
+ *   a skipped optional step takes no reading. The run is refused either way.
+ *   The reason names where the change was seen, not always where it was
+ *   caused.
  *
- * A HEAD that moved and RETURNED inside one step is refused too. The two
- * readings around that step name the same commit, so only git's own record
- * shows it: this checkout's HEAD reflog gained entries while the commit
- * stayed put. A checkout with no HEAD log of its own is refused rather than
- * read through the fallback git offers, which cannot see that switch.
- *
- * Three limits, and none is assumed away.
- *
- * Nothing observes the tree BETWEEN two readings, so a worktree edit made and
- * undone inside one step, with no HEAD move, is invisible; that is why the
- * stamp reports how many readings agreed rather than saying the run was clean
- * throughout. Removing it needs a checkout nothing else can reach.
- *
- * A reading is a list of paths and their status codes, not their contents, so
- * a second edit to a path that was already dirty leaves the reading
- * identical. This is why a PASS means two different things: from a clean
- * start it is a claim about paths, and from a dirty start it is that claim
- * about every path except the ones already listed. The stamp carries
- * `dirty(N)` so the difference is on the face of the artifact.
- *
- * The named step can be off by one. A reading is taken when the step's own
- * process exits, so work outliving it lands in the next step's interval and
- * is attributed there, and a skipped optional step takes no reading, so its
- * probe folds into the following one. The verdict is unaffected — the run is
- * refused either way — but the step in the reason is where the change was
- * SEEN, not always where it was caused.
- *
- * The gate's own steps can write tracked files — `cargo build` rewrites a
- * stale `Cargo.lock` — and that FAILS this row, correctly: that step did
- * straddle the rewrite. The next run passes, with the lock recorded as dirt.
+ * A gate step can write a tracked file, as `cargo build` does to a stale
+ * `Cargo.lock`. That fails this row, correctly, because the step straddled
+ * the rewrite. The next run passes, with the lock recorded as dirt.
  */
 export function classifyTreeProvenance(readings) {
   if (!Array.isArray(readings) || readings.length < 2) {
@@ -169,9 +116,7 @@ export function classifyTreeProvenance(readings) {
     );
   }
   if (readings.some((reading) => !reading?.state?.head)) {
-    return unattributable(
-      "git could not resolve HEAD; this run cannot name the tree it examined",
-    );
+    return unattributable("git could not resolve HEAD; this run cannot name the tree it examined");
   }
   if (readings.some((reading) => !reading.state.dirty)) {
     return unattributable(
@@ -310,9 +255,6 @@ function readHeadReflog(capture, hasHeadLog) {
   return { present: true, count: entries, top: top.trim() };
 }
 
-/** A command's stdout as non-blank lines, or null when it did not answer. */
 function lines(stdout) {
-  return stdout === null
-    ? null
-    : stdout.split(/\r?\n/).filter((line) => line.trim() !== "");
+  return stdout === null ? null : stdout.split(/\r?\n/).filter((line) => line.trim() !== "");
 }

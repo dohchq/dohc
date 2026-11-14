@@ -2,11 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  AppErrorBoundary,
-  ErrorBoundary,
-  installGlobalErrorReporters,
-} from "./ErrorBoundary";
+import { AppErrorBoundary, ErrorBoundary, installGlobalErrorReporters } from "./ErrorBoundary";
 
 function Bomb({ when = true }: { when?: boolean }) {
   if (when) throw new Error("kaboom in a view");
@@ -37,14 +33,11 @@ describe("ErrorBoundary (scoped)", () => {
     );
     expect(screen.getByTestId("error-boundary-editor")).toBeTruthy();
     expect(screen.getByText("kaboom in a view")).toBeTruthy();
-    // The rest of the tree is untouched.
     expect(screen.getByTestId("sibling")).toBeTruthy();
     expect(
       vi
         .mocked(console.error)
-        .mock.calls.some((call) =>
-          String(call[0]).includes('contained by the "editor" boundary'),
-        ),
+        .mock.calls.some((call) => String(call[0]).includes('contained by the "editor" boundary')),
     ).toBe(true);
   });
 
@@ -53,23 +46,14 @@ describe("ErrorBoundary (scoped)", () => {
       const [broken, setBroken] = useState(true);
       return (
         <ErrorBoundary scope="side-panel">
-          <button
-            type="button"
-            data-testid="disarm"
-            onClick={() => setBroken(false)}
-          />
+          <button type="button" data-testid="disarm" onClick={() => setBroken(false)} />
           <Bomb when={broken} />
         </ErrorBoundary>
       );
     }
     render(<Harness />);
     expect(screen.getByTestId("error-boundary-side-panel")).toBeTruthy();
-    // The crash state is owned by the boundary; retry re-renders children.
-    // (The bomb is disarmed by remount-free state living outside the boundary
-    // in real usage — here we simulate recovery by retrying a now-safe tree.)
     fireEvent.click(screen.getByTestId("error-boundary-side-panel-retry"));
-    // Children render again; the bomb still throws, so the card comes back —
-    // proving retry actually re-attempts rather than freezing.
     expect(screen.getByTestId("error-boundary-side-panel")).toBeTruthy();
   });
 
@@ -120,8 +104,6 @@ describe("AppErrorBoundary", () => {
     expect(reloadRenderer).toHaveBeenCalledOnce();
   });
 
-  // The window has no OS title bar, so the crash screen draws its own drag
-  // strip over its top edge without moving the message.
   it("keeps the window movable", () => {
     vi.stubGlobal("dohcDesktop", { reloadRenderer: vi.fn(async () => undefined) });
     render(
@@ -150,11 +132,7 @@ describe("installGlobalErrorReporters", () => {
     rejection.reason = new Error("loose rejection");
     target.dispatchEvent(rejection);
     const logged = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
-    expect(logged.some((entry) => entry.includes("uncaught renderer error"))).toBe(
-      true,
-    );
-    expect(
-      logged.some((entry) => entry.includes("unhandled promise rejection")),
-    ).toBe(true);
+    expect(logged.some((entry) => entry.includes("uncaught renderer error"))).toBe(true);
+    expect(logged.some((entry) => entry.includes("unhandled promise rejection"))).toBe(true);
   });
 });

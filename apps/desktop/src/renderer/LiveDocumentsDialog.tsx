@@ -1,5 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { readLiveStopRefusal, liveStopRefusalForRow, liveStopMessage, LIVE_STOP_EDITS_PENDING_RESUME, LIVE_STOP_WAITING, LIVE_STOP_SERVER_NOT_READY, isLiveStopWaiting, liveStopOffersResume, liveStopAction, SAFE_REFUSAL_MESSAGES, type LiveStopRefusal } from "../ipc/liveEditingStop";
+import {
+  readLiveStopRefusal,
+  liveStopRefusalForRow,
+  liveStopMessage,
+  LIVE_STOP_EDITS_PENDING_RESUME,
+  LIVE_STOP_WAITING,
+  LIVE_STOP_SERVER_NOT_READY,
+  isLiveStopWaiting,
+  liveStopOffersResume,
+  liveStopAction,
+  SAFE_REFUSAL_MESSAGES,
+  type LiveStopRefusal,
+} from "../ipc/liveEditingStop";
 import { Overlay } from "./Overlay";
 import { errorDetails } from "./shell/copyDetails";
 import { CopyButton } from "./ui/CopyButton";
@@ -7,17 +19,37 @@ import { EmptyState, SecondaryButton } from "./ui/controls";
 import { SkeletonLines } from "./ui/SkeletonRows";
 import { useRequestSequence } from "./useRequestSequence";
 import { keptEditsLabel } from "./liveQueueState";
+import { formatShortTime } from "./time";
 
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "live-history-over-budget";
+  reason?:
+    | "document-unavailable"
+    | "workspace-changed"
+    | "session-host-refused"
+    | "session-host-diverged"
+    | "live-document-without-lineage"
+    | "live-edit-unadmitted"
+    | "conflict-parent-withheld"
+    | "live-history-over-budget"
+    | "live-start-failing";
+  /** The server's word for why the row isn't live, and since when, as an ISO time. A live-start-failing row has it. */
+  failure?: { word: string; since: string };
   canResume: boolean;
   /** A retired row's: its owner's Pause or Stop retired it, not the server. */
   stopped?: boolean;
-  deferredStop?: {unsentEdits: number; editable: boolean};
+  deferredStop?: { unsentEdits: number; editable: boolean };
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
-  quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied" | "unreadable";
+  quarantine?:
+    | "paused"
+    | "retrying"
+    | "stopping"
+    | "stopped-kept"
+    | "not-written"
+    | "cannot-write"
+    | "copied"
+    | "unreadable";
   /** The server keeps them in an earlier copy of the workspace, copied or not. */
   earlier?: true;
   saveOnly?: true;
@@ -72,12 +104,22 @@ export type LiveDocumentsDialogProps = {
   workspaceId: string;
   load: (workspaceId: string, retiredAfter?: string) => Promise<LiveDocumentPage>;
   /** Stops the row's document, named by the server's `objectId`. */
-  stop: (workspaceId: string, path: string, objectId: string, again?: LiveDocumentStopAgain) => Promise<LiveDocumentStopResult>;
+  stop: (
+    workspaceId: string,
+    path: string,
+    objectId: string,
+    again?: LiveDocumentStopAgain,
+  ) => Promise<LiveDocumentStopResult>;
   resume: (workspaceId: string, path: string) => Promise<void>;
   /** Told when a Stop wrote refused edits into the file, or kept them on this computer. */
   onStopped?: (path: string, keptEdits: "recovered" | "kept") => void;
   /** A Stop refused after its dialog closed; the shell owns its retry and notice. */
-  onStopPending?: (workspaceId: string, path: string, objectId: string, refusal: LiveStopRefusal) => void;
+  onStopPending?: (
+    workspaceId: string,
+    path: string,
+    objectId: string,
+    refusal: LiveStopRefusal,
+  ) => void;
   /** The Stop still running from this or an earlier opening, kept by the shell. */
   stopRunning?: RefObject<LiveDocumentStopRunning | null>;
   /** The row a notice opened this dialog for. */
@@ -86,12 +128,14 @@ export type LiveDocumentsDialogProps = {
   saveRecoveryCopy?: (workspaceId: string, path: string, incident?: string) => Promise<void>;
   /** Reads again the kept edits of a row dohc could not read, named by its incident. */
   readKeptEdits?: (workspaceId: string, objectId: string, incident: string) => Promise<void>;
+  /** Duplicates a held row's file beside it and opens the copy, which can go
+   * live. Settles when the copy is made or failed; the shell reports a failure. */
+  makeCopy?: (workspaceId: string, path: string) => Promise<void>;
   /** The rows of edits a restore set aside on this computer, which the list
    * shows when it cannot read the server's list. */
   setAside?: readonly LiveDocumentRow[];
   /** One page of refused shares, from the share id the previous page ended on. */
   loadRefusals: (workspaceId: string, after?: string) => Promise<LiveRefusalPage>;
-  /** Asks the engine to enrol one refused share again. */
   retryRefusal: (workspaceId: string, shareId: string) => Promise<void>;
   onClose: () => void;
   /** Reported to the shell, which owns the toast and the Notices row. The
@@ -99,7 +143,12 @@ export type LiveDocumentsDialogProps = {
    * offer to reopen the dialog instead of running work nobody can see. With
    * `waiting`, the Stop of that document is waiting, and `message` is the
    * whole body, without the error's words. */
-  onError: (message: string, error: unknown, retry: () => boolean, waiting?: LiveStopWaitingNotice) => void;
+  onError: (
+    message: string,
+    error: unknown,
+    retry: () => boolean,
+    waiting?: LiveStopWaitingNotice,
+  ) => void;
 };
 
 /** A waiting Stop's notice: its title, and the document whose notice it replaces. */
@@ -132,16 +181,19 @@ type Scope = { live: boolean };
 const readFailedMessage = "dohc could not load the live documents for this workspace.";
 const refusalsReadFailedMessage =
   "dohc could not load the shares that could not start live editing.";
-// What did not happen, in the words this dialog owns.
 const REFUSAL_SENTENCE = "This share could not start live editing automatically.";
 // Enough files to recognize the share without turning a row into a listing.
 const REFUSAL_PATHS_SHOWN = 5;
 
 const REFUSAL_REASONS: Record<string, string> = {
-  quota_exceeded: "A server limit is preventing live editing. Stop live editing for unused documents or check the server limits.",
-  bad_request: "The server could not accept this share for live editing. Copy the details to check the server setup.",
-  conflict: "This share no longer matches the current workspace or document. Check its files and sync before trying again.",
-  not_found: "The server could not find this share or workspace. Check the share before trying again.",
+  quota_exceeded:
+    "A server limit is preventing live editing. Stop live editing for unused documents or check the server limits.",
+  bad_request:
+    "The server could not accept this share for live editing. Copy the details to check the server setup.",
+  conflict:
+    "This share no longer matches the current workspace or document. Check its files and sync before trying again.",
+  not_found:
+    "The server could not find this share or workspace. Check the share before trying again.",
 };
 function refusalReason(row: LiveRefusalRow): string {
   return Object.hasOwn(REFUSAL_REASONS, row.code)
@@ -153,16 +205,16 @@ function isMutation(work: Work): work is Extract<Work, { kind: "stop" | "resume"
   return work.kind === "stop" || work.kind === "resume";
 }
 
-const rowIdentity = (row: LiveDocumentRow) => row.saveOnly ? `${row.path}\n${row.incident}` : row.path;
+const rowIdentity = (row: LiveDocumentRow) =>
+  row.saveOnly ? `${row.path}\n${row.incident}` : row.path;
 
 // Each response refreshes current documents and retained queues. The newest
 // row replaces the same path or retained incident; stopped history stays.
-function mergeRows(
-  existing: LiveDocumentRow[],
-  incoming: LiveDocumentRow[],
-): LiveDocumentRow[] {
+function mergeRows(existing: LiveDocumentRow[], incoming: LiveDocumentRow[]): LiveDocumentRow[] {
   const currentPaths = new Set(incoming.map(rowIdentity));
-  const merged = existing.filter((row) => (!row.saveOnly && row.status === "retired") || currentPaths.has(rowIdentity(row)));
+  const merged = existing.filter(
+    (row) => (!row.saveOnly && row.status === "retired") || currentPaths.has(rowIdentity(row)),
+  );
   const positions = new Map(merged.map((row, index) => [rowIdentity(row), index]));
   const taken = new Set<string>();
   for (const row of incoming) {
@@ -183,8 +235,14 @@ function mergeRows(
 
 function statusLabel(row: LiveDocumentRow): string {
   // The note's editor reads the same states, so the two never disagree.
-  const kept = row.quarantine === undefined ? null
-    : keptEditsLabel({ recovery: row.quarantine, ...(row.saveOnly ? { saveOnly: true } : {}), ...(row.earlier ? { earlier: true } : {}) });
+  const kept =
+    row.quarantine === undefined
+      ? null
+      : keptEditsLabel({
+          recovery: row.quarantine,
+          ...(row.saveOnly ? { saveOnly: true } : {}),
+          ...(row.earlier ? { earlier: true } : {}),
+        });
   if (kept !== null) return kept;
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
@@ -194,6 +252,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "live-edit-unadmitted") return "Server copy is missing an edit";
   if (row.reason === "conflict-parent-withheld") return "Can't resume";
   if (row.reason === "live-history-over-budget") return "History too long";
+  if (row.reason === "live-start-failing") return "Can't start";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -209,6 +268,11 @@ function statusLabel(row: LiveDocumentRow): string {
   }
 }
 
+// For the server's operator. The word never shows without the row's sentence above it.
+function failureLine(failure: NonNullable<LiveDocumentRow["failure"]>): string {
+  return `Server's reason: ${failure.word}, since ${formatShortTime(Date.parse(failure.since))}`;
+}
+
 function statusTone(row: LiveDocumentRow): string {
   if (row.quarantine !== undefined && row.quarantine !== "retrying") return "text-warning";
   if (row.status === "ready") return "text-success";
@@ -218,7 +282,12 @@ function statusTone(row: LiveDocumentRow): string {
 
 // The server holds a diverged copy until its operator recovers it, so a Stop cannot finish.
 function canStop(row: LiveDocumentRow): boolean {
-  return !row.saveOnly && row.status !== "retired" && !row.deferredStop && row.reason !== "session-host-diverged";
+  return (
+    !row.saveOnly &&
+    row.status !== "retired" &&
+    !row.deferredStop &&
+    row.reason !== "session-host-diverged"
+  );
 }
 
 function canResume(row: LiveDocumentRow): boolean {
@@ -226,20 +295,47 @@ function canResume(row: LiveDocumentRow): boolean {
 }
 
 // A Resume finishes a deferred Stop, but not one on a diverged server copy or a withheld conflict parent.
-function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRow["deferredStop"]>): string {
+function deferredStopNote(
+  row: LiveDocumentRow,
+  stop: NonNullable<LiveDocumentRow["deferredStop"]>,
+): string {
   const one = stop.unsentEdits === 1;
-  const unsent = stop.unsentEdits === 0 ? "" : `${stop.unsentEdits} unsent ${one ? "edit remains" : "edits remain"} on this computer. `;
-  const resume = row.reason === "session-host-diverged" || row.reason === "conflict-parent-withheld" ? ""
-    : stop.unsentEdits === 0 ? "Resume live editing to finish syncing. " : `Resume live editing to try sending ${one ? "it" : "them"}. `;
+  const unsent =
+    stop.unsentEdits === 0
+      ? ""
+      : `${stop.unsentEdits} unsent ${one ? "edit remains" : "edits remain"} on this computer. `;
+  const resume =
+    row.reason === "session-host-diverged" || row.reason === "conflict-parent-withheld"
+      ? ""
+      : stop.unsentEdits === 0
+        ? "Resume live editing to finish syncing. "
+        : `Resume live editing to try sending ${one ? "it" : "them"}. `;
   return `${row.status === "ready" ? "Live editing resumed. " : "Live editing stopped. "}${unsent}${resume}${stop.editable ? "You can keep editing." : "Editing is paused."}`;
 }
 
 // Edits the server refused: where they are, and the one way back that always works.
+function heldCopyable(row: LiveDocumentRow): boolean {
+  return row.reason === "conflict-parent-withheld" && row.status !== "retired" && !row.saveOnly;
+}
+
+// The copy is made from the file, which lacks kept edits. Saving a recovery copy
+// doesn't clear edits kept on this computer, so the row keeps Make a copy and
+// says what it leaves out.
+function heldCopyNote(row: LiveDocumentRow): string {
+  return row.quarantine === undefined || row.quarantine === "copied"
+    ? " A copy of it can go live. If you shared only this file, share the copy too."
+    : " A copy of it can go live, but it leaves out your kept edits. Save a recovery copy to keep them. If you shared only this file, share the copy too.";
+}
+
 function quarantineNote(row: LiveDocumentRow): string | null {
-  if (row.saveOnly && row.quarantine !== "unreadable") return row.sessionEnded ? "dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back." : "dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
+  if (row.saveOnly && row.quarantine !== "unreadable")
+    return row.sessionEnded
+      ? "dohc kept your unsent edits because their live editing session ended. Save a recovery copy to get them back."
+      : "dohc kept your unsent edits, but could not write them to your file. Save a recovery copy to get them back.";
   switch (row.quarantine) {
     case "paused":
-      if (row.earlier) return "The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.";
+      if (row.earlier)
+        return "The server could not accept your edits. It kept them in an earlier copy of this workspace. Save a recovery copy to get them back.";
       return `The server could not accept your edits. dohc kept them ${row.storedOn === "server" ? "on the server" : "on this computer"}. Save a recovery copy to get them back.`;
     case "copied":
       return "The server could not accept your edits. A recovery copy of them is saved, so the server may now release them.";
@@ -276,15 +372,14 @@ function busyLabel(work: Work): string {
 }
 
 function failureMessage(work: Work, readFailed: boolean): string {
-  if (work.kind === "read" && !readFailed) return `dohc could not read the edits it kept for ${work.path}.`;
+  if (work.kind === "read" && !readFailed)
+    return `dohc could not read the edits it kept for ${work.path}.`;
   if (readFailed || !isMutation(work)) return readFailedMessage;
   return work.kind === "stop"
     ? `dohc could not stop live editing for ${work.path}.`
     : `dohc could not resume live editing for ${work.path}.`;
 }
 
-/** What to call a refused share: its first file, or the share itself when the
- * engine returned no paths for it. */
 function refusalLabel(row: LiveRefusalRow): string {
   return row.paths[0] ?? "this share";
 }
@@ -309,7 +404,10 @@ function refusalDetails(row: LiveRefusalRow, workspaceId: string): string {
     ["Live editing", REFUSAL_SENTENCE],
     ["Detail", refusalReason(row)],
     ["Reason code", Object.hasOwn(REFUSAL_REASONS, row.code) ? row.code : "unknown"],
-    ["Server detail", SAFE_REFUSAL_MESSAGES.has(row.message) ? row.message : "No safe server detail available."],
+    [
+      "Server detail",
+      SAFE_REFUSAL_MESSAGES.has(row.message) ? row.message : "No safe server detail available.",
+    ],
     ["Files", row.paths.join(", ")],
     ["Workspace id", workspaceId],
     ["Time", new Date().toISOString()],
@@ -331,6 +429,7 @@ export function LiveDocumentsDialog({
   reveal,
   saveRecoveryCopy,
   readKeptEdits,
+  makeCopy,
   setAside = [],
 }: LiveDocumentsDialogProps) {
   const [state, setState] = useState<ListState>({ kind: "loading" });
@@ -339,10 +438,13 @@ export function LiveDocumentsDialog({
   const revealed = useRef<string | null>(null);
   const revealPage = useRef<string | null>(null);
   const [busy, setBusy] = useState<Work | null>(null);
-  const [pendingStops, setPendingStops] = useState<ReadonlyMap<string, LiveStopRefusal>>(() => new Map());
+  const [pendingStops, setPendingStops] = useState<ReadonlyMap<string, LiveStopRefusal>>(
+    () => new Map(),
+  );
   const focusStopRetry = useRef<string | null>(null);
-  // Rows whose Save recovery copy is running, keyed by workspace and path.
   const [savingCopies, setSavingCopies] = useState<ReadonlySet<string>>(() => new Set());
+  // The held row whose copy is being made, as `${workspaceId}\n${path}`.
+  const [copying, setCopying] = useState<string | null>(null);
   const [shownWorkspaceId, setShownWorkspaceId] = useState(workspaceId);
   const request = useRequestSequence([workspaceId]);
   const running = useRef(false);
@@ -391,10 +493,23 @@ export function LiveDocumentsDialog({
   }
 
   // Kept by the shell until an opening uses its answer, so a reopened dialog can show it.
-  function holdStop(work: Extract<Work, { kind: "stop" }>, startedIn: Scope, row: LiveDocumentRow | undefined): LiveDocumentStopRunning {
-    const answer = work.again ? stop(workspaceId, work.path, work.objectId, work.again) : stop(workspaceId, work.path, work.objectId);
-    const held: LiveDocumentStopRunning = { workspaceId, path: work.path, objectId: work.objectId,
-      ...(work.again ? { again: work.again } : {}), ...(row ? { row } : {}), answer, shownIn: startedIn };
+  function holdStop(
+    work: Extract<Work, { kind: "stop" }>,
+    startedIn: Scope,
+    row: LiveDocumentRow | undefined,
+  ): LiveDocumentStopRunning {
+    const answer = work.again
+      ? stop(workspaceId, work.path, work.objectId, work.again)
+      : stop(workspaceId, work.path, work.objectId);
+    const held: LiveDocumentStopRunning = {
+      workspaceId,
+      path: work.path,
+      objectId: work.objectId,
+      ...(work.again ? { again: work.again } : {}),
+      ...(row ? { row } : {}),
+      answer,
+      shownIn: startedIn,
+    };
     if (stopRunning) stopRunning.current = held;
     return held;
   }
@@ -419,9 +534,13 @@ export function LiveDocumentsDialog({
       let held: LiveDocumentStopRunning | null = null;
       const shows = () => held === null || held.shownIn === startedIn;
       // This opening shows or reports the answer, so no later opening takes it over.
-      const answered = () => { if (held !== null && stopRunning?.current === held) stopRunning.current = null; };
+      const answered = () => {
+        if (held !== null && stopRunning?.current === held) stopRunning.current = null;
+      };
       const stoppedRow = (rows?: LiveDocumentRow[]) =>
-        work.kind === "stop" ? rows?.find(row => !row.saveOnly && row.objectId === work.objectId) : undefined;
+        work.kind === "stop"
+          ? rows?.find((row) => !row.saveOnly && row.objectId === work.objectId)
+          : undefined;
       let listRows = state.kind === "ready" ? state.rows : undefined;
       let listed = true;
       try {
@@ -434,14 +553,23 @@ export function LiveDocumentsDialog({
             const shown = await load(workspaceId).catch(() => null);
             listRows = shown?.documents;
             listed = stoppedRow(listRows) !== undefined;
-            if (isCurrent()) setState(shown ? { kind: "ready", rows: mergeRows([], shown.documents), nextCursor: shown.nextCursor } : { kind: "unknown" });
+            if (isCurrent())
+              setState(
+                shown
+                  ? {
+                      kind: "ready",
+                      rows: mergeRows([], shown.documents),
+                      nextCursor: shown.nextCursor,
+                    }
+                  : { kind: "unknown" },
+              );
           }
           const { keptEdits } = await held.answer;
           if (!shows()) return;
           answered();
           if (!isCurrent()) return;
           mutated = true;
-          setPendingStops(previous => {
+          setPendingStops((previous) => {
             const next = new Map(previous);
             next.delete(work.objectId);
             return next;
@@ -475,17 +603,22 @@ export function LiveDocumentsDialog({
         if (work.kind === "stop" && refusal) {
           // Without its row, this opening cannot show the answer either.
           if (!isCurrent() || !listed) {
-            onStopPending?.(workspaceId, work.path, work.objectId,
-              liveStopRefusalForRow(refusal, stoppedRow(listRows) ?? earlier?.row));
+            onStopPending?.(
+              workspaceId,
+              work.path,
+              work.objectId,
+              liveStopRefusalForRow(refusal, stoppedRow(listRows) ?? earlier?.row),
+            );
             return;
           }
           focusStopRetry.current = work.objectId;
-          setPendingStops(previous => new Map(previous).set(work.objectId, refusal));
+          setPendingStops((previous) => new Map(previous).set(work.objectId, refusal));
           return;
         }
         // A server-only document's Stop the server isn't ready for gets the
         // relay's restore-in-progress words, without its code.
-        const notReady = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
+        const notReady =
+          work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
         const waits = work.kind === "stop" && (notReady || isLiveStopWaiting(error));
         // A Stop that waits is reported after this opening closes too, as a refused one is.
         // The shell drops a report from a workspace that is no longer open.
@@ -504,8 +637,12 @@ export function LiveDocumentsDialog({
           return true;
         };
         if (work.kind === "stop" && waits) {
-          onError(notReady ? LIVE_STOP_SERVER_NOT_READY : LIVE_STOP_WAITING, error, retry,
-            {title: notReady ? `Live editing didn't stop for ${work.path}` : `Stopping live editing for ${work.path}`, objectId: work.objectId});
+          onError(notReady ? LIVE_STOP_SERVER_NOT_READY : LIVE_STOP_WAITING, error, retry, {
+            title: notReady
+              ? `Live editing didn't stop for ${work.path}`
+              : `Stopping live editing for ${work.path}`,
+            objectId: work.objectId,
+          });
         } else onError(failureMessage(work, mutated), error, retry);
       } finally {
         if (isCurrent()) {
@@ -604,30 +741,50 @@ export function LiveDocumentsDialog({
     refusalCursor.current = undefined;
     const earlier = stopRunning?.current;
     if (earlier?.workspaceId === workspaceId) {
-      perform({ kind: "stop", path: earlier.path, objectId: earlier.objectId, ...(earlier.again ? { again: earlier.again } : {}) }, earlier);
+      perform(
+        {
+          kind: "stop",
+          path: earlier.path,
+          objectId: earlier.objectId,
+          ...(earlier.again ? { again: earlier.again } : {}),
+        },
+        earlier,
+      );
     } else perform({ kind: "reload" });
     // One page of refusals on open; every later page is asked for by hand.
     performRefusals({ kind: "page" });
-    return () => { scope.current.live = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      scope.current.live = false;
+    };
   }, [workspaceId]);
 
   useLayoutEffect(() => {
     if (busy !== null || focusStopRetry.current === null) return;
-    const row = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-object-id]") ?? [])]
-      .find(element => element.dataset.liveDocumentObjectId === focusStopRetry.current && element.dataset.liveDocumentSaveOnly === undefined);
-    row?.querySelector<HTMLElement>("[data-live-document-pending-action]")?.focus({preventScroll: true});
+    const row = [
+      ...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-object-id]") ?? []),
+    ].find(
+      (element) =>
+        element.dataset.liveDocumentObjectId === focusStopRetry.current &&
+        element.dataset.liveDocumentSaveOnly === undefined,
+    );
+    row
+      ?.querySelector<HTMLElement>("[data-live-document-pending-action]")
+      ?.focus({ preventScroll: true });
     focusStopRetry.current = null;
   }, [pendingStops, busy]);
 
-  // Brings the asked-for row into view and focuses its Stop live editing, or
-  // the row itself when it offers no Stop. A stopped row can be on a later
-  // page, so the list reads on, through the same guarded reads, until it shows.
   useEffect(() => {
-    if (state.kind !== "ready" || reveal === undefined || revealed.current === `${workspaceId}\n${reveal}`) return;
-    const matching = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-path]") ?? [])]
-      .filter((element) => element.dataset.liveDocumentPath === reveal);
-    const row = matching.find(element => element.dataset.liveDocumentSaveOnly !== undefined) ?? matching[0];
+    if (
+      state.kind !== "ready" ||
+      reveal === undefined ||
+      revealed.current === `${workspaceId}\n${reveal}`
+    )
+      return;
+    const matching = [
+      ...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-path]") ?? []),
+    ].filter((element) => element.dataset.liveDocumentPath === reveal);
+    const row =
+      matching.find((element) => element.dataset.liveDocumentSaveOnly !== undefined) ?? matching[0];
     if (!row) {
       // Each page once: a failed read reports itself and waits for its Try again.
       const page = `${workspaceId}\n${reveal}\n${state.nextCursor}`;
@@ -639,8 +796,9 @@ export function LiveDocumentsDialog({
     }
     revealed.current = `${workspaceId}\n${reveal}`;
     row.scrollIntoView?.({ block: "nearest" });
-    (row.querySelector<HTMLElement>("[data-live-document-stop]") ?? row).focus({ preventScroll: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    (row.querySelector<HTMLElement>("[data-live-document-stop]") ?? row).focus({
+      preventScroll: true,
+    });
   }, [state, busy, reveal, workspaceId]);
 
   function close(): void {
@@ -657,8 +815,7 @@ export function LiveDocumentsDialog({
   // computer keeps them, and only their recovery copy can return them.
   const rows = state.kind === "ready" ? state.rows : state.kind === "unknown" ? setAside : [];
   const refusalRows = refusalState.kind === "ready" ? refusalState.rows : [];
-  const refusalNextCursor =
-    refusalState.kind === "ready" ? refusalState.nextCursor : null;
+  const refusalNextCursor = refusalState.kind === "ready" ? refusalState.nextCursor : null;
   // A proven-empty last page keeps the section out of the dialog.
   const refusalsShown =
     refusalState.kind === "unknown" ||
@@ -709,7 +866,11 @@ export function LiveDocumentsDialog({
           Before the first page, lines stand in for the list and its words
           are for a screen reader; a Reload keeps the list and says so. */}
       <p role="status" aria-live="polite" className="mt-3 h-4 truncate text-[12px] text-muted">
-        {state.kind === "loading" || busy?.kind === "stop" ? <span className="sr-only">{statusText}</span> : statusText}
+        {state.kind === "loading" || busy?.kind === "stop" ? (
+          <span className="sr-only">{statusText}</span>
+        ) : (
+          statusText
+        )}
       </p>
       {state.kind === "loading" ? <SkeletonLines rows={2} className="py-2" /> : null}
 
@@ -739,7 +900,8 @@ export function LiveDocumentsDialog({
                 aria-current={row.path === reveal ? "true" : undefined}
                 tabIndex={-1}
                 className={`dohc-focus-row flex flex-wrap items-center gap-3 rounded-md py-2 ${
-                  row.path === reveal ? "-mx-2 border-transparent bg-selected px-2" : ""}`}
+                  row.path === reveal ? "-mx-2 border-transparent bg-selected px-2" : ""
+                }`}
               >
                 <span
                   title={row.path}
@@ -750,27 +912,39 @@ export function LiveDocumentsDialog({
                 <span className={`shrink-0 text-[12px] ${statusTone(row)}`}>
                   {statusLabel(row)}
                 </span>
-                {(pendingStops.has(row.objectId) && !row.saveOnly ? liveStopOffersResume(pendingStops.get(row.objectId)!, row) : canResume(row)) ? (
+                {(
+                  pendingStops.has(row.objectId) && !row.saveOnly
+                    ? liveStopOffersResume(pendingStops.get(row.objectId)!, row)
+                    : canResume(row)
+                ) ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
                     disabled={listBusy}
-                    data-live-document-pending-action={pendingStops.has(row.objectId) ? "" : undefined}
+                    data-live-document-pending-action={
+                      pendingStops.has(row.objectId) ? "" : undefined
+                    }
                     aria-label={`Resume live editing for ${row.path}`}
                     onClick={() => perform({ kind: "resume", path: row.path })}
                   >
                     Resume live editing
                   </SecondaryButton>
                 ) : null}
-                {canStop(row) && (!pendingStops.has(row.objectId) || liveStopAction(pendingStops.get(row.objectId)!, row) === "retry") ? (
+                {canStop(row) &&
+                (!pendingStops.has(row.objectId) ||
+                  liveStopAction(pendingStops.get(row.objectId)!, row) === "retry") ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
                     disabled={listBusy}
                     data-live-document-stop=""
-                    data-live-document-pending-action={pendingStops.has(row.objectId) ? "" : undefined}
+                    data-live-document-pending-action={
+                      pendingStops.has(row.objectId) ? "" : undefined
+                    }
                     aria-label={`${pendingStops.has(row.objectId) ? "Try again to stop" : "Stop"} live editing for ${row.path}`}
-                    onClick={() => perform({ kind: "stop", path: row.path, objectId: row.objectId })}
+                    onClick={() =>
+                      perform({ kind: "stop", path: row.path, objectId: row.objectId })
+                    }
                   >
                     {pendingStops.has(row.objectId) ? "Try again" : "Stop live editing"}
                   </SecondaryButton>
@@ -783,99 +957,231 @@ export function LiveDocumentsDialog({
                     disabled={listBusy}
                     data-live-document-stop=""
                     aria-label={`Try again to write your kept edits to ${row.path}`}
-                    onClick={() => perform({ kind: "stop", path: row.path, objectId: row.objectId,
-                      again: { objectId: row.objectId, recovery: "not-written" } })}
+                    onClick={() =>
+                      perform({
+                        kind: "stop",
+                        path: row.path,
+                        objectId: row.objectId,
+                        again: { objectId: row.objectId, recovery: "not-written" },
+                      })
+                    }
                   >
                     Try again
                   </SecondaryButton>
                 ) : null}
-                {row.quarantine === "unreadable" && readKeptEdits && !pendingStops.has(row.objectId) ? (
+                {row.quarantine === "unreadable" &&
+                readKeptEdits &&
+                !pendingStops.has(row.objectId) ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
                     disabled={listBusy}
                     aria-label={`Try again to read your kept edits for ${row.path}`}
                     onClick={() => {
-                      if (row.incident !== undefined) perform({ kind: "read", path: row.path, objectId: row.objectId, incident: row.incident });
+                      if (row.incident !== undefined)
+                        perform({
+                          kind: "read",
+                          path: row.path,
+                          objectId: row.objectId,
+                          incident: row.incident,
+                        });
                     }}
                   >
                     Try again
                   </SecondaryButton>
                 ) : null}
                 {/* Save needs the queue head dohc could not read. */}
-                {row.quarantine !== undefined && saveRecoveryCopy && (!pendingStops.has(row.objectId) || row.saveOnly || (!row.canResume && pendingStops.get(row.objectId)?.code === "edits-pending")) ? (
+                {row.quarantine !== undefined &&
+                saveRecoveryCopy &&
+                (!pendingStops.has(row.objectId) ||
+                  row.saveOnly ||
+                  (!row.canResume && pendingStops.get(row.objectId)?.code === "edits-pending")) ? (
                   <SecondaryButton
                     size="compact"
                     className="shrink-0"
-                    disabled={(busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) || row.quarantine === "unreadable" || savingCopies.has(`${workspaceId}\n${rowIdentity(row)}`)}
+                    disabled={
+                      (busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) ||
+                      row.quarantine === "unreadable" ||
+                      savingCopies.has(`${workspaceId}\n${rowIdentity(row)}`)
+                    }
                     aria-busy={savingCopies.has(`${workspaceId}\n${rowIdentity(row)}`) || undefined}
                     aria-label={`Save recovery copy of ${row.path}`}
                     onClick={() => {
                       const key = `${workspaceId}\n${rowIdentity(row)}`;
-                      setSavingCopies(saving => new Set(saving).add(key));
-                      void saveRecoveryCopy(workspaceId, row.path, row.incident).finally(() => setSavingCopies(saving => {
-                        const next = new Set(saving);
-                        next.delete(key);
-                        return next;
-                      }));
+                      setSavingCopies((saving) => new Set(saving).add(key));
+                      void saveRecoveryCopy(workspaceId, row.path, row.incident).finally(() =>
+                        setSavingCopies((saving) => {
+                          const next = new Set(saving);
+                          next.delete(key);
+                          return next;
+                        }),
+                      );
                     }}
                   >
                     {/* The server first prepares the earlier copy of the workspace that holds these edits. */}
-                    {row.earlier && savingCopies.has(`${workspaceId}\n${rowIdentity(row)}`) ? "Preparing recovery copy…" : "Save recovery copy"}
+                    {row.earlier && savingCopies.has(`${workspaceId}\n${rowIdentity(row)}`)
+                      ? "Preparing recovery copy…"
+                      : "Save recovery copy"}
+                  </SecondaryButton>
+                ) : null}
+                {/* A held file can't go live again, but a copy of it can once it is opened. */}
+                {heldCopyable(row) && makeCopy && !pendingStops.has(row.objectId) ? (
+                  <SecondaryButton
+                    size="compact"
+                    className="shrink-0"
+                    // One copy at a time: a second would queue behind it and make another file.
+                    disabled={
+                      (busy?.kind === "stop" && busy.objectId === row.objectId) || copying !== null
+                    }
+                    aria-busy={copying === `${workspaceId}\n${row.path}` || undefined}
+                    aria-label={`Make a copy of ${row.path}`}
+                    onClick={() => {
+                      const key = `${workspaceId}\n${row.path}`;
+                      setCopying(key);
+                      void makeCopy(workspaceId, row.path).finally(() =>
+                        setCopying((current) => (current === key ? null : current)),
+                      );
+                    }}
+                  >
+                    {copying === `${workspaceId}\n${row.path}` ? "Making a copy…" : "Make a copy"}
                   </SecondaryButton>
                 ) : null}
                 {/* A Resume alone fails again until dohc has opened the document once. */}
-                {row.reason === "live-document-without-lineage" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                {row.reason === "live-document-without-lineage" &&
+                !pendingStops.has(row.objectId) &&
+                !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    Live editing can't start until you open this document once in dohc. After you open it, resume live editing.
+                    Live editing can't start until you open this document once in dohc. After you
+                    open it, resume live editing. A note larger than 256 KB doesn't open as a
+                    document in dohc. Make it smaller or split it, then open it.
                   </p>
                 ) : null}
                 {/* A Resume retries the edit. One that would remove live work stays held. A deferred Stop's note already offers Resume. */}
-                {row.reason === "live-edit-unadmitted" && !row.deferredStop && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                {row.reason === "live-edit-unadmitted" &&
+                !row.deferredStop &&
+                !pendingStops.has(row.objectId) &&
+                !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    The server hasn't applied an edit to this document. Resume live editing to try again.
+                    The server hasn't applied an edit to this document. Resume live editing to try
+                    again.
                   </p>
                 ) : null}
-                {row.reason === "conflict-parent-withheld" && (!pendingStops.has(row.objectId) || pendingStops.get(row.objectId)?.code === "edits-pending") ? (
-                  <p tabIndex={-1} data-live-document-pending-action={pendingStops.has(row.objectId) ? "" : undefined}
-                    className="m-0 basis-full text-[12px] text-muted">
-                    {pendingStops.has(row.objectId) ? "Live editing didn't stop. " : ""}A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version.{" "}
+                {row.reason === "conflict-parent-withheld" &&
+                (!pendingStops.has(row.objectId) ||
+                  pendingStops.get(row.objectId)?.code === "edits-pending") ? (
+                  <p
+                    tabIndex={-1}
+                    data-live-document-pending-action={
+                      pendingStops.has(row.objectId) ? "" : undefined
+                    }
+                    className="m-0 basis-full text-[12px] text-muted"
+                  >
+                    {pendingStops.has(row.objectId) ? "Live editing didn't stop. " : ""}A conflict
+                    in this file was resolved, so live editing can't resume for it. People with the
+                    link can still read the last shared version.{" "}
                     {row.status === "retired"
                       ? "You can keep editing it in dohc, but your edits won't reach them."
                       : "You can keep editing it in dohc, but your edits may not reach them."}
+                    {makeCopy && heldCopyable(row) && !pendingStops.has(row.objectId)
+                      ? heldCopyNote(row)
+                      : ""}
                   </p>
                 ) : null}
-                {/* Resume can't help because ordinary edits never give the document a new base, so the row doesn't offer it. */}
-                {row.reason === "live-history-over-budget" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                {/* Resume tries again now. Some histories never start, and an older server doesn't try again by itself, so the words promise no more. */}
+                {row.reason === "live-history-over-budget" &&
+                !pendingStops.has(row.objectId) &&
+                !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc, and your edits keep syncing. People you shared it with can't edit it live.
+                    This document's edit history is too long for the server to check, so live
+                    editing can't start. You can keep editing it in dohc and your edits keep
+                    syncing, but people you shared it with can't edit it live. Resume live editing
+                    to try again.
                   </p>
+                ) : null}
+                {/* The server keeps trying it. Resume tries now, and Stop ends live editing for it. */}
+                {row.reason === "live-start-failing" &&
+                !pendingStops.has(row.objectId) &&
+                !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    The server can't start live editing for this document. It keeps trying. You can
+                    keep editing it in dohc and your edits keep syncing, but people you shared it
+                    with can't edit it live until it starts.
+                  </p>
+                ) : null}
+                {/* Any reason the server words this way, under its row's own sentence. */}
+                {row.failure &&
+                !pendingStops.has(row.objectId) &&
+                !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                  <div className="flex basis-full items-start gap-2">
+                    <p className="m-0 text-[12px] text-muted">{failureLine(row.failure)}</p>
+                    <CopyButton
+                      iconOnly
+                      label="Copy the server's reason"
+                      getText={() => failureLine(row.failure!)}
+                    />
+                  </div>
                 ) : null}
                 {/* Resume and Stop can't help here, so the row offers neither. */}
-                {row.reason === "session-host-diverged" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                {row.reason === "session-host-diverged" &&
+                !pendingStops.has(row.objectId) &&
+                !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    The server's copy of this workspace no longer matches the synced one. Contact the server's operator.
+                    The server's copy of this workspace no longer matches the synced one. Contact
+                    the server's operator.
                   </p>
                 ) : null}
                 {busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly ? (
                   <p className="m-0 basis-full text-[12px] text-muted">Stopping live editing…</p>
-                ) : pendingStops.has(row.objectId) && !row.saveOnly && !(row.reason === "conflict-parent-withheld" && pendingStops.get(row.objectId)?.code === "edits-pending") ? (
+                ) : pendingStops.has(row.objectId) &&
+                  !row.saveOnly &&
+                  !(
+                    row.reason === "conflict-parent-withheld" &&
+                    pendingStops.get(row.objectId)?.code === "edits-pending"
+                  ) ? (
                   <div className="flex basis-full items-start gap-2">
-                    <p tabIndex={-1} data-live-document-pending-action={liveStopAction(pendingStops.get(row.objectId)!, row) === "none" ? "" : undefined}
-                      className="m-0 flex-1 text-[12px] text-muted">{liveStopOffersResume(pendingStops.get(row.objectId)!, row)
-                      ? LIVE_STOP_EDITS_PENDING_RESUME : liveStopMessage(pendingStops.get(row.objectId)!, row)}</p>
+                    <p
+                      tabIndex={-1}
+                      data-live-document-pending-action={
+                        liveStopAction(pendingStops.get(row.objectId)!, row) === "none"
+                          ? ""
+                          : undefined
+                      }
+                      className="m-0 flex-1 text-[12px] text-muted"
+                    >
+                      {liveStopOffersResume(pendingStops.get(row.objectId)!, row)
+                        ? LIVE_STOP_EDITS_PENDING_RESUME
+                        : liveStopMessage(pendingStops.get(row.objectId)!, row)}
+                    </p>
                     {pendingStops.get(row.objectId)?.sessionHost ? (
-                      <CopyButton iconOnly label="Copy error details" getText={() => errorDetails([
-                        ["Live editing", liveStopOffersResume(pendingStops.get(row.objectId)!, row) ? LIVE_STOP_EDITS_PENDING_RESUME : liveStopMessage(pendingStops.get(row.objectId)!, row)],
-                        ["File", row.path], ["Server", pendingStops.get(row.objectId)?.sessionHost],
-                      ])} />
+                      <CopyButton
+                        iconOnly
+                        label="Copy error details"
+                        getText={() =>
+                          errorDetails([
+                            [
+                              "Live editing",
+                              liveStopOffersResume(pendingStops.get(row.objectId)!, row)
+                                ? LIVE_STOP_EDITS_PENDING_RESUME
+                                : liveStopMessage(pendingStops.get(row.objectId)!, row),
+                            ],
+                            ["File", row.path],
+                            ["Server", pendingStops.get(row.objectId)?.sessionHost],
+                          ])
+                        }
+                      />
                     ) : null}
                   </div>
                 ) : null}
-                {quarantineNote(row) !== null && (!(busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) &&
-                  (!pendingStops.has(row.objectId) || (!row.canResume && row.quarantine !== "unreadable" && pendingStops.get(row.objectId)?.code === "edits-pending"))) ? (
+                {quarantineNote(row) !== null &&
+                !(busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) &&
+                (!pendingStops.has(row.objectId) ||
+                  (!row.canResume &&
+                    row.quarantine !== "unreadable" &&
+                    pendingStops.get(row.objectId)?.code === "edits-pending")) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">{quarantineNote(row)}</p>
-                ) : !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) && row.deferredStop ? (
+                ) : !pendingStops.has(row.objectId) &&
+                  !(busy?.kind === "stop" && busy.objectId === row.objectId && !row.saveOnly) &&
+                  row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     {deferredStopNote(row, row.deferredStop)}
                   </p>
@@ -969,9 +1275,7 @@ export function LiveDocumentsDialog({
                 disabled={refusalBusy !== null}
                 data-testid="live-refusals-more"
                 aria-label="Next page of shares that could not start live editing"
-                onClick={() =>
-                  performRefusals({ kind: "page", cursor: refusalNextCursor })
-                }
+                onClick={() => performRefusals({ kind: "page", cursor: refusalNextCursor })}
               >
                 Next page
               </SecondaryButton>

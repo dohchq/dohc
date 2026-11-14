@@ -31,10 +31,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
     viewModeEnabled?: boolean;
     autoFocus?: boolean;
     theme?: "light" | "dark";
-    onLinkOpen?: (
-      element: { id: string; link: string },
-      event: { preventDefault(): void },
-    ) => void;
+    onLinkOpen?: (element: { id: string; link: string }, event: { preventDefault(): void }) => void;
     onChange?: (
       elements: readonly unknown[],
       appState: Record<string, unknown>,
@@ -107,9 +104,7 @@ describe("ExcalidrawCanvas", () => {
     async (readOnly) => {
       globalThis.document.documentElement.dataset.theme = "dark";
       const onChange = vi.fn();
-      render(
-        <ExcalidrawCanvas document={document} readOnly={readOnly} onChange={onChange} />,
-      );
+      render(<ExcalidrawCanvas document={document} readOnly={readOnly} onChange={onChange} />);
       const canvas = screen.getByTestId("mock-upstream-excalidraw");
       expect(canvas.dataset.theme).toBe("dark");
 
@@ -124,9 +119,7 @@ describe("ExcalidrawCanvas", () => {
 
   it("serializes the embedded files returned with a scene change", () => {
     const onChange = vi.fn();
-    render(
-      <ExcalidrawCanvas document={document} readOnly={false} onChange={onChange} />,
-    );
+    render(<ExcalidrawCanvas document={document} readOnly={false} onChange={onChange} />);
 
     fireEvent.click(screen.getByTestId("mock-upstream-excalidraw"));
     expect(onChange).toHaveBeenCalledTimes(1);
@@ -138,25 +131,17 @@ describe("ExcalidrawCanvas", () => {
 
   it("does not install a change handler in read-only mode", () => {
     const onChange = vi.fn();
-    render(
-      <ExcalidrawCanvas document={document} readOnly onChange={onChange} />,
-    );
+    render(<ExcalidrawCanvas document={document} readOnly onChange={onChange} />);
 
-    expect(screen.getByTestId("mock-upstream-excalidraw").dataset.readOnly).toBe(
-      "true",
-    );
+    expect(screen.getByTestId("mock-upstream-excalidraw").dataset.readOnly).toBe("true");
     fireEvent.click(screen.getByTestId("mock-upstream-excalidraw"));
     expect(onChange).not.toHaveBeenCalled();
   });
 
   it("does not focus an editable canvas when its editor group is inactive", () => {
-    render(
-      <ExcalidrawCanvas document={document} readOnly={false} autoFocus={false} />,
-    );
+    render(<ExcalidrawCanvas document={document} readOnly={false} autoFocus={false} />);
 
-    expect(screen.getByTestId("mock-upstream-excalidraw").dataset.autoFocus).toBe(
-      "false",
-    );
+    expect(screen.getByTestId("mock-upstream-excalidraw").dataset.autoFocus).toBe("false");
   });
 
   it("opens links through the audited desktop bridge", async () => {

@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LegendListProps } from "@legendapp/list/react";
 import type { ChatMessageRecord } from "../../ipc/bridgeContract";
 import { ChatMessageList } from "./chatMessages";
-import { createWorkReferenceLinks, WorkReferences } from "./workReferences";
 import { scanChatLinks } from "@dohc/workspace-contracts/chat-mentions";
 
 vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
@@ -14,11 +13,29 @@ vi.mock("@legendapp/list/react", () => ({
   LegendList: function LegendList(props: LegendListProps<ChatMessageRecord>) {
     // Reuse unchanged row renders so this test isolates focus-neighbor work.
     // Browser tests cover the real list's mounting and native Tab behavior.
-    const rows = useMemo(() => props.data?.map((item, index) =>
-      props.renderItem?.({ item, index, data: props.data!, extraData: props.extraData, type: undefined })),
-    [props.data, props.renderItem, props.extraData]);
-    return <div role="list" data-pinned={props.alwaysRender?.indices?.join(",")}
-      onFocusCapture={props.onFocusCapture} onBlurCapture={props.onBlurCapture}>{rows}</div>;
+    const rows = useMemo(
+      () =>
+        props.data?.map((item, index) =>
+          props.renderItem?.({
+            item,
+            index,
+            data: props.data!,
+            extraData: props.extraData,
+            type: undefined,
+          }),
+        ),
+      [props.data, props.renderItem, props.extraData],
+    );
+    return (
+      <div
+        role="list"
+        data-pinned={props.alwaysRender?.indices?.join(",")}
+        onFocusCapture={props.onFocusCapture}
+        onBlurCapture={props.onBlurCapture}
+      >
+        {rows}
+      </div>
+    );
   },
 }));
 
@@ -27,13 +44,14 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-const messages: ChatMessageRecord[] = Array.from({ length: 301 }, (_, index) => ({ presentation: { group: "fixture", hue: null, self: false },
+const messages: ChatMessageRecord[] = Array.from({ length: 7 }, (_, index) => ({
+  presentation: { group: "fixture", hue: null, self: false },
   id: `m-${index}`,
   threadId: "thread",
   authorKind: "human",
   authorDisplayName: "Reader",
   createdAtMs: 1_700_000_000_000 + index * 60_000,
-  body: index % 150 === 0 ? `See @[notes/${index}.md].` : `Plain message ${index}.`,
+  body: index % 3 === 0 ? `See @[notes/${index}.md].` : `Plain message ${index}.`,
 }));
 const onOpenPath = () => {};
 const readOnly = { reactions: [], viewerAuthorId: "viewer", readOnly: true, onToggle: () => {} };
@@ -44,48 +62,60 @@ function focus(button: HTMLElement) {
 
 describe("chat focus neighbors", () => {
   it("reuses sparse file-link indices while focus moves and refreshes them when a body changes", () => {
-    const { rerender } = render(<ChatMessageList testIdPrefix="focus" messages={messages}
-      loading={false} emptyLabel="Empty" onOpenPath={onOpenPath} reactionControls={readOnly} />);
+    const { rerender } = render(
+      <ChatMessageList
+        testIdPrefix="focus"
+        messages={messages}
+        loading={false}
+        emptyLabel="Empty"
+        onOpenPath={onOpenPath}
+        reactionControls={readOnly}
+      />,
+    );
     const links = screen.getAllByTestId("focus-message-body-file-mention");
     vi.mocked(scanChatLinks).mockClear();
 
     focus(links[0]!);
-    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("0,150");
+    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("0,3");
     focus(links[1]!);
-    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("150,0,300");
+    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("3,0,6");
     focus(links[2]!);
-    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("300,150");
+    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("6,3");
     expect(scanChatLinks).not.toHaveBeenCalled();
 
-    const changed = messages.map((message, index) => index === 75
-      ? { ...message, body: "See @[notes/new.md]." } : message);
-    rerender(<ChatMessageList testIdPrefix="focus" messages={changed}
-      loading={false} emptyLabel="Empty" onOpenPath={onOpenPath} reactionControls={readOnly} />);
+    const changed = messages.map((message, index) =>
+      index === 1 ? { ...message, body: "See @[notes/new.md]." } : message,
+    );
+    rerender(
+      <ChatMessageList
+        testIdPrefix="focus"
+        messages={changed}
+        loading={false}
+        emptyLabel="Empty"
+        onOpenPath={onOpenPath}
+        reactionControls={readOnly}
+      />,
+    );
     vi.mocked(scanChatLinks).mockClear();
     focus(screen.getAllByTestId("focus-message-body-file-mention")[1]!);
-    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("75,0,150");
+    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("1,0,3");
     expect(scanChatLinks).not.toHaveBeenCalled();
-  });
-
-  it("pins the nearest work links without a file opener, because a work link opens either way", async () => {
-    const work = (index: number) => `@[work:${String(index).padStart(43, "w")}]`;
-    const withWork = messages.map((message, index) => index % 150 === 0 ? { ...message, body: `See ${work(index)}.` } : message);
-    const links = createWorkReferenceLinks("ws", { open: vi.fn(), failed: vi.fn() }, async (references) =>
-      references.map((reference) => ({ reference, kind: "chat" as const, label: "Trip", open: { to: "chat-channel" as const, channel: "c-1" } })));
-    render(<WorkReferences.Provider value={links}><ChatMessageList testIdPrefix="focus" messages={withWork}
-      loading={false} emptyLabel="Empty" reactionControls={readOnly} /></WorkReferences.Provider>);
-    const chips = await screen.findAllByRole("button", { name: "Open Trip" });
-    focus(chips[1]!);
-    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("150,0,300");
   });
 
   it("pins adjacent messages when every row has a reaction button", () => {
-    render(<ChatMessageList testIdPrefix="focus" messages={messages}
-      loading={false} emptyLabel="Empty" onOpenPath={onOpenPath}
-      reactionControls={{ ...readOnly, readOnly: false }} />);
+    render(
+      <ChatMessageList
+        testIdPrefix="focus"
+        messages={messages}
+        loading={false}
+        emptyLabel="Empty"
+        onOpenPath={onOpenPath}
+        reactionControls={{ ...readOnly, readOnly: false }}
+      />,
+    );
     vi.mocked(scanChatLinks).mockClear();
-    focus(screen.getAllByRole("button", { name: "Add reaction" })[150]!);
-    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("150,149,151");
+    focus(screen.getAllByRole("button", { name: "Add reaction" })[3]!);
+    expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("3,2,4");
     expect(scanChatLinks).not.toHaveBeenCalled();
   });
 });

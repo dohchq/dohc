@@ -1,7 +1,7 @@
-//! Verified, restore-tested backups (`plan §Backups`).
+//! Verified, restore-tested backups.
 //!
-//! A backup is not "done" when the bytes are copied — it is done when a
-//! *restore test* proves the copy is openable and consistent. This module:
+//! A backup is done when a restore test proves the copy is openable and
+//! consistent, not when the bytes are copied. This module:
 //!
 //! 1. **Preflights free space** through the [`FreeSpaceProbe`] seam and refuses
 //!    on disk-full before touching anything — it never deletes the only valid
@@ -14,26 +14,25 @@
 //!    compares row counts of the durable tables against the source. Only then
 //!    is the manifest written and the backup declared valid.
 //! 4. **Writes a redaction-safe manifest** (opaque engine id, build, schema
-//!    fingerprint, checksum, size, retention) — never document content. A
+//!    fingerprint, checksum, size, retention), never document content. A
 //!    backup with no manifest is invalid-by-absence and never counted.
-//! 5. **Reads back through [`load_valid_backup`]**, which enforces those
-//!    invariants: it returns `None` for a missing manifest (invalid-by-absence)
-//!    or a checksum that no longer matches the db bytes (tamper / partial
-//!    write). A backup is only trusted through this validated read path.
+//! 5. **Reads back through [`load_valid_backup`]**, which returns `None` for a
+//!    missing manifest or a checksum that no longer matches the db bytes
+//!    (tamper or partial write). A backup is trusted only through this
+//!    validated read path.
 //!
 //! Two named fault points make the crash boundary testable:
 //! `backup.after-copy-before-manifest` and `backup.during-restore-verify`.
 //!
-//! **Same-stem republish window (documented, safe).** When a backup reuses an
-//! existing stem, the copy is staged and verified first, then published by
-//! atomic rename, and the prior manifest is cleared just before the rename so it
-//! can never describe the newly published (still-unmanifested) db. This leaves a
-//! narrow window in which *that stem* has a db but no manifest —
-//! [`load_valid_backup`] correctly reports it invalid-by-absence, and a retry
-//! self-heals by rewriting the manifest. The live source database is never
-//! touched, and any OTHER-stem backup is untouched; the guarantee is precisely
-//! "never destroy a valid restore point to make room for an unverified one",
-//! not "the target stem is atomically valid at every instant".
+//! **Same-stem republish window.** When a backup reuses an existing stem, the
+//! copy is staged and verified first, then published by atomic rename. The
+//! prior manifest is cleared just before the rename, so it can never describe
+//! the newly published db. For a narrow window that stem has a db but no
+//! manifest. [`load_valid_backup`] reports it invalid-by-absence, and a retry
+//! rewrites the manifest. The live source database and every other stem's
+//! backup are untouched. The guarantee is "never destroy a valid restore
+//! point to make room for an unverified one", not "the target stem is
+//! atomically valid at every instant".
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
@@ -154,7 +153,7 @@ const COMPARED_TABLES: &[&str] = &[
     "replication_pending_conflict_moments",
     "replication_pending_conflict_text_blobs",
     "replication_pending_conflict_binary_blobs",
-    // R08 secret-backed-file tables: their ciphertext tips / fork bases /
+    // Secret-backed-file tables: their ciphertext tips / fork bases /
     // history moments are durable state, so a backup missing or truncating them
     // must fail the restore-test row-count compare (never mark a lossy copy
     // verified).
@@ -241,9 +240,6 @@ impl BackupManifest {
 }
 
 impl BackupManifest {
-    /// Parse a manifest from its JSON text. Returns `None` if the JSON is
-    /// malformed or a required field is missing/mistyped (a malformed manifest
-    /// is treated as no manifest — invalid-by-absence).
     fn from_json(text: &str) -> Option<Self> {
         let value: serde_json::Value = serde_json::from_str(text).ok()?;
         let obj = value.as_object()?;

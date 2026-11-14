@@ -3,15 +3,36 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { useRef, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MENU_SEPARATOR, MENU_SHORTCUT, Menu, deleteShortcut, menuEnterFrom, moveInMenu, revealMenuRow, type MenuEntry, type MenuItem } from "./Menu";
+import {
+  MENU_SEPARATOR,
+  MENU_SHORTCUT,
+  Menu,
+  deleteShortcut,
+  menuEnterFrom,
+  moveInMenu,
+  revealMenuRow,
+  type MenuEntry,
+  type MenuItem,
+} from "./Menu";
 import { Overlay } from "../Overlay";
 
-function Harness(props: { items: readonly MenuEntry[]; closeOnPick?: boolean; children?: ReactNode }) {
+function Harness(props: {
+  items: readonly MenuEntry[];
+  closeOnPick?: boolean;
+  children?: ReactNode;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <div>
       <button type="button">Elsewhere</button>
-      <Menu label="Row actions" testId="row-menu" open={open} onOpenChange={setOpen} closeOnPick={props.closeOnPick} items={props.items}>
+      <Menu
+        label="Row actions"
+        testId="row-menu"
+        open={open}
+        onOpenChange={setOpen}
+        closeOnPick={props.closeOnPick}
+        items={props.items}
+      >
         {props.children}
       </Menu>
     </div>
@@ -109,20 +130,32 @@ describe("Menu", () => {
 
     // Shift+Tab from a row is not at the trap's edge, so the trigger takes it.
     await user.click(trigger);
-    expect(fireEvent.keyDown(screen.getByRole("menuitem", { name: "Rename" }), { key: "Tab", shiftKey: true })).toBe(true);
+    expect(
+      fireEvent.keyDown(screen.getByRole("menuitem", { name: "Rename" }), {
+        key: "Tab",
+        shiftKey: true,
+      }),
+    ).toBe(true);
     expect(screen.queryByRole("menu")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
-  // A context menu has no trigger: it opens at a point and gives focus back
-  // to what had it, such as the row that was right-clicked.
   describe("opened at a point", () => {
     function AtPoint(props: { at: { x: number; y: number }; onClose: () => void }) {
       return (
         <>
           <button type="button">Row</button>
           <button type="button">Elsewhere</button>
-          <Menu label="Row actions" at={props.at} open onOpenChange={(open) => { if (!open) props.onClose(); }} items={items} width={200} />
+          <Menu
+            label="Row actions"
+            at={props.at}
+            open
+            onOpenChange={(open) => {
+              if (!open) props.onClose();
+            }}
+            items={items}
+            width={200}
+          />
         </>
       );
     }
@@ -141,11 +174,31 @@ describe("Menu", () => {
     it("starts at its point even with an anchor, which only a trigger's list follows", () => {
       function Anchored(props: { open: boolean }) {
         const box = useRef<HTMLDivElement | null>(null);
-        return <div ref={box}><Menu label="Row actions" at={{ x: 40, y: 50 }} anchor={box} open={props.open} onOpenChange={vi.fn()} items={items} width={200} /></div>;
+        return (
+          <div ref={box}>
+            <Menu
+              label="Row actions"
+              at={{ x: 40, y: 50 }}
+              anchor={box}
+              open={props.open}
+              onOpenChange={vi.fn()}
+              items={items}
+              width={200}
+            />
+          </div>
+        );
       }
-      const rect = vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(
-        { top: 100, bottom: 144, left: 8, right: 308, width: 300, height: 44, x: 8, y: 100, toJSON: () => ({}) },
-      );
+      const rect = vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+        top: 100,
+        bottom: 144,
+        left: 8,
+        right: 308,
+        width: 300,
+        height: 44,
+        x: 8,
+        y: 100,
+        toJSON: () => ({}),
+      });
       try {
         // Opened after the anchor's box is in place, as a right-click opens one.
         render(<Anchored open={false} />).rerender(<Anchored open />);
@@ -164,8 +217,23 @@ describe("Menu", () => {
         const [open, setOpen] = useState(false);
         return (
           <>
-            <button type="button" onClick={() => setOpen(true)}>Row</button>
-            {open ? <Menu label="Row actions" at={{ x: 0, y: 0 }} open onOpenChange={(next) => { if (!next) { setOpen(false); onClose(); } }} items={items} /> : null}
+            <button type="button" onClick={() => setOpen(true)}>
+              Row
+            </button>
+            {open ? (
+              <Menu
+                label="Row actions"
+                at={{ x: 0, y: 0 }}
+                open
+                onOpenChange={(next) => {
+                  if (!next) {
+                    setOpen(false);
+                    onClose();
+                  }
+                }}
+                items={items}
+              />
+            ) : null}
           </>
         );
       }
@@ -189,7 +257,18 @@ describe("Menu", () => {
 
   it("shows a row's shortcut after its label and names it for assistive technology", async () => {
     const user = userEvent.setup();
-    render(<Harness items={[{ id: "rename", label: "Rename", onSelect: rename, shortcut: { label: "F2", keys: "F2" } }]} />);
+    render(
+      <Harness
+        items={[
+          {
+            id: "rename",
+            label: "Rename",
+            onSelect: rename,
+            shortcut: { label: "F2", keys: "F2" },
+          },
+        ]}
+      />,
+    );
     await user.click(screen.getByTestId("row-menu"));
     const row = screen.getByRole("menuitem", { name: "Rename" });
     expect(row.getAttribute("aria-keyshortcuts")).toBe("F2");
@@ -249,10 +328,14 @@ describe("Menu", () => {
 
   it("finds a row by its label's first letter, past a text icon before it", async () => {
     const user = userEvent.setup();
-    render(<Harness items={[
-      { id: "budget", label: "budget.csv", onSelect: vi.fn() },
-      { id: "plan", label: "plan.md", icon: <span aria-hidden>🧭</span>, onSelect: vi.fn() },
-    ]} />);
+    render(
+      <Harness
+        items={[
+          { id: "budget", label: "budget.csv", onSelect: vi.fn() },
+          { id: "plan", label: "plan.md", icon: <span aria-hidden>🧭</span>, onSelect: vi.fn() },
+        ]}
+      />,
+    );
     screen.getByTestId("row-menu").focus();
     await user.keyboard("{ArrowDown}");
     await user.keyboard("p");
@@ -340,7 +423,6 @@ describe("Menu", () => {
     expect(forget.className).toContain("text-danger");
     await user.keyboard("{ArrowDown}{ArrowDown}");
     expect(document.activeElement).toBe(forget);
-    // The current row keeps the selected fill after focus leaves it.
     expect(current.className.split(" ")).toContain("bg-selected");
     expect(current.className.split(" ")).toContain("font-medium");
     expect(forget.className.split(" ")).not.toContain("bg-selected");
@@ -360,12 +442,23 @@ describe("Menu", () => {
 
     render(<Harness items={[{ ...items[0]!, current: true }, items[1]!]} />);
     await user.click(screen.getByTestId("row-menu"));
-    expect(screen.getByRole("menuitem", { name: "Duplicate" }).className.split(" ")).toContain("dohc-focus-row");
+    expect(screen.getByRole("menuitem", { name: "Duplicate" }).className.split(" ")).toContain(
+      "dohc-focus-row",
+    );
     cleanup();
 
-    render(<Harness items={[{ ...items[0]!, checked: true }, { ...items[1]!, checked: false }]} />);
+    render(
+      <Harness
+        items={[
+          { ...items[0]!, checked: true },
+          { ...items[1]!, checked: false },
+        ]}
+      />,
+    );
     await user.click(screen.getByTestId("row-menu"));
-    expect(screen.getByRole("menuitemradio", { name: "Duplicate" }).className.split(" ")).toContain("dohc-focus-row");
+    expect(screen.getByRole("menuitemradio", { name: "Duplicate" }).className.split(" ")).toContain(
+      "dohc-focus-row",
+    );
   });
 
   it("keeps the checked row's selected fill whatever has focus", async () => {
@@ -381,10 +474,18 @@ describe("Menu", () => {
     await user.click(screen.getByTestId("row-menu"));
     await user.keyboard("{ArrowUp}");
     expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Main" }));
-    expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("bg-selected");
-    expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("font-medium");
-    expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("bg-selected");
-    expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("font-medium");
+    expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain(
+      "bg-selected",
+    );
+    expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain(
+      "font-medium",
+    );
+    expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain(
+      "bg-selected",
+    );
+    expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain(
+      "font-medium",
+    );
   });
 
   // Inside the selected fill, styles.css's bg-selected utility shows subtle
@@ -414,8 +515,6 @@ describe("Menu", () => {
     expect(rowOf("Ctrl 2").className.split(" ")).toContain("bg-selected");
   });
 
-  // Opened with the mouse, a menu on its first row showed two active-looking
-  // rows: the focused first row and the checked one.
   it.each([
     ["its checked row", true, "Draft"],
     ["its first row when no row is checked", false, "Main"],
@@ -438,16 +537,29 @@ describe("Menu", () => {
   // jsdom has no layout or styles: rows 28px apart from 4px down, in a list that shows 100px.
   it("scrolls a list shorter than its rows to the checked row it opens on", async () => {
     const spies = [
-      vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (
+        this: HTMLElement,
+      ) {
         const menu = this.closest('[role="menu"]');
-        return menu && menu !== this ? 4 + [...menu.querySelectorAll('[role^="menuitem"]')].indexOf(this) * 28 : 0;
+        return menu && menu !== this
+          ? 4 + [...menu.querySelectorAll('[role^="menuitem"]')].indexOf(this) * 28
+          : 0;
       }),
       vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28),
       vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(100),
     ];
     try {
       const user = userEvent.setup();
-      render(<Harness items={Array.from({ length: 10 }, (_, index) => ({ id: `v${index}`, label: `Version ${index}`, onSelect: vi.fn(), checked: index === 9 }))} />);
+      render(
+        <Harness
+          items={Array.from({ length: 10 }, (_, index) => ({
+            id: `v${index}`,
+            label: `Version ${index}`,
+            onSelect: vi.fn(),
+            checked: index === 9,
+          }))}
+        />,
+      );
       await user.click(screen.getByTestId("row-menu"));
       expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Version 9" }));
       // The last row ends at 284: 284 - 100.
@@ -463,8 +575,14 @@ describe("Menu", () => {
       <Harness
         items={[
           { id: "compare", label: "Compare", onSelect: vi.fn(), icon: <span aria-hidden>C</span> },
-          { id: "merge", label: "Merge", onSelect: remove, icon: <span aria-hidden>M</span>, disabled: true,
-            description: "Only versions made from Main can merge into Main." },
+          {
+            id: "merge",
+            label: "Merge",
+            onSelect: remove,
+            icon: <span aria-hidden>M</span>,
+            disabled: true,
+            description: "Only versions made from Main can merge into Main.",
+          },
         ]}
       />,
     );
@@ -474,12 +592,13 @@ describe("Menu", () => {
     const reason = screen.getByText("Only versions made from Main can merge into Main.");
     expect(merge.getAttribute("aria-describedby")).toBe(reason.id);
     expect(merge.contains(reason)).toBe(true);
-    // The row, its focus fill and the reason keep their strength.
     expect(merge.className).not.toContain("opacity");
     expect(reason.className).not.toContain("opacity");
     expect(screen.getByText("Merge").className.split(" ")).toContain("opacity-50");
     expect(screen.getByText("M").parentElement?.className.split(" ")).toContain("opacity-50");
-    expect(screen.getByRole("menuitem", { name: "Compare" }).getAttribute("aria-describedby")).toBeNull();
+    expect(
+      screen.getByRole("menuitem", { name: "Compare" }).getAttribute("aria-describedby"),
+    ).toBeNull();
     await user.keyboard("{End}{Enter}");
     expect(remove).not.toHaveBeenCalled();
   });
@@ -511,13 +630,15 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(second);
   });
 
-  // A row shows as active when it has focus and focus draws the fill on it.
-  // A pointer open marks none, as a native menu does.
   describe("the marked row", () => {
     const marked = () =>
       screen
         .getAllByRole("menuitem")
-        .filter((row) => row === document.activeElement && row.className.split(" ").includes("focus:bg-selected"))
+        .filter(
+          (row) =>
+            row === document.activeElement &&
+            row.className.split(" ").includes("focus:bg-selected"),
+        )
         .map((row) => row.textContent);
 
     it("marks no row on a pointer open, and the hover fill follows the pointer", async () => {
@@ -552,10 +673,21 @@ describe("Menu", () => {
     });
 
     it("marks the first row of a context menu at once only when the keyboard opened it", () => {
-      const view = render(<Menu label="Row actions" at={{ x: 0, y: 0 }} open onOpenChange={vi.fn()} items={items} />);
+      const view = render(
+        <Menu label="Row actions" at={{ x: 0, y: 0 }} open onOpenChange={vi.fn()} items={items} />,
+      );
       expect(marked()).toEqual([]);
       view.unmount();
-      render(<Menu label="Row actions" at={{ x: 0, y: 0 }} fromKeyboard open onOpenChange={vi.fn()} items={items} />);
+      render(
+        <Menu
+          label="Row actions"
+          at={{ x: 0, y: 0 }}
+          fromKeyboard
+          open
+          onOpenChange={vi.fn()}
+          items={items}
+        />,
+      );
       expect(marked()).toEqual(["Rename"]);
     });
 
@@ -576,22 +708,30 @@ describe("Menu", () => {
       expect(marked()).toEqual(["Delete"]);
     });
 
-    it.each([["Enter", "{Enter}"], ["Space", " "]])("marks the first row on the first %s after a pointer open and runs nothing, then runs it on the next", async (_, key) => {
-      const user = userEvent.setup();
-      render(<Harness items={items} />);
-      await user.click(screen.getByTestId("row-menu"));
-      // The pointer's fill sits on another row.
-      fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Duplicate" }), { movementX: 0, movementY: 3 });
-      await user.keyboard(key);
-      expect(marked()).toEqual(["Rename"]);
-      expect(rename).not.toHaveBeenCalled();
-      expect(items[1]!.onSelect).not.toHaveBeenCalled();
-      expect(screen.getByRole("menu")).toBeTruthy();
+    it.each([
+      ["Enter", "{Enter}"],
+      ["Space", " "],
+    ])(
+      "marks the first row on the first %s after a pointer open and runs nothing, then runs it on the next",
+      async (_, key) => {
+        const user = userEvent.setup();
+        render(<Harness items={items} />);
+        await user.click(screen.getByTestId("row-menu"));
+        fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Duplicate" }), {
+          movementX: 0,
+          movementY: 3,
+        });
+        await user.keyboard(key);
+        expect(marked()).toEqual(["Rename"]);
+        expect(rename).not.toHaveBeenCalled();
+        expect(items[1]!.onSelect).not.toHaveBeenCalled();
+        expect(screen.getByRole("menu")).toBeTruthy();
 
-      await user.keyboard(key);
-      expect(rename).toHaveBeenCalledOnce();
-      expect(screen.queryByRole("menu")).toBeNull();
-    });
+        await user.keyboard(key);
+        expect(rename).toHaveBeenCalledOnce();
+        expect(screen.queryByRole("menu")).toBeNull();
+      },
+    );
 
     it("keeps the mark on the row the pointer moves to once a key has marked one", async () => {
       const user = userEvent.setup();
@@ -599,7 +739,10 @@ describe("Menu", () => {
       await user.click(screen.getByTestId("row-menu"));
       await user.keyboard("{ArrowDown}");
       expect(marked()).toEqual(["Rename"]);
-      fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Duplicate" }), { movementX: 0, movementY: 3 });
+      fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Duplicate" }), {
+        movementX: 0,
+        movementY: 3,
+      });
       expect(marked()).toEqual(["Duplicate"]);
     });
   });
@@ -627,7 +770,9 @@ describe("Menu", () => {
     const trigger = screen.getByRole("button", { name: "All tabs in editor group 1" });
     expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
     await user.click(trigger);
-    expect(screen.getByTestId("tabs-list")).toBe(screen.getByRole("menu", { name: "Tabs in editor group 1" }));
+    expect(screen.getByTestId("tabs-list")).toBe(
+      screen.getByRole("menu", { name: "Tabs in editor group 1" }),
+    );
     await user.click(trigger);
     expect(screen.queryByRole("menu")).toBeNull();
     expect(document.activeElement).toBe(trigger);
@@ -637,9 +782,17 @@ describe("Menu", () => {
     const user = userEvent.setup();
     render(<Harness items={items} />);
     const trigger = screen.getByTestId("row-menu");
-    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(
-      { top: 570, bottom: 594, left: 280, right: 304, width: 24, height: 24, x: 280, y: 570, toJSON: () => ({}) },
-    );
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      top: 570,
+      bottom: 594,
+      left: 280,
+      right: 304,
+      width: 24,
+      height: 24,
+      x: 280,
+      y: 570,
+      toJSON: () => ({}),
+    });
     vi.stubGlobal("innerHeight", 600);
     vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(92);
     try {
@@ -663,18 +816,42 @@ describe("Menu", () => {
       const row = useRef<HTMLDivElement | null>(null);
       return (
         <div ref={row} data-testid="row">
-          <Menu label="Row actions" testId="row-menu" open={open} onOpenChange={setOpen} items={items} width={200} anchor={row} />
+          <Menu
+            label="Row actions"
+            testId="row-menu"
+            open={open}
+            onOpenChange={setOpen}
+            items={items}
+            width={200}
+            anchor={row}
+          />
         </div>
       );
     }
     render(<Anchored />);
     const trigger = screen.getByTestId("row-menu");
-    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(
-      { top: 102, bottom: 126, left: 280, right: 304, width: 24, height: 24, x: 280, y: 102, toJSON: () => ({}) },
-    );
-    vi.spyOn(screen.getByTestId("row"), "getBoundingClientRect").mockReturnValue(
-      { top: 100, bottom: 144, left: 8, right: 308, width: 300, height: 44, x: 8, y: 100, toJSON: () => ({}) },
-    );
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      top: 102,
+      bottom: 126,
+      left: 280,
+      right: 304,
+      width: 24,
+      height: 24,
+      x: 280,
+      y: 102,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(screen.getByTestId("row"), "getBoundingClientRect").mockReturnValue({
+      top: 100,
+      bottom: 144,
+      left: 8,
+      right: 308,
+      width: 300,
+      height: 44,
+      x: 8,
+      y: 100,
+      toJSON: () => ({}),
+    });
     try {
       await user.click(trigger);
       const menu = screen.getByRole("menu");
@@ -686,10 +863,12 @@ describe("Menu", () => {
   });
 });
 
-// The keys every menu shares, the Menu part and the editor menus alike.
 describe("moveInMenu", () => {
   const labels = ["Text", "Heading 1", "Heading 2", "Duplicate", "Delete"];
-  const key = (name: string, modifiers: { ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean } = {}) => ({
+  const key = (
+    name: string,
+    modifiers: { ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean } = {},
+  ) => ({
     key: name,
     ctrlKey: false,
     metaKey: false,
@@ -727,8 +906,14 @@ describe("menuEnterFrom", () => {
   it("starts the list 4px toward its trigger", () => {
     expect(menuEnterFrom("below")).toEqual({ "--dohc-menu-from": "-4px" });
     expect(menuEnterFrom("above")).toEqual({ "--dohc-menu-from": "4px" });
-    expect(menuEnterFrom("right")).toEqual({ "--dohc-menu-from": "0px", "--dohc-menu-from-x": "-4px" });
-    expect(menuEnterFrom("left")).toEqual({ "--dohc-menu-from": "0px", "--dohc-menu-from-x": "4px" });
+    expect(menuEnterFrom("right")).toEqual({
+      "--dohc-menu-from": "0px",
+      "--dohc-menu-from-x": "-4px",
+    });
+    expect(menuEnterFrom("left")).toEqual({
+      "--dohc-menu-from": "0px",
+      "--dohc-menu-from-x": "4px",
+    });
   });
 });
 
@@ -795,8 +980,15 @@ describe("revealMenuRow", () => {
     );
     await user.click(screen.getByTestId("row-menu"));
     const groups = screen.getAllByRole("group");
-    expect(groups.map((group) => document.getElementById(group.getAttribute("aria-labelledby")!)!.textContent)).toEqual(["View", "Collection"]);
-    expect(groups.map((group) => group.querySelector('[role="menuitem"]')!.textContent)).toEqual(["Fields", "Archive"]);
+    expect(
+      groups.map(
+        (group) => document.getElementById(group.getAttribute("aria-labelledby")!)!.textContent,
+      ),
+    ).toEqual(["View", "Collection"]);
+    expect(groups.map((group) => group.querySelector('[role="menuitem"]')!.textContent)).toEqual([
+      "Fields",
+      "Archive",
+    ]);
     // A label is not a row: the arrows skip it.
     await user.keyboard("{ArrowDown}{ArrowDown}");
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Archive" }));

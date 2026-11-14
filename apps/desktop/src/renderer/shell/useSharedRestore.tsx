@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { withErrorWords } from "../../ipc/errorWords";
 import type { OwnerRestorePhase, OwnerRestoreStatus } from "../../ipc/ownerRestoreContract";
 import { bridge } from "../bridge";
-import { DECLINE_REFUSED_MESSAGE, OwnerRestoreDialog, unfinishedRestoreStage, type UnfinishedRestoreStage } from "../OwnerRestoreDialog";
+import {
+  DECLINE_REFUSED_MESSAGE,
+  OwnerRestoreDialog,
+  unfinishedRestoreStage,
+  type UnfinishedRestoreStage,
+} from "../OwnerRestoreDialog";
 import type { ErrorDetailField } from "./copyDetails";
 import type { useShellError } from "./useShellError";
 
@@ -14,7 +19,6 @@ type Target = { workspaceId: string; path: string; from: From; attempt: number }
 
 // One Notices row per file: a refused start, or a restore not yet finished.
 export const sharedRestoreIdentity = (path: string) => `shared-restore:${path}`;
-// One Notices row for a listing that failed or could not read every restore.
 export const sharedRestoreListingIdentity = "shared-restore-listing";
 // The pages of unfinished restores one listing reads, 50 each.
 const UNFINISHED_PAGES = 20;
@@ -22,12 +26,14 @@ const UNFINISHED_PAGES = 20;
 const ROW: Record<UnfinishedRestoreStage, { title: string; message: (path: string) => string }> = {
   decide: {
     title: "Restore waiting for you",
-    message: (path) => `Access to ${path} stopped for a restore. Review the restore, or decline it to keep the file unchanged. ` +
+    message: (path) =>
+      `Access to ${path} stopped for a restore. Review the restore, or decline it to keep the file unchanged. ` +
       "Live editing through that access stays stopped until you share the file again.",
   },
   waiting: {
     title: "Restore waiting",
-    message: (path) => `The restore of ${path} has not finished. Live editing of this file stays stopped until it does.`,
+    message: (path) =>
+      `The restore of ${path} has not finished. Live editing of this file stays stopped until it does.`,
   },
   finishing: {
     title: "Finishing restore",
@@ -49,7 +55,13 @@ export function useSharedRestore(input: {
   onBeforeRestore(): Promise<() => void>;
   onRestored(): void;
   openChange(momentId: string, path: string): void;
-  reportRestoreError(fallback: string, error: unknown, retry: () => void, identity: string, path: string): void;
+  reportRestoreError(
+    fallback: string,
+    error: unknown,
+    retry: () => void,
+    identity: string,
+    path: string,
+  ): void;
   reportShellFailure: Shell["reportShellFailure"];
   showSuccessNotice: Shell["showSuccessNotice"];
   clearIdentity: Shell["clearIdentity"];
@@ -98,10 +110,18 @@ export function useSharedRestore(input: {
         return;
       }
       filed.current.add(restore.path);
-      const details: ErrorDetailField[] = [["File", restore.path, restore.path.length], ["Restore", restore.operationId]];
+      const details: ErrorDetailField[] = [
+        ["File", restore.path, restore.path.length],
+        ["Restore", restore.operationId],
+      ];
       if (refused.current.has(restore.operationId)) {
-        latest.current.reportShellFailure({ repeat: true, identity: sharedRestoreIdentity(restore.path), title: "Restore not declined",
-          message: `dohc could not decline the restore of ${restore.path}. ${DECLINE_REFUSED_MESSAGE}`, details });
+        latest.current.reportShellFailure({
+          repeat: true,
+          identity: sharedRestoreIdentity(restore.path),
+          title: "Restore not declined",
+          message: `dohc could not decline the restore of ${restore.path}. ${DECLINE_REFUSED_MESSAGE}`,
+          details,
+        });
         return;
       }
       const review = inWorkspace(() => open(restore.path, { operationId: restore.operationId }));
@@ -113,7 +133,15 @@ export function useSharedRestore(input: {
         message: ROW[stage].message(restore.path),
         details,
         ...(stage === "decide"
-          ? { action: { label: "Review restore", run: review, additional: [{ label: "Decline restore", run: inWorkspace(() => void decline(restore)) }] } }
+          ? {
+              action: {
+                label: "Review restore",
+                run: review,
+                additional: [
+                  { label: "Decline restore", run: inWorkspace(() => void decline(restore)) },
+                ],
+              },
+            }
           : { retry: review }),
       });
     };
@@ -124,13 +152,19 @@ export function useSharedRestore(input: {
     const decline = async (restore: Restore) => {
       const workspaceId = latest.current.workspaceId;
       try {
-        const { status, result } = await bridge().ownerRestore({ workspaceId, action: "decline", operationId: restore.operationId });
+        const { status, result } = await bridge().ownerRestore({
+          workspaceId,
+          action: "decline",
+          operationId: restore.operationId,
+        });
         if (latest.current.workspaceId !== workspaceId) return;
         if (result.kind === "refused") refuse({ ...restore, phase: status.phase });
         else file({ ...restore, phase: status.phase });
         if (status.phase === "declined") {
-          latest.current.showSuccessNotice(`Declined the restore of ${restore.path}. The file is unchanged. ` +
-            "Live editing through that access stays stopped until you share the file again.");
+          latest.current.showSuccessNotice(
+            `Declined the restore of ${restore.path}. The file is unchanged. ` +
+              "Live editing through that access stays stopped until you share the file again.",
+          );
         }
         void refresh();
       } catch (error) {
@@ -139,8 +173,13 @@ export function useSharedRestore(input: {
         // file this restore as it was.
         unanswered.current.set(restore.path, listing.current);
         // The dialog shows where the restore stands and what is left to do.
-        latest.current.reportRestoreError(`dohc could not decline the restore of ${restore.path}.`, error,
-          inWorkspace(() => open(restore.path, { operationId: restore.operationId })), sharedRestoreIdentity(restore.path), restore.path);
+        latest.current.reportRestoreError(
+          `dohc could not decline the restore of ${restore.path}.`,
+          error,
+          inWorkspace(() => open(restore.path, { operationId: restore.operationId })),
+          sharedRestoreIdentity(restore.path),
+          restore.path,
+        );
       }
     };
     // Drops every listing on its way, so a reply read before a restore
@@ -148,13 +187,14 @@ export function useSharedRestore(input: {
     const invalidate = () => {
       listing.current += 1;
     };
-    const listingFailed = (message: string, cause?: unknown) => latest.current.reportShellFailure({
-      repeat: true,
-      identity: sharedRestoreListingIdentity,
-      message,
-      ...(cause === undefined ? {} : { cause }),
-      retry: inWorkspace(() => void refresh()),
-    });
+    const listingFailed = (message: string, cause?: unknown) =>
+      latest.current.reportShellFailure({
+        repeat: true,
+        identity: sharedRestoreListingIdentity,
+        message,
+        ...(cause === undefined ? {} : { cause }),
+        retry: inWorkspace(() => void refresh()),
+      });
     const refresh = async () => {
       invalidate();
       const token = listing.current;
@@ -163,10 +203,16 @@ export function useSharedRestore(input: {
       const live = () => token === listing.current && latest.current.workspaceId === workspaceId;
       const held = (path: string) => (unanswered.current.get(path) ?? 0) >= token;
       const listed = new Set<string>();
-      let after: string | undefined, complete = false, unreadable = 0;
+      let after: string | undefined,
+        complete = false,
+        unreadable = 0;
       try {
         for (let page = 0; page < UNFINISHED_PAGES && !complete; page++) {
-          const result = await bridge().ownerRestore({ workspaceId, action: "unfinished", ...(after === undefined ? {} : { after }) });
+          const result = await bridge().ownerRestore({
+            workspaceId,
+            action: "unfinished",
+            ...(after === undefined ? {} : { after }),
+          });
           if (!live()) return;
           for (const restore of result.restores) {
             listed.add(restore.path);
@@ -178,7 +224,11 @@ export function useSharedRestore(input: {
         }
       } catch (error) {
         // The rows already filed stay.
-        if (live()) listingFailed(withErrorWords("dohc could not read this workspace's unfinished restores.", error), error);
+        if (live())
+          listingFailed(
+            withErrorWords("dohc could not read this workspace's unfinished restores.", error),
+            error,
+          );
         return;
       }
       if (!complete || !live()) return;
@@ -219,7 +269,12 @@ export function useSharedRestore(input: {
       {...(shown.from.operationId === undefined ? {} : { operationId: shown.from.operationId })}
       onClose={(operation: OwnerRestoreStatus | null) => {
         restores.show(null);
-        if (operation) restores.file({ operationId: operation.operationId, path: shown.path, phase: operation.phase });
+        if (operation)
+          restores.file({
+            operationId: operation.operationId,
+            path: shown.path,
+            phase: operation.phase,
+          });
         void restores.refresh();
       }}
       onBeforeRestore={input.onBeforeRestore}
@@ -227,19 +282,34 @@ export function useSharedRestore(input: {
         restores.settle(shown.path);
         latest.current.onRestored();
       }}
-      onDeclineRefused={(operation) => restores.refuse({ operationId: operation.operationId, path: shown.path, phase: operation.phase })}
+      onDeclineRefused={(operation) =>
+        restores.refuse({
+          operationId: operation.operationId,
+          path: shown.path,
+          phase: operation.phase,
+        })
+      }
       onSettled={() => restores.settle(shown.path)}
       onChanged={() => restores.changed(shown)}
       onError={(fallback, error) => {
         // Try again opens the change and its dialog again, wherever the
         // person has gone since.
         const { path, from } = shown;
-        latest.current.reportRestoreError(fallback, error, restores.inWorkspace(() => {
-          if (from.momentId !== undefined) latest.current.openChange(from.momentId, path);
-          restores.open(path, from);
-        }), sharedRestoreIdentity(path), path);
+        latest.current.reportRestoreError(
+          fallback,
+          error,
+          restores.inWorkspace(() => {
+            if (from.momentId !== undefined) latest.current.openChange(from.momentId, path);
+            restores.open(path, from);
+          }),
+          sharedRestoreIdentity(path),
+          path,
+        );
       }}
     />
   ) : null;
-  return { open: (path, momentId) => restores.open(path, momentId === undefined ? {} : { momentId }), dialog };
+  return {
+    open: (path, momentId) => restores.open(path, momentId === undefined ? {} : { momentId }),
+    dialog,
+  };
 }

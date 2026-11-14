@@ -17,7 +17,11 @@ function useDevPanelOpen(): [boolean, (next: boolean | ((open: boolean) => boole
   const [open, setOpen] = useState(false);
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      if (hasPrimaryModifier(event, window.dohcDesktop?.platform) && event.shiftKey && event.key.toLowerCase() === "d") {
+      if (
+        hasPrimaryModifier(event, window.dohcDesktop?.platform) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "d"
+      ) {
         event.preventDefault();
         setOpen((current) => !current);
       }
@@ -133,7 +137,9 @@ export function DevPanel(props: { workspaceId?: string }) {
                 Workspace
               </Act>
             ) : null}
-            <Act onClick={() => run("Reveal", () => bridge().devRevealPath({ target: "state-dir" }))}>
+            <Act
+              onClick={() => run("Reveal", () => bridge().devRevealPath({ target: "state-dir" }))}
+            >
               App data
             </Act>
           </Row>
@@ -146,7 +152,9 @@ export function DevPanel(props: { workspaceId?: string }) {
               onClick={() =>
                 run("Remove all workspaces from the list", async () => {
                   const result = await bridge().devForgetWorkspaces();
-                  setStatus(`Removed ${result.forgot} workspace${result.forgot === 1 ? "" : "s"} from the list. Their folders stay.`);
+                  setStatus(
+                    `Removed ${result.forgot} workspace${result.forgot === 1 ? "" : "s"} from the list. Their folders stay.`,
+                  );
                 })
               }
             >

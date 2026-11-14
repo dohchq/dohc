@@ -26,16 +26,14 @@ afterEach(() => {
 function largeDocument(label: string) {
   return Array.from(
     { length: 80 },
-    (_, index) =>
-      `# ${label} ${index + 1}\n\n${`${label.toLowerCase()} body `.repeat(70)}`,
+    (_, index) => `# ${label} ${index + 1}\n\n${`${label.toLowerCase()} body `.repeat(70)}`,
   ).join("\n\n");
 }
 
 function multiSliceDocument(label: string) {
   return Array.from(
     { length: MULTI_SLICE_HEADING_COUNT },
-    (_, index) =>
-      `# ${label} ${index + 1}\n\n${`${label.toLowerCase()} body `.repeat(70)}`,
+    (_, index) => `# ${label} ${index + 1}\n\n${`${label.toLowerCase()} body `.repeat(70)}`,
   ).join("\n\n");
 }
 
@@ -50,9 +48,7 @@ async function finishMultiSliceBackfill(container: HTMLElement) {
   }
   expect(sliceCount).toBeGreaterThan(1);
   expect(vi.getTimerCount()).toBe(0);
-  expect(container.querySelectorAll("h1")).toHaveLength(
-    MULTI_SLICE_HEADING_COUNT,
-  );
+  expect(container.querySelectorAll("h1")).toHaveLength(MULTI_SLICE_HEADING_COUNT);
 }
 
 function stubIdleCallbacks() {
@@ -185,13 +181,11 @@ describe("IncrementalMarkdownDocument", () => {
   it("keeps root-relative, external, and unsafe link routing separate", async () => {
     // The external open waits on the confirm gate, so it lands a microtask
     // after the click. Await it before asserting either way.
-    const flushExternalOpen = () =>
-      new Promise((resolve) => setTimeout(resolve, 0));
+    const flushExternalOpen = () => new Promise((resolve) => setTimeout(resolve, 0));
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     const view = render(
       <IncrementalMarkdownDocument
@@ -251,10 +245,7 @@ describe("IncrementalMarkdownDocument", () => {
     expect(firstBody.length).toBeGreaterThan(32 * 1024);
 
     const freshReplacement = render(
-      <IncrementalMarkdownDocument
-        body={secondBody}
-        components={components}
-      />,
+      <IncrementalMarkdownDocument body={secondBody} components={components} />,
     );
     const secondOpeningHeadingCount = renderedHeadings.length;
     expect(secondOpeningHeadingCount).toBeGreaterThan(0);
@@ -262,12 +253,7 @@ describe("IncrementalMarkdownDocument", () => {
     freshReplacement.unmount();
     renderedHeadings.length = 0;
 
-    const view = render(
-      <IncrementalMarkdownDocument
-        body={firstBody}
-        components={components}
-      />,
-    );
+    const view = render(<IncrementalMarkdownDocument body={firstBody} components={components} />);
     const openingHeadingCount = renderedHeadings.length;
     expect(openingHeadingCount).toBeGreaterThan(0);
     expect(openingHeadingCount).toBeLessThan(80);
@@ -278,12 +264,7 @@ describe("IncrementalMarkdownDocument", () => {
     expect(renderedHeadings).toHaveLength(80);
 
     renderedHeadings.length = 0;
-    view.rerender(
-      <IncrementalMarkdownDocument
-        body={secondBody}
-        components={components}
-      />,
-    );
+    view.rerender(<IncrementalMarkdownDocument body={secondBody} components={components} />);
 
     expect(renderedHeadings).toHaveLength(secondOpeningHeadingCount);
   });
@@ -294,29 +275,15 @@ describe("IncrementalMarkdownDocument", () => {
     const firstBody = multiSliceDocument("First");
     const secondBody = multiSliceDocument("Second");
 
-    const view = render(
-      <IncrementalMarkdownDocument
-        body={firstBody}
-        components={components}
-      />,
-    );
+    const view = render(<IncrementalMarkdownDocument body={firstBody} components={components} />);
     expect(view.container.querySelectorAll("h1").length).toBeGreaterThan(0);
-    expect(view.container.querySelectorAll("h1").length).toBeLessThan(
-      MULTI_SLICE_HEADING_COUNT,
-    );
+    expect(view.container.querySelectorAll("h1").length).toBeLessThan(MULTI_SLICE_HEADING_COUNT);
 
     await finishMultiSliceBackfill(view.container);
 
-    view.rerender(
-      <IncrementalMarkdownDocument
-        body={secondBody}
-        components={components}
-      />,
-    );
+    view.rerender(<IncrementalMarkdownDocument body={secondBody} components={components} />);
     expect(view.container.querySelectorAll("h1").length).toBeGreaterThan(0);
-    expect(view.container.querySelectorAll("h1").length).toBeLessThan(
-      MULTI_SLICE_HEADING_COUNT,
-    );
+    expect(view.container.querySelectorAll("h1").length).toBeLessThan(MULTI_SLICE_HEADING_COUNT);
 
     await finishMultiSliceBackfill(view.container);
   });
@@ -348,9 +315,7 @@ describe("IncrementalMarkdownDocument", () => {
       (heading) => heading.textContent,
     );
     expect(replacementHeadings).toHaveLength(firstOpeningCount);
-    expect(
-      replacementHeadings.every((heading) => heading?.startsWith("Other")),
-    ).toBe(true);
+    expect(replacementHeadings.every((heading) => heading?.startsWith("Other"))).toBe(true);
     expect(idle.cancel).toHaveBeenCalledWith(staleId);
     expect(idle.pending.has(staleId)).toBe(false);
     expect(idle.pending.size).toBeGreaterThan(0);
@@ -359,16 +324,11 @@ describe("IncrementalMarkdownDocument", () => {
     await idle.invoke(staleCallback);
     expect(commitCount).toBe(replacementCommitCount);
     expect(
-      Array.from(
-        view.container.querySelectorAll("h1"),
-        (heading) => heading.textContent,
-      ),
+      Array.from(view.container.querySelectorAll("h1"), (heading) => heading.textContent),
     ).toEqual(replacementHeadings);
 
     await idle.finishBackfill();
-    expect(view.container.querySelectorAll("h1")).toHaveLength(
-      MULTI_SLICE_HEADING_COUNT,
-    );
+    expect(view.container.querySelectorAll("h1")).toHaveLength(MULTI_SLICE_HEADING_COUNT);
     expect(
       Array.from(view.container.querySelectorAll("h1")).every((heading) =>
         heading.textContent?.startsWith("Other"),
@@ -394,15 +354,15 @@ describe("IncrementalMarkdownDocument", () => {
       (node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim(),
     );
     expect(loose.map((node) => node.textContent)).toEqual([]);
-    expect(
-      Array.from(view.container.querySelectorAll(":scope > p"), (p) => p.textContent),
-    ).toEqual([
-      "<details>\n<summary>More</summary>",
-      "Hidden text.",
-      "</details>",
-      "<!-- note -->",
-      "An <kbd>inline</kbd> tag.",
-    ]);
+    expect(Array.from(view.container.querySelectorAll(":scope > p"), (p) => p.textContent)).toEqual(
+      [
+        "<details>\n<summary>More</summary>",
+        "Hidden text.",
+        "</details>",
+        "<!-- note -->",
+        "An <kbd>inline</kbd> tag.",
+      ],
+    );
     expect(view.container.querySelector("details, summary, div, kbd")).toBeNull();
     expect(view.container.querySelector("blockquote")?.textContent?.trim()).toBe(
       "<div>quoted</div>",
@@ -454,22 +414,14 @@ describe("IncrementalMarkdownDocument", () => {
     };
     parses.mockClear();
 
-    const view = render(
-      <IncrementalMarkdownDocument body="Text before" components={components} />,
-    );
-    view.rerender(
-      <IncrementalMarkdownDocument body="Text after" components={components} />,
-    );
+    const view = render(<IncrementalMarkdownDocument body="Text before" components={components} />);
+    view.rerender(<IncrementalMarkdownDocument body="Text after" components={components} />);
     expect(parses).toHaveBeenCalledTimes(2);
     expect(view.container.textContent).toBe("Text after");
 
-    view.rerender(
-      <IncrementalMarkdownDocument body="Text after" components={marked} />,
-    );
+    view.rerender(<IncrementalMarkdownDocument body="Text after" components={marked} />);
     expect(parses).toHaveBeenCalledTimes(3);
-    expect(view.container.querySelector("[data-marked]")?.textContent).toBe(
-      "Text after",
-    );
+    expect(view.container.querySelector("[data-marked]")?.textContent).toBe("Text after");
   });
 
   it("evicts the least recently shown chunk past its bound", () => {

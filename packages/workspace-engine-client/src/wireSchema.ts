@@ -8,8 +8,6 @@ export class ProtocolShapeError extends Error {
   }
 }
 
-export function mutableStruct<const Fields extends Schema.Struct.Fields>(
-  fields: Fields,
-) {
+export function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
   return Schema.Struct(fields).mapFields(Struct.map(Schema.mutableKey));
 }

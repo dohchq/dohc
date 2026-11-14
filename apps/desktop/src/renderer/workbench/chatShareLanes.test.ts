@@ -4,16 +4,14 @@ import { answerLocally, emptyJoinedLaneOrder, planJoinedCommit } from "./chatSha
 
 // The joined lane's cache, tested where its rules live. Two of them cannot be
 // seen from the screen at all: what the cache still holds after a read, and
-// how much of it a long session accumulates. #640 exists to make that size a
-// property of the view, so it is pinned here the same way the response size is
-// pinned at the IPC handler.
+// how much of it a long session accumulates. That size must be a property of
+// the view, so it is pinned here the same way the response size is pinned at
+// the IPC handler.
 
 function answer(channelWireId: string): JoinedChannelAnswer {
   return { channelWireId, joined: null };
 }
 
-// One commit through the planner, applied to the cache it plans against. The
-// surface shows what the read named unless a test says otherwise.
 function commit(
   order: ReturnType<typeof emptyJoinedLaneOrder>,
   cache: JoinedChannelAnswer[],
@@ -49,18 +47,12 @@ describe("planJoinedCommit", () => {
         `wire-${pass + 2}`,
       ]);
     }
-    expect(cache.map((entry) => entry.channelWireId)).toEqual([
-      "wire-499",
-      "wire-500",
-      "wire-501",
-    ]);
-    // The per-wire ordering is the same cache and is bounded the same way.
+    expect(cache.map((entry) => entry.channelWireId)).toEqual(["wire-499", "wire-500", "wire-501"]);
     expect(order.answeredAt.size).toBe(3);
   });
 
   it("keeps a channel the view shows that this read did not name", () => {
     const order = emptyJoinedLaneOrder();
-    // The overview answered both channels, and both are on screen.
     let cache = commit(order, [], 6, ["wire-team", "wire-imported"]);
     // A read issued from the older render names only wire-team, and it carries
     // the newer ticket. Its own scope is not the view: evicting to it takes
@@ -78,10 +70,7 @@ describe("planJoinedCommit", () => {
     const order = emptyJoinedLaneOrder();
     let cache = commit(order, [], 1, ["wire-a", "wire-b"]);
     cache = commit(order, cache, 2, ["wire-a"], { shown: null });
-    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual([
-      "wire-a",
-      "wire-b",
-    ]);
+    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual(["wire-a", "wire-b"]);
   });
 
   it("keeps a channel this surface answered itself until a read names it", () => {
@@ -93,13 +82,8 @@ describe("planJoinedCommit", () => {
     cache = [...cache, answer("wire-new")];
 
     cache = commit(order, cache, 2, ["wire-team"]);
-    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual([
-      "wire-new",
-      "wire-team",
-    ]);
+    expect(cache.map((entry) => entry.channelWireId).sort()).toEqual(["wire-new", "wire-team"]);
 
-    // A read that names it takes the answer over, and the local claim ends
-    // there: from the next scope that drops it, it evicts like any other.
     cache = commit(order, cache, 3, ["wire-team", "wire-new"]);
     expect(order.local.size).toBe(0);
     cache = commit(order, cache, 4, ["wire-team"]);
@@ -108,8 +92,6 @@ describe("planJoinedCommit", () => {
 
   it("lets an older response answer a wire the newer claim never covered", () => {
     const order = emptyJoinedLaneOrder();
-    // A read issued from a stale view takes the newer ticket and answers only
-    // the channel that view showed.
     let cache = commit(order, [], 7, ["wire-team"]);
     // The overview's own response is older, and it alone knows about the
     // channel a sync just imported. Barring it whole left that channel
@@ -133,8 +115,6 @@ describe("planJoinedCommit", () => {
       shown: ["wire-team"],
     });
     const cache = write === null ? [] : write.write([]);
-    // The same channel, answered by a read that is older. Ordering per wire is
-    // still ordering: it may not repaint a fresher answer.
     const stale = planJoinedCommit(order, {
       workspaceId: "workspace-a",
       ticket: 6,

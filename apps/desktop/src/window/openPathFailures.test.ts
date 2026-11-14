@@ -45,12 +45,14 @@ describe("open path failures", () => {
     expect(f.notify).toHaveBeenCalledExactlyOnceWith(window);
 
     expect(f.failures.take(renderer(8))).toEqual([]);
-    expect(f.failures.take(window)).toEqual([{
-      attemptId: expect.any(String),
-      path: "C:\\work\\Trips",
-      cause: "Error [EACCES]: permission denied",
-      workspaceId: "trips",
-    }]);
+    expect(f.failures.take(window)).toEqual([
+      {
+        attemptId: expect.any(String),
+        path: "C:\\work\\Trips",
+        cause: "Error [EACCES]: permission denied",
+        workspaceId: "trips",
+      },
+    ]);
     expect(f.failures.take(window)).toEqual([]);
   });
 
@@ -60,7 +62,9 @@ describe("open path failures", () => {
     f.failures.report("C:\\work\\Trips", refused, window);
     const attemptId = f.failures.take(window)[0]!.attemptId;
 
-    await expect(f.failures.retry(attemptId, renderer(8))).rejects.toThrow("Open the folder again.");
+    await expect(f.failures.retry(attemptId, renderer(8))).rejects.toThrow(
+      "Open the folder again.",
+    );
     await f.failures.retry(attemptId, window);
     expect(f.reopen).toHaveBeenCalledExactlyOnceWith("C:\\work\\Trips", window);
     await expect(f.failures.retry(attemptId, window)).rejects.toThrow("Open the folder again.");
@@ -77,7 +81,11 @@ describe("open path failures", () => {
     await f.failures.retry(first!.attemptId, window);
     expect(f.record).toHaveBeenCalledExactlyOnceWith("C:\\work\\Trips", gone);
     const [second] = f.failures.take(window);
-    expect(second).toMatchObject({ path: "C:\\work\\Trips", workspaceId: "a", cause: "Error [ENOENT]: no such file or directory" });
+    expect(second).toMatchObject({
+      path: "C:\\work\\Trips",
+      workspaceId: "a",
+      cause: "Error [ENOENT]: no such file or directory",
+    });
     expect(second!.attemptId).not.toBe(first!.attemptId);
   });
 
@@ -107,7 +115,12 @@ describe("open path failures", () => {
     const taken = f.failures.take(window);
     expect(taken).toEqual([
       expect.objectContaining({ path: "C:\\work\\Trips" }),
-      { attemptId: expect.any(String), moveToApplications: true, cause: "Error: Failed to copy dohc.app", workspaceId: "a" },
+      {
+        attemptId: expect.any(String),
+        moveToApplications: true,
+        cause: "Error: Failed to copy dohc.app",
+        workspaceId: "a",
+      },
     ]);
     const move = taken[1]!;
 
@@ -115,8 +128,12 @@ describe("open path failures", () => {
     await f.failures.retry(move.attemptId, window);
     expect(f.moveAgain).toHaveBeenCalledOnce();
     expect(f.reopen).not.toHaveBeenCalled();
-    expect(f.failures.take(window)).toEqual([expect.objectContaining({ moveToApplications: true, cause: "Error: still full" })]);
-    await expect(f.failures.retry(move.attemptId, window)).rejects.toThrow("Open the folder again.");
+    expect(f.failures.take(window)).toEqual([
+      expect.objectContaining({ moveToApplications: true, cause: "Error: still full" }),
+    ]);
+    await expect(f.failures.retry(move.attemptId, window)).rejects.toThrow(
+      "Open the folder again.",
+    );
   });
 
   it("forgets a closed window's failures and attempts", async () => {
@@ -128,7 +145,9 @@ describe("open path failures", () => {
     f.failures.report("C:\\work\\Plans", refused, window);
     window.destroy();
 
-    await expect(f.failures.retry(taken!.attemptId, window)).rejects.toThrow("Open the folder again.");
+    await expect(f.failures.retry(taken!.attemptId, window)).rejects.toThrow(
+      "Open the folder again.",
+    );
     expect(f.failures.take(window)).toEqual([]);
     f.failures.report("C:\\work\\Late", refused, window);
     expect(f.notify).toHaveBeenCalledTimes(3);
@@ -137,16 +156,20 @@ describe("open path failures", () => {
   it("gives every failure a window has not taken, combining those past its limit", () => {
     const f = fixture(2);
     const window = renderer(7, "a");
-    // One launch reports every folder before the window can take any.
-    for (const path of ["first", "second", "third", "fourth", "fifth"]) f.failures.report(path, refused, window);
+    for (const path of ["first", "second", "third", "fourth", "fifth"])
+      f.failures.report(path, refused, window);
 
     expect(f.failures.take(window)).toEqual([
       expect.objectContaining({ path: "first", workspaceId: "a" }),
       expect.objectContaining({ path: "second", workspaceId: "a" }),
-      { attemptId: expect.any(String), paths: ["third", "fourth", "fifth"], count: 3, workspaceId: "a" },
+      {
+        attemptId: expect.any(String),
+        paths: ["third", "fourth", "fifth"],
+        count: 3,
+        workspaceId: "a",
+      },
     ]);
     expect(f.failures.take(window)).toEqual([]);
-    // The window took them, so the next ones are kept apart again.
     f.failures.report("sixth", refused, window);
     expect(f.failures.take(window)).toEqual([expect.objectContaining({ path: "sixth" })]);
   });
@@ -167,7 +190,8 @@ describe("open path failures", () => {
   it("lists a bounded number of combined folders and counts every one", () => {
     const f = fixture(1);
     const window = renderer(7);
-    for (let index = 0; index < 301; index += 1) f.failures.report(`folder-${index}`, refused, window);
+    for (let index = 0; index < 301; index += 1)
+      f.failures.report(`folder-${index}`, refused, window);
     const [, more] = f.failures.take(window);
     expect(more).toMatchObject({ count: 300 });
     expect(more && "paths" in more ? more.paths : []).toHaveLength(256);
@@ -179,11 +203,17 @@ describe("open path failures", () => {
     for (const path of ["first", "second"]) f.failures.report(path, refused, window);
     const [first, second] = f.failures.take(window);
     for (const path of ["third", "fourth"]) f.failures.report(path, refused, window);
-    // Untaken failures stay whatever main holds.
-    expect(f.failures.take(window).map((failure) => "path" in failure && failure.path)).toEqual(["third", "fourth"]);
+    expect(f.failures.take(window).map((failure) => "path" in failure && failure.path)).toEqual([
+      "third",
+      "fourth",
+    ]);
 
-    await expect(f.failures.retry(first!.attemptId, window)).rejects.toThrow("Open the folder again.");
-    await expect(f.failures.retry(second!.attemptId, window)).rejects.toThrow("Open the folder again.");
+    await expect(f.failures.retry(first!.attemptId, window)).rejects.toThrow(
+      "Open the folder again.",
+    );
+    await expect(f.failures.retry(second!.attemptId, window)).rejects.toThrow(
+      "Open the folder again.",
+    );
     expect(f.reopen).not.toHaveBeenCalled();
   });
 
@@ -192,6 +222,8 @@ describe("open path failures", () => {
     const window = renderer(7);
     for (const path of ["first", "second"]) f.failures.report(path, refused, window);
     const [, more] = f.failures.take(window);
-    await expect(f.failures.retry(more!.attemptId, window)).rejects.toThrow("Open the folder again.");
+    await expect(f.failures.retry(more!.attemptId, window)).rejects.toThrow(
+      "Open the folder again.",
+    );
   });
 });

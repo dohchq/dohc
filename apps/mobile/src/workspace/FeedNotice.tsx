@@ -6,10 +6,18 @@ import { useFailureNotice, useFeed } from "./useView";
 // What's on screen stays, so it can't go out of date without a sign.
 export function FeedNotice() {
   const { current } = useWorkspaces();
-  return current ? <WorkspaceFeedNotice key={current.id} workspaceId={current.id} workspace={current.name} /> : null;
+  return current ? (
+    <WorkspaceFeedNotice key={current.id} workspaceId={current.id} workspace={current.name} />
+  ) : null;
 }
 
-function WorkspaceFeedNotice({ workspaceId, workspace }: { workspaceId: string; workspace: string }) {
+function WorkspaceFeedNotice({
+  workspaceId,
+  workspace,
+}: {
+  workspaceId: string;
+  workspace: string;
+}) {
   const { state, retry } = useFeed();
   useFailureNotice(`feed:${workspaceId}`, workspaceWords.changesFailed(workspace), state, retry);
   return null;

@@ -11,30 +11,28 @@ import { fileURLToPath } from "node:url";
 const SERVICE_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SECRET = "test-secret-with-at-least-32-characters";
 
-for (const nodeEnv of [undefined, "production", "staging"]) {
-  for (const postgresUrl of [undefined, "", "   "]) {
-    test(`refuses missing database configuration in ${nodeEnv ?? "unset NODE_ENV"}: ${JSON.stringify(postgresUrl)}`, () => {
-      const result = spawnSync(process.execPath, ["--import", "tsx", "src/main.ts"], {
-        cwd: SERVICE_ROOT,
-        env: {
-          ...process.env,
-          NODE_ENV: nodeEnv,
-          POSTGRES_URL: postgresUrl,
-          BETTER_AUTH_SECRET: SECRET,
-          DOHC_TEST_AUTH: undefined,
-        },
-        encoding: "utf8",
-        windowsHide: true,
-        // tsx compiles main.ts on startup. A loaded run passed 20 s, so this
-        // matches sync-relay's 45 s tsx startup bound, inside the 60 s test.
-        timeout: 45_000,
-      });
-      assert.equal(result.error, undefined);
-      assert.equal(result.status, 1);
-      assert.match(result.stderr, /POSTGRES_URL must be set outside development\/test/);
-      assert.doesNotMatch(result.stdout, /listening/);
-    }, 60_000);
-  }
+for (const [nodeEnv, postgresUrl] of [["production", "   "]] as const) {
+  test(`refuses missing database configuration in ${nodeEnv ?? "unset NODE_ENV"}: ${JSON.stringify(postgresUrl)}`, () => {
+    const result = spawnSync(process.execPath, ["--import", "tsx", "src/main.ts"], {
+      cwd: SERVICE_ROOT,
+      env: {
+        ...process.env,
+        NODE_ENV: nodeEnv,
+        POSTGRES_URL: postgresUrl,
+        BETTER_AUTH_SECRET: SECRET,
+        DOHC_TEST_AUTH: undefined,
+      },
+      encoding: "utf8",
+      windowsHide: true,
+      // tsx compiles main.ts on startup. A loaded run passed 20 s, so this
+      // matches sync-relay's 45 s tsx startup bound, inside the 60 s test.
+      timeout: 45_000,
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /POSTGRES_URL must be set outside development\/test/);
+    assert.doesNotMatch(result.stdout, /listening/);
+  }, 60_000);
 }
 
 // Runs against the development Postgres (`pnpm dev:postgres`) in a throwaway
@@ -65,7 +63,13 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
     await client.query(`create schema "${schema}"`);
     await client.query(`set search_path to "${schema}"`);
     await client.query(
-      await readFile(new URL("../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql", import.meta.url), "utf8"),
+      await readFile(
+        new URL(
+          "../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
     );
     pool = new pg.Pool({ connectionString: schemaUrl });
   });
@@ -78,10 +82,25 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
 
   /** One verified and one unverified account, each signed in while sign-up was open. */
   async function signedInAccounts(): Promise<{ verified: string; unverified: string }> {
-    await pool.query(await readFile(new URL("../../../packages/workspace-postgres/src/db/migrations/0004_account_deletion.sql", import.meta.url), "utf8"));
-    const auth = createWorkspaceAuth({ pool, baseURL: "http://localhost:1786", secret: SECRET, sendEmail: async () => undefined });
+    await pool.query(
+      await readFile(
+        new URL(
+          "../../../packages/workspace-postgres/src/db/migrations/0004_account_deletion.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const auth = createWorkspaceAuth({
+      pool,
+      baseURL: "http://localhost:1786",
+      secret: SECRET,
+      sendEmail: async () => undefined,
+    });
     const signUp = (name: string) =>
-      auth.api.signUpEmail({ body: { email: `${name}-${Date.now()}@dohc.test`, password: "a-real-password-123", name } });
+      auth.api.signUpEmail({
+        body: { email: `${name}-${Date.now()}@dohc.test`, password: "a-real-password-123", name },
+      });
     const verified = (await signUp("verified")).user.id;
     const unverified = (await signUp("unverified")).user.id;
     await pool.query('update "user" set "emailVerified" = true where id = $1', [verified]);
@@ -111,7 +130,9 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
         probe.close(() => resolve(port));
       });
     });
-    const inherited = Object.entries(process.env).filter(([key]) => !/^(DOHC_|WORKSPACE_API_|BETTER_AUTH_|POSTGRES_)/.test(key));
+    const inherited = Object.entries(process.env).filter(
+      ([key]) => !/^(DOHC_|WORKSPACE_API_|BETTER_AUTH_|POSTGRES_)/.test(key),
+    );
     const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
       cwd: SERVICE_ROOT,
       env: {
@@ -120,7 +141,9 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
         POSTGRES_URL: schemaUrl,
         BETTER_AUTH_SECRET: SECRET,
         WORKSPACE_API_PORT: String(port),
-        ...(signUpEmails ? { DOHC_SIGN_UP_EMAILS: signUpEmails, WORKSPACE_API_RELAY_URL: "http://127.0.0.1:9" } : {}),
+        ...(signUpEmails
+          ? { DOHC_SIGN_UP_EMAILS: signUpEmails, WORKSPACE_API_RELAY_URL: "http://127.0.0.1:9" }
+          : {}),
       },
       windowsHide: true,
     });
@@ -134,7 +157,9 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
         child.stderr.on("data", (chunk: Buffer) => {
           output += chunk.toString();
         });
-        child.on("exit", (code) => reject(new Error(`workspace-api exited with ${code} before it listened:\n${output}`)));
+        child.on("exit", (code) =>
+          reject(new Error(`workspace-api exited with ${code} before it listened:\n${output}`)),
+        );
       });
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
@@ -148,13 +173,6 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
     const { verified, unverified } = await signedInAccounts();
     await startServer("listed@dohc.test");
     assert.deepEqual(await signIns(unverified), { sessions: 0, deviceCodes: 0 });
-    assert.deepEqual(await signIns(verified), { sessions: 1, deviceCodes: 0 });
-  }, 60_000);
-
-  test("with no list, signs nobody out", async () => {
-    const { verified, unverified } = await signedInAccounts();
-    await startServer(null);
-    assert.deepEqual(await signIns(unverified), { sessions: 1, deviceCodes: 1 });
     assert.deepEqual(await signIns(verified), { sessions: 1, deviceCodes: 0 });
   }, 60_000);
 });

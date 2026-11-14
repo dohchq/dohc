@@ -1,9 +1,6 @@
 // Expected [start, end) selection offsets for a 1-based line.
 // The end excludes the newline. Lines past the end clamp to the last line.
-export function lineSpanInText(
-  text: string,
-  line: number,
-): { start: number; end: number } {
+export function lineSpanInText(text: string, line: number): { start: number; end: number } {
   let start = 0;
   let current = 1;
   while (current < line) {

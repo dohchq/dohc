@@ -9,9 +9,18 @@ export function resolveDohcNodeExecutable(input: {
   const platform = input.platform ?? process.platform;
   const arch = input.arch ?? process.arch;
   const paths = platform === "win32" ? win32 : posix;
-  if (!paths.isAbsolute(input.resourcesPath) || platform === "win32" && !win32.parse(input.resourcesPath).root.startsWith("\\\\") && !/^[a-z]:[\\/]/iu.test(input.resourcesPath)) {
+  if (
+    !paths.isAbsolute(input.resourcesPath) ||
+    (platform === "win32" &&
+      !win32.parse(input.resourcesPath).root.startsWith("\\\\") &&
+      !/^[a-z]:[\\/]/iu.test(input.resourcesPath))
+  ) {
     throw new Error("Agent resources path must be absolute.");
   }
   if (agentRuntimeTarget(platform, arch) === "path") return null;
-  return paths.join(input.resourcesPath, "app-compiler", platform === "win32" ? "node.exe" : "node");
+  return paths.join(
+    input.resourcesPath,
+    "app-compiler",
+    platform === "win32" ? "node.exe" : "node",
+  );
 }

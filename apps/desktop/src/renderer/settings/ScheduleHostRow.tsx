@@ -19,12 +19,19 @@ import { SettingRow } from "./SettingRow";
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 
 // Two computers can share a name, so dohc does not decide which this is.
-export const SAME_NAME = "Same name as this computer. It may be an earlier installation of dohc here.";
+export const SAME_NAME =
+  "Same name as this computer. It may be an earlier installation of dohc here.";
 
 type TakeOverFrom = Pick<ScheduleHostComputer, "kind" | "label" | "thisComputer">;
-type Loaded = { status: "loading" } | { status: "ready"; state: ScheduleHostResult } | { status: "failed" };
+type Loaded =
+  | { status: "loading" }
+  | { status: "ready"; state: ScheduleHostResult }
+  | { status: "failed" };
 
-export function ScheduleHostRow(props: { workspaceId: string; onError?: (message: string) => void }) {
+export function ScheduleHostRow(props: {
+  workspaceId: string;
+  onError?: (message: string) => void;
+}) {
   const { workspaceId, onError } = props;
   const requests = useRequestSequence([workspaceId]);
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
@@ -33,8 +40,6 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   const takeOverRef = useRef<HTMLButtonElement | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const computerRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  // The computer the list's one tab stop is on: the focused one once focus
-  // moves, and the chosen one until then.
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const warningId = useId();
 
@@ -58,7 +63,11 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
     [onError, requests],
   );
   const read = useCallback(
-    () => run(() => bridge().readScheduleHost({ workspaceId }), "dohc could not read which computer runs schedules."),
+    () =>
+      run(
+        () => bridge().readScheduleHost({ workspaceId }),
+        "dohc could not read which computer runs schedules.",
+      ),
     [run, workspaceId],
   );
   useEffect(() => {
@@ -67,55 +76,68 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   }, [read]);
   // Another account's answer never fills the row: a session change starts
   // over, and reads again once the new session is ready.
-  useEffect(() => bridge().onCloudSessionChanged(({ phase }) => {
-    requests.next();
-    setBusy(false);
-    setConfirmingTakeOver(false);
-    setLoaded({ status: "loading" });
-    if (phase === "ready") void read();
-  }), [read, requests]);
+  useEffect(
+    () =>
+      bridge().onCloudSessionChanged(({ phase }) => {
+        requests.next();
+        setBusy(false);
+        setConfirmingTakeOver(false);
+        setLoaded({ status: "loading" });
+        if (phase === "ready") void read();
+      }),
+    [read, requests],
+  );
   // A handover that finished in the background, or a choice from another
   // window, shows here.
-  useEffect(() => bridge().onScheduleHostChanged((changed) => {
-    if (changed === workspaceId) void read();
-  }), [read, workspaceId]);
+  useEffect(
+    () =>
+      bridge().onScheduleHostChanged((changed) => {
+        if (changed === workspaceId) void read();
+      }),
+    [read, workspaceId],
+  );
   // The confirmation takes focus on its safe choice.
   useEffect(() => {
     if (confirmingTakeOver) cancelRef.current?.focus();
   }, [confirmingTakeOver]);
 
   // Asks first, since the old computer may still run what is due.
-  const takeOverControls = (from: TakeOverFrom, generation: number) => confirmingTakeOver ? (
-    <div className="flex flex-col gap-2">
-      <p id={warningId} role="alert" className="m-0 text-[12px] text-ink">
-        {from.kind === "server"
-          ? "If this server has not stopped, a run can repeat."
-          : `If ${computerInSentence(from)} is still on, a run can repeat.`}
-      </p>
-      <div className="flex gap-2">
-        <PrimaryButton aria-describedby={warningId} disabled={busy} onClick={() => takeOver(generation)}>
-          Take over now
-        </PrimaryButton>
-        <SecondaryButton
-          ref={cancelRef}
-          aria-describedby={warningId}
-          disabled={busy}
-          onClick={cancelTakeOver}
-        >
-          Cancel
-        </SecondaryButton>
+  const takeOverControls = (from: TakeOverFrom, generation: number) =>
+    confirmingTakeOver ? (
+      <div className="flex flex-col gap-2">
+        <p id={warningId} role="alert" className="m-0 text-[12px] text-ink">
+          {from.kind === "server"
+            ? "If this server has not stopped, a run can repeat."
+            : `If ${computerInSentence(from)} is still on, a run can repeat.`}
+        </p>
+        <div className="flex gap-2">
+          <PrimaryButton
+            aria-describedby={warningId}
+            disabled={busy}
+            onClick={() => takeOver(generation)}
+          >
+            Take over now
+          </PrimaryButton>
+          <SecondaryButton
+            ref={cancelRef}
+            aria-describedby={warningId}
+            disabled={busy}
+            onClick={cancelTakeOver}
+          >
+            Cancel
+          </SecondaryButton>
+        </div>
       </div>
-    </div>
-  ) : (
-    <SecondaryButton
-      ref={takeOverRef}
-      className="self-start"
-      disabled={busy}
-      onClick={() => setConfirmingTakeOver(true)}
-    >
-      Take over now
-    </SecondaryButton>
-  );
+    ) : (
+      <SecondaryButton
+        ref={takeOverRef}
+        className="self-start"
+        disabled={busy}
+        onClick={() => setConfirmingTakeOver(true)}
+      >
+        Take over now
+      </SecondaryButton>
+    );
   const takeOver = (generation: number) =>
     void run(
       () => bridge().takeOverScheduleHost({ workspaceId, generation }),
@@ -131,7 +153,9 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   if (loaded.status === "failed") {
     return (
       <SettingRow title="Schedules run on" testId="settings-row-schedule-host">
-        <SecondaryButton disabled={busy} onClick={() => void read()}>Try again</SecondaryButton>
+        <SecondaryButton disabled={busy} onClick={() => void read()}>
+          Try again
+        </SecondaryButton>
       </SettingRow>
     );
   }
@@ -142,12 +166,20 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   // it stops at its next read.
   if (state.kind === "another-computer" || state.kind === "no-computer") {
     const named = state.kind === "another-computer";
-    const from = { kind: "computer" as const, label: named ? state.label : "another computer", thisComputer: false };
+    const from = {
+      kind: "computer" as const,
+      label: named ? state.label : "another computer",
+      thisComputer: false,
+    };
     return (
       <SettingRow title="Schedules run on" testId="settings-row-schedule-host">
         <div data-testid="schedule-host-elsewhere" className="flex max-w-sm flex-col gap-2">
-          <span className={`text-[12px] ${named ? "text-muted" : "text-ink"}`}>{named ? state.label : state.message}</span>
-          {named && state.sameName ? <span className="text-[12px] text-muted">{SAME_NAME}</span> : null}
+          <span className={`text-[12px] ${named ? "text-muted" : "text-ink"}`}>
+            {named ? state.label : state.message}
+          </span>
+          {named && state.sameName ? (
+            <span className="text-[12px] text-muted">{SAME_NAME}</span>
+          ) : null}
           {takeOverControls(from, 0)}
         </div>
       </SettingRow>
@@ -161,32 +193,47 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
         </span>
         {/* A note can pass, as when the connection comes back. */}
         {state.kind === "note" ? (
-          <SecondaryButton disabled={busy} onClick={() => void read()}>Check again</SecondaryButton>
+          <SecondaryButton disabled={busy} onClick={() => void read()}>
+            Check again
+          </SecondaryButton>
         ) : null}
       </SettingRow>
     );
   }
 
   const shown = shownScheduleHost(state);
-  const handingOver = shown.handoverFrom === null
-    ? null
-    : state.computers.find((computer) => computer.installId === shown.handoverFrom) ?? null;
+  const handingOver =
+    shown.handoverFrom === null
+      ? null
+      : (state.computers.find((computer) => computer.installId === shown.handoverFrom) ?? null);
   const choose = (computer: ScheduleHostComputer) =>
     void run(
-      () => bridge().chooseScheduleHost({ workspaceId, installId: computer.installId, generation: state.generation }),
+      () =>
+        bridge().chooseScheduleHost({
+          workspaceId,
+          installId: computer.installId,
+          generation: state.generation,
+        }),
       "dohc could not move this workspace's schedules.",
     );
   // One tab stop for the list; arrows, Home, and End move between computers.
   const focusedIndex = state.computers.findIndex((computer) => computer.installId === focusedId);
-  const chosenIndex = state.computers.findIndex((computer) => computer.installId === shown.hostInstallId);
+  const chosenIndex = state.computers.findIndex(
+    (computer) => computer.installId === shown.hostInstallId,
+  );
   const tabStop = focusedIndex !== -1 ? focusedIndex : chosenIndex !== -1 ? chosenIndex : 0;
   const moveFocus = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const last = state.computers.length - 1;
-    const target = event.key === "ArrowDown" || event.key === "ArrowRight" ? Math.min(index + 1, last)
-      : event.key === "ArrowUp" || event.key === "ArrowLeft" ? Math.max(index - 1, 0)
-        : event.key === "Home" ? 0
-          : event.key === "End" ? last
-            : null;
+    const target =
+      event.key === "ArrowDown" || event.key === "ArrowRight"
+        ? Math.min(index + 1, last)
+        : event.key === "ArrowUp" || event.key === "ArrowLeft"
+          ? Math.max(index - 1, 0)
+          : event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? last
+              : null;
     if (target === null) return;
     event.preventDefault();
     computerRefs.current[target]?.focus();
@@ -201,7 +248,9 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
             return (
               <button
                 key={computer.installId}
-                ref={(element) => { computerRefs.current[index] = element; }}
+                ref={(element) => {
+                  computerRefs.current[index] = element;
+                }}
                 type="button"
                 aria-pressed={chosen}
                 tabIndex={index === tabStop ? 0 : -1}
@@ -210,9 +259,13 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
                 aria-disabled={busy}
                 onKeyDown={(event) => moveFocus(event, index)}
                 onFocus={() => setFocusedId(computer.installId)}
-                onClick={() => { if (!chosen && !busy) choose(computer); }}
+                onClick={() => {
+                  if (!chosen && !busy) choose(computer);
+                }}
                 className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 aria-disabled:cursor-default ${
-                  chosen ? "bg-selected text-ink font-medium" : "text-muted hover:bg-hover hover:text-ink"
+                  chosen
+                    ? "bg-selected text-ink font-medium"
+                    : "text-muted hover:bg-hover hover:text-ink"
                 }`}
               >
                 <span className="grid size-4 place-items-center" aria-hidden>
@@ -230,7 +283,9 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
           })}
         </div>
         {shown.serverOff && shown.hostInstallId === null ? (
-          <p data-testid="schedule-host-server-off" className="m-0 text-[12px] text-muted">{AUTOMATION_SERVER_OFF}</p>
+          <p data-testid="schedule-host-server-off" className="m-0 text-[12px] text-muted">
+            {AUTOMATION_SERVER_OFF}
+          </p>
         ) : null}
         {handingOver ? (
           <div data-testid="schedule-host-handover" className="flex flex-col gap-2">

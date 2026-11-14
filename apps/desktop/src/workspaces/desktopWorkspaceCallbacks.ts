@@ -67,7 +67,11 @@ export function createDesktopWorkspaceCallbacks<State>(
     });
   }
 
-  function createRelayOnChange(workspace: { workspaceId: string; rootPath: string; attachmentId?: symbol }) {
+  function createRelayOnChange(workspace: {
+    workspaceId: string;
+    rootPath: string;
+    attachmentId?: symbol;
+  }) {
     return () => {
       withWorkspaceAttachment(workspace, () => {
         notifyRenderer({ workspaceId: workspace.workspaceId, pathSetChanged: false });
@@ -80,15 +84,27 @@ export function createDesktopWorkspaceCallbacks<State>(
     };
   }
 
-  const onWatcherBatch: NonNullable<WorkspaceActivityOptions["onWatcherBatch"]> = (workspace, events) => {
+  const onWatcherBatch: NonNullable<WorkspaceActivityOptions["onWatcherBatch"]> = (
+    workspace,
+    events,
+  ) => {
     withWorkspaceAttachment(workspace, (lease) => {
       dependencies.collectionAutomationsOf(lease.state).handleWatcherEvents(events);
     });
   };
 
-  const onObservationResync: NonNullable<WorkspaceActivityOptions["onObservationResync"]> = workspace =>
-    withWorkspaceAttachmentAsync(workspace, lease =>
-      dependencies.collectionAutomationsOf(lease.state).resyncFileObservation?.());
+  const onObservationResync: NonNullable<WorkspaceActivityOptions["onObservationResync"]> = (
+    workspace,
+  ) =>
+    withWorkspaceAttachmentAsync(workspace, (lease) =>
+      dependencies.collectionAutomationsOf(lease.state).resyncFileObservation?.(),
+    );
 
-  return { withWorkspaceAttachment, withWorkspaceAttachmentAsync, createRelayOnChange, onWatcherBatch, onObservationResync };
+  return {
+    withWorkspaceAttachment,
+    withWorkspaceAttachmentAsync,
+    createRelayOnChange,
+    onWatcherBatch,
+    onObservationResync,
+  };
 }

@@ -1,12 +1,22 @@
 import { parseAppLaunchConfig, type AppLaunchConfig } from "./appLaunchConfig";
-import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
+import { parsePublicEditRelease, type PublicEditRelease } from "@dohc/security-contract";
 import { canonicalRelayUrl } from "@dohc/workspace-contracts/relay-values";
 import type { AccountAuthConfig } from "./accountAuth";
-import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } from "./namedLiveBrowserClient";
-import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
-import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
-import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile";
-import {canonicalIpAddress} from "@dohc/service-http";
+import {
+  parseNamedLiveBrowserClientLimits,
+  type NamedLiveBrowserClientLimits,
+} from "./namedLiveBrowserClient";
+import {
+  NAMED_GATEWAY_IDLE_TIMEOUT_RANGE_MS,
+  parseLiveGatewayLimits,
+  type LiveGatewayLimits,
+} from "./liveGateway";
+import {
+  parseNamedLiveBrowserLimits,
+  type NamedLiveBrowserLimits,
+} from "@dohc/ydoc-projection/named-live-browser-transport";
+import { selfHostLiveProfile } from "../../sync-relay/src/selfHostLiveProfile";
+import { canonicalIpAddress } from "@dohc/service-http";
 
 export interface ShareWebConfig {
   appLaunch?: AppLaunchConfig;
@@ -24,7 +34,12 @@ export interface ShareWebConfig {
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
   namedLiveGatewayLimits?: LiveGatewayLimits;
   namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
-  linkLive?: {publicOrigin: string; gateway: LiveGatewayLimits; requests: NamedLiveBrowserClientLimits; editor: NamedLiveBrowserLimits};
+  linkLive?: {
+    publicOrigin: string;
+    gateway: LiveGatewayLimits;
+    requests: NamedLiveBrowserClientLimits;
+    editor: NamedLiveBrowserLimits;
+  };
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -42,15 +57,20 @@ function exactList(value: string, errorMessage: string): string[] {
 }
 
 export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
-  if (env.DOHC_SELF_HOST_LIVE !== undefined && !["0", "1"].includes(env.DOHC_SELF_HOST_LIVE)) throw new Error("DOHC_SELF_HOST_LIVE must be 0 or 1.");
+  if (env.DOHC_SELF_HOST_LIVE !== undefined && !["0", "1"].includes(env.DOHC_SELF_HOST_LIVE))
+    throw new Error("DOHC_SELF_HOST_LIVE must be 0 or 1.");
   if (env.DOHC_SELF_HOST_LIVE === "1") {
     const profile = selfHostLiveProfile();
     env = {
       DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify(profile.requests),
       DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: JSON.stringify(profile.gateway),
       DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS: JSON.stringify(profile.editor),
-      DOHC_SHARE_WEB_LINK_LIVE_LIMITS: JSON.stringify({requests: profile.requests, gateway: profile.gateway, editor: profile.editor}),
-      DOHC_PUBLIC_EDIT_RELEASE: JSON.stringify({version: 1}),
+      DOHC_SHARE_WEB_LINK_LIVE_LIMITS: JSON.stringify({
+        requests: profile.requests,
+        gateway: profile.gateway,
+        editor: profile.editor,
+      }),
+      DOHC_PUBLIC_EDIT_RELEASE: JSON.stringify({ version: 1 }),
       ...Object.fromEntries(Object.entries(env).filter(([, value]) => value !== undefined)),
     };
   }
@@ -66,12 +86,12 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     relayUrl.username ||
     relayUrl.password
   ) {
-    throw new Error("DOHC_SHARE_WEB_RELAY_URL must be an absolute HTTP or HTTPS URL without credentials.");
+    throw new Error(
+      "DOHC_SHARE_WEB_RELAY_URL must be an absolute HTTP or HTTPS URL without credentials.",
+    );
   }
 
-  const publicRelayUrl = canonicalRelayUrl(
-    required(env, "DOHC_SHARE_WEB_PUBLIC_RELAY_URL"),
-  );
+  const publicRelayUrl = canonicalRelayUrl(required(env, "DOHC_SHARE_WEB_PUBLIC_RELAY_URL"));
   if (publicRelayUrl === null) {
     throw new Error(
       "DOHC_SHARE_WEB_PUBLIC_RELAY_URL must be an absolute HTTP or HTTPS URL of at most 2048 characters without credentials, query, or fragment.",
@@ -90,9 +110,12 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
       : exactList(
           trustedProxyValue,
           "DOHC_SHARE_WEB_TRUSTED_PROXIES must contain exact comma-separated peer addresses.",
-        ).map(entry => {
+        ).map((entry) => {
           const address = canonicalIpAddress(entry);
-          if (!address) throw new Error("DOHC_SHARE_WEB_TRUSTED_PROXIES must contain exact comma-separated peer addresses.");
+          if (!address)
+            throw new Error(
+              "DOHC_SHARE_WEB_TRUSTED_PROXIES must contain exact comma-separated peer addresses.",
+            );
           return address;
         }),
   );
@@ -107,22 +130,27 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
   const relayExchangeKey = env.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY || undefined;
   if (relayExchangeKey !== undefined && relayExchangeKey.length < 32) {
-    throw new Error(
-      "DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY must be at least 32 characters.",
-    );
+    throw new Error("DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY must be at least 32 characters.");
   }
   if (!isDevOrTest && relayExchangeKey === undefined) {
-    throw new Error(
-      "DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY must be set outside development/test.",
-    );
+    throw new Error("DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY must be set outside development/test.");
   }
   const devMode = env.DOHC_SHARE_WEB_DEV === "1";
   if (devMode && nodeEnv !== "development" && nodeEnv !== "test") {
     throw new Error("DOHC_SHARE_WEB_DEV=1 requires NODE_ENV=development or test.");
   }
-  const internalHosts = new Set(env.DOHC_SHARE_WEB_INTERNAL_HOSTS ? exactList(env.DOHC_SHARE_WEB_INTERNAL_HOSTS,
-    "DOHC_SHARE_WEB_INTERNAL_HOSTS must contain exact comma-separated Host values.").map(host => host.toLowerCase()) : []);
-  if (relayExchangeKey && internalHosts.size === 0) throw new Error("DOHC_SHARE_WEB_INTERNAL_HOSTS must be set when DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY is configured.");
+  const internalHosts = new Set(
+    env.DOHC_SHARE_WEB_INTERNAL_HOSTS
+      ? exactList(
+          env.DOHC_SHARE_WEB_INTERNAL_HOSTS,
+          "DOHC_SHARE_WEB_INTERNAL_HOSTS must contain exact comma-separated Host values.",
+        ).map((host) => host.toLowerCase())
+      : [],
+  );
+  if (relayExchangeKey && internalHosts.size === 0)
+    throw new Error(
+      "DOHC_SHARE_WEB_INTERNAL_HOSTS must be set when DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY is configured.",
+    );
 
   let accountAuth: AccountAuthConfig | undefined;
   const authUpstream = env.DOHC_SHARE_WEB_AUTH_URL;
@@ -136,58 +164,133 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     } catch {
       throw new Error("Account authentication requires valid public and upstream URLs.");
     }
-    if (origin.protocol !== "https:" || publicOrigin !== origin.origin ||
-        !hosts.includes(origin.host)) {
-      throw new Error("DOHC_SHARE_WEB_PUBLIC_ORIGIN must be a canonical HTTPS origin with an exact configured public Host.");
+    if (
+      origin.protocol !== "https:" ||
+      publicOrigin !== origin.origin ||
+      !hosts.includes(origin.host)
+    ) {
+      throw new Error(
+        "DOHC_SHARE_WEB_PUBLIC_ORIGIN must be a canonical HTTPS origin with an exact configured public Host.",
+      );
     }
-    if ((upstream.protocol !== "http:" && upstream.protocol !== "https:") ||
-        upstream.username || upstream.password || upstream.pathname !== "/" ||
-        upstream.search || upstream.hash) {
-      throw new Error("DOHC_SHARE_WEB_AUTH_URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment.");
+    if (
+      (upstream.protocol !== "http:" && upstream.protocol !== "https:") ||
+      upstream.username ||
+      upstream.password ||
+      upstream.pathname !== "/" ||
+      upstream.search ||
+      upstream.hash
+    ) {
+      throw new Error(
+        "DOHC_SHARE_WEB_AUTH_URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment.",
+      );
     }
     accountAuth = { upstreamUrl: upstream.origin, publicOrigin };
   }
 
   let namedBrowserSessionLimits: NamedLiveBrowserClientLimits | undefined;
   if (env.DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS !== undefined) {
-    if (!accountAuth || !relayExchangeKey) throw new Error("Named browser sessions require account auth and relay exchange configuration.");
-    namedBrowserSessionLimits = parseNamedLiveBrowserClientLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS));
+    if (!accountAuth || !relayExchangeKey)
+      throw new Error(
+        "Named browser sessions require account auth and relay exchange configuration.",
+      );
+    namedBrowserSessionLimits = parseNamedLiveBrowserClientLimits(
+      JSON.parse(env.DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS),
+    );
   }
 
   let namedLiveGatewayLimits: LiveGatewayLimits | undefined;
   if (env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS !== undefined) {
-    if (!namedBrowserSessionLimits || !accountAuth || !relayExchangeKey) throw new Error("Named live transport requires named browser sessions and relay exchange configuration.");
-    namedLiveGatewayLimits = parseLiveGatewayLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS));
+    if (!namedBrowserSessionLimits || !accountAuth || !relayExchangeKey)
+      throw new Error(
+        "Named live transport requires named browser sessions and relay exchange configuration.",
+      );
+    namedLiveGatewayLimits = parseLiveGatewayLimits(
+      JSON.parse(env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS),
+    );
+    // The gateway checks open editors' sessions on a pace set by this timeout, and the relay
+    // keeps a session only a few accepted intervals past its last check.
+    const { idleTimeoutMs } = namedLiveGatewayLimits,
+      { min, max } = NAMED_GATEWAY_IDLE_TIMEOUT_RANGE_MS;
+    if (idleTimeoutMs < min || idleTimeoutMs > max)
+      throw new Error(
+        `DOHC_SHARE_WEB_NAMED_LIVE_LIMITS idleTimeoutMs is ${idleTimeoutMs}. It must be from ${min} to ${max} (${min / 1000} to ${max / 1000} seconds).`,
+      );
   }
   let namedRecipientBrowserLimits: NamedLiveBrowserLimits | undefined;
   if (env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS !== undefined) {
-    if (!namedLiveGatewayLimits) throw new Error("Named browser editing requires the named live gateway.");
-    namedRecipientBrowserLimits = parseNamedLiveBrowserLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS));
-    if (namedRecipientBrowserLimits.provider.frames.receive.maxFrameBytes > namedLiveGatewayLimits.maxFrameBytes ||
-      namedRecipientBrowserLimits.provider.frames.maxQueuedBytes > namedLiveGatewayLimits.maxPendingBytes) {
+    if (!namedLiveGatewayLimits)
+      throw new Error("Named browser editing requires the named live gateway.");
+    namedRecipientBrowserLimits = parseNamedLiveBrowserLimits(
+      JSON.parse(env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS),
+    );
+    if (
+      namedRecipientBrowserLimits.provider.frames.receive.maxFrameBytes >
+        namedLiveGatewayLimits.maxFrameBytes ||
+      namedRecipientBrowserLimits.provider.frames.maxQueuedBytes >
+        namedLiveGatewayLimits.maxPendingBytes
+    ) {
       throw new Error("Named browser frames exceed gateway capacity.");
     }
   }
 
   let linkLive: ShareWebConfig["linkLive"];
   if (env.DOHC_SHARE_WEB_LINK_LIVE_LIMITS !== undefined) {
-    const publicOrigin = required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN"), origin = new URL(publicOrigin);
-    if (origin.protocol !== "https:" || origin.origin !== publicOrigin || !hosts.includes(origin.host) || !relayExchangeKey) throw new Error("Link live editing requires an exact HTTPS public origin and relay exchange configuration.");
+    const publicOrigin = required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN"),
+      origin = new URL(publicOrigin);
+    if (
+      origin.protocol !== "https:" ||
+      origin.origin !== publicOrigin ||
+      !hosts.includes(origin.host) ||
+      !relayExchangeKey
+    )
+      throw new Error(
+        "Link live editing requires an exact HTTPS public origin and relay exchange configuration.",
+      );
     const value: unknown = JSON.parse(env.DOHC_SHARE_WEB_LINK_LIVE_LIMITS);
-    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "editor,gateway,requests") throw new Error("Invalid link live limits.");
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).sort().join() !== "editor,gateway,requests"
+    )
+      throw new Error("Invalid link live limits.");
     const fields = value as Record<string, unknown>;
-    linkLive = {publicOrigin, gateway: parseLiveGatewayLimits(fields.gateway), requests: parseNamedLiveBrowserClientLimits(fields.requests), editor: parseNamedLiveBrowserLimits(fields.editor)};
-    if (linkLive.editor.provider.frames.receive.maxFrameBytes > linkLive.gateway.maxFrameBytes ||
-      linkLive.editor.provider.frames.maxQueuedBytes > linkLive.gateway.maxPendingBytes) throw new Error("Link browser frames exceed gateway capacity.");
+    linkLive = {
+      publicOrigin,
+      gateway: parseLiveGatewayLimits(fields.gateway),
+      requests: parseNamedLiveBrowserClientLimits(fields.requests),
+      editor: parseNamedLiveBrowserLimits(fields.editor),
+    };
+    if (
+      linkLive.editor.provider.frames.receive.maxFrameBytes > linkLive.gateway.maxFrameBytes ||
+      linkLive.editor.provider.frames.maxQueuedBytes > linkLive.gateway.maxPendingBytes
+    )
+      throw new Error("Link browser frames exceed gateway capacity.");
   }
 
-  if (namedLiveGatewayLimits && linkLive && namedLiveGatewayLimits.maxBufferedBytes !== linkLive.gateway.maxBufferedBytes) throw new TypeError("Live gateways must share one buffer budget.");
+  if (
+    namedLiveGatewayLimits &&
+    linkLive &&
+    namedLiveGatewayLimits.maxBufferedBytes !== linkLive.gateway.maxBufferedBytes
+  )
+    throw new TypeError("Live gateways must share one buffer budget.");
 
-  const publicEditRelease = parsePublicEditRelease(env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? undefined : JSON.parse(env.DOHC_PUBLIC_EDIT_RELEASE));
-  if (publicEditRelease && !linkLive) throw new Error("Public Edit release requires configured link live limits and relay exchange.");
+  const publicEditRelease = parsePublicEditRelease(
+    env.DOHC_PUBLIC_EDIT_RELEASE === undefined
+      ? undefined
+      : JSON.parse(env.DOHC_PUBLIC_EDIT_RELEASE),
+  );
+  if (publicEditRelease && !linkLive)
+    throw new Error("Public Edit release requires configured link live limits and relay exchange.");
 
   return {
-    appLaunch: env.DOHC_SHARE_WEB_APP_DOMAIN ? parseAppLaunchConfig({viewerOrigin: required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN"), appDomain: env.DOHC_SHARE_WEB_APP_DOMAIN}) : undefined,
+    appLaunch: env.DOHC_SHARE_WEB_APP_DOMAIN
+      ? parseAppLaunchConfig({
+          viewerOrigin: required(env, "DOHC_SHARE_WEB_PUBLIC_ORIGIN"),
+          appDomain: env.DOHC_SHARE_WEB_APP_DOMAIN,
+        })
+      : undefined,
     publicEditRelease,
     relayUrl: relayUrl.href,
     publicRelayUrl,
@@ -200,8 +303,8 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     devMode,
     ...(accountAuth ? { accountAuth } : {}),
     ...(namedBrowserSessionLimits ? { namedBrowserSessionLimits } : {}),
-    ...(namedLiveGatewayLimits ? {namedLiveGatewayLimits} : {}),
-    ...(namedRecipientBrowserLimits ? {namedRecipientBrowserLimits} : {}),
-    ...(linkLive ? {linkLive} : {}),
+    ...(namedLiveGatewayLimits ? { namedLiveGatewayLimits } : {}),
+    ...(namedRecipientBrowserLimits ? { namedRecipientBrowserLimits } : {}),
+    ...(linkLive ? { linkLive } : {}),
   };
 }

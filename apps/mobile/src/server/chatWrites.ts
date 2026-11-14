@@ -20,17 +20,27 @@ interface MessageFields {
  * replies to, whose result names the thread.
  */
 export type ChatWrite =
-  | { readonly operation: "post"; readonly args: MessageFields & { readonly groupId: string; readonly title?: string } }
+  | {
+      readonly operation: "post";
+      readonly args: MessageFields & { readonly groupId: string; readonly title?: string };
+    }
   | { readonly operation: "send"; readonly args: MessageFields & { readonly streamId: string } }
   | {
-    readonly operation: "reply";
-    readonly args: MessageFields & {
-      readonly threadId: string | null;
-      readonly parentMessageId?: string;
-      readonly resolves?: { readonly messageId: string; readonly chosenOption?: string };
+      readonly operation: "reply";
+      readonly args: MessageFields & {
+        readonly threadId: string | null;
+        readonly parentMessageId?: string;
+        readonly resolves?: { readonly messageId: string; readonly chosenOption?: string };
+      };
+    }
+  | {
+      readonly operation: "react";
+      readonly args: {
+        readonly messageId: string;
+        readonly emoji: string;
+        readonly state: "added" | "removed";
+      };
     };
-  }
-  | { readonly operation: "react"; readonly args: { readonly messageId: string; readonly emoji: string; readonly state: "added" | "removed" } };
 
 /** The closed list of reasons a refused write gives (services/sync-relay/src/operationPublication.ts). */
 export type RefusalReason =
@@ -40,9 +50,14 @@ export type RefusalReason =
   | "Couldn't send"
   | "too old";
 const REASONS: ReadonlySet<string> = new Set<RefusalReason>([
-  "already answered", "The message it replies to wasn't sent", "This workspace changed on your server", "Couldn't send", "too old",
+  "already answered",
+  "The message it replies to wasn't sent",
+  "This workspace changed on your server",
+  "Couldn't send",
+  "too old",
 ]);
-export const isRefusalReason = (value: unknown): value is RefusalReason => typeof value === "string" && REASONS.has(value);
+export const isRefusalReason = (value: unknown): value is RefusalReason =>
+  typeof value === "string" && REASONS.has(value);
 
 /**
  * A write's answer. `pending`: the relay holds the write and is still publishing it, so ask again with the same ID.
@@ -51,8 +66,17 @@ export const isRefusalReason = (value: unknown): value is RefusalReason => typeo
  */
 export type WriteAnswer =
   | { readonly kind: "saved"; readonly threadId: string | null; readonly messageId: string | null }
-  | { readonly kind: "pending"; readonly threadId: string | null; readonly messageId: string | null }
-  | { readonly kind: "refused"; readonly reason: RefusalReason; readonly threadId: string | null; readonly winnerMessageId: string | null }
+  | {
+      readonly kind: "pending";
+      readonly threadId: string | null;
+      readonly messageId: string | null;
+    }
+  | {
+      readonly kind: "refused";
+      readonly reason: RefusalReason;
+      readonly threadId: string | null;
+      readonly winnerMessageId: string | null;
+    }
   | { readonly kind: "missing"; readonly reason: string };
 
 /** The relay waits up to 20 s for publication before it answers `pending`. */
@@ -60,7 +84,8 @@ const WRITE_TIMEOUT_MS = 30_000;
 
 const id = (value: unknown): value is string => text(value, 256);
 /** An optional ID: null when absent, undefined when it isn't one. */
-const optionalId = (value: unknown): string | null | undefined => value === undefined ? null : id(value) ? value : undefined;
+const optionalId = (value: unknown): string | null | undefined =>
+  value === undefined ? null : id(value) ? value : undefined;
 
 /** The write's result, from the route's `{ ok, result, cursor }`. The cursor is checked, never used: a write doesn't move the feed. */
 export function readWriteAnswer(body: unknown): WriteAnswer | null {
@@ -70,22 +95,39 @@ export function readWriteAnswer(body: unknown): WriteAnswer | null {
   const threadId = optionalId(result.threadId);
   if (result.ok === true && (result.state === "saved" || result.state === "pending")) {
     const messageId = optionalId(result.messageId);
-    return threadId === undefined || messageId === undefined ? null : { kind: result.state, threadId, messageId };
+    return threadId === undefined || messageId === undefined
+      ? null
+      : { kind: result.state, threadId, messageId };
   }
   if (result.ok === false && result.refusal === "refused" && isRefusalReason(result.reason)) {
     const winnerMessageId = optionalId(result.winnerMessageId);
-    return threadId === undefined || winnerMessageId === undefined ? null : { kind: "refused", reason: result.reason, threadId, winnerMessageId };
+    return threadId === undefined || winnerMessageId === undefined
+      ? null
+      : { kind: "refused", reason: result.reason, threadId, winnerMessageId };
   }
-  if (result.ok === false && result.refusal === "missing" && text(result.reason)) return { kind: "missing", reason: result.reason };
+  if (result.ok === false && result.refusal === "missing" && text(result.reason))
+    return { kind: "missing", reason: result.reason };
   return null;
 }
 
 /** Sends the write, or asks again for one sent before, with the same operation ID and arguments. */
-export function sendWrite(client: ServerClient, workspaceId: string, operationId: string, write: ChatWrite, signal: AbortSignal): Promise<WriteAnswer> {
+export function sendWrite(
+  client: ServerClient,
+  workspaceId: string,
+  operationId: string,
+  write: ChatWrite,
+  signal: AbortSignal,
+): Promise<WriteAnswer> {
   // The outbox sends a reply only once it knows the thread.
-  if (write.operation === "reply" && write.args.threadId === null) return Promise.reject(new ServerError("invalid"));
-  return client.send("POST", `/sync/${segment(workspaceId)}/ops/${write.operation}`, readWriteAnswer, { operationId, ...write.args },
-    { signal, timeoutMs: WRITE_TIMEOUT_MS });
+  if (write.operation === "reply" && write.args.threadId === null)
+    return Promise.reject(new ServerError("invalid"));
+  return client.send(
+    "POST",
+    `/sync/${segment(workspaceId)}/ops/${write.operation}`,
+    readWriteAnswer,
+    { operationId, ...write.args },
+    { signal, timeoutMs: WRITE_TIMEOUT_MS },
+  );
 }
 
 /**
@@ -94,13 +136,20 @@ export function sendWrite(client: ServerClient, workspaceId: string, operationId
  * `[accountId, workspaceId, operationId, role, "message"]`, and `message-` with its first 32 hex characters. A send
  * takes the post role. A reaction makes no message.
  */
-export async function derivedMessageId(accountId: string, workspaceId: string, operationId: string, write: ChatWrite): Promise<string | null> {
+export async function derivedMessageId(
+  accountId: string,
+  workspaceId: string,
+  operationId: string,
+  write: ChatWrite,
+): Promise<string | null> {
   if (write.operation === "react") return null;
   const role = write.operation === "reply" ? "reply" : "post";
   // The relay's canonical JSON of an array of strings: each as JSON.stringify writes it, joined by commas, in brackets.
-  const canonical = `[${[accountId, workspaceId, operationId, role, "message"].map(part => JSON.stringify(part)).join(",")}]`;
+  const canonical = `[${[accountId, workspaceId, operationId, role, "message"].map((part) => JSON.stringify(part)).join(",")}]`;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
-  const hex = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  const hex = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
   return `message-${hex.slice(0, 32)}`;
 }
 
@@ -113,7 +162,11 @@ const choice = (value: unknown): value is string => text(value, 200);
 function messageFields(value: Fields): MessageFields | null {
   if (!text(value.body, BODY_MAX)) return null;
   if (value.needsDecision !== undefined && typeof value.needsDecision !== "boolean") return null;
-  if (value.options !== undefined && !(Array.isArray(value.options) && value.options.length <= 12 && value.options.every(choice))) return null;
+  if (
+    value.options !== undefined &&
+    !(Array.isArray(value.options) && value.options.length <= 12 && value.options.every(choice))
+  )
+    return null;
   return {
     body: value.body,
     ...(value.needsDecision === undefined ? {} : { needsDecision: value.needsDecision }),
@@ -128,35 +181,64 @@ export function readChatWrite(value: unknown): ChatWrite | null {
   switch (value.operation) {
     case "post": {
       const message = messageFields(args);
-      if (!message || !id(args.groupId) || (args.title !== undefined && !choice(args.title))) return null;
-      return { operation: "post", args: { ...message, groupId: args.groupId, ...(args.title === undefined ? {} : { title: args.title }) } };
+      if (!message || !id(args.groupId) || (args.title !== undefined && !choice(args.title)))
+        return null;
+      return {
+        operation: "post",
+        args: {
+          ...message,
+          groupId: args.groupId,
+          ...(args.title === undefined ? {} : { title: args.title }),
+        },
+      };
     }
     case "send": {
       const message = messageFields(args);
-      return message && id(args.streamId) ? { operation: "send", args: { ...message, streamId: args.streamId } } : null;
+      return message && id(args.streamId)
+        ? { operation: "send", args: { ...message, streamId: args.streamId } }
+        : null;
     }
     case "reply": {
       const message = messageFields(args);
       const parentMessageId = optionalId(args.parentMessageId);
-      if (!message || !(args.threadId === null || id(args.threadId)) || parentMessageId === undefined) return null;
+      if (
+        !message ||
+        !(args.threadId === null || id(args.threadId)) ||
+        parentMessageId === undefined
+      )
+        return null;
       let resolves: { messageId: string; chosenOption?: string } | undefined;
       if (args.resolves !== undefined) {
         const target = args.resolves;
-        if (!isFields(target) || !id(target.messageId) || (target.chosenOption !== undefined && !choice(target.chosenOption))) return null;
-        resolves = { messageId: target.messageId, ...(target.chosenOption === undefined ? {} : { chosenOption: target.chosenOption }) };
+        if (
+          !isFields(target) ||
+          !id(target.messageId) ||
+          (target.chosenOption !== undefined && !choice(target.chosenOption))
+        )
+          return null;
+        resolves = {
+          messageId: target.messageId,
+          ...(target.chosenOption === undefined ? {} : { chosenOption: target.chosenOption }),
+        };
       }
       return {
         operation: "reply",
         args: {
-          ...message, threadId: args.threadId,
+          ...message,
+          threadId: args.threadId,
           ...(parentMessageId === null ? {} : { parentMessageId }),
           ...(resolves === undefined ? {} : { resolves }),
         },
       };
     }
     case "react":
-      return id(args.messageId) && text(args.emoji, 32) && (args.state === "added" || args.state === "removed")
-        ? { operation: "react", args: { messageId: args.messageId, emoji: args.emoji, state: args.state } }
+      return id(args.messageId) &&
+        text(args.emoji, 32) &&
+        (args.state === "added" || args.state === "removed")
+        ? {
+            operation: "react",
+            args: { messageId: args.messageId, emoji: args.emoji, state: args.state },
+          }
         : null;
     default:
       return null;

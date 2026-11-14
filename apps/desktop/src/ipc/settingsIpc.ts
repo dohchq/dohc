@@ -1,12 +1,20 @@
 import { agentKeyForGroup, agentColorChanges } from "../workspaces/actorPresentation";
 import type { AgentColorChangedEvent } from "./bridgeContract";
 import { join } from "node:path";
-import { DesktopUserSettingsResult, WorkspaceSettingsResult, GetWorkspaceUiStateResult } from "./bridgeContract";
+import {
+  DesktopUserSettingsResult,
+  WorkspaceSettingsResult,
+  GetWorkspaceUiStateResult,
+} from "./bridgeContract";
 import type { settingsOperations } from "./settingsOperations";
 import type { OperationHandlers } from "./operationTable";
 import {
   DEFAULT_USER_SETTINGS,
-  AgentColors, StoredUserSettingsResult, listAgents, rendererUserSettingsResult, runnableAgents,
+  AgentColors,
+  StoredUserSettingsResult,
+  listAgents,
+  rendererUserSettingsResult,
+  runnableAgents,
   settingsDeepEqual,
   type Agent,
   type DesktopUserSettings,
@@ -17,11 +25,19 @@ import { withAppPinned } from "../settings/pinnedApps";
 import { withChatState } from "../settings/archivedChats";
 import { watchSettingsFile } from "../settings/settingsFileWatcher";
 import {
-  ensureUserSettingsFile, orderUserSettingsAgents, readCachedUserSettingsFile, reloadUserSettingsFile,
-  replaceUserSettingsFile, updateUserSettingsFile, USER_SETTINGS_FILE, writeUserSettingsFile,
+  ensureUserSettingsFile,
+  orderUserSettingsAgents,
+  readCachedUserSettingsFile,
+  reloadUserSettingsFile,
+  replaceUserSettingsFile,
+  updateUserSettingsFile,
+  USER_SETTINGS_FILE,
+  writeUserSettingsFile,
 } from "../settings/userSettingsStore";
 import {
-  readWorkspaceSettingsFile, resetWorkspaceSettingsFile, saveWorkspaceSettingsFile,
+  readWorkspaceSettingsFile,
+  resetWorkspaceSettingsFile,
+  saveWorkspaceSettingsFile,
   workspaceSettingsPath,
 } from "../workspaces/workspaceSettingsFile";
 import { readUiStateFile, writeUiStateFile } from "../workspaces/workspaceUiState";
@@ -61,8 +77,13 @@ export function createSettingsIpc<
   // result; the other surfaces learn it here.
   broadcastAgentColor(event: AgentColorChangedEvent): void;
   broadcastUserSettings(result: DesktopUserSettingsResult): void;
+  // Tells the server again which agents this computer runs, so a last agent
+  // switched off or removed is taken back there too. It never waits or throws.
+  publishRunners(): void;
   withRendererWorkspaceOperation<Result>(
-    sender: Sender, workspaceId: string, message: string,
+    sender: Sender,
+    workspaceId: string,
+    message: string,
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result>;
   // The system's own opener; answers an error message, or "" when it opened.
@@ -72,9 +93,20 @@ export function createSettingsIpc<
 }) {
   const {
     stateDir,
-    setCachedNames, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray,
-    openDispatchWorkspaces, chatDispatchService, withRendererWorkspaceOperation,
-    broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath, knownWorkspaceIds,
+    setCachedNames,
+    applyZoomLevelToWindows,
+    applyThemeMode,
+    setSpellCheckerEnabled,
+    refreshDispatchTray,
+    openDispatchWorkspaces,
+    chatDispatchService,
+    withRendererWorkspaceOperation,
+    broadcastUserSettings,
+    broadcastAgentColor,
+    notifyRenderer,
+    openPath,
+    knownWorkspaceIds,
+    publishRunners,
   } = dependencies;
 
   // Every change to the user settings file runs here, one at a time, and each
@@ -97,12 +129,17 @@ export function createSettingsIpc<
   }
 
   async function announce({ previous, result }: UserSettingsChange): Promise<void> {
-    for (const event of agentColorChanges(previous.settings.appearance.agentColors, result.settings.appearance.agentColors)) {
+    for (const event of agentColorChanges(
+      previous.settings.appearance.agentColors,
+      result.settings.appearance.agentColors,
+    )) {
       broadcastAgentColor(event);
     }
     const publicResult = rendererUserSettingsResult(result);
     if (settingsDeepEqual(rendererUserSettingsResult(previous), publicResult)) return;
     broadcastUserSettings(publicResult);
+    // Before the tray, which can fail, and before the return for no agents dohc starts.
+    publishRunners();
     await refreshDispatchTray();
     const agents = runnableAgents(result.settings);
     if (agents.length === 0) return;
@@ -111,11 +148,14 @@ export function createSettingsIpc<
     // zoom step does not scan every open workspace.
     if (settingsDeepEqual(runnableAgents(previous.settings), agents)) return;
     for (const workspace of openDispatchWorkspaces()) {
-      void chatDispatchService.scanWorkspace(workspace.workspaceId).then(() => {
-        notifyRenderer({ workspaceId: workspace.workspaceId });
-      }).catch((error) => {
-        console.error("[desktop] runner-settings dispatch scan:", error);
-      });
+      void chatDispatchService
+        .scanWorkspace(workspace.workspaceId)
+        .then(() => {
+          notifyRenderer({ workspaceId: workspace.workspaceId });
+        })
+        .catch((error) => {
+          console.error("[desktop] runner-settings dispatch scan:", error);
+        });
     }
   }
 
@@ -152,7 +192,9 @@ export function createSettingsIpc<
    */
   async function reloadUserSettings(): Promise<DesktopUserSettingsResult> {
     const change = await changeUserSettings(() => reloadUserSettingsFile(stateDir()));
-    return rendererUserSettingsResult(change?.result ?? await readCachedUserSettingsFile(stateDir()));
+    return rendererUserSettingsResult(
+      change?.result ?? (await readCachedUserSettingsFile(stateDir())),
+    );
   }
 
   // One zoom step, from the zoom level in the file as it is now.
@@ -164,7 +206,8 @@ export function createSettingsIpc<
           ...current.appearance,
           zoomLevel: nextZoomLevel(current.appearance.zoomLevel, step),
         },
-      })));
+      })),
+    );
   }
 
   // Answers the function that stops the watch. It never keeps main alive.
@@ -197,8 +240,7 @@ export function createSettingsIpc<
     reloadUserSettings,
 
     setUserSettings: async (input) => {
-      return saveUserSettings(() =>
-        writeUserSettingsFile(stateDir(), input.settings, input.base));
+      return saveUserSettings(() => writeUserSettingsFile(stateDir(), input.settings, input.base));
     },
 
     // One pin at a time, applied to the file as it is now, so two quick pins
@@ -206,7 +248,9 @@ export function createSettingsIpc<
     setAppPinned: async (input) => {
       return saveUserSettings(() =>
         updateUserSettingsFile(stateDir(), (current) =>
-          withAppPinned(current, input, knownWorkspaceIds())));
+          withAppPinned(current, input, knownWorkspaceIds()),
+        ),
+      );
     },
 
     // Like a pin: one chat at a time, applied to the file as it is now.
@@ -215,7 +259,8 @@ export function createSettingsIpc<
         updateUserSettingsFile(stateDir(), (current) => {
           operation.assertCurrent();
           return withChatState(current, input, knownWorkspaceIds());
-        }));
+        }),
+      );
     },
 
     orderAgents: async (input) => {
@@ -224,17 +269,21 @@ export function createSettingsIpc<
 
     setAgentColor: async (input, { operation }) => {
       const key = agentKeyForGroup(input.workspaceId, input.group);
-      await saveUserSettings(() => updateUserSettingsFile(stateDir(), current => {
-        operation.assertCurrent();
-        if ((current.appearance.agentColors?.[key] ?? null) === input.hue) return current;
-        const agentColors = { ...current.appearance.agentColors };
-        if (input.hue === null) delete agentColors[key];
-        else agentColors[key] = input.hue;
-        if (!AgentColors.safeParse(agentColors).success) {
-          throw new Error("dohc could not save this agent color within the settings limits. Use the default color for this agent.");
-        }
-        return { ...current, appearance: { ...current.appearance, agentColors } };
-      }));
+      await saveUserSettings(() =>
+        updateUserSettingsFile(stateDir(), (current) => {
+          operation.assertCurrent();
+          if ((current.appearance.agentColors?.[key] ?? null) === input.hue) return current;
+          const agentColors = { ...current.appearance.agentColors };
+          if (input.hue === null) delete agentColors[key];
+          else agentColors[key] = input.hue;
+          if (!AgentColors.safeParse(agentColors).success) {
+            throw new Error(
+              "dohc could not save this agent color within the settings limits. Use the default color for this agent.",
+            );
+          }
+          return { ...current, appearance: { ...current.appearance, agentColors } };
+        }),
+      );
     },
 
     resetUserSettings: async () => {
@@ -279,9 +328,7 @@ export function createSettingsIpc<
     },
 
     getWorkspaceSettings: async (_input, { operation }) =>
-      WorkspaceSettingsResult.parse(
-        await readWorkspaceSettingsFile(operation.workspace),
-      ),
+      WorkspaceSettingsResult.parse(await readWorkspaceSettingsFile(operation.workspace)),
 
     // A save or reset before the engine prepared .dohc/local is refused with
     // words that say why, and writes nothing. Only on Windows does a read wait
@@ -292,9 +339,7 @@ export function createSettingsIpc<
       ),
 
     resetWorkspaceSettings: async (_input, { operation }) =>
-      WorkspaceSettingsResult.parse(
-        await resetWorkspaceSettingsFile(operation.workspace),
-      ),
+      WorkspaceSettingsResult.parse(await resetWorkspaceSettingsFile(operation.workspace)),
 
     // Per-workspace workbench UI state (.dohc/local/ui-state.json). The
     // renderer cannot write .dohc through writeWorkspaceText (reserved path),
@@ -311,11 +356,13 @@ export function createSettingsIpc<
       return parsed.success ? parsed.data : null;
     },
 
-    setWorkspaceUiState: async (input, { operation }) => writeUiStateFile(operation.workspace, input.state),
+    setWorkspaceUiState: async (input, { operation }) =>
+      writeUiStateFile(operation.workspace, input.state),
   } satisfies OperationHandlers<typeof settingsOperations, Event, Operation>;
 
   return {
     ...handlers,
-    watchUserSettingsFile, stepWindowZoom,
+    watchUserSettingsFile,
+    stepWindowZoom,
   };
 }

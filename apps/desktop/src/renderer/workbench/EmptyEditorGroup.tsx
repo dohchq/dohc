@@ -24,15 +24,32 @@ const KIND_TONE: Record<StartKind, string> = {
 // What a person can make, in tile order. A drawing takes its name from the
 // kind registry. A Markdown file is a Page, as the Explorer's Home calls it.
 // The registry names no Collection, so that label lives only here.
-const START_KINDS: readonly { kind: StartKind; label: string; glyph: ReactNode; shortcut?: "new-file" }[] = [
-  { kind: "markdown", label: "Page", shortcut: "new-file", glyph: <KindGlyph kind={FILE_KIND_RECORDS.markdown} size={16} className={KIND_TONE.markdown} /> },
-  { kind: "collection", label: "Collection", glyph: <ObjectGlyph kind="collection" size={16} className={KIND_TONE.collection} /> },
-  { kind: "drawing", label: FILE_KIND_RECORDS.drawing.name, glyph: <KindGlyph kind={FILE_KIND_RECORDS.drawing} size={16} className={KIND_TONE.drawing} /> },
+const START_KINDS: readonly {
+  kind: StartKind;
+  label: string;
+  glyph: ReactNode;
+  shortcut?: "new-file";
+}[] = [
+  {
+    kind: "markdown",
+    label: "Page",
+    shortcut: "new-file",
+    glyph: <KindGlyph kind={FILE_KIND_RECORDS.markdown} size={16} className={KIND_TONE.markdown} />,
+  },
+  {
+    kind: "collection",
+    label: "Collection",
+    glyph: <ObjectGlyph kind="collection" size={16} className={KIND_TONE.collection} />,
+  },
+  {
+    kind: "drawing",
+    label: FILE_KIND_RECORDS.drawing.name,
+    glyph: <KindGlyph kind={FILE_KIND_RECORDS.drawing} size={16} className={KIND_TONE.drawing} />,
+  },
 ];
 
 const RECENT_LIMIT = 5;
 
-// The recent paths that are still listed files, most recent first.
 function recentFiles(recent: readonly string[], files: readonly ListedFile[]): ListedFile[] {
   if (recent.length === 0) return [];
   const wanted = new Set(recent);
@@ -45,7 +62,9 @@ function recentFiles(recent: readonly string[], files: readonly ListedFile[]): L
 }
 
 function fileTone(kind: FileKindRecord): string | undefined {
-  return kind.displayKind === "markdown" || kind.displayKind === "drawing" ? KIND_TONE[kind.displayKind] : undefined;
+  return kind.displayKind === "markdown" || kind.displayKind === "drawing"
+    ? KIND_TONE[kind.displayKind]
+    : undefined;
 }
 
 // An editor group with no open tab shows what a person can make, and their
@@ -55,9 +74,7 @@ export function EmptyEditorGroup(props: {
   // The create action of each kind the workspace offers. A kind without one
   // has no tile.
   create: Partial<Record<StartKind, CreateAction>>;
-  // Opened paths, most recent first.
   recent: readonly string[];
-  // The workspace's files, or null until its first listing lands.
   files: readonly ListedFile[] | null;
   onOpen: (path: string) => void;
   // Adds dropped files. Absent where the workspace takes no import.
@@ -66,7 +83,10 @@ export function EmptyEditorGroup(props: {
   const recentId = useId();
   // A press while an action runs does nothing, so a double click creates once.
   const running = useRef(false);
-  const recent = useMemo(() => props.files ? recentFiles(props.recent, props.files) : [], [props.recent, props.files]);
+  const recent = useMemo(
+    () => (props.files ? recentFiles(props.recent, props.files) : []),
+    [props.recent, props.files],
+  );
   const tiles = START_KINDS.flatMap((tile) => {
     const create = props.create[tile.kind];
     return create ? [{ ...tile, create }] : [];
@@ -82,12 +102,17 @@ export function EmptyEditorGroup(props: {
     const pending = create();
     if (!(pending instanceof Promise)) return;
     running.current = true;
-    const release = () => { running.current = false; };
+    const release = () => {
+      running.current = false;
+    };
     void pending.then(release, release);
   }
 
   return (
-    <div data-testid="start-surface" className="@container flex min-h-0 flex-1 flex-col overflow-y-auto">
+    <div
+      data-testid="start-surface"
+      className="@container flex min-h-0 flex-1 flex-col overflow-y-auto"
+    >
       {/* The cards sit at a share of the group's height, so what lands later
           grows below them and never moves them. */}
       <div aria-hidden className="max-h-64 min-h-8 shrink-0 basis-[22%]" />
@@ -99,11 +124,16 @@ export function EmptyEditorGroup(props: {
               <button
                 key={tile.kind}
                 type="button"
-                aria-keyshortcuts={tile.shortcut ? shortcutAria(tile.shortcut, props.platform) : undefined}
+                aria-keyshortcuts={
+                  tile.shortcut ? shortcutAria(tile.shortcut, props.platform) : undefined
+                }
                 onClick={() => run(tile.create)}
                 className="group flex min-w-0 flex-col gap-2 rounded-lg text-left"
               >
-                <span aria-hidden className="relative block h-28 overflow-hidden rounded-lg border border-line bg-panel transition-colors duration-100 group-hover:border-ink/30 group-hover:bg-panel-2">
+                <span
+                  aria-hidden
+                  className="relative block h-28 overflow-hidden rounded-lg border border-line bg-panel transition-colors duration-100 group-hover:border-ink/30 group-hover:bg-panel-2"
+                >
                   {START_TILE_ART[tile.kind]}
                 </span>
                 <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-ink">
@@ -111,7 +141,10 @@ export function EmptyEditorGroup(props: {
                   <span className="truncate">{tile.label}</span>
                   {/* The chord shows only where it leaves the name whole. */}
                   {tile.shortcut ? (
-                    <span aria-hidden className="ml-auto hidden shrink-0 text-[12px] font-normal text-subtle @2xl:block">
+                    <span
+                      aria-hidden
+                      className="ml-auto hidden shrink-0 text-[12px] font-normal text-subtle @2xl:block"
+                    >
                       {shortcutText(tile.shortcut, props.platform)}
                     </span>
                   ) : null}
@@ -123,7 +156,9 @@ export function EmptyEditorGroup(props: {
         {onDropFiles ? <DropZone onDrop={onDropFiles} /> : null}
         {recent.length > 0 ? (
           <section aria-labelledby={recentId}>
-            <h2 id={recentId} className="pb-2 text-[12px] font-medium text-subtle">Recent</h2>
+            <h2 id={recentId} className="pb-2 text-[12px] font-medium text-subtle">
+              Recent
+            </h2>
             {/* A row's text starts on the cards' edge and its hover fill hangs outside it. */}
             <ul className="-mx-2">
               {recent.map((file) => {
@@ -136,7 +171,12 @@ export function EmptyEditorGroup(props: {
                       onClick={() => props.onOpen(file.path)}
                       className="dohc-focus-row flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
                     >
-                      <FileGlyph kind={kind} icon={file.icon} size={16} className={fileTone(kind)} />
+                      <FileGlyph
+                        kind={kind}
+                        icon={file.icon}
+                        size={16}
+                        className={fileTone(kind)}
+                      />
                       <span className="min-w-0 truncate">{fileName(file.path)}</span>
                     </button>
                   </li>
@@ -167,7 +207,12 @@ function DropZone(props: { onDrop: (files: File[]) => void }) {
         setOver(true);
       }}
       onDragLeave={(event) => {
-        if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setOver(false);
+        if (
+          !(
+            event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)
+          )
+        )
+          setOver(false);
       }}
       onDrop={(event) => {
         event.preventDefault();

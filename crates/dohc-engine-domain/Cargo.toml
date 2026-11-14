@@ -15,11 +15,11 @@ fault-injection = ["dohc-engine-storage/fault-injection"]
 
 [dependencies]
 dohc-engine-storage = { path = "../dohc-engine-storage" }
-# R08 secrets crypto: AES-256-GCM secret-file AEAD + redaction-safe plaintext /
+# Secrets crypto: AES-256-GCM secret-file AEAD + redaction-safe plaintext /
 # key types. The secret domain store encrypts on write and decrypts only in the
 # single authorized materialization accessor; ciphertext-only reaches storage.
 dohc-engine-crypto = { path = "../dohc-engine-crypto" }
-# R07's cross-platform security classifier is the single path floor shared by
+# The cross-platform security classifier is the single path floor shared by
 # plaintext and secret-backed stores. Direction is domain -> files only; the
 # files crate remains independent of domain.
 dohc-engine-files = { path = "../dohc-engine-files" }
@@ -30,8 +30,8 @@ rusqlite = { version = "0.41", features = ["bundled", "collation", "functions"] 
 # Content-addressed text blobs (sha256), matching the storage core's discipline.
 sha2 = "0.11"
 thiserror = "2"
-# R09 chats: NFC identity normalization for channel/projection/heading fields
-# (matrix 4.1b) and base64url feed cursors (matrix 4.8, byte-parity with the TS
+# Chats: NFC identity normalization for channel/projection/heading fields
+# and base64url feed cursors (byte-parity with the TS
 # `Buffer.from(..., "base64url")` encode/decode).
 unicode-normalization = "0.1"
 unicode-segmentation = "1.13"
@@ -62,7 +62,7 @@ dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 dohc-engine-files = { path = "../dohc-engine-files", features = ["fault-injection"] }
 # Builds a store as the build before agent ids left it.
 dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-support"] }
-# Parse the R08 cross-engine ciphertext fixture (produced by Node) in the
+# Parse the cross-engine ciphertext fixture (produced by Node) in the
 # secret store's TS-written-secret-decrypts test.
 serde_json = "1"
 

@@ -34,7 +34,9 @@ export function automationShareWarning(
   recipientEmail: string | null,
 ): string | null {
   if (stops.length === 0) return null;
-  const automations = new Map(stops.map((stop) => [stop.automationId, `"${stop.automationName}" in ${stop.collectionPath}`]));
+  const automations = new Map(
+    stops.map((stop) => [stop.automationId, `"${stop.automationName}" in ${stop.collectionPath}`]),
+  );
   const reach = [...new Set(stops.map((stop) => automationReachCopy(stop, true)))];
   const what = `${automations.size === 1 ? "the automation" : "the automations"} ${AND.format([...automations.values()])}`;
   const who = recipientEmail ?? "anyone who opens this link";
@@ -44,9 +46,18 @@ export function automationShareWarning(
 export function useAutomationShareCheck(workspaceId: string, target: RelayShareTarget) {
   // A check answers for one share of one selection in one workspace.
   const keyOf = (share: AutomationShare) =>
-    JSON.stringify([workspaceId, target, share.recipientEmail, share.access, share.shareId ?? null]);
-  // What the last check found, for the share it checked.
-  const [checked, setChecked] = useState<{ key: string; warning: string | null; failed: boolean } | null>(null);
+    JSON.stringify([
+      workspaceId,
+      target,
+      share.recipientEmail,
+      share.access,
+      share.shareId ?? null,
+    ]);
+  const [checked, setChecked] = useState<{
+    key: string;
+    warning: string | null;
+    failed: boolean;
+  } | null>(null);
   /** The warning or the failed check for the share on screen, or null. */
   const noteFor = (share: AutomationShare) => (checked?.key === keyOf(share) ? checked : null);
   /** Whether Create for this share asks main first: Edit on files, and no warning shown yet. */
@@ -67,7 +78,10 @@ export function useAutomationShareCheck(workspaceId: string, target: RelayShareT
       let stops: AutomationShareImpactResult["stops"];
       try {
         ({ stops } = await bridge().automationShareImpact({
-          workspaceId, recipientEmail: share.recipientEmail, paths: target.paths, access: "edit",
+          workspaceId,
+          recipientEmail: share.recipientEmail,
+          paths: target.paths,
+          access: "edit",
         }));
       } catch {
         if (!isCurrent()) return false;
@@ -83,7 +97,9 @@ export function useAutomationShareCheck(workspaceId: string, target: RelayShareT
 }
 
 /** The warning before a share, or the sentence that the check failed. */
-export function AutomationShareNote(props: { note: { warning: string | null; failed: boolean } | null }) {
+export function AutomationShareNote(props: {
+  note: { warning: string | null; failed: boolean } | null;
+}) {
   const { note } = props;
   if (note?.warning) {
     return (
@@ -99,7 +115,11 @@ export function AutomationShareNote(props: { note: { warning: string | null; fai
   }
   if (note?.failed) {
     return (
-      <p data-testid="share-automation-check-failed" role="status" className="m-0 text-xs leading-relaxed text-muted">
+      <p
+        data-testid="share-automation-check-failed"
+        role="status"
+        className="m-0 text-xs leading-relaxed text-muted"
+      >
         {AUTOMATION_CHECK_FAILED}
       </p>
     );

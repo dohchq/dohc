@@ -6,22 +6,21 @@ description: Triage dohc's nightly verification run, run one by hand, or fix the
 # Triage verification runs
 
 The verification queue service runs local PR gates on this host. Its root is `C:\w\_verification`.
-Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full run of main's head.
-Read [the verification procedure](../../../docs/engineering/verify-agent-work.md) for the queue, flaky tests, the nightly run, and test times.
+Read [the verification procedure](../../../docs/engineering/verify-agent-work.md) for the queue, flaky tests, the [nightly run](../../../docs/engineering/verify-agent-work.md#nightly-run), and test times.
 
 Both procedures follow these rules:
 
 - Follow `AGENTS.md`. Keep one concern per PR.
 - Create worktrees with `~/dev/garage/tools/worktree.mjs`. Remove your worktrees and processes when you finish.
 - Verify each PR with `pnpm verify:pr --base origin/main` through the queue, unless passing PR checks cover its head.
-- Owners take turns in the queue. You may move a waiting request with `pnpm verify:queue move` and a `--reason`: `--before` to order one owner's requests, and `--first` only to unblock other work, as [the procedure](../../../docs/engineering/verify-agent-work.md#move-a-waiting-request) describes.
+- Owners take turns in the queue. You may move a waiting request with `pnpm verify:queue move` and a `--reason`.
+  Follow [the procedure](../../../docs/engineering/verify-agent-work.md#move-a-waiting-request): `--before` orders one owner's requests, and `--first` is only to unblock other work.
 - Do not cancel, kill, or edit another request, or its files under `C:\w\_verification` or `C:\w\_locks`.
 - Do not stop another agent's run.
 
 ## Run a nightly by hand
 
 Run `pnpm verify:queue nightly` from a checkout of origin/main.
-It verifies main's head against the last nightly that passed. The queue runs it before every PR request.
 If the `dohc-verification-nightly` task is missing, run `pnpm verify:queue install`. It registers the task again.
 
 ## Triage the nightly run
@@ -36,7 +35,7 @@ If the `dohc-verification-nightly` task is missing, run `pnpm verify:queue insta
    Name a flaky test as recurring when it is also flaky in another finished run in the last 7 days of `C:\w\_verification\history.jsonl`. Stop.
 7. If its state is `failed`, find the merge that broke main:
    1. List the failing tests from `result.json` and the failing step's log.
-   2. Run only those tests at `head` from `request.json` to confirm the failure. A test that failed in the step `rust-linux` failed on Linux: run it in your own clone in WSL.
+   2. Run only those tests at `head` from `request.json` to confirm the failure. For a `rust-linux` failure, rerun the failing tests in your own WSL clone.
    3. Run `git bisect start <head> <base>` with `head` and `base` from `request.json`.
    4. Run `git bisect run <command>`, where the command runs only those tests. Do not run the full gate to bisect.
    5. Record the first bad commit, then run `git bisect reset`.

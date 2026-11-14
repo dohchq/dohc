@@ -1,10 +1,27 @@
 import { jsonResponse } from "@dohc/service-http";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
+import {
+  DiscussionActivityCapacityError,
+  linkLogWaitGroup,
+  type DiscussionActivityHub,
+} from "./discussionActivity";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
-import { assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, parseNamedShareLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
-import { assertSha256, parseCursor, parseLimit, parseLinkLogHold, parseString, readJsonObject } from "./requestInputs";
+import {
+  assertChatAuthorship,
+  assertClientLogProvenance,
+  namedShareOrigin,
+  parseNamedShareLogOps,
+  type LogAuthorNameLookup,
+} from "./relayLogInputs";
+import {
+  assertSha256,
+  parseCursor,
+  parseLimit,
+  parseLinkLogHold,
+  parseString,
+  readJsonObject,
+} from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideOf,
@@ -68,7 +85,8 @@ export function createNamedShareTransportRoutes(
         if (
           !(error instanceof RelayError) ||
           (error.code !== "not_found" && error.code !== "share_access_removed")
-        ) throw error;
+        )
+          throw error;
         await claimPendingShares(actor.userId);
         authorized = requireShareAction(route.shareId, actor.userId, "read");
       }
@@ -76,15 +94,16 @@ export function createNamedShareTransportRoutes(
       const url = new URL(request.url);
       const channelWireId = url.searchParams.get("channelWireId");
       const clientOrigin = url.searchParams.get("originId");
-      const ownOriginId = clientOrigin === null || clientOrigin === ""
-        ? null
-        : namedShareOrigin(share.shareId, actor.userId,
-          parseString(clientOrigin, "originId", MAX_ORIGIN_ID_CHARS));
+      const ownOriginId =
+        clientOrigin === null || clientOrigin === ""
+          ? null
+          : namedShareOrigin(
+              share.shareId,
+              actor.userId,
+              parseString(clientOrigin, "originId", MAX_ORIGIN_ID_CHARS),
+            );
       const chatSide = chatSideOf(share.selector);
-      if (
-        channelWireId !== null &&
-        (!chatSide || chatSide.channelWireId !== channelWireId)
-      ) {
+      if (channelWireId !== null && (!chatSide || chatSide.channelWireId !== channelWireId)) {
         throw notFound();
       }
       const since = parseCursor(url.searchParams.get("since"));
@@ -116,24 +135,45 @@ export function createNamedShareTransportRoutes(
         let scanSince = since;
         const readPage = () => {
           const fresh = requireShareAction(route.shareId, actor.userId, "read");
-          if (fresh.share.workspaceId !== share.workspaceId ||
-              (channelWireId !== null && chatSideOf(fresh.effectiveSelector)?.channelWireId !== channelWireId)) throw notFound();
-          return filteredLogPage(share.workspaceId, share.shareId, fresh.effectiveSelector, scanSince, limit, "authenticated", half, ["user", actor.userId]);
+          if (
+            fresh.share.workspaceId !== share.workspaceId ||
+            (channelWireId !== null &&
+              chatSideOf(fresh.effectiveSelector)?.channelWireId !== channelWireId)
+          )
+            throw notFound();
+          return filteredLogPage(
+            share.workspaceId,
+            share.shareId,
+            fresh.effectiveSelector,
+            scanSince,
+            limit,
+            "authenticated",
+            half,
+            ["user", actor.userId],
+          );
         };
         while (!request.signal.aborted && Date.now() < deadline) {
           try {
-            await discussionActivity.wait(linkLogWaitGroup(share.workspaceId), `named:${actor.userId}`, {
-              holdMs: Math.max(1, deadline - Date.now()), signal: request.signal,
-              shouldPark: () => {
-                try {
-                  page = readPage();
-                  scanSince = page.nextCursor;
-                  return page.ops.length === 0 && !page.hasMore;
-                } catch { return false; }
+            await discussionActivity.wait(
+              linkLogWaitGroup(share.workspaceId),
+              `named:${actor.userId}`,
+              {
+                holdMs: Math.max(1, deadline - Date.now()),
+                signal: request.signal,
+                shouldPark: () => {
+                  try {
+                    page = readPage();
+                    scanSince = page.nextCursor;
+                    return page.ops.length === 0 && !page.hasMore;
+                  } catch {
+                    return false;
+                  }
+                },
               },
-            });
+            );
           } catch (error) {
-            if (error instanceof DiscussionActivityCapacityError) throw relayError("share_access_rate_limited");
+            if (error instanceof DiscussionActivityCapacityError)
+              throw relayError("share_access_rate_limited");
             throw error;
           }
           if (page.ops.length === 0 && !page.hasMore) page = readPage();
@@ -146,44 +186,54 @@ export function createNamedShareTransportRoutes(
       // the page was assembled) must abort the response, not leak a final
       // filtered page. Re-loading the share throws the same generic 404.
       requireShareAction(route.shareId, actor.userId, "read");
-      const mappings = !identityKey || url.searchParams.get("includeReferences") === "false" || page.hasMore ? {references: [], nextAfter: null, hasMore: false} : await storage.listWorkReferences({workspaceId: share.workspaceId,
-        reader: {kind: "user", userId: actor.userId, grantId: authorized.grant.grantId}, identityKey,
-        after: url.searchParams.get("referenceAfter") || undefined});
+      const mappings =
+        !identityKey || url.searchParams.get("includeReferences") === "false" || page.hasMore
+          ? { references: [], nextAfter: null, hasMore: false }
+          : await storage.listWorkReferences({
+              workspaceId: share.workspaceId,
+              reader: { kind: "user", userId: actor.userId, grantId: authorized.grant.grantId },
+              identityKey,
+              after: url.searchParams.get("referenceAfter") || undefined,
+            });
       const latest = requireShareAction(route.shareId, actor.userId, "read");
-      if (JSON.stringify(latest.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector)) throw notFound();
+      if (JSON.stringify(latest.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector))
+        throw notFound();
       return jsonResponse({
         ok: true,
-        ...(mappings.references.length || mappings.nextAfter ? {workReferences: mappings.references, nextReferenceAfter: mappings.nextAfter, referenceHasMore: mappings.hasMore} : {}),
+        ...(mappings.references.length || mappings.nextAfter
+          ? {
+              workReferences: mappings.references,
+              nextReferenceAfter: mappings.nextAfter,
+              referenceHasMore: mappings.hasMore,
+            }
+          : {}),
         ...page,
         ownOriginId,
       });
     }
 
-    // MU-C4 member append — the bidirectional extension of the PR-18
-    // recipient model, and the first place a non-owner writes into an
-    // owner's bucket. Fail-closed gauntlet, in order:
-    //   1. authorizeShareAction: membership, grant status, granter standing —
-    //      every denial is the same byte-identical generic 404.
-    //   2. The selector must accept appends: a read-write chat
-    //      grant, or a file share at comment or edit. A
-    //      read-only member and a VIEW file share are refused with an
-    //      explicit 403 — the member legitimately knows the share exists,
-    //      so this is a refusal, not a 404 — and with one code and one
-    //      body, because a level-specific refusal would tell a probing
+    // Member append: the first place a non-owner writes into an owner's
+    // bucket. Fail-closed checks, in order:
+    //   1. authorizeShareAction: membership, grant status, granter standing.
+    //      Every denial is the same byte-identical generic 404.
+    //   2. The selector must accept appends: a read-write chat grant, or a
+    //      file share at comment or edit. A read-only member and a view file
+    //      share are refused with an explicit 403, because the member
+    //      legitimately knows the share exists. The refusal has one code and
+    //      one body, because a level-specific refusal would tell a probing
     //      recipient the selector's level.
-    //   3. MU-C0 verified authorship: every authored chat op must claim the
-    //      AUTHENTICATED pusher (assertChatAuthorship verifies it) — a
+    //   3. Verified authorship: every authored chat op must claim the
+    //      authenticated pusher (assertChatAuthorship verifies it), so a
     //      member cannot forge a message or reaction as another member.
     //   4. Every op must pass the same fail-closed chat filter that scopes
     //      reads: chat.* only, granted channel only, earliest-thread-binding
     //      honored. One rejected op rejects the whole batch atomically.
-    // Accepted ops land in the OWNER's workspace bucket under a
-    // share-namespaced origin id, so a member can never extend (or collide
-    // with) the owner's — or another member's — origin sequence space; the
-    // relay still assigns no cross-origin order.
-    // Deliberate R10b boundary: members are not workspace replicas. Their
-    // share-namespaced appends are governed by the fail-closed share/channel
-    // filter, so workspace epoch enforcement does not apply on this route.
+    // Accepted ops land in the owner's workspace bucket under a
+    // share-namespaced origin id, so a member can never extend or collide
+    // with the owner's or another member's origin sequence space. The relay
+    // still assigns no cross-origin order. Members are not workspace
+    // replicas: the fail-closed share/channel filter governs their appends,
+    // so workspace epoch enforcement does not apply on this route.
     if (route.route === "share-log" && request.method === "POST") {
       if (browserMessageId === undefined) await claimPendingShares(actor.userId);
       const authorized = requireShareAction(route.shareId, actor.userId, "append");
@@ -198,12 +248,12 @@ export function createNamedShareTransportRoutes(
         throw badRequest(`originId must not start with "${PROPOSAL_ORIGIN_PREFIX}"`);
       }
       if (originId === "browser-chat" && browserMessageId === undefined) {
-        throw badRequest('originId is reserved for browser chat');
+        throw badRequest("originId is reserved for browser chat");
       }
       if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
       if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
       // Authorship runs before the filter and parseLogOp so neither admits nor
-      // freezes a payload whose claimed author is missing or forged (MU-C0).
+      // freezes a payload whose claimed author is missing or forged.
       assertChatAuthorship(input.ops, actor.userId);
       assertClientLogProvenance(originId, input.ops);
       // Batch-aware channel scoping: a thread created earlier in this batch
@@ -228,14 +278,13 @@ export function createNamedShareTransportRoutes(
           const stored = storage.findThreadCreateFileBinding(share.workspaceId, threadId);
           return stored !== undefined ? stored : pendingThreadFiles.get(threadId);
         },
-        objectCurrentPath: (objectId) =>
-          storage.objectCurrentPath(share.workspaceId, objectId),
+        objectCurrentPath: (objectId) => storage.objectCurrentPath(share.workspaceId, objectId),
         objectIdAtPath: (path) => storage.objectIdAtPath(share.workspaceId, path),
       };
       const ops = await parseNamedShareLogOps(input.ops, actor.userId, lookupUserDisplayName);
       for (const op of ops) {
         // The write filter, never the read one: what a recipient may see is
-        // not what it may push into the granter's log (#646 PR3-0).
+        // not what it may push into the granter's log.
         const decision = filterOpForShareAppend(
           share.selector,
           op.opKind,
@@ -260,10 +309,7 @@ export function createNamedShareTransportRoutes(
           if (typeof threadId === "string" && threadId.length > 0) {
             if (chatSideForBinding) {
               pendingThreadBindings.set(threadId, chatSideForBinding.channelWireId);
-            } else if (
-              typeof created.linkedPath === "string" &&
-              created.linkedPath.length > 0
-            ) {
+            } else if (typeof created.linkedPath === "string" && created.linkedPath.length > 0) {
               // The accept door converts the binding.
               //
               // A recipient names its file by path because its own object
@@ -279,10 +325,7 @@ export function createNamedShareTransportRoutes(
               // Rewriting a payload before persisting is what this route
               // already does: the served copy above is a redaction, and the
               // path in it was normalized by the filter.
-              const objectId = storage.objectIdAtPath(
-                share.workspaceId,
-                created.linkedPath,
-              );
+              const objectId = storage.objectIdAtPath(share.workspaceId, created.linkedPath);
               // The filter admitted this op by proving an object is there,
               // so this is unreachable through the filter's own path. A
               // batch that reaches it is refused whole rather than stored as
@@ -311,15 +354,12 @@ export function createNamedShareTransportRoutes(
         // in standing, and still a selector that accepts appends at its
         // current level on the same workspace bucket — a level
         // narrowed mid-flight loses the race the same way a revoke does.
-        guard: shareActionGuard(
-          route.shareId,
-          actor.userId,
-          "append",
-          share.workspaceId,
-        ),
+        guard: shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId),
       };
-      const result = browserMessageId === undefined ? storage.appendLogBatch(batch) :
-        storage.appendBrowserChatBatch({...batch, messageId: browserMessageId});
+      const result =
+        browserMessageId === undefined
+          ? storage.appendLogBatch(batch)
+          : storage.appendBrowserChatBatch({ ...batch, messageId: browserMessageId });
       if (result.inserted > 0) {
         discussionActivity.wakeLog(share.workspaceId);
       }
@@ -343,11 +383,7 @@ export function createNamedShareTransportRoutes(
       // else — a blob of an unshared file, a secret ciphertext blob, a
       // random hash — is the same generic 404 as a nonexistent share.
       // Chat shares expose no blob because their filter decisions name none.
-      const blob = historicalSharedBlob(
-        share.workspaceId,
-        share.selector,
-        route.sha256,
-      );
+      const blob = historicalSharedBlob(share.workspaceId, share.selector, route.sha256);
       if (!blob) throw notFound();
       // Re-check revocation immediately before returning the blob body: a
       // revoke that raced with this in-flight read must abort rather than
@@ -358,16 +394,6 @@ export function createNamedShareTransportRoutes(
         headers: { "content-type": "application/octet-stream" },
       });
     }
-    // A recipient's blob, charged to the GRANTER's workspace.
-    // Same level gate as the proposal route, same refusal, so a probe cannot
-    // tell the level from the code.
-    //
-    // It needs no bound of its own. Three already apply and all three are
-    // the granter's: MAX_BLOB_BYTES per blob, the granter's workspace quota
-    // per workspace (`putBlob` charges it), and the unreferenced-blob sweep,
-    // which reclaims anything no open proposal claims. A blob count would
-    // bound bytes less tightly than the byte quota that already refuses
-    // them.
     if (route.route === "share-blob" && request.method === "PUT") {
       await claimPendingShares(actor.userId);
       const authorized = requireShareAction(route.shareId, actor.userId, "propose");

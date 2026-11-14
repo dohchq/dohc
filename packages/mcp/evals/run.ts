@@ -39,21 +39,56 @@ async function toolListBytes(): Promise<{ tools: number; bytes: number }> {
   const { tools } = await client.listTools();
   await client.close();
   await server.close();
-  const seen = tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+  const seen = tools.map(({ name, description, inputSchema }) => ({
+    name,
+    description,
+    inputSchema,
+  }));
   return { tools: tools.length, bytes: Buffer.byteLength(JSON.stringify(seen)) };
 }
 
-async function sample(evalCase: EvalCase, model: string, index: number, keepSessionRoute: boolean): Promise<ResultRow> {
-  const base = { case: evalCase.id, kind: evalCase.kind, model, sample: index, route: keepSessionRoute ? "session" as const : "sign-in" as const };
-  const outcome = await runClaudeSample({ evalCase, model, timeoutMs: SAMPLE_TIMEOUT_MS, keepSessionRoute });
+async function sample(
+  evalCase: EvalCase,
+  model: string,
+  index: number,
+  keepSessionRoute: boolean,
+): Promise<ResultRow> {
+  const base = {
+    case: evalCase.id,
+    kind: evalCase.kind,
+    model,
+    sample: index,
+    route: keepSessionRoute ? ("session" as const) : ("sign-in" as const),
+  };
+  const outcome = await runClaudeSample({
+    evalCase,
+    model,
+    timeoutMs: SAMPLE_TIMEOUT_MS,
+    keepSessionRoute,
+  });
   const harness = outcome.harness ? { harness: outcome.harness } : {};
-  if (!outcome.run) return { ...base, ...harness, error: outcome.error ?? "unknown error", usage: outcome.usage };
+  if (!outcome.run)
+    return { ...base, ...harness, error: outcome.error ?? "unknown error", usage: outcome.usage };
   const checks = grade(evalCase.expect, outcome.run);
-  return { ...base, ...harness, pass: checks.every((check) => check.pass), checks, calls: outcome.run.calls, text: outcome.run.text, usage: outcome.usage };
+  return {
+    ...base,
+    ...harness,
+    pass: checks.every((check) => check.pass),
+    checks,
+    calls: outcome.run.calls,
+    text: outcome.run.text,
+    usage: outcome.usage,
+  };
 }
 
 /** Two samples, and a third when they disagree. */
-async function runCase(evalCase: EvalCase, model: string, samples: number, keepSessionRoute: boolean, record: (row: ResultRow) => Promise<void>): Promise<ResultRow[]> {
+async function runCase(
+  evalCase: EvalCase,
+  model: string,
+  samples: number,
+  keepSessionRoute: boolean,
+  record: (row: ResultRow) => Promise<void>,
+): Promise<ResultRow[]> {
   const rows: ResultRow[] = [];
   for (let index = 1; index <= samples; index += 1) {
     const row = await sample(evalCase, model, index, keepSessionRoute);
@@ -81,16 +116,27 @@ function passCounts(rows: readonly ResultRow[]): Map<string, { passed: number; g
   return counts;
 }
 
-function summary(input: { model: string; cases: readonly EvalCase[]; rows: readonly ResultRow[]; baseline: readonly ResultRow[] | undefined; context: { tools: number; bytes: number } }): { text: string; regressions: string[] } {
+function summary(input: {
+  model: string;
+  cases: readonly EvalCase[];
+  rows: readonly ResultRow[];
+  baseline: readonly ResultRow[] | undefined;
+  context: { tools: number; bytes: number };
+}): { text: string; regressions: string[] } {
   const counts = passCounts(input.rows);
-  const before = input.baseline ? passCounts(input.baseline.filter((row) => row.model === input.model)) : undefined;
+  const before = input.baseline
+    ? passCounts(input.baseline.filter((row) => row.model === input.model))
+    : undefined;
   const regressions: string[] = [];
   const lines = [
     `# Tool-use eval: ${input.model}`,
     "",
     `Harness: ${[...new Set(input.rows.map((row) => row.harness).filter(Boolean))].join(", ") || "unknown"}.`,
     ...(input.rows.some((row) => row.route === "session")
-      ? ["", "These samples kept the enclosing session's route to the model. A proxy on that route can rename tools, so compare this run only with runs made the same way."]
+      ? [
+          "",
+          "These samples kept the enclosing session's route to the model. A proxy on that route can rename tools, so compare this run only with runs made the same way.",
+        ]
       : []),
     `The tool list is ${input.context.tools} tools and ${input.context.bytes.toLocaleString("en-US")} bytes.`,
     "",
@@ -100,28 +146,52 @@ function summary(input: { model: string; cases: readonly EvalCase[]; rows: reado
   for (const evalCase of input.cases) {
     const count = counts.get(evalCase.id);
     const rows = input.rows.filter((row) => row.case === evalCase.id);
-    const verdict = !count ? "error" : casePasses(rows.filter((row) => row.pass !== undefined).map((row) => row.pass === true)) ? "pass" : "FAIL";
+    const verdict = !count
+      ? "error"
+      : casePasses(rows.filter((row) => row.pass !== undefined).map((row) => row.pass === true))
+        ? "pass"
+        : "FAIL";
     const earlier = before?.get(evalCase.id);
     // A case that passed every baseline sample and fails now is a regression.
-    if (earlier && earlier.graded > 0 && earlier.passed === earlier.graded && verdict === "FAIL") regressions.push(evalCase.id);
-    const baselineCell = before ? `${earlier ? `${earlier.passed}/${earlier.graded}` : "none"} | ` : "";
-    lines.push(`| ${evalCase.id} | ${evalCase.kind} | ${baselineCell}${count ? `${count.passed}/${count.graded}` : "0/0"} | ${verdict} |`);
+    if (earlier && earlier.graded > 0 && earlier.passed === earlier.graded && verdict === "FAIL")
+      regressions.push(evalCase.id);
+    const baselineCell = before
+      ? `${earlier ? `${earlier.passed}/${earlier.graded}` : "none"} | `
+      : "";
+    lines.push(
+      `| ${evalCase.id} | ${evalCase.kind} | ${baselineCell}${count ? `${count.passed}/${count.graded}` : "0/0"} | ${verdict} |`,
+    );
   }
   const failed = input.rows.filter((row) => row.pass === false);
   if (failed.length > 0) {
     lines.push("", "## Failed samples", "");
     for (const row of failed) {
-      lines.push(`- ${row.case}, sample ${row.sample}: ${row.checks!.filter((check) => !check.pass).map((check) => check.name + (check.detail ? ` (${check.detail})` : "")).join("; ")}`);
+      lines.push(
+        `- ${row.case}, sample ${row.sample}: ${row
+          .checks!.filter((check) => !check.pass)
+          .map((check) => check.name + (check.detail ? ` (${check.detail})` : ""))
+          .join("; ")}`,
+      );
     }
   }
   const errors = input.rows.filter((row) => row.error !== undefined);
   if (errors.length > 0) {
-    lines.push("", "## Errors", "", "These samples could not be graded and are left out of every pass count.", "");
+    lines.push(
+      "",
+      "## Errors",
+      "",
+      "These samples could not be graded and are left out of every pass count.",
+      "",
+    );
     for (const row of errors) lines.push(`- ${row.case}, sample ${row.sample}: ${row.error}`);
   }
-  if (regressions.length > 0) lines.push("", `Regressions against the baseline: ${regressions.join(", ")}.`);
+  if (regressions.length > 0)
+    lines.push("", `Regressions against the baseline: ${regressions.join(", ")}.`);
   const cost = input.rows.reduce((total, row) => total + row.usage.costUsd, 0);
-  const tokens = input.rows.reduce((total, row) => total + row.usage.inputTokens + row.usage.outputTokens, 0);
+  const tokens = input.rows.reduce(
+    (total, row) => total + row.usage.inputTokens + row.usage.outputTokens,
+    0,
+  );
   lines.push(
     "",
     `${input.rows.length} samples used ${tokens.toLocaleString("en-US")} tokens, which is $${cost.toFixed(2)} at API prices. A subscription run is not billed this amount.`,
@@ -140,20 +210,32 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   const context = await toolListBytes();
   if (options.context) {
-    process.stdout.write(`${context.tools} tools, ${context.bytes} bytes of names, descriptions, and input schemas\n`);
+    process.stdout.write(
+      `${context.tools} tools, ${context.bytes} bytes of names, descriptions, and input schemas\n`,
+    );
     return 0;
   }
   const wanted = options.cases;
   const cases = wanted ? CASES.filter((evalCase) => wanted.includes(evalCase.id)) : CASES;
   const unknown = (wanted ?? []).filter((id) => !CASES.some((evalCase) => evalCase.id === id));
   if (unknown.length > 0) {
-    process.stderr.write(`no case named ${unknown.join(", ")}; cases: ${CASES.map((evalCase) => evalCase.id).join(", ")}\n`);
+    process.stderr.write(
+      `no case named ${unknown.join(", ")}; cases: ${CASES.map((evalCase) => evalCase.id).join(", ")}\n`,
+    );
     return 1;
   }
   const { model, samples, keepSessionRoute } = options;
   if (options.dryRun) {
     for (const evalCase of cases) {
-      process.stdout.write(`${evalCase.id}\n  claude ${claudeArguments({ prompt: evalCase.prompt, model, mcpConfigPath: "<mcp.json>" }).map((part) => JSON.stringify(part)).join(" ")}\n`);
+      process.stdout.write(
+        `${evalCase.id}\n  claude ${claudeArguments({
+          prompt: evalCase.prompt,
+          model,
+          mcpConfigPath: "<mcp.json>",
+        })
+          .map((part) => JSON.stringify(part))
+          .join(" ")}\n`,
+      );
     }
     return 0;
   }
@@ -162,7 +244,10 @@ async function main(argv: readonly string[]): Promise<number> {
     return 1;
   }
   const baseline = options.baseline
-    ? (await readFile(options.baseline, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as ResultRow)
+    ? (await readFile(options.baseline, "utf8"))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as ResultRow)
     : undefined;
 
   await mkdir(options.out, { recursive: true });
@@ -172,12 +257,17 @@ async function main(argv: readonly string[]): Promise<number> {
   const record = async (row: ResultRow): Promise<void> => {
     rows.push(row);
     await appendFile(resultsPath, `${JSON.stringify(row)}\n`);
-    process.stdout.write(`${row.case} #${row.sample}: ${row.error ? `error: ${row.error}` : row.pass ? "pass" : "FAIL"}\n`);
+    process.stdout.write(
+      `${row.case} #${row.sample}: ${row.error ? `error: ${row.error}` : row.pass ? "pass" : "FAIL"}\n`,
+    );
   };
   const queue = [...cases];
-  await Promise.all(Array.from({ length: options.concurrency }, async () => {
-    for (let evalCase = queue.shift(); evalCase; evalCase = queue.shift()) await runCase(evalCase, model, samples, keepSessionRoute, record);
-  }));
+  await Promise.all(
+    Array.from({ length: options.concurrency }, async () => {
+      for (let evalCase = queue.shift(); evalCase; evalCase = queue.shift())
+        await runCase(evalCase, model, samples, keepSessionRoute, record);
+    }),
+  );
 
   const report = summary({ model, cases, rows, baseline, context });
   await writeFile(join(options.out, "summary.md"), report.text);

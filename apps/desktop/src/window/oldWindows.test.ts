@@ -6,8 +6,6 @@ function window(id: number) {
   return { id, webContents: { id, isDestroyed: () => false, send: vi.fn() } };
 }
 
-// Window 1 was left showing the workspace from before Forget. Window 2 shows
-// the workspace as it is open now. Window 3 shows another workspace.
 function setup() {
   const before = Symbol("before Forget");
   const now = Symbol("open now");
@@ -25,18 +23,32 @@ function setup() {
   let quitting = false;
   const oldWindows = createOldWindows<(typeof old)["webContents"], typeof old>({
     windows: () => windows,
-    sessionOf: contents => sessions.get(contents),
+    sessionOf: (contents) => sessions.get(contents),
     authorities: { isCurrentAttachment: (_workspaceId, attachmentId) => attachmentId !== before },
     isQuitting: () => quitting,
     focus,
   });
-  return { oldWindows, windows, sessions, old, reopened, other, focus, quit: () => { quitting = true; } };
+  return {
+    oldWindows,
+    windows,
+    sessions,
+    old,
+    reopened,
+    other,
+    focus,
+    quit: () => {
+      quitting = true;
+    },
+  };
 }
 
 describe("old windows", () => {
   it("tells only a window Forget left behind about its workspace", () => {
     const { oldWindows, old, reopened, other } = setup();
-    expect(oldWindows.read(old.webContents)).toEqual({ workspaceId: "workspace", openElsewhere: true });
+    expect(oldWindows.read(old.webContents)).toEqual({
+      workspaceId: "workspace",
+      openElsewhere: true,
+    });
     expect(oldWindows.read(reopened.webContents)).toBeNull();
     expect(oldWindows.read(other.webContents)).toBeNull();
   });
@@ -59,7 +71,10 @@ describe("old windows", () => {
     const { oldWindows, windows, sessions, old, reopened, focus } = setup();
     sessions.delete(reopened.webContents);
     windows.splice(windows.indexOf(reopened), 1);
-    expect(oldWindows.read(old.webContents)).toEqual({ workspaceId: "workspace", openElsewhere: false });
+    expect(oldWindows.read(old.webContents)).toEqual({
+      workspaceId: "workspace",
+      openElsewhere: false,
+    });
     oldWindows.goTo(old.webContents);
     expect(focus).not.toHaveBeenCalled();
   });

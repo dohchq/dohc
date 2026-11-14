@@ -8,7 +8,15 @@
 // racing edit.
 
 import { createHash } from "node:crypto";
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { COPY_FEEDBACK_MS } from "../ui/CopyButton";
@@ -52,12 +60,24 @@ vi.mock("../collab/useEngineDoc", () => ({
 // The record's file check runs in a worker; these tests set its answer.
 const sourceMock = vi.hoisted(() => ({ current: null as RecordSourceCheck | null }));
 vi.mock("./recordSourceCheck", () => ({
-  useRecordSourceCheck: (): RecordSourceCheck => sourceMock.current ?? { state: "clear", contentHash: "c".repeat(64) },
+  useRecordSourceCheck: (): RecordSourceCheck =>
+    sourceMock.current ?? { state: "clear", contentHash: "c".repeat(64) },
 }));
 
 function engineDocState(
   partial: Partial<
-    Pick<UseEngineDoc, "available" | "opening" | "doc" | "headSha256" | "saveState" | "saveError" | "sharedWaiting" | "readOnlyWhileEditing" | "deletedWhileEditing">
+    Pick<
+      UseEngineDoc,
+      | "available"
+      | "opening"
+      | "doc"
+      | "headSha256"
+      | "saveState"
+      | "saveError"
+      | "sharedWaiting"
+      | "readOnlyWhileEditing"
+      | "deletedWhileEditing"
+    >
   >,
 ): UseEngineDoc {
   return {
@@ -98,7 +118,7 @@ function enqueue(change: Parameters<typeof enqueueCollectionFieldWrite>[2] = CHA
 
 it("reports queued and failed paths only for their workspace before Stop and restore", () => {
   enqueue();
-  enqueue({...CHANGE, recordPath: "tasks/Second.md", recordId: "rec-2"});
+  enqueue({ ...CHANGE, recordPath: "tasks/Second.md", recordId: "rec-2" });
   expect(retainedCollectionFieldWritePaths("ws-1")).toEqual(["tasks/Plan.md", "tasks/Second.md"]);
   expect(retainedCollectionFieldWritePaths("other")).toEqual([]);
   act(() => setCollectionFieldWriteAccess("ws-1", "No connection"));
@@ -106,7 +126,6 @@ it("reports queued and failed paths only for their workspace before Stop and res
   expect(retainedCollectionFieldWritePaths("ws-1")).toEqual(["tasks/Plan.md", "tasks/Second.md"]);
 });
 
-/** Walks the mounted head writer through saving → saved so it settles. */
 function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
   docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
   host.rerender(<CollectionFieldWriteHost />);
@@ -142,9 +161,17 @@ describe("retained failures", () => {
     act(() => setCollectionFieldWriteAccess("ws-1", refusal));
     expect(status.result.current.error).toBe(refusal);
     const before = renders;
-    act(() => { enqueueCollectionFieldWrite("ws-1", "other", { ...CHANGE, recordId: "rec-2", recordPath: "other/Else.md" }); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "other", {
+        ...CHANGE,
+        recordId: "rec-2",
+        recordPath: "other/Else.md",
+      });
+    });
     expect(renders).toBe(before);
-    act(() => { enqueueCollectionFieldWrite("other", "tasks", CHANGE); });
+    act(() => {
+      enqueueCollectionFieldWrite("other", "tasks", CHANGE);
+    });
     expect(renders).toBe(before);
     expect(status.result.current.error).toBe(refusal);
   });
@@ -159,23 +186,40 @@ describe("retained failures", () => {
     const refusal = "This share must be reopened.";
     act(() => setCollectionFieldWriteAccess("ws-1", refusal));
     const unsaved = "dohc did not save this change.";
-    expect(collectionWriteFailures().map(failure => failure.message)).toEqual([original, unsaved]);
+    expect(collectionWriteFailures().map((failure) => failure.message)).toEqual([
+      original,
+      unsaved,
+    ]);
     const rows = screen.getAllByTestId("collection-write-failure");
     expect(rows[0]!.textContent).toContain(refusal);
     expect(rows[1]!.textContent).toContain(refusal);
-    expect(screen.getAllByTestId("collection-write-retry").every(button => button.hasAttribute("disabled"))).toBe(true);
+    expect(
+      screen
+        .getAllByTestId("collection-write-retry")
+        .every((button) => button.hasAttribute("disabled")),
+    ).toBe(true);
     const changedRefusal = "Your access to this share changed.";
     act(() => setCollectionFieldWriteAccess("ws-1", changedRefusal));
-    expect(rows.every(row => row.textContent?.includes(changedRefusal))).toBe(true);
-    expect(collectionWriteFailures().map(failure => failure.message)).toEqual([original, unsaved]);
+    expect(rows.every((row) => row.textContent?.includes(changedRefusal))).toBe(true);
+    expect(collectionWriteFailures().map((failure) => failure.message)).toEqual([
+      original,
+      unsaved,
+    ]);
     act(() => setCollectionFieldWriteAccess("ws-1", null));
-    expect(collectionWriteFailures().map(failure => failure.message)).toEqual([original, unsaved]);
+    expect(collectionWriteFailures().map((failure) => failure.message)).toEqual([
+      original,
+      unsaved,
+    ]);
     expect(rows[0]!.textContent).toContain(original);
     expect(rows[0]!.textContent).not.toContain(refusal);
     expect(rows[1]!.textContent).not.toContain(refusal);
     expect(rows[1]!.textContent).not.toContain(changedRefusal);
     expect(rows[1]!.textContent).toContain(unsaved);
-    expect(screen.getAllByTestId("collection-write-retry").every(button => !button.hasAttribute("disabled"))).toBe(true);
+    expect(
+      screen
+        .getAllByTestId("collection-write-retry")
+        .every((button) => !button.hasAttribute("disabled")),
+    ).toBe(true);
   });
 
   it("leaves another workspace's retained row untouched when a refusal clears", () => {
@@ -195,7 +239,11 @@ describe("retained failures", () => {
     expect(collectionWriteFailures()[0]).toBe(otherFailure);
     expect(rows[0]!.textContent).toContain(refusal);
     expect(rows[1]!.textContent).not.toContain(refusal);
-    expect(screen.getAllByTestId("collection-write-retry").map(button => button.hasAttribute("disabled"))).toEqual([true, false]);
+    expect(
+      screen
+        .getAllByTestId("collection-write-retry")
+        .map((button) => button.hasAttribute("disabled")),
+    ).toEqual([true, false]);
   });
 
   it("keeps an applied but refused field value with the confirmed access explanation", () => {
@@ -208,7 +256,13 @@ describe("retained failures", () => {
       const message = "Your access to this share ended.";
       act(() => setCollectionFieldWriteAccess("ws-1", message));
       expect(collectionWriteFailures()).toHaveLength(0);
-      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "unknown" }, readOnlyWhileEditing: true, saveError: "forbidden" });
+      docMock.current = engineDocState({
+        available: true,
+        doc,
+        saveState: { kind: "unknown" },
+        readOnlyWhileEditing: true,
+        saveError: "forbidden",
+      });
       host.rerender(<CollectionFieldWriteHost />);
       const ownMessage = "dohc did not save this change. forbidden";
       expect(collectionWriteFailures()[0]).toMatchObject({ message: ownMessage, change: CHANGE });
@@ -217,37 +271,47 @@ describe("retained failures", () => {
       act(() => setCollectionFieldWriteAccess("ws-1", null));
       expect(screen.getByTestId("collection-write-failure").textContent).toContain(ownMessage);
       expect(screen.getByTestId("collection-write-failure").textContent).not.toContain(message);
-    } finally { host.unmount(); doc.destroy(); }
+    } finally {
+      host.unmount();
+      doc.destroy();
+    }
   });
-  it.each(["ended", "changed"])("retains waiting edits and refuses retries after access %s", access => {
-    docMock.current = engineDocState({ sharedWaiting: { state: "pending", message: "Waiting to send" } });
-    const host = render(<CollectionFieldWriteHost />);
-    enqueue();
-    const message = `Your access to this share ${access}.`;
-    act(() => setCollectionFieldWriteAccess("ws-1", message));
-    expect(hasPendingCollectionFieldWrites()).toBe(false);
-    const failure = collectionWriteFailures()[0]!;
-    expect(failure.change).toEqual(CHANGE);
-    expect(failure.message).toBe("dohc did not save this change.");
-    expect(screen.getByTestId("collection-write-failure").textContent).toContain(message);
-    expect(screen.getByTestId("collection-write-retry").hasAttribute("disabled")).toBe(true);
-    const doc = new Y.Doc();
-    try {
-      doc.getMap("frontmatter").set("id", CHANGE.recordId);
-      docMock.current = engineDocState({ available: true, doc });
-      act(() => retryCollectionFieldWrite(failure.id));
-      host.rerender(<CollectionFieldWriteHost />);
-      expect(doc.getMap("frontmatter").get("status")).toBeUndefined();
-      expect(enqueue()).toBe(false);
-      expect(collectionWriteFailures()).toHaveLength(2);
-      // The restriction belongs only to the received workspace.
-      expect(enqueueCollectionFieldWrite("other", "tasks", CHANGE)).toBe(true);
-    } finally { host.unmount(); doc.destroy(); }
-  });
+  it.each(["ended", "changed"])(
+    "retains waiting edits and refuses retries after access %s",
+    (access) => {
+      docMock.current = engineDocState({
+        sharedWaiting: { state: "pending", message: "Waiting to send" },
+      });
+      const host = render(<CollectionFieldWriteHost />);
+      enqueue();
+      const message = `Your access to this share ${access}.`;
+      act(() => setCollectionFieldWriteAccess("ws-1", message));
+      expect(hasPendingCollectionFieldWrites()).toBe(false);
+      const failure = collectionWriteFailures()[0]!;
+      expect(failure.change).toEqual(CHANGE);
+      expect(failure.message).toBe("dohc did not save this change.");
+      expect(screen.getByTestId("collection-write-failure").textContent).toContain(message);
+      expect(screen.getByTestId("collection-write-retry").hasAttribute("disabled")).toBe(true);
+      const doc = new Y.Doc();
+      try {
+        doc.getMap("frontmatter").set("id", CHANGE.recordId);
+        docMock.current = engineDocState({ available: true, doc });
+        act(() => retryCollectionFieldWrite(failure.id));
+        host.rerender(<CollectionFieldWriteHost />);
+        expect(doc.getMap("frontmatter").get("status")).toBeUndefined();
+        expect(enqueue()).toBe(false);
+        expect(collectionWriteFailures()).toHaveLength(2);
+        expect(enqueueCollectionFieldWrite("other", "tasks", CHANGE)).toBe(true);
+      } finally {
+        host.unmount();
+        doc.destroy();
+      }
+    },
+  );
 
   it("keeps a field edit waiting and applies it when this record becomes editable", () => {
     const message = "Record saved on this device. Waiting to send.";
-    docMock.current = engineDocState({ sharedWaiting: {state: "pending", message} });
+    docMock.current = engineDocState({ sharedWaiting: { state: "pending", message } });
     const host = render(<CollectionFieldWriteHost />);
     const status = renderHook(() => useCollectionWriteStatus("ws-1", "tasks"));
     enqueue();
@@ -257,21 +321,24 @@ describe("retained failures", () => {
     const doc = new Y.Doc();
     try {
       doc.getMap("frontmatter").set("id", CHANGE.recordId);
-      docMock.current = engineDocState({available: true, doc});
+      docMock.current = engineDocState({ available: true, doc });
       host.rerender(<CollectionFieldWriteHost />);
       expect(doc.getMap("frontmatter").get("status")).toBe("done");
       expect(status.result.current.waiting).toBeNull();
       settleHead(host, doc);
       expect(hasPendingCollectionFieldWrites()).toBe(false);
-    } finally { host.unmount(); doc.destroy(); }
+    } finally {
+      host.unmount();
+      doc.destroy();
+    }
   });
   it.each([
-    '&root {id: rec-1, status: draft, score: .nan}',
-    '!!map &root {id: rec-1, status: draft, score: .nan}',
-    ': note\nid: rec-1\nstatus: draft\nscore: .nan',
-    'id: rec-1\nstatus: &v .nan\nscore: *v',
-    'id: rec-1\nstatus: &v .nan\nscore: {nested: [*v]}',
-  ])("refuses a field write before changing the document: %s", yaml => {
+    "&root {id: rec-1, status: draft, score: .nan}",
+    "!!map &root {id: rec-1, status: draft, score: .nan}",
+    ": note\nid: rec-1\nstatus: draft\nscore: .nan",
+    "id: rec-1\nstatus: &v .nan\nscore: *v",
+    "id: rec-1\nstatus: &v .nan\nscore: {nested: [*v]}",
+  ])("refuses a field write before changing the document: %s", (yaml) => {
     const markdown = `---\n${yaml}\n---\n\nBody`;
     const doc = markdownToYDoc(markdown);
     const before = Y.encodeStateAsUpdate(doc);
@@ -283,7 +350,9 @@ describe("retained failures", () => {
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       expect(yDocToMarkdown(doc)).toBe(`${markdown}\n`);
       host.unmount();
-    } finally { doc.destroy(); }
+    } finally {
+      doc.destroy();
+    }
   });
 
   it("offers to open a refused record's file externally on its failure row only", () => {
@@ -298,11 +367,12 @@ describe("retained failures", () => {
       expect(open.textContent).toBe("Open externally");
       expect(row.contains(open)).toBe(true);
       expect(screen.queryByTestId("lossy-note-open-externally")).toBeNull();
-      // The row's own controls keep their names.
       expect(screen.getByTestId("collection-write-retry").textContent).toBe("Retry");
       expect(screen.getByLabelText("Unsaved collection value")).toBeTruthy();
       host.unmount();
-    } finally { doc.destroy(); }
+    } finally {
+      doc.destroy();
+    }
   });
 
   it("offers no Open externally on a failure row that is not a refused edit", () => {
@@ -365,7 +435,10 @@ describe("retained failures", () => {
       expect(doc.getMap("frontmatter").get("status")).toBe("done");
       settleHead(host, doc);
       expect(hasPendingCollectionFieldWrites()).toBe(false);
-    } finally { host.unmount(); doc.destroy(); }
+    } finally {
+      host.unmount();
+      doc.destroy();
+    }
   });
 
   it("refuses a field write when its session holds a lossy note other than the bytes it checked", async () => {
@@ -386,14 +459,20 @@ describe("retained failures", () => {
       await waitFor(() => expect(collectionWriteFailures()[0]?.message).toBe(LOSSY_RECORD));
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       host.unmount();
-    } finally { doc.destroy(); }
+    } finally {
+      doc.destroy();
+    }
   });
 
   it.each<{ name: string; base: CollectionValue; current: CollectionValue | undefined }>([
     { name: "scalar", base: "alpha", current: "alpha" },
     { name: "duplicate list", base: ["alpha", "alpha"], current: ["alpha", "alpha"] },
     { name: "nested list", base: [["alpha", null]], current: [["alpha", null]] },
-    { name: "mapping", base: { choices: ["alpha", { enabled: true }], count: 2 }, current: { count: 2, choices: ["alpha", { enabled: true }] } },
+    {
+      name: "mapping",
+      base: { choices: ["alpha", { enabled: true }], count: 2 },
+      current: { count: 2, choices: ["alpha", { enabled: true }] },
+    },
     { name: "missing value", base: null, current: undefined },
     { name: "empty selection", base: [], current: null },
     { name: "reordered valid selection", base: ["alpha", "beta"], current: ["beta", "alpha"] },
@@ -401,7 +480,14 @@ describe("retained failures", () => {
     docMock.current = engineDocState({ available: false });
     const host = render(<CollectionFieldWriteHost />);
     const value = ["gamma"];
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [base] }); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", {
+        ...CHANGE,
+        field: "tags",
+        value,
+        previousValues: [base],
+      });
+    });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     if (current !== undefined) doc.getMap("frontmatter").set("tags", current);
@@ -416,12 +502,23 @@ describe("retained failures", () => {
     { name: "scalar", base: "alpha", current: "beta" },
     { name: "duplicate list", base: ["alpha", "alpha"], current: ["alpha", "beta"] },
     { name: "nested list", base: [["alpha", null]], current: [["alpha", "beta"]] },
-    { name: "mapping", base: { choices: ["alpha", { enabled: true }] }, current: { choices: ["alpha", { enabled: false }] } },
+    {
+      name: "mapping",
+      base: { choices: ["alpha", { enabled: true }] },
+      current: { choices: ["alpha", { enabled: false }] },
+    },
   ])("retains a repair for copying after its flagged $name changes", ({ base, current }) => {
     docMock.current = engineDocState({ available: false });
     render(<CollectionFieldWriteHost />);
     const value = ["gamma"];
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [base] }); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", {
+        ...CHANGE,
+        field: "tags",
+        value,
+        previousValues: [base],
+      });
+    });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     doc.getMap("frontmatter").set("tags", current);
@@ -435,7 +532,14 @@ describe("retained failures", () => {
     docMock.current = engineDocState({ available: false });
     const host = render(<CollectionFieldWriteHost />);
     const value = ["alpha", "alpha", "gamma"];
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [["alpha", "alpha"]] }); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", {
+        ...CHANGE,
+        field: "tags",
+        value,
+        previousValues: [["alpha", "alpha"]],
+      });
+    });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     doc.getMap("frontmatter").set("tags", [...value]);
@@ -446,57 +550,96 @@ describe("retained failures", () => {
     expect(doc.getMap("frontmatter").get("tags")).toEqual(value);
   });
 
-  it.each(["addition", "removal", "duplicate"] as const)("keeps a retry copy-only after a collaborator's %s", (operation) => {
-    docMock.current = engineDocState({ available: false });
-    const host = render(<CollectionFieldWriteHost />);
-    const base = ["alpha", "beta"];
-    const value = [...base, "gamma"];
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [base] }); });
-    const failure = collectionWriteFailures()[0]!;
-    const doc = new Y.Doc();
-    const remote = operation === "addition" ? [...base, "delta"] : operation === "removal" ? ["beta"] : ["alpha", "alpha"];
-    doc.getMap("frontmatter").set("id", "rec-1");
-    doc.getMap("frontmatter").set("tags", remote);
-    docMock.current = engineDocState({ available: true, doc });
-    act(() => retryCollectionFieldWrite(failure.id));
-    expect(doc.getMap("frontmatter").get("tags")).toEqual(remote);
-    expect(hasPendingCollectionFieldWrites()).toBe(false);
-    expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, change: { value } });
-    expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
-    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
-    expect(doc.getMap("frontmatter").get("tags")).toEqual(remote);
-    host.unmount();
-  });
+  it.each(["addition", "removal", "duplicate"] as const)(
+    "keeps a retry copy-only after a collaborator's %s",
+    (operation) => {
+      docMock.current = engineDocState({ available: false });
+      const host = render(<CollectionFieldWriteHost />);
+      const base = ["alpha", "beta"];
+      const value = [...base, "gamma"];
+      act(() => {
+        enqueueCollectionFieldWrite("ws-1", "tasks", {
+          ...CHANGE,
+          field: "tags",
+          value,
+          previousValues: [base],
+        });
+      });
+      const failure = collectionWriteFailures()[0]!;
+      const doc = new Y.Doc();
+      const remote =
+        operation === "addition"
+          ? [...base, "delta"]
+          : operation === "removal"
+            ? ["beta"]
+            : ["alpha", "alpha"];
+      doc.getMap("frontmatter").set("id", "rec-1");
+      doc.getMap("frontmatter").set("tags", remote);
+      docMock.current = engineDocState({ available: true, doc });
+      act(() => retryCollectionFieldWrite(failure.id));
+      expect(doc.getMap("frontmatter").get("tags")).toEqual(remote);
+      expect(hasPendingCollectionFieldWrites()).toBe(false);
+      expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, change: { value } });
+      expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
+      act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+      expect(doc.getMap("frontmatter").get("tags")).toEqual(remote);
+      host.unmount();
+    },
+  );
 
-  it.each(["base", "already-applied"] as const)("retries a selection against its %s value", (current) => {
-    docMock.current = engineDocState({ available: false });
-    const host = render(<CollectionFieldWriteHost />);
-    const value = ["alpha", "gamma"];
-    const onDiscarded = vi.fn();
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [["alpha"]] },
-      undefined, undefined, undefined, onDiscarded); });
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    doc.getMap("frontmatter").set("tags", current === "base" ? ["alpha"] : value);
-    docMock.current = engineDocState({ available: true, doc });
-    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
-    expect(doc.getMap("frontmatter").get("tags")).toEqual(value);
-    settleHead(host, doc);
-    expect(collectionWriteFailures()).toEqual([]);
-    expect(onDiscarded).not.toHaveBeenCalled();
-  });
+  it.each(["base", "already-applied"] as const)(
+    "retries a selection against its %s value",
+    (current) => {
+      docMock.current = engineDocState({ available: false });
+      const host = render(<CollectionFieldWriteHost />);
+      const value = ["alpha", "gamma"];
+      const onDiscarded = vi.fn();
+      act(() => {
+        enqueueCollectionFieldWrite(
+          "ws-1",
+          "tasks",
+          { ...CHANGE, field: "tags", value, previousValues: [["alpha"]] },
+          undefined,
+          undefined,
+          undefined,
+          onDiscarded,
+        );
+      });
+      const doc = new Y.Doc();
+      doc.getMap("frontmatter").set("id", "rec-1");
+      doc.getMap("frontmatter").set("tags", current === "base" ? ["alpha"] : value);
+      docMock.current = engineDocState({ available: true, doc });
+      act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+      expect(doc.getMap("frontmatter").get("tags")).toEqual(value);
+      settleHead(host, doc);
+      expect(collectionWriteFailures()).toEqual([]);
+      expect(onDiscarded).not.toHaveBeenCalled();
+    },
+  );
 
   it("preserves exact discard notification through a failed Retry without reporting an index commit", () => {
     docMock.current = engineDocState({ available: false });
     render(<CollectionFieldWriteHost />);
     const onDiscarded = vi.fn();
     const onIndexed = vi.fn();
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE,
-      undefined, undefined, onIndexed, onDiscarded); });
+    act(() => {
+      enqueueCollectionFieldWrite(
+        "ws-1",
+        "tasks",
+        CHANGE,
+        undefined,
+        undefined,
+        onIndexed,
+        onDiscarded,
+      );
+    });
     act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
     expect(onDiscarded).not.toHaveBeenCalled();
     const failureId = collectionWriteFailures()[0]!.id;
-    act(() => { discardCollectionFieldWrite(failureId); discardCollectionFieldWrite(failureId); });
+    act(() => {
+      discardCollectionFieldWrite(failureId);
+      discardCollectionFieldWrite(failureId);
+    });
     expect(onDiscarded).toHaveBeenCalledOnce();
     expect(onIndexed).not.toHaveBeenCalled();
   });
@@ -516,9 +659,12 @@ describe("retained failures", () => {
       "Could not copy. Select the value above to copy it.",
     );
     // The button's own "Could not copy" lasts COPY_FEEDBACK_MS; the line stays.
-    await waitFor(() => expect(screen.getByTestId("collection-write-copy").textContent).toBe("Copy value"), {
-      timeout: COPY_FEEDBACK_MS * 3,
-    });
+    await waitFor(
+      () => expect(screen.getByTestId("collection-write-copy").textContent).toBe("Copy value"),
+      {
+        timeout: COPY_FEEDBACK_MS * 3,
+      },
+    );
     expect(screen.getByTestId("collection-write-copy-refused")).toBeTruthy();
 
     writeText.mockImplementationOnce(async () => undefined);
@@ -556,8 +702,13 @@ describe("retained failures", () => {
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
     expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha"]);
     expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
-    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty("value", '[\n  "alpha"\n]');
-    expect(screen.getByText("Discard removes the input kept here. You cannot undo this.")).toBeTruthy();
+    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty(
+      "value",
+      '[\n  "alpha"\n]',
+    );
+    expect(
+      screen.getByText("Discard removes the input kept here. You cannot undo this."),
+    ).toBeTruthy();
   });
 
   it("marks the older failure when the newer same-field input was already queued", () => {
@@ -568,7 +719,10 @@ describe("retained failures", () => {
     docMock.current = engineDocState({ available: false });
     host.rerender(<CollectionFieldWriteHost />);
     expect(collectionWriteFailures().map((failure) => failure.superseded)).toEqual([true, false]);
-    expect(collectionWriteFailures().map((failure) => failure.change.value)).toEqual(["done", "newer"]);
+    expect(collectionWriteFailures().map((failure) => failure.change.value)).toEqual([
+      "done",
+      "newer",
+    ]);
   });
 
   it("does not supersede a failed edit when a different field changes", () => {
@@ -584,7 +738,6 @@ describe("retained failures", () => {
     render(<CollectionFieldWriteHost />);
     enqueue();
 
-    // The write left the queue but not the app: value retained whole.
     await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
     expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
@@ -592,11 +745,13 @@ describe("retained failures", () => {
     // Actionable with only the host mounted — no CollectionPage anywhere.
     screen.getByTestId("collection-write-failures");
     // The host's region comes first; the copy control has its own.
-    expect(screen.getAllByRole("status")[0]!.textContent).toContain("1 unsaved collection change needs attention.");
+    expect(screen.getAllByRole("status")[0]!.textContent).toContain(
+      "1 unsaved collection change needs attention.",
+    );
     screen.getByTestId("collection-write-retry");
-    expect(
-      screen.getByTestId("collection-write-discard").textContent,
-    ).toBe("Discard unsaved change");
+    expect(screen.getByTestId("collection-write-discard").textContent).toBe(
+      "Discard unsaved change",
+    );
   });
 
   it("lands the original value on retry and clears the failure", async () => {
@@ -610,10 +765,7 @@ describe("retained failures", () => {
     docMock.current = engineDocState({ available: true, doc });
     fireEvent.click(screen.getByTestId("collection-write-retry"));
 
-    // Retry replays the exact accepted value through the record's doc.
-    await waitFor(() =>
-      expect(doc.getMap("frontmatter").get("status")).toBe("done"),
-    );
+    await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("done"));
     expect(collectionWriteFailures()).toHaveLength(0);
     expect(screen.queryByTestId("collection-write-failures")).toBeNull();
 
@@ -643,10 +795,15 @@ describe("retained failures", () => {
     try {
       enqueue();
       act(() => setCollectionFieldWriteAccess("ws-1", "This share must be reopened."));
-      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
+      docMock.current = engineDocState({
+        available: true,
+        doc,
+        saveState: { kind: "file-locked", reason: "test failure", issueId: null },
+      });
       host.rerender(<CollectionFieldWriteHost />);
       await act(() => vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS));
-      const message = "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.";
+      const message =
+        "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.";
       expect(collectionWriteFailures()).toEqual([]);
       expect(hasPendingCollectionFieldWrites()).toBe(false);
       expect(status.result.current.error).toBe(message);
@@ -654,7 +811,11 @@ describe("retained failures", () => {
       expect(status.result.current.error).toBe(message);
       act(() => setCollectionFieldWriteAccess("ws-1", null));
       expect(status.result.current.error).toBe(message);
-    } finally { status.unmount(); host.unmount(); doc.destroy(); }
+    } finally {
+      status.unmount();
+      host.unmount();
+      doc.destroy();
+    }
   });
 
   it("does not retry into a replacement record at the old path", async () => {
@@ -686,7 +847,6 @@ describe("retained failures", () => {
     enqueue();
 
     await act(() => vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS));
-    // Completed, not failed: no retry offer for a write that is not lost.
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(0);
     expect(screen.queryByTestId("collection-write-failures")).toBeNull();
@@ -700,44 +860,59 @@ describe("collection index acknowledgements", () => {
     docMock.current = engineDocState({ available: true, doc });
     const host = render(<CollectionFieldWriteHost />);
     const onIndexed = vi.fn();
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed);
+    });
     expect(onIndexed).not.toHaveBeenCalled();
     settleHead(host, doc);
     host.rerender(<CollectionFieldWriteHost />);
     expect(onIndexed).toHaveBeenCalledOnce();
   });
 
-  it.each(["retry", "discard"] as const)("does not acknowledge failed input before %s", (action) => {
-    docMock.current = engineDocState({ available: false });
-    const host = render(<CollectionFieldWriteHost />);
-    const onIndexed = vi.fn();
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed); });
-    expect(onIndexed).not.toHaveBeenCalled();
-    const failure = collectionWriteFailures()[0]!;
-    if (action === "discard") {
-      act(() => discardCollectionFieldWrite(failure.id));
+  it.each(["retry", "discard"] as const)(
+    "does not acknowledge failed input before %s",
+    (action) => {
+      docMock.current = engineDocState({ available: false });
+      const host = render(<CollectionFieldWriteHost />);
+      const onIndexed = vi.fn();
+      act(() => {
+        enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed);
+      });
       expect(onIndexed).not.toHaveBeenCalled();
-    } else {
-      const doc = new Y.Doc();
-      doc.getMap("frontmatter").set("id", "rec-1");
-      docMock.current = engineDocState({ available: true, doc });
-      act(() => retryCollectionFieldWrite(failure.id));
-      expect(onIndexed).not.toHaveBeenCalled();
-      settleHead(host, doc);
-      expect(onIndexed).toHaveBeenCalledOnce();
-    }
-  });
+      const failure = collectionWriteFailures()[0]!;
+      if (action === "discard") {
+        act(() => discardCollectionFieldWrite(failure.id));
+        expect(onIndexed).not.toHaveBeenCalled();
+      } else {
+        const doc = new Y.Doc();
+        doc.getMap("frontmatter").set("id", "rec-1");
+        docMock.current = engineDocState({ available: true, doc });
+        act(() => retryCollectionFieldWrite(failure.id));
+        expect(onIndexed).not.toHaveBeenCalled();
+        settleHead(host, doc);
+        expect(onIndexed).toHaveBeenCalledOnce();
+      }
+    },
+  );
 
   it("acknowledges a durably held file-lock edit once", async () => {
     vi.useFakeTimers();
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
+    docMock.current = engineDocState({
+      available: true,
+      doc,
+      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
+    });
     render(<CollectionFieldWriteHost />);
     const onIndexed = vi.fn();
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed);
+    });
     expect(onIndexed).not.toHaveBeenCalled();
-    await act(async () => { await vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS * 2); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS * 2);
+    });
     expect(onIndexed).toHaveBeenCalledOnce();
     expect(collectionWriteFailures()).toHaveLength(0);
   });
@@ -750,7 +925,6 @@ describe("settleCollectionFieldWrites", () => {
     enqueue();
     await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
 
-    // The queue is already empty; the unresolved failure must still count.
     await expect(settleCollectionFieldWrites()).resolves.toEqual({
       failed: 1,
       stalled: false,
@@ -773,7 +947,8 @@ describe("settleCollectionFieldWrites", () => {
     docMock.current = engineDocState({
       available: true,
       doc,
-      saveState: { kind: "unknown" }, readOnlyWhileEditing: true,
+      saveState: { kind: "unknown" },
+      readOnlyWhileEditing: true,
       saveError: "This workspace is read-only.",
     });
     act(() => host.rerender(<CollectionFieldWriteHost />));
@@ -788,12 +963,17 @@ describe("beginCollectionWriteOperation", () => {
     docMock.current = engineDocState({ available: true, doc });
     const host = render(<CollectionFieldWriteHost />);
     let guard!: ReturnType<typeof beginCollectionWriteOperation>;
-    act(() => { guard = beginCollectionWriteOperation("ws-1"); });
+    act(() => {
+      guard = beginCollectionWriteOperation("ws-1");
+    });
     enqueue({ ...CHANGE, field: "tags", value: ["alpha"] });
     enqueue({ ...CHANGE, field: "tags", value: ["alpha", "beta"] });
     const [older, newer] = collectionWriteFailures();
     expect(older?.superseded).toBe(true);
-    act(() => { guard.release(); retryCollectionFieldWrite(newer!.id); });
+    act(() => {
+      guard.release();
+      retryCollectionFieldWrite(newer!.id);
+    });
     settleHead(host, doc);
     act(() => retryCollectionFieldWrite(older!.id));
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
@@ -801,7 +981,10 @@ describe("beginCollectionWriteOperation", () => {
     expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha"]);
     expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
     expect(screen.getByTestId("collection-write-copy")).toBeTruthy();
-    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty("value", '[\n  "alpha"\n]');
+    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty(
+      "value",
+      '[\n  "alpha"\n]',
+    );
   });
 
   it("does not supersede current-lineage input with a delayed callback from an older lineage", () => {
@@ -813,7 +996,9 @@ describe("beginCollectionWriteOperation", () => {
     act(() => {
       enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, value: "old" }, undefined, 0);
     });
-    expect(collectionWriteFailures().find((failure) => failure.id === current.id)?.superseded).toBe(false);
+    expect(collectionWriteFailures().find((failure) => failure.id === current.id)?.superseded).toBe(
+      false,
+    );
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
@@ -825,7 +1010,9 @@ describe("beginCollectionWriteOperation", () => {
 
   it("rejects a failure arriving while the initial draft flush is pending", async () => {
     let finishFlush!: () => void;
-    const flush = new Promise<void>((resolve) => { finishFlush = resolve; });
+    const flush = new Promise<void>((resolve) => {
+      finishFlush = resolve;
+    });
     const beginning = beginCollectionLineageOperation("ws-1", () => flush);
     expect(enqueue()).toBe(false);
     finishFlush();
@@ -839,13 +1026,18 @@ describe("beginCollectionWriteOperation", () => {
     docMock.current = engineDocState({ available: true, doc: original });
     render(<CollectionFieldWriteHost />);
     let release!: () => void;
-    await act(async () => { release = await beginCollectionLineageOperation("ws-1"); });
+    await act(async () => {
+      release = await beginCollectionLineageOperation("ws-1");
+    });
     // The actual version IPC is now in flight, beyond the preflight check.
     expect(enqueue()).toBe(false);
     const nextVersion = new Y.Doc();
     nextVersion.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc: nextVersion });
-    act(() => { advanceCollectionWriteLineage("ws-1"); release(); });
+    act(() => {
+      advanceCollectionWriteLineage("ws-1");
+      release();
+    });
     const failure = collectionWriteFailures()[0]!;
     act(() => retryCollectionFieldWrite(failure.id));
     expect(nextVersion.getMap("frontmatter").has("status")).toBe(false);
@@ -877,31 +1069,23 @@ describe("beginCollectionWriteOperation", () => {
     act(() => {
       guard = beginCollectionWriteOperation("ws-1");
     });
-    // Nothing queued and nothing failed when the operation began.
     await expect(guard.settled).resolves.toEqual({ failed: 0, stalled: false });
 
-    // An edit racing the pause is not accepted into the queue and not lost.
     expect(enqueue()).toBe(false);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(1);
     expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
     expect(doc.getMap("frontmatter").has("status")).toBe(false);
 
-    // Retry waits out the pause: the value stays retained, nothing writes.
     const failureId = collectionWriteFailures()[0]!.id;
     act(() => retryCollectionFieldWrite(failureId));
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(1);
-    expect(screen.getByTestId("collection-write-retry")).toHaveProperty(
-      "disabled",
-      true,
-    );
+    expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
 
     act(() => guard.release());
     fireEvent.click(screen.getByTestId("collection-write-retry"));
-    await waitFor(() =>
-      expect(doc.getMap("frontmatter").get("status")).toBe("done"),
-    );
+    await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("done"));
     expect(collectionWriteFailures()).toHaveLength(0);
     settleHead(host, doc);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
@@ -944,7 +1128,6 @@ describe("beginCollectionWriteOperation", () => {
     act(() => {
       guard = beginCollectionWriteOperation("ws-1");
     });
-    // The queued head keeps settling under the pause; only NEW edits wait.
     settleHead(host, doc);
     await expect(guard.settled).resolves.toEqual({ failed: 0, stalled: false });
     act(() => guard.release());
@@ -967,47 +1150,90 @@ describe("beginCollectionWriteOperation", () => {
 
 describe("abandoned schema preparation", () => {
   const read = {
-    text: serializeCollectionSchema({ name: null, description: null, fields: [{ name: "status", type: "select", options: [] }], views: [] }),
+    text: serializeCollectionSchema({
+      name: null,
+      description: null,
+      fields: [{ name: "status", type: "select", options: [] }],
+      views: [],
+    }),
     truncated: false,
     contentHash: "same-schema-in-both-versions",
   };
 
-  it.each(["initial", "retry"] as const)("does not prepare an %s option write after the selection changes during the schema read", async (attempt) => {
-    let finishRead!: (value: typeof read) => void;
-    const readWorkspaceText = vi.fn(() => new Promise<typeof read>((resolve) => { finishRead = resolve; }));
-    const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
-    vi.stubGlobal("dohcDesktop", { readWorkspaceText, writeWorkspaceText });
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    doc.getMap("frontmatter").set("tags", ["alpha"]);
-    docMock.current = engineDocState({ available: attempt === "initial", doc });
-    render(<CollectionFieldWriteHost />);
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", {
-      ...CHANGE, field: "tags", value: ["alpha", "gamma"], previousValues: [["alpha"]],
-    }, "gamma"); });
-    if (attempt === "retry") {
-      docMock.current = engineDocState({ available: true, doc });
-      act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
-    }
-    expect(readWorkspaceText).toHaveBeenCalledOnce();
-    doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
-    await act(async () => finishRead({ ...read, text: serializeCollectionSchema({
-      name: null, description: null,
-      fields: [{ name: "tags", type: "multi-select", options: ["alpha", "beta"] }], views: [],
-    }) }));
-    expect(writeWorkspaceText).not.toHaveBeenCalled();
-    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
-    expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, createOption: "gamma" });
-  });
+  it.each(["initial", "retry"] as const)(
+    "does not prepare an %s option write after the selection changes during the schema read",
+    async (attempt) => {
+      let finishRead!: (value: typeof read) => void;
+      const readWorkspaceText = vi.fn(
+        () =>
+          new Promise<typeof read>((resolve) => {
+            finishRead = resolve;
+          }),
+      );
+      const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
+      vi.stubGlobal("dohcDesktop", { readWorkspaceText, writeWorkspaceText });
+      const doc = new Y.Doc();
+      doc.getMap("frontmatter").set("id", "rec-1");
+      doc.getMap("frontmatter").set("tags", ["alpha"]);
+      docMock.current = engineDocState({ available: attempt === "initial", doc });
+      render(<CollectionFieldWriteHost />);
+      act(() => {
+        enqueueCollectionFieldWrite(
+          "ws-1",
+          "tasks",
+          {
+            ...CHANGE,
+            field: "tags",
+            value: ["alpha", "gamma"],
+            previousValues: [["alpha"]],
+          },
+          "gamma",
+        );
+      });
+      if (attempt === "retry") {
+        docMock.current = engineDocState({ available: true, doc });
+        act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+      }
+      expect(readWorkspaceText).toHaveBeenCalledOnce();
+      doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
+      await act(async () =>
+        finishRead({
+          ...read,
+          text: serializeCollectionSchema({
+            name: null,
+            description: null,
+            fields: [{ name: "tags", type: "multi-select", options: ["alpha", "beta"] }],
+            views: [],
+          }),
+        }),
+      );
+      expect(writeWorkspaceText).not.toHaveBeenCalled();
+      expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+      expect(collectionWriteFailures()[0]).toMatchObject({
+        recoveryOnly: true,
+        createOption: "gamma",
+      });
+    },
+  );
 
   it("retains an initial option value when the selection changes during the schema write", async () => {
     let finishWrite!: (value: { status: "written" }) => void;
-    const writeWorkspaceText = vi.fn(() => new Promise<{ status: "written" }>((resolve) => { finishWrite = resolve; }));
+    const writeWorkspaceText = vi.fn(
+      () =>
+        new Promise<{ status: "written" }>((resolve) => {
+          finishWrite = resolve;
+        }),
+    );
     vi.stubGlobal("dohcDesktop", {
-      readWorkspaceText: vi.fn(async () => ({ ...read, text: serializeCollectionSchema({
-        name: null, description: null,
-        fields: [{ name: "tags", type: "multi-select", options: ["alpha", "beta"] }], views: [],
-      }) })),
+      readWorkspaceText: vi.fn(async () => ({
+        ...read,
+        text: serializeCollectionSchema({
+          name: null,
+          description: null,
+          fields: [{ name: "tags", type: "multi-select", options: ["alpha", "beta"] }],
+          views: [],
+        }),
+      })),
       writeWorkspaceText,
     });
     const doc = new Y.Doc();
@@ -1016,14 +1242,28 @@ describe("abandoned schema preparation", () => {
     docMock.current = engineDocState({ available: true, doc });
     render(<CollectionFieldWriteHost />);
     const value = ["alpha", "gamma"];
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", {
-      ...CHANGE, field: "tags", value, previousValues: [["alpha"]],
-    }, "gamma"); });
+    act(() => {
+      enqueueCollectionFieldWrite(
+        "ws-1",
+        "tasks",
+        {
+          ...CHANGE,
+          field: "tags",
+          value,
+          previousValues: [["alpha"]],
+        },
+        "gamma",
+      );
+    });
     await waitFor(() => expect(writeWorkspaceText).toHaveBeenCalledOnce());
     doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
     await act(async () => finishWrite({ status: "written" }));
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
-    expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, createOption: undefined, change: { value } });
+    expect(collectionWriteFailures()[0]).toMatchObject({
+      recoveryOnly: true,
+      createOption: undefined,
+      change: { value },
+    });
   });
 
   it("keeps a changed selection recovery-only through refusal changes and restored access", () => {
@@ -1038,14 +1278,24 @@ describe("abandoned schema preparation", () => {
     docMock.current = engineDocState({ available: true, doc });
     host.rerender(<CollectionFieldWriteHost />);
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
-    const ownMessage = "This selection changed since your edit. Copy your unsaved value before discarding it.";
-    expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, change: { value }, message: ownMessage });
-    for (const refusal of ["This share must be reopened.", "Your access to this share changed.", null]) {
+    const ownMessage =
+      "This selection changed since your edit. Copy your unsaved value before discarding it.";
+    expect(collectionWriteFailures()[0]).toMatchObject({
+      recoveryOnly: true,
+      change: { value },
+      message: ownMessage,
+    });
+    for (const refusal of [
+      "This share must be reopened.",
+      "Your access to this share changed.",
+      null,
+    ]) {
       act(() => setCollectionFieldWriteAccess("ws-1", refusal));
       expect(collectionWriteFailures()[0]?.message).toBe(ownMessage);
       expect(status.result.current.error).toBe(ownMessage);
       expect(screen.getByTestId("collection-write-failure").textContent).toContain(ownMessage);
-      if (refusal !== null) expect(screen.getByTestId("collection-write-failure").textContent).not.toContain(refusal);
+      if (refusal !== null)
+        expect(screen.getByTestId("collection-write-failure").textContent).not.toContain(refusal);
       expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
     }
     act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
@@ -1058,15 +1308,22 @@ describe("abandoned schema preparation", () => {
       const schema: Parameters<typeof serializeCollectionSchema>[0] = {
         name: null,
         description: null,
-        fields: scenario === "removed" ? []
-          : scenario === "renamed" ? [{ name: "other", type: "select", options: [] }]
-          : scenario === "number" ? [{ name: "status", type: "number" }]
-          : [{ name: "status", type: "multi-select", options: [] }],
+        fields:
+          scenario === "removed"
+            ? []
+            : scenario === "renamed"
+              ? [{ name: "other", type: "select", options: [] }]
+              : scenario === "number"
+                ? [{ name: "status", type: "number" }]
+                : [{ name: "status", type: "multi-select", options: [] }],
         views: [],
       };
       const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
       vi.stubGlobal("dohcDesktop", {
-        readWorkspaceText: vi.fn(async () => ({ ...read, text: serializeCollectionSchema(schema) })),
+        readWorkspaceText: vi.fn(async () => ({
+          ...read,
+          text: serializeCollectionSchema(schema),
+        })),
         writeWorkspaceText,
       });
       const doc = new Y.Doc();
@@ -1074,7 +1331,9 @@ describe("abandoned schema preparation", () => {
       docMock.current = engineDocState({ available: true, doc });
       render(<CollectionFieldWriteHost />);
       const onIndexed = vi.fn();
-      act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done", undefined, onIndexed); });
+      act(() => {
+        enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done", undefined, onIndexed);
+      });
       await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
       expect(writeWorkspaceText).not.toHaveBeenCalled();
       expect(doc.getMap("frontmatter").has("status")).toBe(false);
@@ -1091,7 +1350,9 @@ describe("abandoned schema preparation", () => {
     vi.stubGlobal("dohcDesktop", { readWorkspaceText, writeWorkspaceText });
     docMock.current = engineDocState({ opening: true });
     const host = render(<CollectionFieldWriteHost />);
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done"); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done");
+    });
     expect(readWorkspaceText).not.toHaveBeenCalled();
     const replacement = new Y.Doc();
     replacement.getMap("frontmatter").set("id", "replacement-record");
@@ -1106,14 +1367,18 @@ describe("abandoned schema preparation", () => {
 
   it("cancels a discarded option edit before its delayed schema read starts a write", async () => {
     let finishRead!: (value: typeof read) => void;
-    const reading = new Promise<typeof read>((resolve) => { finishRead = resolve; });
+    const reading = new Promise<typeof read>((resolve) => {
+      finishRead = resolve;
+    });
     const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
     vi.stubGlobal("dohcDesktop", { readWorkspaceText: vi.fn(() => reading), writeWorkspaceText });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     render(<CollectionFieldWriteHost />);
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done"); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done");
+    });
     // Cancel synchronously, without depending on React's unmount cleanup.
     await act(async () => {
       abandonPendingCollectionFieldWrites("stalled");
@@ -1129,14 +1394,21 @@ describe("abandoned schema preparation", () => {
   it("keeps an issued schema mutation owned after the user discards its stalled entry", async () => {
     const observer = renderHook(() => useCollectionWritesBlockingAdmission("ws-2"));
     let finishWrite!: (value: { status: "written" }) => void;
-    const writing = new Promise<{ status: "written" }>((resolve) => { finishWrite = resolve; });
+    const writing = new Promise<{ status: "written" }>((resolve) => {
+      finishWrite = resolve;
+    });
     const writeWorkspaceText = vi.fn(() => writing);
-    vi.stubGlobal("dohcDesktop", { readWorkspaceText: vi.fn(async () => read), writeWorkspaceText });
+    vi.stubGlobal("dohcDesktop", {
+      readWorkspaceText: vi.fn(async () => read),
+      writeWorkspaceText,
+    });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     render(<CollectionFieldWriteHost />);
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done"); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done");
+    });
     await waitFor(() => expect(writeWorkspaceText).toHaveBeenCalledOnce());
     act(() => {
       abandonPendingCollectionFieldWrites("stalled");
@@ -1145,10 +1417,17 @@ describe("abandoned schema preparation", () => {
     expect(hasPendingCollectionFieldWrites()).toBe(true);
     expect(observer.result.current).toBe(true);
     let admitted = false;
-    const beginning = beginCollectionLineageOperation("ws-1").then((release) => { admitted = true; release(); });
+    const beginning = beginCollectionLineageOperation("ws-1").then((release) => {
+      admitted = true;
+      release();
+    });
     await Promise.resolve();
     expect(admitted).toBe(false);
-    await act(async () => { finishWrite({ status: "written" }); await writing; await beginning; });
+    await act(async () => {
+      finishWrite({ status: "written" });
+      await writing;
+      await beginning;
+    });
     expect(admitted).toBe(true);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(observer.result.current).toBe(false);
@@ -1157,42 +1436,59 @@ describe("abandoned schema preparation", () => {
 });
 
 describe("abandonPendingCollectionFieldWrites", () => {
-  it.each(["rename", "delete"] as const)("clears the old completed file-lock status after collection %s", (operation) => {
-    vi.useFakeTimers();
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
-    render(<CollectionFieldWriteHost />);
-    const observer = renderHook(() => ({
-      original: useCollectionWriteStatus("ws-1", "tasks"),
-      moved: useCollectionWriteStatus("ws-1", "archive/tasks"),
-      otherWorkspace: useCollectionWriteStatus("ws-2", "tasks"),
-    }));
-    enqueue();
-    act(() => vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS));
-    act(() => { enqueueCollectionFieldWrite("ws-2", "tasks", CHANGE); });
-    act(() => vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS));
-    expect(hasPendingCollectionFieldWrites()).toBe(false);
-    expect(collectionWriteFailures()).toEqual([]);
-    const lockedStatus = observer.result.current.original;
-    const otherStatus = observer.result.current.otherWorkspace;
-    expect(lockedStatus.error).not.toBeNull();
-    expect(lockedStatus.settled).toBe(1);
-    expect(otherStatus.error).not.toBeNull();
-    act(() => remapCollectionFieldWritePaths("ws-1", (path) =>
-      path === "tasks" || path.startsWith("tasks/")
-        ? operation === "rename" ? `archive/${path}` : null
-        : path,
-    ));
-    expect(observer.result.current.moved).toEqual(operation === "rename" ? lockedStatus : { error: null, settled: 0 });
-    expect(observer.result.current.original).toEqual({ error: null, settled: 0 });
-    expect(observer.result.current.otherWorkspace).toEqual(otherStatus);
-  });
+  it.each(["rename", "delete"] as const)(
+    "clears the old completed file-lock status after collection %s",
+    (operation) => {
+      vi.useFakeTimers();
+      const doc = new Y.Doc();
+      doc.getMap("frontmatter").set("id", "rec-1");
+      docMock.current = engineDocState({
+        available: true,
+        doc,
+        saveState: { kind: "file-locked", reason: "test failure", issueId: null },
+      });
+      render(<CollectionFieldWriteHost />);
+      const observer = renderHook(() => ({
+        original: useCollectionWriteStatus("ws-1", "tasks"),
+        moved: useCollectionWriteStatus("ws-1", "archive/tasks"),
+        otherWorkspace: useCollectionWriteStatus("ws-2", "tasks"),
+      }));
+      enqueue();
+      act(() => vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS));
+      act(() => {
+        enqueueCollectionFieldWrite("ws-2", "tasks", CHANGE);
+      });
+      act(() => vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS));
+      expect(hasPendingCollectionFieldWrites()).toBe(false);
+      expect(collectionWriteFailures()).toEqual([]);
+      const lockedStatus = observer.result.current.original;
+      const otherStatus = observer.result.current.otherWorkspace;
+      expect(lockedStatus.error).not.toBeNull();
+      expect(lockedStatus.settled).toBe(1);
+      expect(otherStatus.error).not.toBeNull();
+      act(() =>
+        remapCollectionFieldWritePaths("ws-1", (path) =>
+          path === "tasks" || path.startsWith("tasks/")
+            ? operation === "rename"
+              ? `archive/${path}`
+              : null
+            : path,
+        ),
+      );
+      expect(observer.result.current.moved).toEqual(
+        operation === "rename" ? lockedStatus : { error: null, settled: 0 },
+      );
+      expect(observer.result.current.original).toEqual({ error: null, settled: 0 });
+      expect(observer.result.current.otherWorkspace).toEqual(otherStatus);
+    },
+  );
 
   it("observes admission blockers from other workspaces through retention and discard", () => {
     const observer = renderHook(() => useCollectionWritesBlockingAdmission("ws-2"));
     expect(observer.result.current).toBe(false);
-    act(() => { enqueueCollectionFieldWrite("ws-2", "tasks", CHANGE); });
+    act(() => {
+      enqueueCollectionFieldWrite("ws-2", "tasks", CHANGE);
+    });
     expect(observer.result.current).toBe(false);
     enqueue();
     expect(observer.result.current).toBe(true);
@@ -1209,7 +1505,9 @@ describe("abandonPendingCollectionFieldWrites", () => {
     const host = render(<CollectionFieldWriteHost />);
     enqueue({ ...CHANGE, value: "older" });
     let guard!: ReturnType<typeof beginCollectionWriteOperation>;
-    act(() => { guard = beginCollectionWriteOperation("ws-1"); });
+    act(() => {
+      guard = beginCollectionWriteOperation("ws-1");
+    });
     enqueue({ ...CHANGE, value: "newer" });
     const newer = collectionWriteFailures()[0]!;
     act(() => abandonPendingCollectionFieldWrites("stalled"));
@@ -1218,7 +1516,10 @@ describe("abandonPendingCollectionFieldWrites", () => {
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
-    act(() => { guard.release(); retryCollectionFieldWrite(newer.id); });
+    act(() => {
+      guard.release();
+      retryCollectionFieldWrite(newer.id);
+    });
     settleHead(host, doc);
     act(() => retryCollectionFieldWrite(older.id));
     expect(doc.getMap("frontmatter").get("status")).toBe("newer");
@@ -1239,7 +1540,9 @@ describe("abandonPendingCollectionFieldWrites", () => {
     expect(doc.getMap("frontmatter").get("status")).toBe("done");
     act(() => discardCollectionFieldWrite(collectionWriteFailures()[0]!.id));
     expect(hasPendingCollectionFieldWrites()).toBe(true);
-    expect(screen.getByRole("status").textContent).toContain("dohc has not confirmed this save yet.");
+    expect(screen.getByRole("status").textContent).toContain(
+      "dohc has not confirmed this save yet.",
+    );
     expect(screen.getByTestId("collection-save-unconfirmed")).toBeTruthy();
     settleHead(host, doc);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
@@ -1255,7 +1558,12 @@ describe("abandonPendingCollectionFieldWrites", () => {
     enqueue();
     act(() => abandonPendingCollectionFieldWrites("stalled"));
     expect(collectionWriteFailures()).toHaveLength(0);
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "error", reason: "test failure", issueId: null }, saveError: "save failed" });
+    docMock.current = engineDocState({
+      available: true,
+      doc,
+      saveState: { kind: "error", reason: "test failure", issueId: null },
+      saveError: "save failed",
+    });
     host.rerender(<CollectionFieldWriteHost />);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
@@ -1271,7 +1579,11 @@ describe("abandonPendingCollectionFieldWrites", () => {
     enqueue();
     enqueue({ ...CHANGE, value: "newer" });
     act(() => abandonPendingCollectionFieldWrites("stalled"));
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "error", reason: "test failure", issueId: null } });
+    docMock.current = engineDocState({
+      available: true,
+      doc,
+      saveState: { kind: "error", reason: "test failure", issueId: null },
+    });
     host.rerender(<CollectionFieldWriteHost />);
     const older = collectionWriteFailures().find((failure) => failure.change.value === "done")!;
     expect(older.superseded).toBe(true);
@@ -1290,10 +1602,18 @@ describe("abandonPendingCollectionFieldWrites", () => {
     const host = render(<CollectionFieldWriteHost />);
     enqueue();
     const draining = settleCollectionFieldWrites(undefined, { stallMs: 20_000 });
-    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    docMock.current = engineDocState({
+      available: true,
+      doc,
+      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
+    });
     host.rerender(<CollectionFieldWriteHost />);
-    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
     await expect(draining).resolves.toEqual({ stalled: true, failed: 0 });
     act(() => abandonPendingCollectionFieldWrites("stalled"));
     expect(hasPendingCollectionFieldWrites()).toBe(false);
@@ -1311,7 +1631,10 @@ describe("abandonPendingCollectionFieldWrites", () => {
     expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual(["ws-1"]);
     expect(hasPendingCollectionFieldWrites()).toBe(true);
     act(() => abandonPendingCollectionFieldWrites("now ws-2"));
-    expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual(["ws-1", "ws-2"]);
+    expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual([
+      "ws-1",
+      "ws-2",
+    ]);
   });
 
   it("finishes a previously stalled head when the engine later confirms durable file-lock ownership", () => {
@@ -1322,7 +1645,11 @@ describe("abandonPendingCollectionFieldWrites", () => {
     enqueue();
     act(() => abandonPendingCollectionFieldWrites("stalled"));
     expect(hasPendingCollectionFieldWrites()).toBe(true);
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
+    docMock.current = engineDocState({
+      available: true,
+      doc,
+      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
+    });
     host.rerender(<CollectionFieldWriteHost />);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(0);

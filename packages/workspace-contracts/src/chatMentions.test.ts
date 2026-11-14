@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHAT_FILE_LINK_WITHHELD,
   activeMentionQuery,
   applyMentionCompletion,
   codeCover,
@@ -9,7 +10,9 @@ import {
   findMentions,
   formatChatWorkReferenceToken,
   matchMentionCandidates,
+  projectChatFileLinks,
   scanMentionTokens,
+  withholdChatFileLinks,
   type MentionCandidate,
 } from "./chatMentions";
 
@@ -56,10 +59,12 @@ describe("shared mention scanning", () => {
       "@agent.ops_v2 tilde fence",
       "~~~~",
     ].join("\n");
-    expect(scanMentionTokens(body, { ignoreCode: true }).map((mention) => mention.handle))
-      .toEqual(["you"]);
-    expect(findMentions(body, candidates, { ignoreCode: true }).map((mention) => mention.handle))
-      .toEqual(["you"]);
+    expect(scanMentionTokens(body, { ignoreCode: true }).map((mention) => mention.handle)).toEqual([
+      "you",
+    ]);
+    expect(
+      findMentions(body, candidates, { ignoreCode: true }).map((mention) => mention.handle),
+    ).toEqual(["you"]);
     expect(codeRanges(body)).toHaveLength(3);
   });
 
@@ -80,12 +85,7 @@ describe("shared mention scanning", () => {
     const body = "@agent. @agent, @agent... @a.b";
 
     const tokens = scanMentionTokens(body);
-    expect(tokens.map((mention) => mention.handle)).toEqual([
-      "agent",
-      "agent",
-      "agent",
-      "a.b",
-    ]);
+    expect(tokens.map((mention) => mention.handle)).toEqual(["agent", "agent", "agent", "a.b"]);
     expect(tokens.map((mention) => body.slice(mention.start, mention.end))).toEqual([
       "@agent",
       "@agent",
@@ -125,7 +125,6 @@ describe("shared mention composer helpers", () => {
 });
 
 describe("code cover", () => {
-  // Bodies of backtick runs, fences, mentions and line breaks, from a fixed seed.
   const bodies = () => {
     const pieces = ["`", "``", "```\n", "~~~\n", "\n", " ", "a", "@you ", "  ```\n"];
     let seed = 7;
@@ -150,7 +149,10 @@ describe("code cover", () => {
       const cover = codeCover(body);
       const naive = inRanges(body);
       const positions = Array.from({ length: body.length + 1 }, (_, at) => at);
-      expect({ body, inside: positions.map(cover) }).toEqual({ body, inside: positions.map(naive) });
+      expect({ body, inside: positions.map(cover) }).toEqual({
+        body,
+        inside: positions.map(naive),
+      });
     }
   });
 
@@ -158,7 +160,10 @@ describe("code cover", () => {
     for (const body of bodies()) {
       const naive = inRanges(body);
       const expected = scanMentionTokens(body).filter((mention) => !naive(mention.start));
-      expect({ body, found: scanMentionTokens(body, { ignoreCode: true }) }).toEqual({ body, found: expected });
+      expect({ body, found: scanMentionTokens(body, { ignoreCode: true }) }).toEqual({
+        body,
+        found: expected,
+      });
     }
   });
 
@@ -175,7 +180,9 @@ describe("work links", () => {
   const ref = "A".repeat(42) + "_";
   it("reads a work link as a work reference, never as a file", () => {
     const body = `See ${formatChatWorkReferenceToken(ref)} and @[notes/plan.md]`;
-    expect(extractChatWorkReferenceTokens(body)).toEqual([{ reference: ref, start: 4, end: 4 + 51, text: `@[work:${ref}]` }]);
+    expect(extractChatWorkReferenceTokens(body)).toEqual([
+      { reference: ref, start: 4, end: 4 + 51, text: `@[work:${ref}]` },
+    ]);
     expect(extractChatFileReferences(body)).toEqual([{ path: "notes/plan.md" }]);
   });
 
@@ -183,5 +190,35 @@ describe("work links", () => {
     const short = "@[work:abc]";
     expect(extractChatWorkReferenceTokens(`${short} \`@[work:${ref}]\``)).toEqual([]);
     expect(extractChatFileReferences(short)).toEqual([{ path: "work:abc" }]);
+  });
+});
+
+describe("withholding file links", () => {
+  const ref = "A".repeat(42) + "_";
+  const covers = (path: string) => path.startsWith("team/");
+  const out = CHAT_FILE_LINK_WITHHELD;
+
+  it("keeps work links and covered file links, and replaces every other link whole", () => {
+    expect(
+      withholdChatFileLinks(
+        `@[team/a.md#Goals] @[work:${ref}] @[other/b.md#Q3] \`@[other/c.md]\``,
+        covers,
+      ),
+    ).toBe(`@[team/a.md#Goals] @[work:${ref}] ${out} \`${out}\``);
+  });
+
+  it("replaces a nested or unclosed link to its line end, and changes nothing a second time", () => {
+    const once = withholdChatFileLinks("a @[x @[team/a.md] b\n@[other/open\r\nnext @[]", covers);
+    expect(once).toBe(`a ${out} b\n${out}\r\nnext ${out}`);
+    expect(withholdChatFileLinks(once, () => false)).toBe(once);
+    expect(withholdChatFileLinks("no links here", () => false)).toBe("no links here");
+  });
+
+  it("names a kept file link by the path its reader knows, with its heading", () => {
+    const fromTeam = (path: string) =>
+      path.startsWith("acme/team/") ? path.slice("acme/".length) : null;
+    expect(
+      projectChatFileLinks(`@[acme/team/a.md#Goals] @[work:${ref}] @[acme/b.md]`, fromTeam),
+    ).toBe(`@[team/a.md#Goals] @[work:${ref}] ${out}`);
   });
 });

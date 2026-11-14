@@ -1,6 +1,11 @@
 import { Check, Plus, RotateCw } from "lucide-react";
 import { type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
-import type { ListVersionLastChangesResult, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
+import type {
+  ListVersionLastChangesResult,
+  WorkspaceVersionRecord,
+} from "../../ipc/bridgeContract";
+import type { VersionsRead } from "../../notices/failure";
+import type { CauseNotice, NoticeOwner } from "../../notices/noticeOwner";
 import { bridge } from "../bridge";
 import { relativeTime } from "../relativeTime";
 import { EmptyState, RetryRow, SecondaryButton } from "../ui/controls";
@@ -12,96 +17,77 @@ import { type WorkspaceVersions, withDeadline } from "./WorkspaceVersions";
 
 type LastChange = ListVersionLastChangesResult["versions"][number]["lastChange"];
 type Count = number | "failed";
-interface ConflictCount { count: number; more: boolean }
-
-// Where the tab's failed reads go: a row in Notices, which onSettled takes back.
-// `quiet` changes the row where it stands, with no new toast. `onDismiss` runs
-// when the person dismisses the row.
-interface ReadReports {
-  onError: (fallback: string, error: unknown, retry: () => void, identity: string, quiet: boolean, onDismiss: () => void) => void;
-  onSettled: (identity: string) => void;
+interface ConflictCount {
+  count: number;
+  more: boolean;
 }
 
-type Read = "last-changes" | "counts" | "conflicts";
-// A read's sentence when it fails alone.
-const READ_FAILED: Record<Read, string> = {
-  "last-changes": "dohc could not read when each version last changed.",
-  counts: "dohc could not count the files that differ from Main.",
-  conflicts: "dohc could not read which merges have files to decide.",
-};
-export const READS_FAILED = "dohc could not finish loading Versions.";
-
-// The page's one row in Notices, for every read that fails, as when the
-// engine goes away. It files once the reads that started together have
-// settled, so one cause shows one toast in its final words. A second failure
-// changes the row where it stands. A toast only means something new failed,
-// so a row that says more than one read failed keeps saying so until every
-// read works, then goes. Its Try again reads every failed read again. Once
-// the person dismisses the row, it stays gone until a read fails again, which
-// files a new row and toast.
-function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) => void) {
-  // Each page has its own row, since a split can show two.
-  const identity = `versions-reads:${useId()}`;
-  // Each failed read and its error, in the order they failed.
-  const [failures, setFailures] = useState<ReadonlyMap<Read, unknown>>(new Map());
-  // The reads that start together and have not settled.
-  const [reading, setReading] = useState<ReadonlySet<Read>>(new Set());
+// The page's one notice, for every read that fails, as when the engine goes
+// away. It files once the reads that started together have settled, so one
+// cause shows one toast in its final words. A second failure changes the row
+// where it stands. A toast only means something new failed, so a row that
+// says more than one read failed keeps saying so until every read works, then
+// goes. Its Try again reads every failed read again. Once the person dismisses
+// the row, it stays gone until a read fails again, which files a new row and
+// toast.
+function useReadsNotice(notices: NoticeOwner, retry: (reads: readonly VersionsRead[]) => void) {
+  const [failures, setFailures] = useState<ReadonlyMap<VersionsRead, unknown>>(new Map());
+  const [reading, setReading] = useState<ReadonlySet<VersionsRead>>(new Set());
   const current = useRef(failures);
   current.current = failures;
-  // The row's sentence, or null with no row.
-  const filed = useRef<string | null>(null);
-  // Set when the person dismisses the row. Any failure clears it, and the
-  // change runs the effect again, even for a read that already failed.
-  const [dismissed, setDismissed] = useState(false);
-  // Its Try again reads for this page, so the row goes with the page, as when
-  // its tab closes or another tab shows in its place.
-  useEffect(() => () => {
-    if (filed.current !== null) reports.onSettled(identity);
-  }, []);
+  const retryReads = useRef(retry);
+  retryReads.current = retry;
+  // Each page has its own notice, since a split can show two. It closes with
+  // the page, as when its tab closes or another tab shows in its place.
+  const notice = useRef<CauseNotice<"versions-reads"> | null>(null);
   useEffect(() => {
-    // A Try again pressed since this render took these failures back.
-    if (failures !== current.current) return;
-    if (failures.size === 0) {
-      if (filed.current !== null) reports.onSettled(identity);
-      filed.current = null;
-      return;
-    }
-    if (dismissed || (filed.current === null && reading.size > 0)) return;
-    const [first, ...others] = [...failures.keys()];
-    const sentence = others.length > 0 || filed.current === READS_FAILED ? READS_FAILED : READ_FAILED[first!];
-    if (sentence === filed.current) return;
-    const quiet = filed.current !== null;
-    filed.current = sentence;
-    // The first failure's error gives the words and Copy details.
-    reports.onError(sentence, failures.get(first!), () => {
+    const opened = notices.open("versions-reads", () => {
       const failed = [...current.current.keys()];
       // The effect of a render before this press can still run. It finds its
       // failures gone, so it files nothing.
       current.current = new Map();
-      filed.current = null;
       setFailures(current.current);
-      retry(failed);
-    }, identity, quiet, () => {
-      filed.current = null;
-      setDismissed(true);
+      retryReads.current(failed);
     });
-  }, [failures, reading, dismissed]);
-  const settled = (read: Read) => setReading((now) => {
-    if (!now.has(read)) return now;
-    const next = new Set(now);
-    next.delete(read);
-    return next;
-  });
+    notice.current = opened;
+    return () => opened.close();
+  }, [notices]);
+  useEffect(() => {
+    const opened = notice.current;
+    // A Try again pressed since this render took these failures back.
+    if (opened === null || failures !== current.current) return;
+    if (failures.size === 0) {
+      opened.resolve();
+      return;
+    }
+    const shown = opened.shown();
+    if (shown === undefined && reading.size > 0) return;
+    const [first, ...others] = [...failures.keys()];
+    // The first failure's error gives the words and Copy details.
+    opened.show(
+      { read: others.length > 0 || shown?.read === "several" ? "several" : first! },
+      failures.get(first!),
+    );
+  }, [failures, reading]);
+  const settled = (read: VersionsRead) =>
+    setReading((now) => {
+      if (!now.has(read)) return now;
+      const next = new Set(now);
+      next.delete(read);
+      return next;
+    });
   return {
-    started(read: Read) {
+    started(read: VersionsRead) {
       setReading((now) => (now.has(read) ? now : new Set(now).add(read)));
     },
-    failed(read: Read, error: unknown) {
-      setDismissed(false);
+    failed(read: VersionsRead, error: unknown) {
+      notice.current?.failed();
       settled(read);
-      setFailures((now) => (now.has(read) ? now : new Map(now).set(read, error)));
+      // A new map even for a read that already failed, so the notice is shown
+      // again. A read keeps the error it first failed with.
+      setFailures((now) => new Map(now).set(read, now.has(read) ? now.get(read) : error));
     },
-    worked(read: Read) {
+    worked(read: VersionsRead) {
       settled(read);
       setFailures((now) => {
         if (!now.has(read)) return now;
@@ -119,7 +105,6 @@ function useReadsNotice(reports: ReadReports, retry: (reads: readonly Read[]) =>
 export function VersionsPage(props: {
   workspaceId: string;
   versions: WorkspaceVersions;
-  // The workspace is not ready for a version change.
   disabled?: boolean;
   // Changes when history grows, so the last changes and the counts re-read.
   historyKey: string;
@@ -127,12 +112,15 @@ export function VersionsPage(props: {
   versionKey: number;
   onOpenCompare: (versionId: string) => void;
   onReviewConflicts: () => void;
-} & ReadReports) {
+  notices: NoticeOwner;
+}) {
   const { workspaceId, versions } = props;
   const { snapshot } = versions;
   const [lastChanges, setLastChanges] = useState<Map<string, LastChange> | null>(null);
   const [counts, setCounts] = useState<ReadonlyMap<string, Count>>(new Map());
-  const [conflictCounts, setConflictCounts] = useState<ReadonlyMap<string, ConflictCount>>(new Map());
+  const [conflictCounts, setConflictCounts] = useState<ReadonlyMap<string, ConflictCount>>(
+    new Map(),
+  );
   const [countRetry, setCountRetry] = useState(0);
   // The row that takes focus when the control in it that had focus goes away.
   const [focusRow, setFocusRow] = useState<string | null>(null);
@@ -145,8 +133,7 @@ export function VersionsPage(props: {
 
   const versionIds = snapshot?.versions.map((version) => version.id).join("\n") ?? null;
 
-  // Try again reads again each read that had failed.
-  const notice = useReadsNotice(props, (reads) => {
+  const notice = useReadsNotice(props.notices, (reads) => {
     if (reads.includes("last-changes")) setLastChangesRetry((attempt) => attempt + 1);
     // Every failed count, even one whose failure has not reached the notice
     // yet. That failure's effect, from before the press, then files nothing.
@@ -169,11 +156,12 @@ export function VersionsPage(props: {
         if (!lastChangeReads.isCurrent(token)) return;
         notice.worked("last-changes");
         setLastChangesFailed(false);
-        setLastChanges(new Map(result.versions.map((entry) => [entry.versionId, entry.lastChange])));
+        setLastChanges(
+          new Map(result.versions.map((entry) => [entry.versionId, entry.lastChange])),
+        );
       },
       (error: unknown) => {
         if (!lastChangeReads.isCurrent(token)) return;
-        // The rows still show, sorted by when each version was made.
         setLastChanges((current) => current ?? new Map());
         setLastChangesFailed(true);
         notice.failed("last-changes", error);
@@ -188,15 +176,22 @@ export function VersionsPage(props: {
   const countRun = useRef<number | null>(null);
   const counted = useRef<{ versionKey: string; historyKey: string } | null>(null);
   const countReads = useRequestSequence([workspaceId]);
-  const ordered = useMemo(() => orderVersions(snapshot?.versions ?? [], lastChanges), [snapshot, lastChanges]);
+  const ordered = useMemo(
+    () => orderVersions(snapshot?.versions ?? [], lastChanges),
+    [snapshot, lastChanges],
+  );
   const countOrder = useRef<string[]>([]);
-  countOrder.current = ordered.filter((version) => version.kind !== "main").map((version) => version.id);
+  countOrder.current = ordered
+    .filter((version) => version.kind !== "main")
+    .map((version) => version.id);
   const activeVersionId = snapshot?.activeVersionId ?? null;
   // A failed count stays in Notices while a version shown has one. Its Try
   // again counts every one of them again.
   const countErrors = useRef(new Map<string, unknown>());
   const failedCounts = useRef<string[]>([]);
-  failedCounts.current = countOrder.current.filter((versionId) => counts.get(versionId) === "failed");
+  failedCounts.current = countOrder.current.filter(
+    (versionId) => counts.get(versionId) === "failed",
+  );
   const failedKey = failedCounts.current.join("\n");
   const reportedCounts = useRef<ReadonlySet<string>>(new Set());
   useEffect(() => {
@@ -219,7 +214,11 @@ export function VersionsPage(props: {
     const versionKey = `${props.versionKey}\n${versionIds}`;
     const last = counted.current;
     const historyChanged = last !== null && last.historyKey !== props.historyKey;
-    if (last === null || last.versionKey !== versionKey || (historyChanged && !named.includes(activeVersionId ?? ""))) {
+    if (
+      last === null ||
+      last.versionKey !== versionKey ||
+      (historyChanged && !named.includes(activeVersionId ?? ""))
+    ) {
       for (const versionId of named) staleCounts.current.add(versionId);
     } else if (historyChanged && activeVersionId !== null) {
       staleCounts.current.add(activeVersionId);
@@ -237,12 +236,20 @@ export function VersionsPage(props: {
         // own capture, then still reach every row.
         const order = countOrder.current;
         const start: number = last === null ? 0 : order.indexOf(last) + 1;
-        const versionId: string | undefined = [...order.slice(start), ...order.slice(0, start)].find((id) => staleCounts.current.has(id));
+        const versionId: string | undefined = [
+          ...order.slice(start),
+          ...order.slice(0, start),
+        ].find((id) => staleCounts.current.has(id));
         if (versionId === undefined) break;
         staleCounts.current.delete(versionId);
         let count: Count;
         try {
-          count = (await withDeadline(bridge().countWorkspaceVersionChanges({ workspaceId, versionId }), "countWorkspaceVersionChanges")).count;
+          count = (
+            await withDeadline(
+              bridge().countWorkspaceVersionChanges({ workspaceId, versionId }),
+              "countWorkspaceVersionChanges",
+            )
+          ).count;
         } catch (error) {
           countErrors.current.set(versionId, error);
           count = "failed";
@@ -287,12 +294,22 @@ export function VersionsPage(props: {
     if (versionIds === null) return;
     const token = conflictReads.next();
     notice.started("conflicts");
-    void withDeadline(bridge().countWorkspaceVersionConflicts({ workspaceId }), "countWorkspaceVersionConflicts").then(
+    void withDeadline(
+      bridge().countWorkspaceVersionConflicts({ workspaceId }),
+      "countWorkspaceVersionConflicts",
+    ).then(
       (result) => {
         if (!conflictReads.isCurrent(token)) return;
         notice.worked("conflicts");
         // When the count stopped before the list did, every count is a lower bound.
-        setConflictCounts(new Map(result.versions.map(({ versionId, count }) => [versionId, { count, more: result.more }])));
+        setConflictCounts(
+          new Map(
+            result.versions.map(({ versionId, count }) => [
+              versionId,
+              { count, more: result.more },
+            ]),
+          ),
+        );
       },
       (error: unknown) => {
         if (conflictReads.isCurrent(token)) notice.failed("conflicts", error);
@@ -322,12 +339,18 @@ export function VersionsPage(props: {
 
   let body: ReactNode;
   if (!ready) {
-    body = versions.loadFailed
-      ? <RetryRow testId="versions-page-retry" onRetry={versions.reload} />
-      : <SkeletonRows layout="list" label="Loading versions..." />;
+    body = versions.loadFailed ? (
+      <RetryRow testId="versions-page-retry" onRetry={versions.reload} />
+    ) : (
+      <SkeletonRows layout="list" label="Loading versions..." />
+    );
   } else if (onlyMain) {
     body = (
-      <EmptyState picture={EMPTY_ART.versions} data-testid="versions-page-empty" title="Make a version to try changes without touching Main.">
+      <EmptyState
+        picture={EMPTY_ART.versions}
+        data-testid="versions-page-empty"
+        title="Make a version to try changes without touching Main."
+      >
         {newVersion}
       </EmptyState>
     );
@@ -335,13 +358,21 @@ export function VersionsPage(props: {
     const names = new Map(snapshot.versions.map((version) => [version.id, version.name]));
     body = (
       // Row fills hang outside the column's edge, so the text starts on it.
-      <ul aria-label="Versions" data-testid="versions-page-list" className="-mx-2 m-0 list-none p-0">
+      <ul
+        aria-label="Versions"
+        data-testid="versions-page-list"
+        className="-mx-2 m-0 list-none p-0"
+      >
         {ordered.map((version) => (
           <VersionRow
             key={version.id}
             version={version}
             active={version.id === snapshot.activeVersionId}
-            madeFrom={version.madeFromVersionId === undefined ? undefined : names.get(version.madeFromVersionId)}
+            madeFrom={
+              version.madeFromVersionId === undefined
+                ? undefined
+                : names.get(version.madeFromVersionId)
+            }
             lastChange={lastChanges.get(version.id) ?? null}
             lastChangesFailed={lastChangesFailed}
             count={counts.get(version.id)}
@@ -364,7 +395,10 @@ export function VersionsPage(props: {
   }
 
   return (
-    <div data-testid="versions-page" className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable]">
+    <div
+      data-testid="versions-page"
+      className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg [scrollbar-gutter:stable]"
+    >
       {/* The document column, so the page lines up with the editor's text. */}
       <div className="mx-auto flex w-full max-w-[calc(720px+2*var(--dohc-editor-gutter))] flex-1 flex-col px-[var(--dohc-editor-gutter)] pb-6">
         <header className="flex shrink-0 items-start justify-between gap-4 pb-4 pt-10">
@@ -436,12 +470,18 @@ function VersionRow(props: {
     const parent = props.madeFrom ?? "Main";
     // With no change of its own, when it was made is its only time. Unread,
     // the made time alone would claim it has none.
-    parts.push(["made", lastChange === null && !props.lastChangesFailed ? `Made from ${parent} ${relativeTime(version.createdAtMs)}` : `Made from ${parent}`]);
+    parts.push([
+      "made",
+      lastChange === null && !props.lastChangesFailed
+        ? `Made from ${parent} ${relativeTime(version.createdAtMs)}`
+        : `Made from ${parent}`,
+    ]);
     if (props.count === "failed") {
       parts.push([
         "count-retry",
         // As tall as the details line, so the row keeps its height while the
         // count fails. Its ring sits inside, where the line doesn't clip it.
+        // oxlint-disable-next-line react/jsx-key -- the pair's key is applied where the pairs are rendered
         <button
           type="button"
           data-testid="versions-page-count-retry"
@@ -455,7 +495,11 @@ function VersionRow(props: {
         </button>,
       ]);
     } else if (props.count !== undefined) {
-      parts.push(["count", <span data-testid="versions-page-count">{filesDiffer(props.count)}</span>]);
+      parts.push([
+        "count",
+        // oxlint-disable-next-line react/jsx-key -- the pair's key is applied where the pairs are rendered
+        <span data-testid="versions-page-count">{filesDiffer(props.count)}</span>,
+      ]);
     }
   }
   if (lastChange !== null) {
@@ -466,7 +510,8 @@ function VersionRow(props: {
   }
   // A merge from this version left files to decide: the row says so first
   // and offers the decision in place of another merge.
-  const toDecide = props.conflicts !== undefined && props.conflicts.count > 0 ? props.conflicts : null;
+  const toDecide =
+    props.conflicts !== undefined && props.conflicts.count > 0 ? props.conflicts : null;
 
   return (
     <li
@@ -482,27 +527,54 @@ function VersionRow(props: {
         {props.active ? <Check size={14} aria-hidden className="text-accent" /> : null}
       </span>
       <span className="flex h-5 w-1.5 shrink-0 items-center self-start">
-        {isMain ? null : <span aria-hidden className={`size-1.5 rounded-full ${versionDotClass(version.id)}`} />}
+        {isMain ? null : (
+          <span aria-hidden className={`size-1.5 rounded-full ${versionDotClass(version.id)}`} />
+        )}
       </span>
       <div className="min-w-0 flex-1">
         {/* The name gives way before Current does. */}
         <div className="flex min-w-0 items-baseline gap-2">
-          <div id={nameId} data-testid="versions-page-name" className="truncate text-[13px] font-medium leading-5 text-ink">{version.name}</div>
+          <div
+            id={nameId}
+            data-testid="versions-page-name"
+            className="truncate text-[13px] font-medium leading-5 text-ink"
+          >
+            {version.name}
+          </div>
           {/* aria-current on the row already says it. */}
-          {props.active ? <span aria-hidden data-testid="versions-page-current" className="shrink-0 text-[12px] leading-5 text-muted">Current</span> : null}
+          {props.active ? (
+            <span
+              aria-hidden
+              data-testid="versions-page-current"
+              className="shrink-0 text-[12px] leading-5 text-muted"
+            >
+              Current
+            </span>
+          ) : null}
         </div>
         {/* One line that cuts off before the row's actions on a narrow tab,
             after the count to decide, which it never cuts. */}
-        <div data-testid="versions-page-details" className="flex min-h-4 text-[12px] leading-4 text-muted">
+        <div
+          data-testid="versions-page-details"
+          className="flex min-h-4 text-[12px] leading-4 text-muted"
+        >
           {toDecide ? (
-            <span data-testid="versions-page-conflicts" className="shrink-0 whitespace-nowrap text-warning">
-              {toDecide.count}{toDecide.more ? "+" : ""} to decide
+            <span
+              data-testid="versions-page-conflicts"
+              className="shrink-0 whitespace-nowrap text-warning"
+            >
+              {toDecide.count}
+              {toDecide.more ? "+" : ""} to decide
             </span>
           ) : null}
           <span className="min-w-0 truncate">
             {parts.map(([key, part], index) => (
               <span key={key}>
-                {index > 0 || toDecide ? <span aria-hidden className="whitespace-pre">{" · "}</span> : null}
+                {index > 0 || toDecide ? (
+                  <span aria-hidden className="whitespace-pre">
+                    {" · "}
+                  </span>
+                ) : null}
                 {part}
               </span>
             ))}
@@ -513,19 +585,34 @@ function VersionRow(props: {
         {/* Shown on hover and while keyboard focus is on one of them, and always
             on the version you're in. A click on the row's text focuses the row,
             which doesn't hold them open. */}
-        <div className={`flex items-center gap-2 ${props.active ? "" : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"}`}>
+        <div
+          className={`flex items-center gap-2 ${props.active ? "" : "opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"}`}
+        >
           {props.active ? null : (
-            <SecondaryButton size="row" data-testid="versions-page-switch" {...rowAction(props.onSwitch)}>
+            <SecondaryButton
+              size="row"
+              data-testid="versions-page-switch"
+              {...rowAction(props.onSwitch)}
+            >
               Switch
             </SecondaryButton>
           )}
           {isMain ? null : (
-            <SecondaryButton size="row" data-testid="versions-page-compare" aria-describedby={nameId} onClick={props.onCompare}>
+            <SecondaryButton
+              size="row"
+              data-testid="versions-page-compare"
+              aria-describedby={nameId}
+              onClick={props.onCompare}
+            >
               Compare
             </SecondaryButton>
           )}
           {isMain || toDecide || !version.canMergeIntoMain ? null : (
-            <SecondaryButton size="row" data-testid="versions-page-merge" {...rowAction(props.onMerge)}>
+            <SecondaryButton
+              size="row"
+              data-testid="versions-page-merge"
+              {...rowAction(props.onMerge)}
+            >
               Merge into Main
             </SecondaryButton>
           )}
@@ -534,7 +621,12 @@ function VersionRow(props: {
             notice opens, which lists every open conflict, not only this
             version's. */}
         {toDecide ? (
-          <SecondaryButton size="row" data-testid="versions-page-decide" aria-describedby={nameId} onClick={props.onReviewConflicts}>
+          <SecondaryButton
+            size="row"
+            data-testid="versions-page-decide"
+            aria-describedby={nameId}
+            onClick={props.onReviewConflicts}
+          >
             Decide what to keep
           </SecondaryButton>
         ) : null}

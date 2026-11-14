@@ -1,5 +1,9 @@
 import { useEffect, useLayoutEffect, useReducer, useRef } from "react";
-import type { DirectWriteRow, PushShareDirectWritesResult, ShareDirectWriteAnswerDelivery } from "../../ipc/bridgeContract";
+import type {
+  DirectWriteRow,
+  PushShareDirectWritesResult,
+  ShareDirectWriteAnswerDelivery,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
 export type DirectWriteNoticeKind =
@@ -16,7 +20,6 @@ export interface DirectWriteNotice {
   kind: DirectWriteNoticeKind;
   message: string;
   retry: (() => void) | null;
-  // Sends the waiting changes for the owner to review.
   send: { label: string; run: () => void } | null;
 }
 
@@ -70,36 +73,49 @@ export function useShareDirectWrites(input: {
       }
     };
 
-    const report = async (result: PushShareDirectWritesResult, delivery?: ShareDirectWriteAnswerDelivery): Promise<void> => {
+    const report = async (
+      result: PushShareDirectWritesResult,
+      delivery?: ShareDirectWriteAnswerDelivery,
+    ): Promise<void> => {
       if (!isCurrent() || !latest.current.ready) return;
       const { ownerName, refreshShareView, sendShareChanges } = latest.current;
       const notices: DirectWriteNotice[] = [];
-      const showNotice = (notice: DirectWriteNotice) => { notices.push(notice); };
+      const showNotice = (notice: DirectWriteNotice) => {
+        notices.push(notice);
+      };
       let refresh = false;
       try {
         const reportAccess = (access: ShareViewRefresh): boolean => {
           if (!isCurrent() || (access !== "ended" && access !== "changed")) return false;
           showNotice({
             kind: "direct-write-unavailable",
-            message: access === "ended"
-              ? `Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask ${ownerName} to share it again.`
-              : `Your access to this share changed. Your unsent Collection changes stay in this workspace. Ask ${ownerName} for Edit access, then reopen the share.`,
+            message:
+              access === "ended"
+                ? `Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask ${ownerName} to share it again.`
+                : `Your access to this share changed. Your unsent Collection changes stay in this workspace. Ask ${ownerName} for Edit access, then reopen the share.`,
             retry: null,
             send: null,
           });
           return true;
         };
-        const needsCheck = result.status === "unavailable" || result.status === "failed" ||
-          result.writes.some(write => write.result === "refused");
+        const needsCheck =
+          result.status === "unavailable" ||
+          result.status === "failed" ||
+          result.writes.some((write) => write.result === "refused");
         if (needsCheck) {
-          const access = await latest.current.checkShareAccess().catch((): ShareViewRefresh => "stale");
+          const access = await latest.current
+            .checkShareAccess()
+            .catch((): ShareViewRefresh => "stale");
           if (!isCurrent() || reportAccess(access)) return;
         }
-        const sendAsProposal = { label: "Send as proposal", run: () => {
-          if (!isCurrent()) return;
-          if (!latest.current.enabled) void report({ status: "unavailable" });
-          else void sendShareChanges();
-        } };
+        const sendAsProposal = {
+          label: "Send as proposal",
+          run: () => {
+            if (!isCurrent()) return;
+            if (!latest.current.enabled) void report({ status: "unavailable" });
+            else void sendShareChanges();
+          },
+        };
         if (needsCheck && (result.status === "unavailable" || !latest.current.enabled)) {
           // Any 404 on the way to the relay reads as unavailable, so only the
           // access check can say the share ended. It then shows it ended.
@@ -113,7 +129,8 @@ export function useShareDirectWrites(input: {
         }
         const stale = result.writes.filter((write) => write.result === "stale");
         const refused = result.writes.filter(
-          (write): write is Extract<DirectWriteRow, { result: "refused" }> => write.result === "refused",
+          (write): write is Extract<DirectWriteRow, { result: "refused" }> =>
+            write.result === "refused",
         );
         if (stale.length > 0) {
           // Bring in the owner's version, so the person sees what changed.
@@ -121,7 +138,8 @@ export function useShareDirectWrites(input: {
           const draft = stale.length === 1 ? stale[0]!.recoveredDraftPath : null;
           showNotice({
             kind: "direct-write-stale",
-            message: draft ? `${writeLabel(stale[0]!)} is taken. Your text draft is kept in ${draft} on this computer. Use New record to create another record.`
+            message: draft
+              ? `${writeLabel(stale[0]!)} is taken. Your text draft is kept in ${draft} on this computer. Use New record to create another record.`
               : `${writesLabel(stale)} changed before your change reached ${ownerName}. Check the new version, or send yours as a proposal.`,
             retry: draft ? null : () => void push(),
             send: sendAsProposal,
@@ -139,19 +157,21 @@ export function useShareDirectWrites(input: {
           });
         }
         if (result.status !== "failed") return;
-        showNotice(lasting
-          ? {
-              kind: "direct-write-refused",
-              message: `${refusal ? `${refusal} ` : ""}${ownerName}'s share doesn't take your Collection changes directly. Send them as a proposal.`,
-              retry: () => void push(),
-              send: sendAsProposal,
-            }
-          : {
-              kind: "direct-write-failed",
-              message: `dohc could not send your Collection changes to ${ownerName}.${result.errorMessage ? ` ${result.errorMessage}` : ""}`,
-              retry: () => void push(),
-              send: null,
-            });
+        showNotice(
+          lasting
+            ? {
+                kind: "direct-write-refused",
+                message: `${refusal ? `${refusal} ` : ""}${ownerName}'s share doesn't take your Collection changes directly. Send them as a proposal.`,
+                retry: () => void push(),
+                send: sendAsProposal,
+              }
+            : {
+                kind: "direct-write-failed",
+                message: `dohc could not send your Collection changes to ${ownerName}.${result.errorMessage ? ` ${result.errorMessage}` : ""}`,
+                retry: () => void push(),
+                send: null,
+              },
+        );
       } finally {
         if (notices.length && isCurrent() && latest.current.ready) {
           const claimed = delivery ? await delivery.claim() : true;
@@ -175,7 +195,8 @@ export function useShareDirectWrites(input: {
     const unsubscribe = bridge().onShareDirectWritesPushed((event, delivery) => {
       if (event.workspaceId !== workspaceId || inFlight.has(event.answerId)) return;
       inFlight.add(event.answerId);
-      void report(event.result, delivery).catch(error => console.error("[desktop] direct-write feedback failed:", error))
+      void report(event.result, delivery)
+        .catch((error) => console.error("[desktop] direct-write feedback failed:", error))
         .finally(() => inFlight.delete(event.answerId));
     }, workspaceId);
     return () => {
@@ -194,15 +215,18 @@ export function useShareDirectWrites(input: {
     // A committed Notice is shown even if readiness or workspace changed.
     // Acknowledge before passive subscription cleanup can release its claim.
     for (const delivery of acknowledgments.current.splice(0)) {
-      void delivery.acknowledge()
-        .catch(error => console.error("[desktop] direct-write acknowledgment failed:", error));
+      void delivery
+        .acknowledge()
+        .catch((error) => console.error("[desktop] direct-write acknowledgment failed:", error));
     }
   }, [shownRevision]);
 }
 
 // Why the relay refused: its reason alone, which already starts with the
 // file's path, or the file when the relay gave no reason.
-function refusalSentence(refused: ReadonlyArray<Extract<DirectWriteRow, { result: "refused" }>>): string {
+function refusalSentence(
+  refused: ReadonlyArray<Extract<DirectWriteRow, { result: "refused" }>>,
+): string {
   const reason = refused[0]!.reason.trim().replace(/[.\s]+$/u, "");
   const changes = refused.length === 1 ? "your change" : `${refused.length} of your changes`;
   return reason

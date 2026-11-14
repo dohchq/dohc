@@ -16,7 +16,6 @@ export interface ComposerPollDraft {
   open: boolean;
 }
 
-// The choices of an open poll, the ones Send asks; null when it is closed.
 export function openPollChoices(poll: ComposerPollDraft | null | undefined): PollDraft | null {
   return poll?.open ? poll.choices : null;
 }
@@ -27,7 +26,6 @@ export function trimChoice(choice: string): string {
   return choice.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
 }
 
-// The indexes of choices that repeat an earlier one once trimmed.
 export function repeatedPollChoices(choices: PollDraft): ReadonlySet<number> {
   const seen = new Set<string>();
   const repeated = new Set<number>();
@@ -45,14 +43,18 @@ export function repeatedPollChoices(choices: PollDraft): ReadonlySet<number> {
 export function pollChoicesToSend(choices: PollDraft): string[] | null {
   const trimmed = choices.map(trimChoice).filter((choice) => choice.length > 0);
   if (trimmed.length < 2 || trimmed.length > MAX_POLL_CHOICES) return null;
-  if (trimmed.some((choice) => choice.length > MAX_POLL_CHOICE_LENGTH || /[\r\n]/u.test(choice))) return null;
+  if (trimmed.some((choice) => choice.length > MAX_POLL_CHOICE_LENGTH || /[\r\n]/u.test(choice)))
+    return null;
   return new Set(trimmed).size === trimmed.length ? trimmed : null;
 }
 
 // The / catalog's query: a / at the start of a word, then letters, with the
 // word ending at the caret. So `https://`, `a/b`, a / inside a mention, and
 // the start of a path such as `/poll/results.md` never open it.
-export function activeCatalogQuery(value: string, caret: number): { start: number; query: string } | null {
+export function activeCatalogQuery(
+  value: string,
+  caret: number,
+): { start: number; query: string } | null {
   const end = Math.max(0, Math.min(caret, value.length));
   if (end < value.length && !/\s/u.test(value[end]!)) return null;
   const before = value.slice(0, end);

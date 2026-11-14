@@ -29,7 +29,12 @@ export function reachName(path: string): string {
 }
 
 /** A conversation that does not exist yet: no run and no pause. */
-export const NEW_CONVERSATION: ChatDispatchStateForThreadResult = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
+export const NEW_CONVERSATION: ChatDispatchStateForThreadResult = {
+  liveRunId: null,
+  liveTriggerMessageId: null,
+  pendingCount: 0,
+  paused: false,
+};
 
 // The roster pick a composer reports, held beside that composer's draft, and
 // the offer it makes with facts already read. A pick belongs to the
@@ -45,10 +50,16 @@ export function useAgentOffer(input: {
 }) {
   const { workspaceId, scope, setup, dispatch, reach } = input;
   const [pick, setPick] = useState<{ scope: string; agent: MentionCandidate } | null>(null);
-  const onRosterPick = useCallback((next: AgentRosterPick | null) => setPick((current) => {
-    if (!next) return current?.scope === scope ? null : current;
-    return current?.scope === scope && current.agent === next.candidate ? current : { scope, agent: next.candidate };
-  }), [scope]);
+  const onRosterPick = useCallback(
+    (next: AgentRosterPick | null) =>
+      setPick((current) => {
+        if (!next) return current?.scope === scope ? null : current;
+        return current?.scope === scope && current.agent === next.candidate
+          ? current
+          : { scope, agent: next.candidate };
+      }),
+    [scope],
+  );
   const agent = pick?.scope === scope ? pick.agent : null;
   const offer = useMemo(() => {
     // A personal agent reads its mentions through the server, so sending starts no run here.
@@ -80,7 +91,12 @@ export const AgentOffer = memo(function AgentOffer(props: { offer: AgentAddresse
       className="dohc-pop-in @container flex min-w-0 flex-1 items-center gap-1.5 px-1.5 text-[11px] tabular-nums text-muted"
     >
       <span className="relative inline-grid shrink-0">
-        <ChatAvatar name={offer.agent.label} kind="agent" presentation={offer.presentation} size="strip" />
+        <ChatAvatar
+          name={offer.agent.label}
+          kind="agent"
+          presentation={offer.presentation}
+          size="strip"
+        />
         {offer.working || offer.state === "runs" ? (
           <span
             aria-hidden
@@ -91,17 +107,30 @@ export const AgentOffer = memo(function AgentOffer(props: { offer: AgentAddresse
           />
         ) : null}
       </span>
-      <span className="sr-only">{offer.agent.label}{offer.working ? ", agent working" : ""}</span>
-      {words ? <span data-testid="composer-agent-offer-words" className="min-w-0 truncate" title={words}>{words}</span> : null}
+      <span className="sr-only">
+        {offer.agent.label}
+        {offer.working ? ", agent working" : ""}
+      </span>
+      {words ? (
+        <span data-testid="composer-agent-offer-words" className="min-w-0 truncate" title={words}>
+          {words}
+        </span>
+      ) : null}
       {offer.state === "unknown" && offer.reach ? (
         // Alone, the folder needs its verb.
-        <span data-testid="composer-agent-offer-reach" className="min-w-0 truncate" title={`Reaches ${offer.reach}`}>
+        <span
+          data-testid="composer-agent-offer-reach"
+          className="min-w-0 truncate"
+          title={`Reaches ${offer.reach}`}
+        >
           Reaches {reachName(offer.reach)}
         </span>
       ) : null}
       {hideFolder && offer.reach ? (
         <>
-          <span aria-hidden className={`shrink-0 text-subtle ${hideFolder}`}>·</span>
+          <span aria-hidden className={`shrink-0 text-subtle ${hideFolder}`}>
+            ·
+          </span>
           <span
             data-testid="composer-agent-offer-reach"
             title={`Reaches ${offer.reach}`}

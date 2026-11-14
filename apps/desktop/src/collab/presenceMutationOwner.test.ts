@@ -3,7 +3,6 @@ import { PresenceMutationOwner } from "./presenceMutationOwner";
 import {
   RendererWorkspaceOpenSupersededError,
   RendererWorkspaceSessionOwner,
-  type RendererWorkspaceSession,
 } from "../window/rendererWorkspaceSessionOwner";
 
 import { deferred } from "../testing/deferred";
@@ -67,11 +66,7 @@ describe("PresenceMutationOwner", () => {
       resolve: async () => ({ publish, leave }),
     });
     await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
-    const replacementOpen = sessions.open(
-      webContents,
-      physical("workspace-b"),
-      "document-1",
-    );
+    const replacementOpen = sessions.open(webContents, physical("workspace-b"), "document-1");
 
     expect(first.isCurrent()).toBe(false);
     publishDrain.resolve();
@@ -102,11 +97,7 @@ describe("PresenceMutationOwner", () => {
       await publishDrain.promise;
       return "old-snapshot";
     });
-    const oldResult = presence.publish(
-      first,
-      "workspace-a/share-1/topic/me",
-      OLD_INCARNATION,
-      {
+    const oldResult = presence.publish(first, "workspace-a/share-1/topic/me", OLD_INCARNATION, {
       resolve: async () => {
         const exactSource = source;
         return {
@@ -114,8 +105,7 @@ describe("PresenceMutationOwner", () => {
           leave: () => exactSource.leave(),
         };
       },
-      },
-    );
+    });
     await vi.waitFor(() => expect(exactPublish).toHaveBeenCalledOnce());
     source = { leave: changedSourceLeave };
 
@@ -123,11 +113,7 @@ describe("PresenceMutationOwner", () => {
     const staleOpen = sessions
       .open(webContents, physical("workspace-a"), "document-1")
       .catch((error: unknown) => error);
-    const replacementOpen = sessions.open(
-      webContents,
-      physical("workspace-a"),
-      "document-2",
-    );
+    const replacementOpen = sessions.open(webContents, physical("workspace-a"), "document-2");
     publishDrain.resolve();
     await expect(oldResult).resolves.toBeUndefined();
     await vi.waitFor(() => expect(oldLeave).toHaveBeenCalledOnce());
@@ -179,12 +165,7 @@ describe("PresenceMutationOwner", () => {
         leave,
       }),
     });
-    const leaving = presence.leave(
-      active,
-      "key",
-      OLD_INCARNATION,
-      async () => leave,
-    );
+    const leaving = presence.leave(active, "key", OLD_INCARNATION, async () => leave);
     await vi.waitFor(() => expect(order).toEqual(["publish-start"]));
     expect(leave).not.toHaveBeenCalled();
 
@@ -211,24 +192,14 @@ describe("PresenceMutationOwner", () => {
       }),
     });
     await vi.waitFor(() => expect(runOldPublish).toHaveBeenCalledOnce());
-    const staleLeave = presence.leave(
-      active,
-      "same-key",
-      OLD_INCARNATION,
-      async () => oldLeave,
-    );
+    const staleLeave = presence.leave(active, "same-key", OLD_INCARNATION, async () => oldLeave);
     const newLeave = vi.fn(async () => undefined);
-    const replacement = presence.publish(
-      active,
-      "same-key",
-      NEW_INCARNATION,
-      {
-        resolve: async () => ({
-          publish: async () => "new",
-          leave: newLeave,
-        }),
-      },
-    );
+    const replacement = presence.publish(active, "same-key", NEW_INCARNATION, {
+      resolve: async () => ({
+        publish: async () => "new",
+        leave: newLeave,
+      }),
+    });
 
     oldPublishDrain.resolve();
     await expect(oldPublish).resolves.toBeUndefined();
@@ -250,11 +221,7 @@ describe("PresenceMutationOwner", () => {
     });
     const sessions = sessionOwner(presence);
     const oldSender = sender(7);
-    const oldSession = await sessions.open(
-      oldSender,
-      physical("workspace-a"),
-      "document-1",
-    );
+    const oldSession = await sessions.open(oldSender, physical("workspace-a"), "document-1");
     const retryDrain = deferred();
     const oldLeave = vi
       .fn<() => Promise<void>>()
@@ -269,16 +236,8 @@ describe("PresenceMutationOwner", () => {
     await sessions.retireForReload(oldSender, "document-1");
     expect(oldLeave).toHaveBeenCalledOnce();
 
-    const firstSuccessor = await sessions.open(
-      sender(8),
-      physical("workspace-b"),
-      "document-2",
-    );
-    const secondSuccessor = await sessions.open(
-      sender(9),
-      physical("workspace-b"),
-      "document-3",
-    );
+    const firstSuccessor = await sessions.open(sender(8), physical("workspace-b"), "document-2");
+    const secondSuccessor = await sessions.open(sender(9), physical("workspace-b"), "document-3");
     const firstPublish = vi.fn(async () => "first");
     const secondPublish = vi.fn(async () => "second");
     const first = presence.publish(firstSuccessor, "same-key", NEW_INCARNATION, {
@@ -302,11 +261,7 @@ describe("PresenceMutationOwner", () => {
     // its expiry. It must not delete the in-flight obligation and let a later
     // same-key successor cross the stale leave.
     expire();
-    const thirdSuccessor = await sessions.open(
-      sender(10),
-      physical("workspace-b"),
-      "document-4",
-    );
+    const thirdSuccessor = await sessions.open(sender(10), physical("workspace-b"), "document-4");
     const thirdPublish = vi.fn(async () => "third");
     const third = presence.publish(thirdSuccessor, "same-key", NEW_INCARNATION, {
       resolve: async () => ({
@@ -338,11 +293,7 @@ describe("PresenceMutationOwner", () => {
     });
     const sessions = sessionOwner(presence);
     const oldSender = sender(7);
-    const oldSession = await sessions.open(
-      oldSender,
-      physical("workspace-a"),
-      "document-1",
-    );
+    const oldSession = await sessions.open(oldSender, physical("workspace-a"), "document-1");
     const oldLeave = vi.fn(async () => {
       throw new Error("relay unavailable");
     });
@@ -356,11 +307,7 @@ describe("PresenceMutationOwner", () => {
     expect(oldLeave).toHaveBeenCalledOnce();
 
     expire();
-    const successor = await sessions.open(
-      sender(8),
-      physical("workspace-a"),
-      "document-2",
-    );
+    const successor = await sessions.open(sender(8), physical("workspace-a"), "document-2");
     await expect(
       presence.publish(successor, "old-client-key", NEW_INCARNATION, {
         resolve: async () => ({

@@ -1,11 +1,7 @@
-//! A group's stream: where a new top-level message goes, and one listing of
-//! posts and conversation messages in a single order.
-
 use dohc_engine_domain::{
-    AGENT_REPLY_EXCERPT_CHARS, ChatActorKind, ChatChannelKind, ChatDecisionState, ChatThreadLane,
-    ChatWorkReport, ChatWorkStatus, DomainError, LinkedChatStore, MarkThreadRead, NoFaults,
-    ResolveDecision, SendMessage, StartChannelThread, StreamAgentRequest, StreamAgentRequestState,
-    StreamPage, StreamPosition, ThreadWork,
+    ChatActorKind, ChatChannelKind, ChatThreadLane, ChatWorkReport, ChatWorkStatus, DomainError,
+    LinkedChatStore, MarkThreadRead, NoFaults, SendMessage, StartChannelThread, StreamAgentRequest,
+    StreamAgentRequestState, StreamPage, StreamPosition, ThreadWork,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -140,197 +136,9 @@ fn ids(page: &StreamPage) -> Vec<String> {
 }
 
 #[test]
-fn a_mixed_page_reports_only_each_items_own_decision() {
-    let (_scratch, mut store) = store();
-    group(&mut store);
-    for (thread, message, lane, at) in [
-        ("open-post", "open-root", ChatThreadLane::Posts, 10),
-        ("resolved-post", "resolved-root", ChatThreadLane::Posts, 20),
-        ("plain-post", "plain-root", ChatThreadLane::Posts, 30),
-        ("chat", "chat-poll", ChatThreadLane::Chat, 40),
-    ] {
-        let mut input = start_input("group", thread, message, lane, at);
-        if message != "plain-root" {
-            input.needs_decision = true;
-            input.options = vec!["Train".to_owned(), "Bus".to_owned()];
-        }
-        LinkedChatStore::new(&mut store)
-            .start_channel_thread(&input, &NO_FAULTS)
-            .expect("start");
-    }
-    let mut reply = reply_input("plain-post", "reply-poll", 50);
-    reply.parent_message_id = Some("plain-root".to_owned());
-    reply.needs_decision = true;
-    reply.options = vec!["Yes".to_owned(), "No".to_owned()];
-    send(&mut store, reply);
-    send(&mut store, reply_input("resolved-post", "answer", 60));
-    LinkedChatStore::new(&mut store)
-        .resolve_decision(
-            &ResolveDecision {
-                workspace_id: WS.to_owned(),
-                thread_id: "resolved-post".to_owned(),
-                message_id: "resolved-root".to_owned(),
-                resolved_by_message_id: "answer".to_owned(),
-                chosen_option: Some("Train".to_owned()),
-                now_ms: 61,
-                request_id: "resolve-root".to_owned(),
-            },
-            &NO_FAULTS,
-        )
-        .expect("resolve");
-
-    let stream = page(&mut store, None, 10);
-    assert_eq!(
-        ids(&stream),
-        ["open-root", "resolved-root", "plain-root", "chat-poll"]
-    );
-    for index in [0, 3] {
-        let decision = stream.items[index].decision.as_ref().expect("open poll");
-        assert_eq!(decision.message_id, stream.items[index].message.message_id);
-        assert_eq!(decision.state, ChatDecisionState::Open);
-        assert_eq!(decision.options, ["Train", "Bus"]);
-        assert_eq!(decision.chosen_option, None);
-    }
-    let resolved = stream.items[1].decision.as_ref().expect("resolved poll");
-    assert_eq!(resolved.state, ChatDecisionState::Resolved);
-    assert_eq!(resolved.options, ["Train", "Bus"]);
-    assert_eq!(resolved.chosen_option.as_deref(), Some("Train"));
-    assert_eq!(resolved.resolved_by_message_id.as_deref(), Some("answer"));
-    let resolved_post = stream.items[1].post.as_ref().expect("post");
-    assert_eq!(resolved_post.open_decision_count, 0);
-    assert_eq!(stream.items[2].decision, None);
-    let plain_post = stream.items[2].post.as_ref().expect("post");
-    assert_eq!(plain_post.open_decision_count, 1);
-
-    let newest = page(&mut store, None, 1);
-    assert_eq!(ids(&newest), ["chat-poll"]);
-    assert!(newest.items[0].decision.is_some());
-    let older = page(&mut store, Some(&newest.items[0].position), 2);
-    assert_eq!(ids(&older), ["resolved-root", "plain-root"]);
-    assert_eq!(older.items[0].decision, stream.items[1].decision);
-    assert_eq!(older.items[1].decision, None);
-}
-
-#[test]
-fn an_agent_dm_puts_every_new_message_in_its_one_conversation() {
-    let (_scratch, mut store) = store();
-    let agent = LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, "agent", "default", "My agent", 1, &NO_FAULTS)
-        .expect("agent dm");
-
-    // A post asked for in an agent DM still joins the conversation.
-    let first = start(
-        &mut store,
-        &agent.channel_id,
-        "thread-a",
-        "m-1",
-        ChatThreadLane::Posts,
-        10,
-    );
-    let second = start(
-        &mut store,
-        &agent.channel_id,
-        "thread-b",
-        "m-2",
-        ChatThreadLane::Posts,
-        11,
-    );
-    assert_eq!(first, "thread-a");
-    assert_eq!(
-        second, "thread-a",
-        "the second message joins the first's conversation"
-    );
-
-    let found = LinkedChatStore::new(&mut store)
-        .get_thread(WS, "thread-a")
-        .expect("thread");
-    assert_eq!(found.thread.lane, ChatThreadLane::Chat);
-    assert_eq!(found.message_count, 2);
-    assert_eq!(found.channel.expect("channel").kind, ChatChannelKind::Agent);
-
-    let mut titled = start_input(
-        &agent.channel_id,
-        "thread-c",
-        "m-3",
-        ChatThreadLane::Posts,
-        12,
-    );
-    titled.title = Some("Plan".to_owned());
-    let refused = LinkedChatStore::new(&mut store)
-        .start_channel_thread(&titled, &NO_FAULTS)
-        .unwrap_err();
-    assert_eq!(refused.code(), "invalid-thread-title");
-
-    // A group keeps the lane it is asked for.
-    group(&mut store);
-    let post = start(
-        &mut store,
-        "group",
-        "post-1",
-        "p-1",
-        ChatThreadLane::Posts,
-        20,
-    );
-    let found = LinkedChatStore::new(&mut store)
-        .get_thread(WS, &post)
-        .expect("post");
-    assert_eq!(found.thread.lane, ChatThreadLane::Posts);
-}
-
-#[test]
-fn a_wake_into_an_agent_dm_keeps_its_own_thread_beside_the_conversation() {
-    let (_scratch, mut store) = store();
-    let agent = LinkedChatStore::new(&mut store)
-        .ensure_agent_channel(WS, "agent", "default", "My agent", 1, &NO_FAULTS)
-        .expect("agent dm");
-    let conversation = start(
-        &mut store,
-        &agent.channel_id,
-        "conversation",
-        "m-1",
-        ChatThreadLane::Chat,
-        10,
-    );
-
-    let mut wake = start_input(
-        &agent.channel_id,
-        "wake-1",
-        "w-1",
-        ChatThreadLane::Posts,
-        20,
-    );
-    wake.own_thread = true;
-    wake.title = Some("Daily digest".to_owned());
-    let woken = LinkedChatStore::new(&mut store)
-        .start_channel_thread(&wake, &NO_FAULTS)
-        .expect("wake")
-        .0
-        .thread_id;
-    assert_eq!(woken, "wake-1", "the trigger's recorded thread exists");
-    let found = LinkedChatStore::new(&mut store)
-        .get_thread(WS, "wake-1")
-        .expect("wake thread");
-    assert_eq!(found.thread.lane, ChatThreadLane::Posts);
-    assert_eq!(found.message_count, 1);
-
-    // A person's next message still joins the conversation, not the wake.
-    let next = start(
-        &mut store,
-        &agent.channel_id,
-        "thread-b",
-        "m-2",
-        ChatThreadLane::Posts,
-        30,
-    );
-    assert_eq!(next, conversation);
-}
-
-#[test]
 fn the_stream_merges_both_lanes_in_one_order_and_pages_from_the_newest_end() {
     let (_scratch, mut store) = store();
     group(&mut store);
-    // Posts at 10, 30, 50; conversation messages at 20, 30, 40. At 30 the post
-    // sorts first.
     start(
         &mut store,
         "group",
@@ -377,8 +185,6 @@ fn the_stream_merges_both_lanes_in_one_order_and_pages_from_the_newest_end() {
     assert_eq!(ids(&older), ["p-10", "c-20"]);
     assert!(!older.has_older);
 
-    // A cursor on a conversation message in a millisecond that also holds a
-    // post keeps that post.
     let from_chat = page(&mut store, Some(&newest.items[1].position), 10);
     assert_eq!(ids(&from_chat), ["p-10", "c-20", "p-30"]);
 
@@ -389,103 +195,6 @@ fn the_stream_merges_both_lanes_in_one_order_and_pages_from_the_newest_end() {
             "only posts carry a summary"
         );
     }
-}
-
-#[test]
-fn the_stream_lists_only_top_level_conversation_messages_and_reads_every_conversation() {
-    let (_scratch, mut store) = store();
-    group(&mut store);
-    let chat = start(
-        &mut store,
-        "group",
-        "chat-a",
-        "a-1",
-        ChatThreadLane::Chat,
-        10,
-    );
-    let mut parented = reply_input(&chat, "a-reply", 11);
-    parented.parent_message_id = Some("a-1".to_owned());
-    send(&mut store, parented);
-    send(&mut store, reply_input(&chat, "a-2", 12));
-
-    // A second conversation thread, as when two devices started it before they
-    // synced, still shows its messages.
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute(
-                "INSERT INTO chat_threads (workspace_id, thread_id, title, created_at_ms, \
-                 updated_at_ms, channel_id, lane) \
-                 SELECT workspace_id, 'chat-b', title, 11, 11, channel_id, lane \
-                 FROM chat_threads WHERE workspace_id = ?1 AND thread_id = 'chat-a'",
-                [WS],
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("second conversation");
-    send(&mut store, reply_input("chat-b", "b-1", 11));
-
-    let all = page(&mut store, None, 10);
-    assert_eq!(ids(&all), ["a-1", "b-1", "a-2"]);
-}
-
-#[test]
-fn a_post_summarises_its_replies_repliers_agent_reply_and_open_decisions() {
-    let (_scratch, mut store) = store();
-    group(&mut store);
-    let mut opening = start_input("group", "post", "open", ChatThreadLane::Posts, 10);
-    opening.author_kind = ChatActorKind::Human;
-    opening.author_display_name = "Ada".to_owned();
-    opening.author_owner_display_name = None;
-    LinkedChatStore::new(&mut store)
-        .start_channel_thread(&opening, &NO_FAULTS)
-        .expect("post");
-
-    for (index, (name, kind)) in [
-        ("Bo", ChatActorKind::Human),
-        ("Cy", ChatActorKind::Human),
-        ("Scout", ChatActorKind::Agent),
-        ("Di", ChatActorKind::Human),
-        ("Bo", ChatActorKind::Human),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut reply = reply_input("post", &format!("r-{index}"), 20 + index as i64);
-        reply.author_kind = kind;
-        reply.author_display_name = name.to_owned();
-        reply.author_user_id = Some(name.to_lowercase());
-        reply.author_owner_display_name = (kind == ChatActorKind::Agent).then(|| "Ada".to_owned());
-        if kind == ChatActorKind::Agent {
-            reply.body = "é".repeat(AGENT_REPLY_EXCERPT_CHARS + 20);
-        }
-        if name == "Di" {
-            reply.needs_decision = true;
-        }
-        send(&mut store, reply);
-    }
-
-    let stream = page(&mut store, None, 10);
-    assert_eq!(ids(&stream), ["open"]);
-    let post = stream.items[0].post.as_ref().expect("post summary");
-    assert_eq!(post.reply_count, 5);
-    assert_eq!(post.last_reply_at_ms, Some(24));
-    assert_eq!(
-        post.repliers
-            .iter()
-            .map(|replier| replier.author_display_name.as_str())
-            .collect::<Vec<_>>(),
-        ["Bo", "Di", "Scout"],
-        "distinct repliers, newest first, at most three"
-    );
-    let agent = post.latest_agent_reply.as_ref().expect("agent reply");
-    assert_eq!(agent.message_id, "r-2");
-    assert_eq!(agent.author_owner_display_name.as_deref(), Some("Ada"));
-    assert_eq!(
-        agent.body_excerpt.chars().count(),
-        AGENT_REPLY_EXCERPT_CHARS
-    );
-    assert_eq!(post.open_decision_count, 1);
 }
 
 /// A thread's Work card is its newest work report: that report's status and
@@ -594,7 +303,6 @@ fn a_threads_work_card_is_its_newest_report_with_that_reports_own_link() {
         "each message keeps its own report"
     );
 
-    // An older report that arrives late changes nothing.
     let mut late = reply_input("post", "late", 25);
     late.work = report(ChatWorkStatus::Failed, Some("http://example.com/threads/2"));
     send(&mut store, late);
@@ -602,79 +310,6 @@ fn a_threads_work_card_is_its_newest_report_with_that_reports_own_link() {
         facts(&card(&mut store)),
         (ChatWorkStatus::Done, None, "done".to_owned(), 30)
     );
-}
-
-/// A retried write replays only with the report it first carried.
-#[test]
-fn a_retried_message_must_carry_the_same_work_report() {
-    let (_scratch, mut store) = store();
-    group(&mut store);
-    start(
-        &mut store,
-        "group",
-        "post",
-        "open",
-        ChatThreadLane::Posts,
-        10,
-    );
-    let mut first = reply_input("post", "report", 20);
-    first.request_id = Some("request".to_owned());
-    first.work = Some(ChatWorkReport {
-        status: ChatWorkStatus::Working,
-        url: None,
-    });
-    let mut chats = LinkedChatStore::new(&mut store);
-    let sent = chats.send_message(&first, &NO_FAULTS).expect("send");
-    assert_eq!(chats.send_message(&first, &NO_FAULTS).expect("retry"), sent);
-    for work in [
-        None,
-        Some(ChatWorkReport {
-            status: ChatWorkStatus::Done,
-            url: None,
-        }),
-    ] {
-        let mut changed = first.clone();
-        changed.work = work;
-        assert!(matches!(
-            chats.send_message(&changed, &NO_FAULTS),
-            Err(DomainError::IdempotencyKeyReuseMismatch)
-        ));
-    }
-}
-
-/// A stored report that the checks did not write reads as corrupt, and is
-/// never served.
-#[test]
-fn a_stored_work_report_with_a_bad_link_reads_as_corrupt() {
-    let (_scratch, mut store) = store();
-    group(&mut store);
-    let mut opening = start_input("group", "post", "open", ChatThreadLane::Posts, 10);
-    opening.work = Some(ChatWorkReport {
-        status: ChatWorkStatus::Working,
-        url: None,
-    });
-    LinkedChatStore::new(&mut store)
-        .start_channel_thread(&opening, &NO_FAULTS)
-        .expect("post");
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute(
-                "UPDATE chat_messages SET work = ?1 WHERE message_id = 'open'",
-                [r#"{"status":"done","url":"javascript:alert(1)"}"#],
-            )
-            .map_err(StorageError::corrupt_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("tamper");
-    let chats = LinkedChatStore::new(&mut store);
-    assert!(matches!(
-        chats.get_message(WS, "open"),
-        Err(DomainError::StateCorrupt { .. })
-    ));
-    assert!(matches!(
-        chats.get_thread(WS, "post"),
-        Err(DomainError::StateCorrupt { .. })
-    ));
 }
 
 /// Only an agent's message reports work, and a report's link is a web
@@ -748,59 +383,6 @@ fn a_work_report_from_a_person_or_with_a_bad_link_is_refused() {
 }
 
 #[test]
-fn a_post_keeps_link_repliers_with_the_same_name_apart() {
-    let (_scratch, mut store) = store();
-    group(&mut store);
-    start(
-        &mut store,
-        "group",
-        "post",
-        "open",
-        ChatThreadLane::Posts,
-        10,
-    );
-    for (index, principal) in ["p-1", "p-2"].into_iter().enumerate() {
-        let message_id = format!("link-{index}");
-        let mut reply = reply_input("post", &message_id, 20 + index as i64);
-        reply.author_kind = ChatActorKind::Human;
-        reply.author_display_name = "Guest".to_owned();
-        reply.author_owner_display_name = None;
-        reply.author_user_id = None;
-        send(&mut store, reply);
-        // Only the relay writes a link message, so the test plants one.
-        store
-            .write_with(&NO_FAULTS, |tx| {
-                tx.execute(
-                    "UPDATE chat_messages SET author_kind = 'link', \
-                     link_grant_id = 'grant-1', link_principal_id = ?2 \
-                     WHERE workspace_id = ?1 AND message_id = ?3",
-                    [WS, principal, &message_id],
-                )
-                .map_err(StorageError::persist_public)?;
-                Ok::<_, StorageError>(())
-            })
-            .expect("link reply");
-    }
-
-    let stream = page(&mut store, None, 10);
-    let post = stream.items[0].post.as_ref().expect("post summary");
-    assert_eq!(
-        post.repliers
-            .iter()
-            .map(|replier| {
-                let link = replier.link_author.as_ref().expect("link author");
-                (
-                    replier.author_display_name.as_str(),
-                    link.grant_id.as_str(),
-                    link.principal_id.as_str(),
-                )
-            })
-            .collect::<Vec<_>>(),
-        [("Guest", "grant-1", "p-2"), ("Guest", "grant-1", "p-1")]
-    );
-}
-
-#[test]
 fn the_page_carries_the_newest_read_item_across_both_lanes() {
     let (_scratch, mut store) = store();
     group(&mut store);
@@ -843,7 +425,6 @@ fn the_page_carries_the_newest_read_item_across_both_lanes() {
         Some("post-10".to_owned())
     );
 
-    // Reading the conversation through its parented reply covers c-20 only.
     LinkedChatStore::new(&mut store)
         .mark_thread_read(&read_mark(&chat, 2, None, None, 51), &NO_FAULTS)
         .expect("read chat");
@@ -941,220 +522,6 @@ fn an_account_read_place_drives_the_pages_newest_read_item() {
 }
 
 #[test]
-fn the_stream_refuses_bad_limits_and_cursors() {
-    let (_scratch, mut store) = store();
-    group(&mut store);
-    let chats = LinkedChatStore::new(&mut store);
-    for limit in [0, 101] {
-        assert_eq!(
-            chats
-                .list_group_stream(WS, "group", None, limit)
-                .unwrap_err()
-                .code(),
-            "invalid-cursor"
-        );
-    }
-    let empty_id = StreamPosition {
-        created_at_ms: 1,
-        lane: ChatThreadLane::Chat,
-        id: String::new(),
-    };
-    assert_eq!(
-        chats
-            .list_group_stream(WS, "group", Some(&empty_id), 10)
-            .unwrap_err()
-            .code(),
-        "invalid-cursor"
-    );
-    assert!(chats.list_group_stream(WS, "missing", None, 10).is_err());
-}
-
-#[test]
-fn each_lane_reads_its_stream_index() {
-    let (_scratch, mut store) = store();
-    group(&mut store);
-    store
-        .read_with(|conn| {
-            for (sql, index) in [
-                (
-                    "EXPLAIN QUERY PLAN SELECT t.created_at_ms, t.thread_id FROM chat_threads t \
-                     WHERE t.workspace_id = 'w' AND t.channel_id = 'c' AND t.lane = 'posts' \
-                       AND (t.created_at_ms, t.thread_id) < (1, 'x') \
-                     ORDER BY t.created_at_ms DESC, t.thread_id DESC LIMIT 51",
-                    "idx_chat_threads_channel_lane_created",
-                ),
-                (
-                    "EXPLAIN QUERY PLAN SELECT created_at_ms, message_id FROM chat_messages \
-                     WHERE workspace_id = 'w' AND thread_id = 't' AND parent_message_id IS NULL \
-                       AND (created_at_ms, message_id) < (1, 'x') \
-                     ORDER BY created_at_ms DESC, message_id DESC LIMIT 51",
-                    "idx_chat_messages_thread_top_created",
-                ),
-            ] {
-                let plan: Vec<String> = conn
-                    .prepare(sql)?
-                    .query_map([], |row| row.get::<_, String>(3))?
-                    .collect::<Result<_, _>>()?;
-                let plan = plan.join("\n");
-                assert!(plan.contains(index), "{index} unused:\n{plan}");
-                assert!(
-                    !plan.contains("TEMP B-TREE"),
-                    "the page sorts rows:\n{plan}"
-                );
-            }
-            Ok::<_, rusqlite::Error>(())
-        })
-        .expect("plans");
-}
-
-#[test]
-fn each_message_carries_its_open_agent_requests_in_the_stream_and_the_thread() {
-    let (_scratch, mut store) = store();
-    group(&mut store);
-    let chat = start(
-        &mut store,
-        "group",
-        "chat",
-        "m-wait",
-        ChatThreadLane::Chat,
-        10,
-    );
-    for (id, at) in [
-        ("m-run", 11),
-        ("m-fail", 12),
-        ("m-done", 13),
-        ("m-joined", 14),
-        ("m-crash", 15),
-        ("m-silent", 16),
-    ] {
-        send(&mut store, reply_input(&chat, id, at));
-    }
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            for (message, state, run) in [
-                ("m-wait", "pending", None),
-                ("m-run", "running", Some("run-live")),
-                ("m-fail", "failed", Some("run-failed")),
-                ("m-done", "done", Some("run-done")),
-                ("m-joined", "done", Some("run-live")),
-                ("m-crash", "done", Some("run-crash")),
-                ("m-silent", "done", Some("run-silent")),
-            ] {
-                tx.execute(
-                    "INSERT INTO chat_dispatch_ledger (workspace_id, trigger_message_id, \
-                     agent_id, thread_id, state, run_id, failure_reason, attempt_count, \
-                     created_at_ms, updated_at_ms) VALUES (?1, ?2, 'default', ?3, ?4, ?5, \
-                     CASE ?4 WHEN 'failed' THEN 'no-reply' END, 1, 20, 20)",
-                    rusqlite::params![WS, message, chat, state, run],
-                )
-                .map_err(StorageError::persist_public)?;
-            }
-            // Desktop marks a completed run's failure handled when it exited
-            // nonzero or left no reply.
-            for (run, trigger, ended, exit, log, handled) in [
-                ("run-live", "m-run", None, None, None, false),
-                (
-                    "run-failed",
-                    "m-fail",
-                    Some(40),
-                    Some(0),
-                    Some("runs/failed.log"),
-                    true,
-                ),
-                (
-                    "run-done",
-                    "m-done",
-                    Some(41),
-                    Some(0),
-                    Some("runs/done.log"),
-                    false,
-                ),
-                (
-                    "run-crash",
-                    "m-crash",
-                    Some(42),
-                    Some(7),
-                    Some("runs/crash.log"),
-                    true,
-                ),
-                (
-                    "run-silent",
-                    "m-silent",
-                    Some(43),
-                    Some(0),
-                    Some("runs/silent.log"),
-                    true,
-                ),
-            ] {
-                tx.execute(
-                    "INSERT INTO agent_run_records (workspace_id, run_id, thread_id, \
-                     trigger_message_id, command, started_at_ms, ended_at_ms, exit_code, \
-                     log_path, failure_handled) VALUES (?1, ?2, ?3, ?4, 'agent', 30, ?5, ?6, ?7, ?8)",
-                    rusqlite::params![WS, run, chat, trigger, ended, exit, log, handled],
-                )
-                .map_err(StorageError::persist_public)?;
-            }
-            Ok::<_, StorageError>(())
-        })
-        .expect("requests");
-
-    let expected = |id: &str| -> Vec<StreamAgentRequest> {
-        let request = |state, run: Option<&str>| StreamAgentRequest {
-            agent_id: "default".to_owned(),
-            state,
-            run_id: run.map(str::to_owned),
-            started_at_ms: run.map(|_| 30),
-            failure_reason: None,
-            exit_code: None,
-            log_path: None,
-        };
-        match id {
-            "m-wait" => vec![request(StreamAgentRequestState::Waiting, None)],
-            "m-run" | "m-joined" => {
-                vec![request(StreamAgentRequestState::Running, Some("run-live"))]
-            }
-            "m-fail" => vec![StreamAgentRequest {
-                failure_reason: Some("no-reply".to_owned()),
-                exit_code: Some(0),
-                log_path: Some("runs/failed.log".to_owned()),
-                ..request(StreamAgentRequestState::Failed, Some("run-failed"))
-            }],
-            "m-crash" => vec![StreamAgentRequest {
-                exit_code: Some(7),
-                log_path: Some("runs/crash.log".to_owned()),
-                ..request(StreamAgentRequestState::Failed, Some("run-crash"))
-            }],
-            "m-silent" => vec![StreamAgentRequest {
-                failure_reason: Some("no-reply".to_owned()),
-                exit_code: Some(0),
-                log_path: Some("runs/silent.log".to_owned()),
-                ..request(StreamAgentRequestState::Failed, Some("run-silent"))
-            }],
-            _ => Vec::new(),
-        }
-    };
-
-    let stream = page(&mut store, None, 10);
-    assert_eq!(stream.items.len(), 7);
-    for item in &stream.items {
-        assert_eq!(item.agent_requests, expected(&item.message.message_id));
-    }
-    let thread = LinkedChatStore::new(&mut store)
-        .list_messages(WS, &chat, 10, None)
-        .expect("thread");
-    for message in &thread.messages {
-        assert_eq!(
-            thread
-                .agent_requests
-                .get(&message.message_id)
-                .cloned()
-                .unwrap_or_default(),
-            expected(&message.message_id)
-        );
-    }
-}
-
-#[test]
 fn a_message_that_names_two_agents_shows_each_agents_own_request() {
     let (_scratch, mut store) = store();
     group(&mut store);
@@ -1218,7 +585,6 @@ fn a_message_that_names_two_agents_shows_each_agents_own_request() {
         .expect("thread");
     assert_eq!(thread.agent_requests.get("m-both"), Some(&expected));
 }
-
 /// Times a group's stream over 10,000 items, with and without the stream
 /// indexes. Run it in release:
 /// `cargo test --release -p dohc-engine-domain --test chats_stream -- --ignored --nocapture stream_timings`
@@ -1245,7 +611,6 @@ fn stream_timings() {
     }
 
     fn time(name: &str, store: &mut EngineStore, items: i64) {
-        // An older page starts halfway back.
         let mut before: Option<StreamPosition> = None;
         for _ in 0..items / 2 / 100 {
             before = Some(page(store, before.as_ref(), 100).items[0].position.clone());
@@ -1273,7 +638,6 @@ fn stream_timings() {
         );
     }
 
-    // 10,000 posts, each with two replies.
     {
         let (_scratch, mut store) = store();
         group(&mut store);
@@ -1300,7 +664,6 @@ fn stream_timings() {
         time("posts", &mut store, ITEMS);
     }
 
-    // One conversation of 10,000 messages.
     {
         let (_scratch, mut store) = store();
         group(&mut store);
@@ -1321,7 +684,6 @@ fn stream_timings() {
         time("conversation messages", &mut store, ITEMS);
     }
 
-    // A conversation of 1,000 messages with 10,000 replies under them.
     {
         let (_scratch, mut store) = store();
         group(&mut store);

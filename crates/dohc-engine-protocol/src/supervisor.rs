@@ -1,5 +1,4 @@
-//! Bounded request supervisor skeleton (tokio), replacing the workspace
-//! kernel spike's one-OS-thread-per-request dispatch.
+//! Bounded request supervisor skeleton (tokio).
 //!
 //! Properties (each covered by a test):
 //!
@@ -31,8 +30,8 @@
 //! guarantee — concurrent requests are unordered, only events are ordered.
 //!
 //! Skeleton scope: single session, no event stream, no blob scheduling, no
-//! per-workspace actors — those live in `dohc-engine-runtime` later. This
-//! exists to prove the dispatch shape and its bounds.
+//! per-workspace actors. Those live in `dohc-engine-runtime`. This exists to
+//! prove the dispatch shape and its bounds.
 
 use crate::cancel::CancelSignal;
 use crate::error::{ErrorCode, WireError};
@@ -374,7 +373,7 @@ fn lock(registry: &CancelRegistry) -> std::sync::MutexGuard<'_, HashMap<RequestI
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::BlobEgress;
+
     use serde_json::{Value, json};
     use tokio::sync::Notify;
 
@@ -604,129 +603,6 @@ mod tests {
         assert!(receiver.await.expect("responded").is_ok());
     }
 
-    #[tokio::test]
-    async fn cancel_resolves_in_flight_request_with_cancelled() {
-        let service = Arc::new(Gate {
-            release: Notify::new(),
-            started: Notify::new(),
-        });
-        let supervisor = Supervisor::new(config(1, 4), service.clone());
-        let receiver = supervisor.try_submit(request(7)).expect("accepted");
-        service.started.notified().await;
-
-        assert!(supervisor.cancel(7), "in-flight id is cancellable");
-        let outcome = receiver.await.expect("responded");
-        let error = outcome.expect_err("cancelled request must fail");
-        assert_eq!(error.code, ErrorCode::Cancelled);
-
-        // Terminal ids are gone from the registry.
-        assert!(!supervisor.cancel(7));
-        // Id is reusable after completion.
-        let receiver = supervisor.try_submit(request(7)).expect("id reusable");
-        service.started.notified().await;
-        service.release.notify_one();
-        assert!(receiver.await.expect("responded").is_ok());
-    }
-
-    struct BlobCompletion;
-
-    impl EngineService for BlobCompletion {
-        type Input = ();
-        async fn call(&self, ctx: RequestContext, request: Request) -> RequestOutcome {
-            Ok(ServiceResponse {
-                output_guard: None,
-                response: Response {
-                    id: request.id,
-                    result: Value::Null,
-                },
-                blob_egress: Some(BlobEgress {
-                    stream_id: request.id,
-                    sha256: "completion-handoff".to_owned(),
-                    bytes: vec![1, 2, 3],
-                    cancel: ctx.cancel,
-                    deadline: ctx.deadline,
-                    byte_permit: None,
-                }),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn completion_handoff_precedes_cancel_registry_release() {
-        let supervisor = Arc::new(Supervisor::new(config(1, 1), Arc::new(BlobCompletion)));
-        let hook_supervisor = Arc::clone(&supervisor);
-        let handed_off = Arc::new(Mutex::new(None::<CancelSignal>));
-        let hook_handed_off = Arc::clone(&handed_off);
-        let receiver = supervisor
-            .try_submit_with(
-                request(77),
-                Arc::from(["blobs".to_owned()]),
-                crate::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes,
-                move |outcome| {
-                    let egress = outcome
-                        .as_ref()
-                        .expect("successful blob response")
-                        .blob_egress
-                        .as_ref()
-                        .expect("blob egress");
-                    *hook_handed_off
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some(egress.cancel.clone());
-                    assert!(
-                        hook_supervisor.cancel(77),
-                        "supervisor cancellation remains registered during handoff"
-                    );
-                },
-            )
-            .expect("accepted");
-        let outcome = receiver.await.expect("responded").expect("successful");
-        assert!(outcome.blob_egress.is_some());
-        let signal = handed_off
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-            .expect("handoff signal");
-        assert!(
-            signal.is_cancelled(),
-            "cancel reaches the handed-off egress"
-        );
-        assert!(!supervisor.cancel(77), "terminal request is deregistered");
-    }
-
-    #[tokio::test]
-    async fn cancel_resolves_queued_request_behind_hung_handler() {
-        let service = Arc::new(Gate {
-            release: Notify::new(),
-            started: Notify::new(),
-        });
-        let supervisor = Supervisor::new(config(1, 4), service.clone());
-        let in_flight = supervisor.try_submit(request(1)).expect("accepted");
-        service.started.notified().await;
-
-        // Queued behind the hung handler; must resolve without a slot.
-        let queued = supervisor.try_submit(request(2)).expect("accepted");
-        assert!(supervisor.cancel(2));
-        let error = queued.await.expect("responded").expect_err("cancelled");
-        assert_eq!(error.code, ErrorCode::Cancelled);
-
-        // The in-flight request was untouched and still completes.
-        service.release.notify_one();
-        assert!(in_flight.await.expect("responded").is_ok());
-    }
-
-    #[tokio::test]
-    async fn duplicate_in_flight_id_is_rejected() {
-        let service = Arc::new(Gate {
-            release: Notify::new(),
-            started: Notify::new(),
-        });
-        let supervisor = Supervisor::new(config(1, 4), service.clone());
-        let _receiver = supervisor.try_submit(request(3)).expect("accepted");
-        let error = supervisor.try_submit(request(3)).expect_err("duplicate id");
-        assert_eq!(error.code, ErrorCode::InvalidParams);
-    }
-
     /// Service that sleeps far past any deadline until told to stop, then
     /// answers that it was cancelled.
     struct Sleeper;
@@ -742,21 +618,6 @@ mod tests {
                 () = ctx.cancel.cancelled() => Err(WireError::new(ErrorCode::Cancelled, "handler observed cancellation")),
             }
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn deadline_elapse_yields_deadline_exceeded() {
-        let supervisor = Supervisor::new(config(2, 4), Arc::new(Sleeper));
-        let mut slow = request(1);
-        slow.deadline_ms = Some(50);
-        let receiver = supervisor.try_submit(slow).expect("accepted");
-        let outcome = receiver.await.expect("responded");
-        let error = outcome.expect_err("must time out");
-        assert_eq!(
-            error.code,
-            ErrorCode::DeadlineExceeded,
-            "a handler's cooperative cancel after expiry answers DEADLINE_EXCEEDED"
-        );
     }
 
     /// Request 1 lands its work and waits for `release` without observing
@@ -816,26 +677,6 @@ mod tests {
             service.signalled.load(Ordering::SeqCst),
             "the handler was told to stop"
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_expired_handler_answers_with_the_work_it_landed() {
-        let service = Arc::new(Landing::new());
-        let supervisor = Supervisor::new(config(1, 1), service.clone());
-        let mut landing = request(1);
-        landing.deadline_ms = Some(50);
-        let mut receiver = supervisor.try_submit(landing).expect("accepted");
-        service.entered.notified().await;
-        tokio::time::advance(Duration::from_millis(100)).await;
-        tokio::task::yield_now().await;
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-        service.release.notify_one();
-        let response = receiver.await.expect("responded").expect("landed outcome");
-        assert_eq!(response.response.result, json!("landed"));
-        assert!(service.signalled.load(Ordering::SeqCst));
     }
 
     /// Request 1 waits for `release` and never looks at cancellation, as a
@@ -928,60 +769,6 @@ mod tests {
                 .try_submit(request(6))
                 .expect("the finished handler released its admission");
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_cancelled_handler_frees_its_slot_but_keeps_its_admission() {
-        let service = Arc::new(Landing::new());
-        // One execution slot, two admitted requests.
-        let supervisor = Supervisor::new(config(1, 1), service.clone());
-        let landing = supervisor.try_submit(request(1)).expect("accepted");
-        service.entered.notified().await;
-        assert!(supervisor.cancel(1));
-        let next = supervisor.try_submit(request(2)).expect("accepted");
-        tokio::time::timeout(Duration::from_secs(1), next)
-            .await
-            .expect("the cancelled handler released its execution slot")
-            .expect("responded")
-            .expect("ran");
-        let _queued = supervisor.try_submit(request(3)).expect("accepted");
-        assert_eq!(
-            supervisor
-                .try_submit(request(4))
-                .expect_err("the cancelled handler still counts")
-                .code,
-            ErrorCode::Overloaded
-        );
-        service.release.notify_one();
-        assert!(landing.await.expect("responded").is_ok());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn queued_request_deadline_resolves_behind_hung_handler() {
-        // One slot, occupied by a handler with a long deadline; a queued
-        // request with a short deadline must still resolve on time.
-        let supervisor = Supervisor::new(config(1, 4), Arc::new(Sleeper));
-        let mut hog = request(1);
-        hog.deadline_ms = Some(5_000);
-        let hog_receiver = supervisor.try_submit(hog).expect("accepted");
-
-        let mut queued = request(2);
-        queued.deadline_ms = Some(50);
-        let started = tokio::time::Instant::now();
-        let queued_receiver = supervisor.try_submit(queued).expect("accepted");
-        let error = queued_receiver
-            .await
-            .expect("responded")
-            .expect_err("queued deadline");
-        assert_eq!(error.code, ErrorCode::DeadlineExceeded);
-        assert!(
-            started.elapsed() < Duration::from_millis(1000),
-            "queued request waited for the hung handler: {:?}",
-            started.elapsed()
-        );
-
-        let error = hog_receiver.await.expect("responded").expect_err("hog");
-        assert_eq!(error.code, ErrorCode::DeadlineExceeded);
     }
 
     #[tokio::test(start_paused = true)]

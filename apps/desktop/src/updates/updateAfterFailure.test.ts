@@ -4,29 +4,53 @@ import { deferred } from "../testing/deferred";
 
 const bounds = { verdictMs: 1_000, downloadMs: 2_000 };
 
-function fixture(options: {
-  version?: string | null;
-  confirm?: boolean;
-  install?: { accepted: boolean; cancelled?: boolean };
-  controller?: "missing";
-} = {}) {
-  const awaitUpdate = vi.fn(async (
-    _bounds: typeof bounds,
-    _confirmDownload: (version: string) => Promise<boolean>,
-    _onDownloading?: (version: string) => void,
-  ): Promise<string | null> => options.version === undefined ? "2.0.0" : options.version);
-  const controller = vi.fn(async () => options.controller === "missing" ? null : { awaitUpdate });
+function fixture(
+  options: {
+    version?: string | null;
+    confirm?: boolean;
+    install?: { accepted: boolean; cancelled?: boolean };
+    controller?: "missing";
+  } = {},
+) {
+  const awaitUpdate = vi.fn(
+    async (
+      _bounds: typeof bounds,
+      _confirmDownload: (version: string) => Promise<boolean>,
+      _onDownloading?: (version: string) => void,
+    ): Promise<string | null> => (options.version === undefined ? "2.0.0" : options.version),
+  );
+  const controller = vi.fn(async () => (options.controller === "missing" ? null : { awaitUpdate }));
   const confirmDownload = vi.fn(async (_failure: UpdateFailure, _version: string) => true);
-  const confirmRestart = vi.fn(async (_failure: UpdateFailure, _version: string) => options.confirm ?? true);
+  const confirmRestart = vi.fn(
+    async (_failure: UpdateFailure, _version: string) => options.confirm ?? true,
+  );
   const install = vi.fn(async () => options.install ?? { accepted: true });
-  // The notice stays until its signal aborts or the test closes it.
   const notices: Array<{ version: string; signal: AbortSignal; close(): void }> = [];
-  const showDownloading = vi.fn((_failure: UpdateFailure, version: string, signal: AbortSignal) => new Promise<void>((resolve) => {
-    signal.addEventListener("abort", () => resolve());
-    notices.push({ version, signal, close: resolve });
-  }));
-  const updateAfterFailure = createUpdateAfterFailure({ controller, confirmDownload, showDownloading, confirmRestart, install, bounds });
-  return { updateAfterFailure, awaitUpdate, controller, confirmDownload, showDownloading, notices, confirmRestart, install };
+  const showDownloading = vi.fn(
+    (_failure: UpdateFailure, version: string, signal: AbortSignal) =>
+      new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => resolve());
+        notices.push({ version, signal, close: resolve });
+      }),
+  );
+  const updateAfterFailure = createUpdateAfterFailure({
+    controller,
+    confirmDownload,
+    showDownloading,
+    confirmRestart,
+    install,
+    bounds,
+  });
+  return {
+    updateAfterFailure,
+    awaitUpdate,
+    controller,
+    confirmDownload,
+    showDownloading,
+    notices,
+    confirmRestart,
+    install,
+  };
 }
 
 describe("update after a failure", () => {
@@ -40,7 +64,9 @@ describe("update after a failure", () => {
 
   it("asks about the download in the words for this failure", async () => {
     const f = fixture();
-    f.awaitUpdate.mockImplementationOnce(async (_bounds, confirmDownload) => await confirmDownload("2.0.0") ? "2.0.0" : null);
+    f.awaitUpdate.mockImplementationOnce(async (_bounds, confirmDownload) =>
+      (await confirmDownload("2.0.0")) ? "2.0.0" : null,
+    );
     f.confirmDownload.mockResolvedValueOnce(false);
     await expect(f.updateAfterFailure("window-load")).resolves.toBe(false);
     expect(f.confirmDownload).toHaveBeenCalledWith("window-load", "2.0.0");
@@ -59,8 +85,12 @@ describe("update after a failure", () => {
   });
 
   it("keeps the app open when a window with unsaved work stops the restart", async () => {
-    await expect(fixture({ install: { accepted: false, cancelled: true } }).updateAfterFailure("startup")).resolves.toBe(true);
-    await expect(fixture({ install: { accepted: false } }).updateAfterFailure("startup")).resolves.toBe(false);
+    await expect(
+      fixture({ install: { accepted: false, cancelled: true } }).updateAfterFailure("startup"),
+    ).resolves.toBe(true);
+    await expect(
+      fixture({ install: { accepted: false } }).updateAfterFailure("startup"),
+    ).resolves.toBe(false);
   });
 
   it("shows a notice while the update downloads and closes it once the download ends", async () => {
@@ -100,7 +130,9 @@ describe("update after a failure", () => {
     try {
       await expect(f.updateAfterFailure("startup")).resolves.toBe(false);
       expect(logged).toHaveBeenCalledOnce();
-    } finally { logged.mockRestore(); }
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it("shares one check between failures that arrive together, then checks again", async () => {

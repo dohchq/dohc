@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub mod accepted;
+mod delivery_group;
 pub mod draft;
 pub mod enrollment;
 mod native_source;
@@ -114,8 +115,10 @@ pub enum AcceptedAs<'a> {
 /// own draft. The host matches the draft's delivery. The owner matches a
 /// draft still waiting for its receipt, or one acknowledged at this cursor,
 /// so an old draft's bytes served again under a new cursor are not its own.
-/// A frame that is this computer's own draft is not a change from another
-/// computer.
+/// A group matches only by the digest computed here from its own rows while
+/// it waits, or kept in its rows' receipt once acknowledged; its id alone
+/// never matches. A frame that is this computer's own draft is not a change
+/// from another computer.
 pub fn is_own_draft_in(
     conn: &Connection,
     key: &crate::DocKey,
@@ -126,26 +129,96 @@ pub fn is_own_draft_in(
         AcceptedAs::Delivery(delivery_id) => (Some(delivery_id), None),
         AcceptedAs::JournalCursor(cursor) => (None, Some(cursor)),
     };
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e \
-         JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id \
-         WHERE e.update_digest=?1 \
-           AND o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 \
-           AND CASE WHEN ?5 IS NOT NULL THEN e.delivery_id=?5 \
-                    ELSE e.pending=1 \
-                      OR json_extract(e.accepted_receipt_json,'$.journalCursor')=?6 END)",
-        params![
-            update_digest,
-            key.workspace_id,
-            key.version_id,
-            key.object_id,
-            delivery_id,
-            journal_cursor
-        ],
-        |r| r.get(0),
-    )
-    .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
+    let storage =
+        |error: rusqlite::Error| crate::CollabError::Storage(StorageError::corrupt_public(error));
+    let scope = params![
+        update_digest,
+        key.workspace_id,
+        key.version_id,
+        key.object_id,
+        delivery_id,
+        journal_cursor
+    ];
+    let row: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e \
+             JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id \
+             WHERE e.update_digest=?1 \
+               AND o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 \
+               AND CASE WHEN ?5 IS NOT NULL THEN e.delivery_id=?5 \
+                        ELSE e.pending=1 \
+                          OR json_extract(e.accepted_receipt_json,'$.journalCursor')=?6 END)",
+            scope,
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    if row
+        || conn
+            .query_row(OWN_ACKNOWLEDGED_GROUP, scope, |r| r.get(0))
+            .map_err(storage)?
+    {
+        return Ok(true);
+    }
+    // Only a queue's head can have been offered.
+    for outbox_id in document_outboxes(conn, key).map_err(storage)? {
+        let head =
+            delivery_group::pending_in(conn, &outbox_id, 1).map_err(|error| match error {
+                OwnerOutboxError::Storage(error) => crate::CollabError::Storage(error),
+                error => crate::CollabError::Corrupt {
+                    reason: format!("owner outbox head: {error}"),
+                },
+            })?;
+        if head.first().is_some_and(|head| {
+            head.is_group()
+                && head.update_digest == update_digest
+                && delivery_id.is_none_or(|id| id == head.delivery_id)
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
+
+fn document_outboxes(conn: &Connection, key: &crate::DocKey) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT outbox_id FROM owner_ydoc_outboxes \
+         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",
+    )?;
+    let rows = statement.query_map(
+        params![key.workspace_id, key.version_id, key.object_id],
+        |r| r.get::<_, String>(0),
+    )?;
+    rows.collect()
+}
+
+/// The declaration, run and saved receipt of this document's own group that
+/// the relay accepted under this delivery, if it is one.
+pub(crate) fn own_group_context_in(
+    conn: &Connection,
+    key: &crate::DocKey,
+    delivery_id: &str,
+    update_digest: &str,
+) -> Result<Option<delivery_group::GroupContext>, OwnerOutboxError> {
+    for outbox_id in document_outboxes(conn, key).map_err(read_sql)? {
+        let context = delivery_group::context_in(conn, &outbox_id, delivery_id, update_digest)?;
+        if context.is_some() {
+            return Ok(context);
+        }
+    }
+    Ok(None)
+}
+
+/// An acknowledged group of this document by the receipt its rows keep, found
+/// through migration 100's index on its digest. `+e.outbox_id` keeps the
+/// planner from walking an outbox's whole history instead.
+const OWN_ACKNOWLEDGED_GROUP: &str = "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e \
+     JOIN owner_ydoc_outboxes o ON o.outbox_id=+e.outbox_id \
+     WHERE e.delivery_group IS NOT NULL AND e.accepted_receipt_json IS NOT NULL \
+       AND json_extract(e.accepted_receipt_json,'$.updateDigest')=?1 \
+       AND o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 \
+       AND CASE WHEN ?5 IS NOT NULL \
+                THEN json_extract(e.accepted_receipt_json,'$.deliveryId')=?5 \
+                ELSE json_extract(e.accepted_receipt_json,'$.journalCursor')=?6 END)";
 
 /// Bound owners settle through the admitted host cut, including after their
 /// pending queue drains. Ordinary settlement carries no accepted audit cut.
@@ -405,26 +478,43 @@ pub fn refuse_entry_in_tx(
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
     require_workspace(workspace, &parent.binding.workspace_id)?;
     let observed = draft::read_observed_in(tx, &parent.binding)?;
-    let entry: Option<(String, bool, Option<String>, Option<String>)> = tx.query_row(
-        "SELECT update_digest,pending,accepted_receipt_json,terminal_reason FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
-        params![input.outbox_id,input.delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
-    ).optional().map_err(read_sql)?;
-    let (digest, pending, receipt, reason) = entry.ok_or(OwnerOutboxError::NotFound)?;
-    if digest != input.update_digest || receipt.is_some() {
+    let found = delivery_group::find_in(
+        tx,
+        &input.outbox_id,
+        &input.delivery_id,
+        &input.update_digest,
+    )?;
+    let entry = match found {
+        Some(entry) => entry,
+        // A group's kept bytes recognize the same refusal again.
+        None if delivery_group::was_refused_in(
+            tx,
+            &input.outbox_id,
+            &input.delivery_id,
+            &input.update_digest,
+            &input.reason,
+        )? =>
+        {
+            return Ok(parent.binding)
+        }
+        None => return Err(OwnerOutboxError::NotFound),
+    };
+    if entry.update_digest != input.update_digest || entry.receipt_json.is_some() {
         return Err(OwnerOutboxError::ReceiptMismatch);
     }
-    if !pending {
-        return if reason.as_deref() == Some(input.reason.as_str()) {
+    let Some(delivery) = entry.pending else {
+        return if entry.terminal_reason.as_deref() == Some(input.reason.as_str()) {
             Ok(parent.binding)
         } else {
             Err(OwnerOutboxError::ReceiptMismatch)
         };
-    }
+    };
     let checkpoint_digest = match &observed {
         Some(observed) => observed.checkpoint_digest.clone(),
         None => native_refusal_checkpoint_in_tx(tx, &parent.binding, input)?,
     };
-    tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1", params![input.outbox_id,input.delivery_id,input.reason]).map_err(write_sql)?;
+    // A group's later rows depend on its earlier ones, so it is refused whole.
+    tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?4 WHERE outbox_id=?1 AND pending=1 AND sequence BETWEEN ?2 AND ?3", params![input.outbox_id,delivery.first_sequence,delivery.last_sequence,input.reason]).map_err(write_sql)?;
     // Retiring the granted head ends its Try again.
     tx.execute("UPDATE owner_ydoc_outboxes SET retry_delivery_id=NULL WHERE outbox_id=?1 AND retry_delivery_id=?2", params![input.outbox_id,input.delivery_id]).map_err(write_sql)?;
     let visible = draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
@@ -807,14 +897,32 @@ fn append_with_retained_base(
         OwnerOutboxState::Active
     };
     let delivery_id = delivery_id(&parent.outbox_id, parent.next_sequence, &update_digest);
+    // A draft joins the group behind the head or starts one; other rows go alone.
+    let delivery_group = draft_revision
+        .map(|revision| {
+            delivery_group::joinable_in(
+                tx,
+                &parent.outbox_id,
+                parent.next_sequence,
+                revision,
+                declaration_json.as_deref(),
+                automation_json.as_deref(),
+                person_edit,
+                agent_run_id,
+                byte_length,
+            )
+            .map(|joined| joined.unwrap_or(parent.next_sequence))
+        })
+        .transpose()?;
     put_binary_blob_with_sha(tx, &input.update, &update_digest)?;
     tx.execute(
         "INSERT INTO owner_ydoc_outbox_entries \
              (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,\
               byte_length,created_at_ms,pending,result_pending_bytes,\
               result_oldest_entry_at_ms,result_state,agent_declaration_json,\
-              draft_binding_revision,automation_declaration_json,person_edit,agent_run_id) \
-             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12,?13,?14,?15)",
+              draft_binding_revision,automation_declaration_json,person_edit,agent_run_id,\
+              delivery_group) \
+             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
         params![
             parent.outbox_id,
             parent.next_sequence,
@@ -831,6 +939,7 @@ fn append_with_retained_base(
             automation_json,
             person_edit.then_some(true),
             agent_run_id,
+            delivery_group,
         ],
     )
     .map_err(write_sql)?;
@@ -1079,7 +1188,8 @@ pub fn read_pending(
         let mut statement = conn
             .prepare(
                 "SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,\
-                 byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit,agent_run_id \
+                 byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit,agent_run_id,\
+                 COALESCE(delivery_group,sequence) \
                  FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
             )
             .map_err(read_sql)?;
@@ -1097,10 +1207,11 @@ pub fn read_pending(
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<bool>>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, i64>(11)?,
                 ))
             })
             .map_err(read_sql)?;
-        let mut entries = Vec::new();
+        let mut groups: Vec<(i64, Vec<OwnerOutboxEntry>)> = Vec::new();
         for row in rows {
             let (
                 sequence,
@@ -1114,6 +1225,7 @@ pub fn read_pending(
                 automation_json,
                 person_edit,
                 agent_run_id,
+                group,
             ) = row.map_err(read_sql)?;
             let update = get_binary_blob(conn, &blob_digest)?.ok_or(OwnerOutboxError::Corrupt)?;
             if update_digest != blob_digest
@@ -1122,7 +1234,7 @@ pub fn read_pending(
             {
                 return Err(OwnerOutboxError::Corrupt);
             }
-            entries.push(OwnerOutboxEntry {
+            let entry = OwnerOutboxEntry {
                 sequence,
                 append_key,
                 delivery_id,
@@ -1134,8 +1246,16 @@ pub fn read_pending(
                 agent_declaration: stored_declaration(declaration_json)?,
                 agent_run_id,
                 automation_declaration: stored_automation_declaration(automation_json)?,
-            });
+            };
+            match groups.last_mut() {
+                Some((last, rows)) if *last == group => rows.push(entry),
+                _ => groups.push((group, vec![entry])),
+            }
         }
+        let entries = groups
+            .into_iter()
+            .map(|(_, rows)| group_entry(outbox_id, rows))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(OwnerOutboxPending {
             outbox_id: parent.outbox_id,
             binding: parent.binding,
@@ -1150,6 +1270,28 @@ pub fn read_pending(
             retry_delivery_id: parent.retry_delivery_id,
         })
     })
+}
+
+/// One delivery of a group's rows: their merged update under the group's id,
+/// with the first row's key, time and author, which every row shares.
+fn group_entry(
+    outbox_id: &str,
+    mut rows: Vec<OwnerOutboxEntry>,
+) -> Result<OwnerOutboxEntry, OwnerOutboxError> {
+    if rows.len() < 2 {
+        return rows.pop().ok_or(OwnerOutboxError::Corrupt);
+    }
+    let updates = rows
+        .iter_mut()
+        .map(|row| std::mem::take(&mut row.update))
+        .collect::<Vec<_>>();
+    let update = crate::merge_updates(&updates).map_err(draft::collab)?;
+    let mut entry = rows.swap_remove(0);
+    entry.update_digest = hex_sha256(&update);
+    entry.delivery_id = delivery_id(outbox_id, entry.sequence, &entry.update_digest);
+    entry.byte_length = i64::try_from(update.len()).map_err(|_| OwnerOutboxError::Corrupt)?;
+    entry.update = update;
+    Ok(entry)
 }
 
 /// The workspace identity a hosted store was created for: its replication
@@ -1285,6 +1427,7 @@ fn read_page(
         {
             return Err(OwnerOutboxError::InvalidInput("invalid read part sequence"));
         }
+        // Each entry is one delivery, named by its first row.
         let next_entry = |after: i64| -> Result<Option<OwnerOutboxReadCursor>, OwnerOutboxError> {
             tx.query_row(
                 "SELECT sequence FROM owner_ydoc_outbox_entries \
@@ -1301,7 +1444,7 @@ fn read_page(
         let (total_bytes, digest, bytes, following) = match cursor.part {
             Header => {
                 let count: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1",
+                    "SELECT COUNT(DISTINCT COALESCE(delivery_group,sequence)) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1",
                     [outbox_id], |row| row.get(0),
                 ).map_err(read_sql)?;
                 header["pendingEntryCount"] = count.into();
@@ -1353,18 +1496,24 @@ fn read_page(
                         row.get::<_, Option<String>>(10)?,
                     )),
                 ).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::InvalidInput("invalid read entry"))?;
-                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json, person_edit, native_json, agent_run_id) = entry;
+                let (append_key, _, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json, person_edit, native_json, agent_run_id) = entry;
                 if digest != blob_digest || byte_length <= 0 {
                     return Err(OwnerOutboxError::Corrupt);
                 }
+                let delivery = delivery_group::starting_at_in(&tx, outbox_id, cursor.sequence)?
+                    .ok_or(OwnerOutboxError::InvalidInput("invalid read entry"))?;
+                let group = delivery.is_group().then(|| delivery.update(&tx)).transpose()?;
                 if cursor.part == EntryHeader {
+                    let entry_bytes = group.as_ref().map_or(Ok(byte_length), |update| i64::try_from(update.len()))
+                        .map_err(|_| OwnerOutboxError::Corrupt)?;
                     let mut header = serde_json::json!({
                         "sequence": cursor.sequence, "appendKey": append_key,
-                        "deliveryId": delivery_id, "updateDigest": digest,
-                        "byteLength": byte_length, "createdAtMs": created_at_ms,
+                        "deliveryId": delivery.delivery_id, "updateDigest": delivery.update_digest,
+                        "byteLength": entry_bytes, "createdAtMs": created_at_ms,
                     });
+                    // A group's merged update is not the sum of what its rows queued.
+                    if group.is_some() { header["queuedByteLength"] = delivery.queued_bytes.into(); }
                     if person_edit == Some(true) { header["personEdit"] = serde_json::json!(true); }
-                    // An entry that declared no agent has no field at all.
                     if let Some(declaration) = stored_declaration(declaration_json)? {
                         header["agentDeclaration"] = serde_json::to_value(declaration)
                             .map_err(|_| OwnerOutboxError::Corrupt)?;
@@ -1384,9 +1533,12 @@ fn read_page(
                     let bytes = page_json(&header)?;
                     let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
                     (total, digest, bytes, following_part(Update))
+                } else if let Some(update) = group {
+                    let (total, digest, bytes) = slice_header(update, cursor.offset, max_bytes)?;
+                    (total, digest, bytes, next_entry(delivery.last_sequence)?)
                 } else {
                     let bytes = slice_blob(&tx, &blob_digest, byte_length, cursor.offset, max_bytes)?;
-                    (byte_length, digest, bytes, next_entry(cursor.sequence)?)
+                    (byte_length, digest, bytes, next_entry(delivery.last_sequence)?)
                 }
             }
         };
@@ -1497,7 +1649,6 @@ fn accepted_checkpoint_in(
 
 /// Where a queue stands with its owner's adoption seed.
 enum RefusedSeed {
-    /// It holds no refused seed.
     None,
     /// It holds its owner's refused adoption seed with no Try again granted,
     /// at the restore generation its document's application binding still
@@ -1512,7 +1663,6 @@ enum RefusedSeed {
     Earlier,
 }
 
-/// An adoption seed entry of queue `o` that nothing applied.
 const UNAPPLIED_SEED: &str = "EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e WHERE e.outbox_id=o.outbox_id AND e.pending=1
     AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed'
     AND NOT EXISTS(SELECT 1 FROM live_device_update_applications s WHERE s.delivery_id=e.delivery_id))";
@@ -1975,50 +2125,35 @@ fn acknowledge_prefix_in(
     receipts: &[OwnerDeliveryReceipt],
 ) -> Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError> {
     let outbox_id = parent.outbox_id.as_str();
-    let mut statement = tx
-        .prepare(
-            "SELECT sequence,delivery_id,update_digest,byte_length \
-             FROM owner_ydoc_outbox_entries \
-             WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
-        )
-        .map_err(read_sql)?;
-    let rows = statement
-        .query_map([outbox_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })
-        .map_err(read_sql)?;
-    let prefix = rows
-        .take(receipts.len())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(read_sql)?;
+    // Each receipt names one delivery: a row alone, or a group's rows.
+    let prefix = delivery_group::pending_in(tx, outbox_id, receipts.len())?;
     if prefix.len() != receipts.len()
-        || prefix
-            .iter()
-            .zip(receipts)
-            .any(|((_, delivery_id, digest, _), receipt)| {
-                delivery_id != &receipt.delivery_id || digest != &receipt.update_digest
-            })
+        || prefix.iter().zip(receipts).any(|(delivery, receipt)| {
+            delivery.delivery_id != receipt.delivery_id
+                || delivery.update_digest != receipt.update_digest
+        })
     {
         return Err(OwnerOutboxError::ReceiptMismatch);
     }
-    let acknowledged_bytes = prefix.iter().try_fold(0_i64, |total, row| {
-        total.checked_add(row.3).ok_or(OwnerOutboxError::Corrupt)
+    let acknowledged_bytes = prefix.iter().try_fold(0_i64, |total, delivery| {
+        total
+            .checked_add(delivery.queued_bytes)
+            .ok_or(OwnerOutboxError::Corrupt)
     })?;
-    let last_sequence = prefix.last().ok_or(OwnerOutboxError::ReceiptMismatch)?.0;
+    let last_sequence = prefix
+        .last()
+        .ok_or(OwnerOutboxError::ReceiptMismatch)?
+        .last_sequence;
+    let rows = prefix.iter().map(|delivery| delivery.rows).sum::<usize>();
     let released_digests = prefix
         .iter()
-        .map(|(_, _, digest, _)| digest.clone())
+        .flat_map(|delivery| delivery.row_digests.iter().cloned())
         .collect::<BTreeSet<_>>();
-    // Every acknowledgement keeps its receipt, observed or not: a cleared
-    // entry alone does not prove the relay accepted it.
-    for receipt in receipts {
-        tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1",
-            params![outbox_id,receipt.delivery_id,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
+    // Every acknowledgement keeps its receipt on each row it covers, observed
+    // or not: a cleared entry alone does not prove the relay accepted it.
+    for (delivery, receipt) in prefix.iter().zip(receipts) {
+        tx.execute("UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=?4 WHERE outbox_id=?1 AND pending=1 AND sequence BETWEEN ?2 AND ?3",
+            params![outbox_id,delivery.first_sequence,delivery.last_sequence,serde_json::to_string(receipt).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
     }
     let acknowledged = tx
         .execute(
@@ -2027,7 +2162,7 @@ fn acknowledge_prefix_in(
             params![outbox_id, last_sequence],
         )
         .map_err(write_sql)?;
-    if acknowledged != receipts.len() {
+    if acknowledged != rows {
         return Err(OwnerOutboxError::Corrupt);
     }
     for digest in released_digests {
@@ -2243,15 +2378,17 @@ pub(crate) fn record_refusal_in_tx(
     validate_identifier(&refusal.key, "refusal key must be non-empty and bounded")?;
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
     require_workspace(workspace_id, &parent.binding.workspace_id)?;
-    let (recorded, head): (bool, Option<String>) = tx
+    let recorded: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outbox_refusals \
-             WHERE outbox_id=?1 AND refusal_key=?2),(SELECT delivery_id FROM owner_ydoc_outbox_entries \
-             WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1)",
+             WHERE outbox_id=?1 AND refusal_key=?2)",
             params![input.outbox_id, refusal.key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .map_err(read_sql)?;
+    let head = delivery_group::pending_in(tx, &input.outbox_id, 1)?
+        .pop()
+        .map(|head| head.delivery_id);
     let refused = Some(refusal.delivery_id.as_str());
     if recorded
         || head.as_deref() != refused
@@ -2379,15 +2516,10 @@ pub(crate) fn retry_in_tx(
     if let Some(granted) = parent.retry_delivery_id {
         return Ok(granted);
     }
-    let head: String = tx
-        .query_row(
-            "SELECT delivery_id FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1",
-            [&input.outbox_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(read_sql)?
-        .ok_or(OwnerOutboxError::NotFound)?;
+    let head = delivery_group::pending_in(tx, &input.outbox_id, 1)?
+        .pop()
+        .ok_or(OwnerOutboxError::NotFound)?
+        .delivery_id;
     tx.execute(
         "UPDATE owner_ydoc_outboxes SET retry_delivery_id=?2 WHERE outbox_id=?1 AND state='quarantined'",
         params![input.outbox_id, head],
@@ -2594,7 +2726,6 @@ pub(crate) fn stored_automation_declaration(
         .transpose()
 }
 
-/// The actor an outbox entry credits, and its attribution.
 pub(crate) type EntryCredit = (
     Option<String>,
     Option<dohc_engine_domain::ChangeAttribution>,
@@ -2675,7 +2806,6 @@ mod tests {
             .expect("main version");
         (dir, store)
     }
-
     fn durable_write_counts(store: &EngineStore) -> (i64, i64, i64) {
         store
             .read_with(|conn| {
@@ -2693,7 +2823,6 @@ mod tests {
             })
             .expect("durable write counts")
     }
-
     fn binding() -> LiveObjectBinding {
         LiveObjectBinding {
             workspace_id: "workspace-1".to_owned(),
@@ -2787,201 +2916,6 @@ mod tests {
     }
 
     #[test]
-    fn header_entry_cursor_skips_base_and_tracks_acknowledged_prefixes() {
-        let (_dir, mut store) = store("owner-delivery-head");
-        let mut entry = input("first", b"a", 1);
-        entry.base_update = vec![17; 1_048_576];
-        let appended = append(&mut store, "workspace-1", entry.clone()).expect("first");
-        entry.append_key = "second".to_owned();
-        append(&mut store, "workspace-1", entry.clone()).expect("second");
-        entry.append_key = "third".to_owned();
-        append(&mut store, "workspace-1", entry).expect("third");
-        let pending = read_pending(&store, "workspace-1", &appended.outbox_id).expect("reference");
-        let mut stale_cursor = None;
-        for (index, sequence) in [(0, 1), (2, 3)] {
-            let header = page(&store, &appended.outbox_id, None, 4096);
-            assert_eq!(hex_sha256(&header.bytes), header.digest);
-            let raw: serde_json::Value = serde_json::from_slice(&header.bytes).expect("header");
-            assert_eq!(raw["baseByteLength"], 1_048_576);
-            assert_eq!(
-                header.next_cursor.as_ref().expect("base").part,
-                OwnerOutboxReadPart::Base
-            );
-            let first: OwnerOutboxReadCursor =
-                serde_json::from_value(raw["firstEntryCursor"].clone()).expect("first entry");
-            assert_eq!(first.snapshot, header.cursor.snapshot);
-            assert_eq!(
-                (first.part, first.sequence, first.offset),
-                (OwnerOutboxReadPart::EntryHeader, sequence, 0)
-            );
-            if let Some(stale) = stale_cursor.take() {
-                assert!(matches!(
-                    read_pending_page(
-                        &store,
-                        "workspace-1",
-                        &appended.outbox_id,
-                        Some(stale),
-                        4096
-                    ),
-                    Ok(OwnerOutboxPageResult::ReadChanged)
-                ));
-            }
-            let entry_header = page(&store, &appended.outbox_id, Some(first.clone()), 4096);
-            let update = page(&store, &appended.outbox_id, entry_header.next_cursor, 4096);
-            assert_eq!(update.cursor.part, OwnerOutboxReadPart::Update);
-            assert_eq!(update.bytes, b"a");
-            assert_eq!(hex_sha256(&update.bytes), update.digest);
-            assert!(header.bytes.len() + entry_header.bytes.len() + update.bytes.len() < 4096);
-            stale_cursor = Some(first);
-            acknowledge(
-                &mut store,
-                "workspace-1",
-                &appended.outbox_id,
-                &pending.entries[index..(index + 2).min(pending.entries.len())]
-                    .iter()
-                    .map(receipt)
-                    .collect::<Vec<_>>(),
-            )
-            .expect("ack head");
-        }
-        let header = page(&store, &appended.outbox_id, None, 4096);
-        let raw: serde_json::Value = serde_json::from_slice(&header.bytes).expect("empty header");
-        assert_eq!(raw["pendingEntryCount"], 0);
-        assert!(raw["firstEntryCursor"].is_null());
-    }
-
-    #[test]
-    fn entry_headers_carry_the_recorded_native_source_and_an_unbound_queue_has_no_checkpoint() {
-        let (_dir, mut store) = store("owner-native-source-read");
-        let appended = append(&mut store, "workspace-1", input("native", b"a", 1)).expect("append");
-        let source = OwnerOutboxNativeSource {
-            binding: binding(),
-            adoption_id: "adoption-1".to_owned(),
-            native_sequence: 3,
-            update_digest: appended.update_digest.clone(),
-            origin: OwnerOutboxNativeOrigin::NativeUpdate {
-                actor_origin_id: Some("automation-1".to_owned()),
-                actor_kind: Some("automation".to_owned()),
-                on_behalf_of: Some("person-1".to_owned()),
-                chain_depth: Some(1),
-                recorded_at_ms: 5,
-                agent_run_id: None,
-            },
-        };
-        let json = serde_json::to_string(&source).expect("source");
-        committed(
-            store
-                .write_with(&NoFaults, |tx| -> Result<usize, OwnerOutboxError> {
-                    tx.execute(
-                        "UPDATE owner_ydoc_outbox_entries SET native_source_json=?2 WHERE outbox_id=?1",
-                        params![appended.outbox_id, json],
-                    )
-                    .map_err(write_sql)
-                })
-                .expect("recorded source"),
-        )
-        .expect("recorded source committed");
-        let header = page(&store, &appended.outbox_id, None, 4096);
-        let raw: serde_json::Value = serde_json::from_slice(&header.bytes).expect("header");
-        assert!(raw["checkpointDigest"].is_null());
-        assert_eq!(raw["frozenAtRefusedSeed"], serde_json::json!(false));
-        let first: OwnerOutboxReadCursor =
-            serde_json::from_value(raw["firstEntryCursor"].clone()).expect("first entry");
-        let entry = page(&store, &appended.outbox_id, Some(first), 4096);
-        let entry: serde_json::Value = serde_json::from_slice(&entry.bytes).expect("entry header");
-        assert_eq!(
-            entry["nativeSource"],
-            serde_json::to_value(&source).expect("source json")
-        );
-        let checkpoint = OwnerOutboxReadCursor {
-            snapshot: header.cursor.snapshot.clone(),
-            part: OwnerOutboxReadPart::Checkpoint,
-            sequence: 0,
-            offset: 0,
-        };
-        // As for a checkpoint that moved on: the read changed instead of failing.
-        assert!(matches!(
-            read_pending_page(
-                &store,
-                "workspace-1",
-                &appended.outbox_id,
-                Some(checkpoint),
-                4096
-            ),
-            Ok(OwnerOutboxPageResult::ReadChanged)
-        ));
-    }
-
-    #[test]
-    fn changed_append_acknowledgment_or_quarantine_invalidates_a_partial_read() {
-        for mutation in ["append", "acknowledge", "ack-append", "quarantine"] {
-            let (_dir, mut store) = store("owner-page-changed");
-            let appended = append(
-                &mut store,
-                "workspace-1",
-                input("first", b"first update", 1),
-            )
-            .expect("append");
-            let pending =
-                read_pending(&store, "workspace-1", &appended.outbox_id).expect("pending");
-            // Leave the read in the middle of a blob, not merely between rows.
-            let first = page(&store, &appended.outbox_id, None, 4096);
-            let base = page(&store, &appended.outbox_id, first.next_cursor, 1);
-            let cursor = base.next_cursor.expect("base has remaining bytes");
-            assert_eq!(cursor.part, OwnerOutboxReadPart::Base);
-            match mutation {
-                "append" => {
-                    append(
-                        &mut store,
-                        "workspace-1",
-                        input("second", b"second update", 2),
-                    )
-                    .expect("append during read");
-                }
-                "acknowledge" | "ack-append" => {
-                    acknowledge(
-                        &mut store,
-                        "workspace-1",
-                        &appended.outbox_id,
-                        &[receipt(&pending.entries[0])],
-                    )
-                    .expect("ack during read");
-                    if mutation == "ack-append" {
-                        // Restore byte totals and oldest timestamp; only the
-                        // monotonic next_sequence distinguishes this snapshot.
-                        append(
-                            &mut store,
-                            "workspace-1",
-                            input("replacement", b"first update", 1),
-                        )
-                        .expect("replace acknowledged entry");
-                    }
-                }
-                _ => {
-                    quarantine(
-                        &mut store,
-                        "workspace-1",
-                        OwnerOutboxQuarantineInput {
-                            outbox_id: appended.outbox_id.clone(),
-                            reason: "binding changed".to_owned(),
-                            observed_binding: None,
-                        },
-                        20,
-                    )
-                    .expect("quarantine during read");
-                }
-            }
-            assert!(
-                matches!(
-                    read_pending_page(&store, "workspace-1", &appended.outbox_id, Some(cursor), 1),
-                    Ok(OwnerOutboxPageResult::ReadChanged)
-                ),
-                "{mutation}"
-            );
-        }
-    }
-
-    #[test]
     fn page_refuses_invalid_offsets_and_inconsistent_blob_lengths() {
         let (_dir, mut store) = store("owner-page-corrupt");
         let appended =
@@ -3009,77 +2943,6 @@ mod tests {
     }
 
     #[test]
-    fn owner_receipt_numeric_bounds_guard_acknowledgement() {
-        fn run_case(tag: &str, epoch: &str, cursor: &str, valid: bool) {
-            let (_dir, mut store) = store(tag);
-            let outbox_id = append(&mut store, "workspace-1", input("key-1", b"one", 10))
-                .expect("append")
-                .outbox_id;
-            let pending = read_pending(&store, "workspace-1", &outbox_id).expect("pending receipt");
-            let receipt = OwnerDeliveryReceipt {
-                delivery_id: pending.entries[0].delivery_id.clone(),
-                update_digest: pending.entries[0].update_digest.clone(),
-                journal_cursor: cursor.parse().expect("cursor fixture"),
-                accepting_host_epoch: epoch.parse().expect("epoch fixture"),
-            };
-            let result = acknowledge(&mut store, "workspace-1", &outbox_id, &[receipt]);
-
-            if valid {
-                assert_eq!(result.expect("valid receipt").acknowledged, 1, "{tag}");
-                assert!(
-                    read_pending(&store, "workspace-1", &outbox_id)
-                        .expect("acknowledged pending state")
-                        .entries
-                        .is_empty(),
-                    "{tag}"
-                );
-            } else {
-                assert!(
-                    matches!(result, Err(OwnerOutboxError::InvalidInput(_))),
-                    "{tag}: {result:?}"
-                );
-                let after =
-                    read_pending(&store, "workspace-1", &outbox_id).expect("refused pending state");
-                assert_eq!(after.entries, pending.entries, "{tag}");
-                assert_eq!(after.pending_bytes, pending.pending_bytes, "{tag}");
-            }
-        }
-
-        run_case("owner-receipt-min", "1", "1", true);
-        run_case(
-            "owner-receipt-max",
-            "9007199254740991",
-            "9007199254740991",
-            true,
-        );
-        for (tag, epoch) in [
-            ("owner-receipt-epoch-zero", "0"),
-            ("owner-receipt-epoch-negative", "-1"),
-            ("owner-receipt-epoch-overflow", "9007199254740992"),
-        ] {
-            run_case(tag, epoch, "1", false);
-        }
-        for (tag, cursor) in [
-            ("owner-receipt-cursor-zero", "0"),
-            ("owner-receipt-cursor-negative", "-1"),
-            ("owner-receipt-cursor-overflow", "9007199254740992"),
-        ] {
-            run_case(tag, "1", cursor, false);
-        }
-
-        let field_type = OwnerDeliveryReceipt {
-            delivery_id: "delivery-type".to_owned(),
-            update_digest: "0".repeat(64),
-            journal_cursor: "1".parse().expect("cursor fixture"),
-            accepting_host_epoch: "1".parse().expect("epoch fixture"),
-        };
-        assert_eq!(
-            std::any::type_name_of_val(&field_type.accepting_host_epoch),
-            "i64"
-        );
-    }
-
-    #[test]
     fn mismatched_durable_main_version_refuses_without_writes() {
         let (_dir, mut store) = store("owner-outbox-main-version-mismatch");
         let before = durable_write_counts(&store);
@@ -3088,19 +2951,6 @@ mod tests {
 
         assert!(matches!(
             append(&mut store, "workspace-1", mismatched),
-            Err(OwnerOutboxError::MainVersionMismatch)
-        ));
-        assert_eq!(durable_write_counts(&store), before);
-    }
-
-    #[test]
-    fn absent_durable_main_version_refuses_without_writes() {
-        let dir = ScratchDir::new_named("owner-outbox-main-version-absent").expect("scratch");
-        let mut store = EngineStore::open(&dir.join("engine.db"), 1).expect("store");
-        let before = durable_write_counts(&store);
-
-        assert!(matches!(
-            append(&mut store, "workspace-1", input("key-1", b"one", 10)),
             Err(OwnerOutboxError::MainVersionMismatch)
         ));
         assert_eq!(durable_write_counts(&store), before);
@@ -3122,45 +2972,6 @@ mod tests {
             append(&mut store, "workspace-1", changed_base),
             Err(OwnerOutboxError::ParentMismatch)
         ));
-    }
-
-    #[test]
-    fn append_key_payload_mismatch_is_refused() {
-        let (_dir, mut store) = store("owner-outbox-key");
-        append(&mut store, "workspace-1", input("key-1", b"one", 10)).expect("append");
-        assert!(matches!(
-            append(&mut store, "workspace-1", input("key-1", b"changed", 11)),
-            Err(OwnerOutboxError::AppendKeyMismatch)
-        ));
-    }
-
-    #[test]
-    fn sequence_numbers_increase() {
-        let (_dir, mut store) = store("owner-outbox-sequence");
-        let first = append(&mut store, "workspace-1", input("key-1", b"one", 10)).expect("first");
-        let second = append(&mut store, "workspace-1", input("key-2", b"two", 11)).expect("second");
-        assert_eq!((first.sequence, second.sequence), (1, 2));
-    }
-
-    #[test]
-    fn delivery_id_is_stable_across_reopen() {
-        let (dir, mut store) = store("owner-outbox-reopen");
-        let first = append(&mut store, "workspace-1", input("key-1", b"one", 10)).expect("first");
-        drop(store);
-        let mut reopened = EngineStore::open(&dir.join("engine.db"), 20).expect("reopen");
-        let replay =
-            append(&mut reopened, "workspace-1", input("key-1", b"one", 10)).expect("replay");
-        assert_eq!(replay, first);
-    }
-
-    #[test]
-    fn append_key_replay_preserves_the_original_result_while_later_entries_are_pending() {
-        let (_dir, mut store) = store("owner-outbox-pending-replay");
-        let first = append(&mut store, "workspace-1", input("key-1", b"one", 10)).expect("first");
-        append(&mut store, "workspace-1", input("key-2", b"two", 11)).expect("second");
-
-        let replay = append(&mut store, "workspace-1", input("key-1", b"one", 10)).expect("replay");
-        assert_eq!(replay, first);
     }
 
     #[test]
@@ -3227,171 +3038,6 @@ mod tests {
                 .is_none(),
             "an acknowledged update with no other owner must release its full blob"
         );
-    }
-
-    #[test]
-    fn acknowledgement_keeps_a_shared_update_blob_owned_by_the_base() {
-        let (_dir, mut store) = store("owner-outbox-shared-update-blob");
-        let shared_bytes = b"shared base and update";
-        let mut shared_input = input("key-1", shared_bytes, 10);
-        shared_input.base_update = shared_bytes.to_vec();
-        let first = append(&mut store, "workspace-1", shared_input).expect("append");
-        let pending = read_pending(&store, "workspace-1", &first.outbox_id).expect("pending");
-
-        let result = acknowledge(
-            &mut store,
-            "workspace-1",
-            &first.outbox_id,
-            &[receipt(&pending.entries[0])],
-        )
-        .expect("a shared blob reference must not refuse acknowledgement");
-
-        assert_eq!(result.acknowledged, 1);
-        assert_eq!(result.pending_bytes, 0);
-        assert_eq!(
-            store
-                .read_with(|conn| {
-                    conn.query_row(
-                        "SELECT pending,update_blob_digest FROM owner_ydoc_outbox_entries \
-                         WHERE append_key='key-1'",
-                        [],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-                    )
-                })
-                .expect("read committed tombstone"),
-            (0, None),
-            "the tombstone must commit after the expected foreign-key refusal"
-        );
-        assert_eq!(
-            store
-                .get_binary_blob(&first.update_digest)
-                .expect("read shared blob"),
-            Some(shared_bytes.to_vec()),
-            "the parent base reference must retain the shared content-addressed blob"
-        );
-    }
-
-    #[test]
-    fn pending_entries_require_a_full_update_blob_reference() {
-        let (_dir, mut store) = store("owner-outbox-pending-blob-reference");
-        let outbox = append(&mut store, "workspace-1", input("key-1", b"one", 10))
-            .expect("append")
-            .outbox_id;
-
-        let illegal = store.write_with(&NoFaults, |tx| -> Result<usize, OwnerOutboxError> {
-            tx.execute(
-                "UPDATE owner_ydoc_outbox_entries SET update_blob_digest=NULL \
-                 WHERE append_key='key-1' AND pending=1",
-                [],
-            )
-            .map_err(write_sql)
-        });
-
-        assert!(
-            illegal.is_err(),
-            "the schema must reject a pending entry without its full update blob"
-        );
-        assert!(
-            read_pending(&store, "workspace-1", &outbox)
-                .expect("pending after refused mutation")
-                .entries[0]
-                .update
-                .eq(b"one"),
-            "the refused mutation must leave the pending blob intact"
-        );
-    }
-
-    #[test]
-    fn acknowledgement_matches_only_a_contiguous_prefix() {
-        let (_dir, mut store) = store("owner-outbox-prefix");
-        let outbox = append(&mut store, "workspace-1", input("key-1", b"one", 10))
-            .expect("first")
-            .outbox_id;
-        append(&mut store, "workspace-1", input("key-2", b"two", 11)).expect("second");
-        append(&mut store, "workspace-1", input("key-3", b"three", 12)).expect("third");
-        let pending = read_pending(&store, "workspace-1", &outbox).expect("pending");
-        let reversed = [receipt(&pending.entries[1]), receipt(&pending.entries[0])];
-        assert!(matches!(
-            acknowledge(&mut store, "workspace-1", &outbox, &reversed),
-            Err(OwnerOutboxError::ReceiptMismatch)
-        ));
-        let prefix = [receipt(&pending.entries[0]), receipt(&pending.entries[1])];
-        let result = acknowledge(&mut store, "workspace-1", &outbox, &prefix).expect("ack");
-        assert_eq!(result.acknowledged, 2);
-        assert_eq!(
-            read_pending(&store, "workspace-1", &outbox)
-                .expect("remaining")
-                .entries[0]
-                .sequence,
-            3
-        );
-    }
-
-    #[test]
-    fn delivery_digest_mismatch_is_refused() {
-        let (_dir, mut store) = store("owner-outbox-digest");
-        let outbox = append(&mut store, "workspace-1", input("key-1", b"one", 10))
-            .expect("append")
-            .outbox_id;
-        let pending = read_pending(&store, "workspace-1", &outbox).expect("pending");
-        let mut mismatched = receipt(&pending.entries[0]);
-        mismatched.update_digest = "0".repeat(64);
-        assert!(matches!(
-            acknowledge(&mut store, "workspace-1", &outbox, &[mismatched]),
-            Err(OwnerOutboxError::ReceiptMismatch)
-        ));
-        assert_eq!(
-            read_pending(&store, "workspace-1", &outbox)
-                .expect("still pending")
-                .entries
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn quarantine_preserves_base_and_pending_updates() {
-        let (_dir, mut store) = store("owner-outbox-quarantine");
-        let outbox = append(&mut store, "workspace-1", input("key-1", b"one", 10))
-            .expect("append")
-            .outbox_id;
-        quarantine(
-            &mut store,
-            "workspace-1",
-            OwnerOutboxQuarantineInput {
-                outbox_id: outbox.clone(),
-                reason: "restore-fence-mismatch".to_owned(),
-                observed_binding: Some(binding()),
-            },
-            20,
-        )
-        .expect("quarantine");
-        let pending = read_pending(&store, "workspace-1", &outbox).expect("pending");
-        assert!(matches!(
-            acknowledge(
-                &mut store,
-                "workspace-1",
-                &outbox,
-                &[receipt(&pending.entries[0])]
-            ),
-            Err(OwnerOutboxError::Frozen)
-        ));
-        let pending = read_pending(&store, "workspace-1", &outbox).expect("still quarantined");
-        assert_eq!(pending.state, OwnerOutboxState::Quarantined);
-        assert_eq!(pending.base_update, b"base update");
-        assert_eq!(pending.entries[0].update, b"one");
-    }
-
-    #[test]
-    fn limit_triggering_append_is_preserved_and_seals_queue() {
-        let (_dir, mut store) = store("owner-outbox-limit");
-        let mut limited = input("key-1", b"one", 10);
-        limited.limits.max_pending_bytes = 3;
-        let result = append(&mut store, "workspace-1", limited).expect("append");
-        assert_eq!(result.state, OwnerOutboxState::Sealed);
-        let pending = read_pending(&store, "workspace-1", &result.outbox_id).expect("pending");
-        assert_eq!(pending.entries.len(), 1);
-        assert_eq!(pending.entries[0].update, b"one");
     }
 
     #[test]
@@ -3578,36 +3224,6 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_refusal_requarantines_with_its_reason_and_uses_up_the_grant() {
-        let (_dir, mut store, outbox, pending) = refused_queue("owner-outbox-try-again-refused");
-        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
-        refuse(&mut store, &outbox);
-        let frozen = read_pending(&store, "workspace-1", &outbox).expect("refused again");
-        assert_eq!(frozen.state, OwnerOutboxState::Quarantined);
-        assert_eq!(frozen.quarantine_reason.as_deref(), Some("invalid-update"));
-        assert_eq!(frozen.retry_delivery_id, None);
-        assert_eq!(frozen.entries, pending.entries);
-        assert!(matches!(
-            acknowledge(
-                &mut store,
-                "workspace-1",
-                &outbox,
-                &[receipt(&pending.entries[0])]
-            ),
-            Err(OwnerOutboxError::Frozen)
-        ));
-        // Only another request from the owner opens another attempt.
-        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again later");
-        acknowledge(
-            &mut store,
-            "workspace-1",
-            &outbox,
-            &[receipt(&pending.entries[0])],
-        )
-        .expect("accepted on the second request");
-    }
-
-    #[test]
     fn a_granted_attempt_survives_reopen_as_exactly_one_attempt() {
         let (dir, mut store, outbox, pending) = refused_queue("owner-outbox-try-again-reopen");
         retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
@@ -3659,145 +3275,6 @@ mod tests {
         )
         .expect("record refusal");
     }
-
-    fn recorded_refusals(store: &EngineStore, outbox: &str) -> i64 {
-        store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1",
-                    [outbox],
-                    |row| row.get(0),
-                )
-            })
-            .expect("recorded refusals")
-    }
-
-    #[test]
-    fn no_earlier_refusal_ends_a_newer_try_again() {
-        let (dir, mut store, outbox, pending) = refused_queue("owner-outbox-earlier-refusal");
-        let head = pending.entries[0].delivery_id.clone();
-        for key in ["refusal-a", "refusal-b"] {
-            retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
-            record(&mut store, &outbox, &head, key);
-            let refused = read_pending(&store, "workspace-1", &outbox).expect("refused");
-            assert_eq!(refused.retry_delivery_id, None);
-        }
-        retry(&mut store, "workspace-1", try_again(&outbox)).expect("newest try again");
-        let still_granted = |store: &EngineStore| {
-            let granted = read_pending(store, "workspace-1", &outbox).expect("granted");
-            assert_eq!(granted.state, OwnerOutboxState::Quarantined);
-            assert_eq!(granted.retry_delivery_id.as_deref(), Some(head.as_str()));
-            assert_eq!(granted.entries, pending.entries);
-        };
-        // A write of the first refusal whose completion was delayed.
-        record(&mut store, &outbox, &head, "refusal-a");
-        still_granted(&store);
-        drop(store);
-        let mut store = EngineStore::open(&dir.join("engine.db"), 50).expect("reopen");
-        for key in ["refusal-a", "refusal-b", "refusal-a"] {
-            record(&mut store, &outbox, &head, key);
-            still_granted(&store);
-        }
-        assert_eq!(recorded_refusals(&store, &outbox), 2);
-        acknowledge(
-            &mut store,
-            "workspace-1",
-            &outbox,
-            &[receipt(&pending.entries[0])],
-        )
-        .expect("accepted");
-        assert_eq!(recorded_refusals(&store, &outbox), 0);
-    }
-
-    #[test]
-    fn a_moved_head_and_a_released_queue_keep_no_earlier_refusal() {
-        let (_dir, mut store, outbox, pending) = refused_queue("owner-outbox-refusal-cleanup");
-        let [first, second] = [0, 1].map(|index| pending.entries[index].delivery_id.clone());
-        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
-        acknowledge(
-            &mut store,
-            "workspace-1",
-            &outbox,
-            &[receipt(&pending.entries[0])],
-        )
-        .expect("first head accepted");
-        // A refusal still kept for the earlier head.
-        committed(
-            store
-                .write_with(&NoFaults, |tx| -> Result<usize, OwnerOutboxError> {
-                    tx.execute(
-                        "INSERT INTO owner_ydoc_outbox_refusals(outbox_id,delivery_id,refusal_key) VALUES(?1,?2,'refusal-first')",
-                        params![outbox, first],
-                    )
-                    .map_err(write_sql)
-                })
-                .expect("earlier refusal"),
-        )
-        .expect("earlier refusal committed");
-        record(&mut store, &outbox, &second, "refusal-second");
-        let kept: Vec<String> = store
-            .read_with(|conn| {
-                let mut statement = conn.prepare(
-                    "SELECT delivery_id FROM owner_ydoc_outbox_refusals WHERE outbox_id=?1",
-                )?;
-                let rows = statement.query_map([&outbox], |row| row.get(0))?;
-                rows.collect::<Result<Vec<_>, rusqlite::Error>>()
-            })
-            .expect("kept refusals");
-        assert_eq!(kept, vec![second]);
-        // Release deletes the queue's rows; the refusals go with them.
-        committed(
-            store
-                .write_with(&NoFaults, |tx| -> Result<(), OwnerOutboxError> {
-                    tx.execute(
-                        "DELETE FROM owner_ydoc_outbox_entries WHERE outbox_id=?1",
-                        [&outbox],
-                    )
-                    .map_err(write_sql)?;
-                    tx.execute(
-                        "DELETE FROM owner_ydoc_outboxes WHERE outbox_id=?1",
-                        [&outbox],
-                    )
-                    .map_err(write_sql)?;
-                    Ok(())
-                })
-                .expect("released"),
-        )
-        .expect("release committed");
-        assert_eq!(recorded_refusals(&store, &outbox), 0);
-    }
-
-    #[test]
-    fn a_granted_try_again_keeps_its_document_loaded_until_an_outcome_uses_it_up() {
-        let (_dir, mut store, outbox, _pending) = refused_queue("owner-outbox-unload-grant");
-        let pending = |store: &EngineStore| {
-            store
-                .read_with(|conn| {
-                    crate::live_update_application::unload_pending(conn, "workspace-1", "object-1")
-                })
-                .expect("unload pending")
-        };
-        // A refused queue waits for its owner, not for delivery.
-        assert_eq!(pending(&store), None);
-        retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
-        assert_eq!(
-            pending(&store),
-            Some(crate::live_update_application::UnloadPending::Delivery)
-        );
-        // Refused again, the grant is used up.
-        refuse(&mut store, &outbox);
-        assert_eq!(pending(&store), None);
-    }
-
-    #[test]
-    fn a_repeated_try_again_keeps_the_outstanding_grant() {
-        let (_dir, mut store, outbox, pending) = refused_queue("owner-outbox-try-again-twice");
-        let first = retry(&mut store, "workspace-1", try_again(&outbox)).expect("try again");
-        let second = retry(&mut store, "workspace-1", try_again(&outbox)).expect("again");
-        assert_eq!(first, pending.entries[0].delivery_id);
-        assert_eq!(second, first);
-    }
-
     #[test]
     fn a_recorded_refusal_ends_its_try_again_once_and_never_a_later_one() {
         let (dir, mut store, outbox, pending) = refused_queue("owner-outbox-known-refusal");
@@ -3854,44 +3331,6 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_of_an_active_head_quarantines_the_queue_and_keeps_its_bytes() {
-        let (_dir, mut store) = store("owner-outbox-known-refusal-active");
-        let first = append(&mut store, "workspace-1", input("key-1", b"one", 10)).expect("first");
-        append(&mut store, "workspace-1", input("key-2", b"two", 11)).expect("second");
-        let before = read_pending(&store, "workspace-1", &first.outbox_id).expect("active");
-        record(
-            &mut store,
-            &first.outbox_id,
-            &first.delivery_id,
-            "refusal-1",
-        );
-        let frozen = read_pending(&store, "workspace-1", &first.outbox_id).expect("frozen");
-        assert_eq!(frozen.state, OwnerOutboxState::Quarantined);
-        assert_eq!(
-            frozen.quarantine_reason.as_deref(),
-            Some("provenance-refused")
-        );
-        assert_eq!(frozen.entries, before.entries);
-        assert!(matches!(
-            record_refusal(
-                &mut store,
-                "workspace-2",
-                OwnerOutboxQuarantineInput {
-                    outbox_id: first.outbox_id.clone(),
-                    reason: "provenance-refused".to_owned(),
-                    observed_binding: None,
-                },
-                OwnerOutboxRefusal {
-                    delivery_id: first.delivery_id.clone(),
-                    key: "refusal-2".to_owned(),
-                },
-                40,
-            ),
-            Err(OwnerOutboxError::WorkspaceMismatch)
-        ));
-    }
-
-    #[test]
     fn stale_try_again_requests_cannot_reopen_the_queue() {
         let (_dir, mut store, outbox, _pending) = refused_queue("owner-outbox-try-again-stale");
         assert!(matches!(
@@ -3934,46 +3373,6 @@ mod tests {
                 .expect("still frozen")
                 .retry_delivery_id,
             None
-        );
-    }
-
-    #[test]
-    fn try_again_needs_a_refused_queue_at_an_unmoved_binding() {
-        let (_dir, mut store) = store("owner-outbox-try-again-active");
-        let active = append(&mut store, "workspace-1", input("key-1", b"one", 10))
-            .expect("active")
-            .outbox_id;
-        assert!(matches!(
-            retry(&mut store, "workspace-1", try_again(&active)),
-            Err(OwnerOutboxError::NotQuarantined)
-        ));
-        // A moved binding recovers through enrollment, not another attempt.
-        quarantine(
-            &mut store,
-            "workspace-1",
-            OwnerOutboxQuarantineInput {
-                outbox_id: active.clone(),
-                reason: "restore-fenced".to_owned(),
-                observed_binding: Some(binding()),
-            },
-            20,
-        )
-        .expect("binding quarantine");
-        assert!(matches!(
-            retry(&mut store, "workspace-1", try_again(&active)),
-            Err(OwnerOutboxError::ParentMismatch)
-        ));
-        let illegal = store.write_with(&NoFaults, |tx| -> Result<usize, OwnerOutboxError> {
-            tx.execute(
-                "UPDATE owner_ydoc_outboxes SET state='active',quarantine_reason=NULL,\
-                 observed_binding_json=NULL,retry_delivery_id='owner-delivery-x' WHERE outbox_id=?1",
-                [&active],
-            )
-            .map_err(write_sql)
-        });
-        assert!(
-            illegal.is_err(),
-            "the schema must refuse a grant on an outbox that is not quarantined"
         );
     }
 }

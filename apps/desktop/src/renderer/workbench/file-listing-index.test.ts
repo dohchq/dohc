@@ -16,14 +16,11 @@ describe("indexFileListing", () => {
 
     const indexed = indexFileListing(files);
 
-    expect(indexed.markdownWikilinkFiles).toEqual([
-      { path: "docs/Guide.MD", fileId: null },
-    ]);
+    expect(indexed.markdownWikilinkFiles).toEqual([{ path: "docs/Guide.MD", fileId: null }]);
     expect(indexed.conflictSummaries).toEqual(
       Array.from(
         { length: 5 },
-        (_, index) =>
-          `conflict-${index + 1} has a sync conflict (conflict-${index + 1}.conflict)`,
+        (_, index) => `conflict-${index + 1} has a sync conflict (conflict-${index + 1}.conflict)`,
       ),
     );
     expect(indexed.presentPaths).toEqual(new Set(files.map((file) => file.path)));
@@ -40,8 +37,7 @@ describe("indexFileListing", () => {
     ];
 
     const first = indexFileListing(files).graphRefreshKey;
-    const equivalent = indexFileListing(files.map((file) => ({ ...file })))
-      .graphRefreshKey;
+    const equivalent = indexFileListing(files.map((file) => ({ ...file }))).graphRefreshKey;
     const reordered = indexFileListing([...files].reverse()).graphRefreshKey;
 
     expect(first).toBe(equivalent);

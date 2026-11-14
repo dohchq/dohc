@@ -21,7 +21,9 @@ function privateShortTmpdir(): string {
   }
   const stats = lstatSync(dir);
   if (!stats.isDirectory() || stats.uid !== uid || (stats.mode & 0o077) !== 0) {
-    throw new Error(`${dir} must be a directory that only user ${uid} can enter. Remove it as its owner, then run the tests again.`);
+    throw new Error(
+      `${dir} must be a directory that only user ${uid} can enter. Remove it as its owner, then run the tests again.`,
+    );
   }
   return dir;
 }

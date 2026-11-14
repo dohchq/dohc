@@ -51,9 +51,9 @@ describe("engine Y.Doc save-seq bookkeeping", () => {
       noteLocalEdit(state, index + 1);
       noteSettleStart(state, token);
     });
-    expect(
-      [...tokens].reverse().map((token) => noteSettleOutcome(state, token)),
-    ).toEqual([3, 2, 1]);
+    expect([...tokens].reverse().map((token) => noteSettleOutcome(state, token))).toEqual([
+      3, 2, 1,
+    ]);
   });
 
   it("pairs each completing settle with its own start, not the newest one", () => {
@@ -62,7 +62,6 @@ describe("engine Y.Doc save-seq bookkeeping", () => {
     noteSettleStart(state, 1);
     noteLocalEdit(state, 2);
     noteSettleStart(state, 2);
-    // The first settle completes first and carried only edit 1.
     expect(noteSettleOutcome(state, 1)).toBe(1);
     expect(noteSettleOutcome(state, 2)).toBe(2);
   });

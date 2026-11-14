@@ -1,6 +1,7 @@
 import type { JsonValue } from "./protocol.js";
 
-const KiB = 1024, MiB = 1024 * KiB;
+const KiB = 1024,
+  MiB = 1024 * KiB;
 
 /**
  * Automation evaluation limits, each no looser than its dataset guest counterpart in `DEFAULT_LIMITS`.
@@ -46,8 +47,26 @@ export type JsonObject = { [key: string]: JsonValue };
  * A step result cannot be bound to one of them. This matches the automations file contract's list.
  */
 export const AUTOMATION_SCOPE_NAMES: readonly string[] = Object.freeze([
-  "record", "previous", "trigger", "person", "now", "message",
-  "today", "dateAdd", "dateBetween", "formatDate", "lower", "upper", "trim", "contains", "join", "length", "sum", "min", "max", "round",
+  "record",
+  "previous",
+  "trigger",
+  "person",
+  "now",
+  "message",
+  "today",
+  "dateAdd",
+  "dateBetween",
+  "formatDate",
+  "lower",
+  "upper",
+  "trim",
+  "contains",
+  "join",
+  "length",
+  "sum",
+  "min",
+  "max",
+  "round",
 ]);
 
 /**
@@ -81,7 +100,9 @@ export interface AutomationScope {
 }
 
 /** One part of message text. This matches `AutomationTextPart` from the automations file contract. */
-export type AutomationTextPart = { kind: "text"; text: string } | { kind: "expression"; expression: string };
+export type AutomationTextPart =
+  | { kind: "text"; text: string }
+  | { kind: "expression"; expression: string };
 
 /** `expression` is JavaScript such as `record.Status == "Done"`. `text` is message text, already split into parts. */
 export type AutomationFormula = (
@@ -95,8 +116,18 @@ export type AutomationFormula = (
   when?: Array<{ index: number } & ({ truthy: boolean } | { equals: JsonValue })>;
 };
 
-export type AutomationErrorCode = "syntax" | "runtime" | "timeout" | "memory" | "too_large" | "invalid_result" | "busy";
-export interface AutomationError { code: AutomationErrorCode; message: string }
+export type AutomationErrorCode =
+  | "syntax"
+  | "runtime"
+  | "timeout"
+  | "memory"
+  | "too_large"
+  | "invalid_result"
+  | "busy";
+export interface AutomationError {
+  code: AutomationErrorCode;
+  message: string;
+}
 export type AutomationOutcome<T> = { ok: true; value: T } | { ok: false; error: AutomationError };
 
 /** A code change in any reachable Collection. `collection` is its workspace path; `table` selects a dataset table; `id` names the record. */
@@ -112,10 +143,19 @@ export interface CodeStepReturn {
 
 export type AutomationWorkerItem = AutomationFormula | { kind: "code"; source: string };
 /** Time a request has spent reading its scope and running its items, in milliseconds. */
-export interface AutomationTimeSpent { prepareMs: number; runMs: number }
+export interface AutomationTimeSpent {
+  prepareMs: number;
+  runMs: number;
+}
 /** A run sends its scope on first use of a worker, then continues until end. `spent` includes earlier phases and workers. */
 export type AutomationWorkerRequest =
-  | { kind: "evaluate"; runId: number; scope?: AutomationScope; items: AutomationWorkerItem[]; spent: AutomationTimeSpent }
+  | {
+      kind: "evaluate";
+      runId: number;
+      scope?: AutomationScope;
+      items: AutomationWorkerItem[];
+      spent: AutomationTimeSpent;
+    }
   | { kind: "end"; runId: number };
 /**
  * The worker answers each item in order with `result` and the time the item took. A result with `restart` is the
@@ -128,25 +168,41 @@ export type AutomationWorkerReply =
   | { kind: "restart" }
   | { kind: "refused"; message: string };
 
-export const subjectOf = (item: { kind: AutomationWorkerItem["kind"] }) => item.kind === "code" ? "The code" : "The formula";
+export const subjectOf = (item: { kind: AutomationWorkerItem["kind"] }) =>
+  item.kind === "code" ? "The code" : "The formula";
 export const itemLimitMs = (item: { kind: AutomationWorkerItem["kind"] }) =>
   item.kind === "code" ? AUTOMATION_LIMITS.codeMs : AUTOMATION_LIMITS.formulaMs;
 /** The worker refuses a request whose scope it cannot turn into JSON. */
 export const NOT_JSON = "The automation scope must hold only JSON values.";
-export const failure = (code: AutomationErrorCode, message: string) => ({ ok: false, error: { code, message } }) as const;
+export const failure = (code: AutomationErrorCode, message: string) =>
+  ({ ok: false, error: { code, message } }) as const;
 
 /** The scope object and its `record` or `bindings` object add two levels to the nesting of the values in them. */
 export const SCOPE_DEPTH = AUTOMATION_LIMITS.resultDepth + 2;
-export const scopeTooLarge = () => failure("too_large", `The record and step results are larger than ${AUTOMATION_LIMITS.scopeBytes / 1024} KiB.`);
-export const scopeTooDeep = () => failure("too_large", `The record and step results nest lists or objects more than ${AUTOMATION_LIMITS.resultDepth} levels deep.`);
+export const scopeTooLarge = () =>
+  failure(
+    "too_large",
+    `The record and step results are larger than ${AUTOMATION_LIMITS.scopeBytes / 1024} KiB.`,
+  );
+export const scopeTooDeep = () =>
+  failure(
+    "too_large",
+    `The record and step results nest lists or objects more than ${AUTOMATION_LIMITS.resultDepth} levels deep.`,
+  );
 
 /** The failure for an item that starts after its request spent one of its time budgets, or nothing. */
 export function notReached(item: AutomationWorkerItem, spent: AutomationTimeSpent) {
   if (spent.runMs >= AUTOMATION_LIMITS.requestMs) {
-    return failure("timeout", `${subjectOf(item)} did not run because the run took longer than ${AUTOMATION_LIMITS.requestMs / 1000} s.`);
+    return failure(
+      "timeout",
+      `${subjectOf(item)} did not run because the run took longer than ${AUTOMATION_LIMITS.requestMs / 1000} s.`,
+    );
   }
   if (spent.prepareMs >= AUTOMATION_LIMITS.prepareRequestMs) {
-    return failure("timeout", `${subjectOf(item)} did not run because reading the record and step results took longer than ${AUTOMATION_LIMITS.prepareRequestMs / 1000} s in all.`);
+    return failure(
+      "timeout",
+      `${subjectOf(item)} did not run because reading the record and step results took longer than ${AUTOMATION_LIMITS.prepareRequestMs / 1000} s in all.`,
+    );
   }
   return undefined;
 }

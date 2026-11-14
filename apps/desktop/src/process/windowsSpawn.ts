@@ -1,6 +1,6 @@
 // Windows child-process spawning support, shared by agent transports and the
-// site runner. On Windows, package-manager and npm-installed CLI commands are.
-// Cmd/.bat shims that cannot be spawned directly; they must run behind a
+// site runner. On Windows, package-manager and npm-installed CLI commands are
+// .cmd/.bat shims that cannot be spawned directly; they must run behind a
 // cmd.exe wrapper whose command line follows cmd's (not POSIX's) quoting
 // rules, and killing that wrapper does not kill the real process it started.
 // Everything here is a no-op on other platforms.
@@ -119,39 +119,29 @@ export function killProcessTreeWin32(
 ): Promise<boolean> {
   if (process.platform !== "win32" || !pid || exited()) return Promise.resolve(false);
   return new Promise((resolve) => {
-    execFile(
-      "taskkill",
-      ["/pid", String(pid), "/T", "/F"],
-      { windowsHide: true },
-      (error) => resolve(!error),
+    execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }, (error) =>
+      resolve(!error),
     );
   });
 }
 
 // taskkill /PID <wrapper> /T walks the live process tree from a still-running
-// wrapper pid — it has nothing to walk once that wrapper has already exited,
-// the same gap posixSpawn.ts's module comment describes for "-pid" process
-// groups. siteRunner's stopChild needs a snapshot taken while the wrapper was
-// still alive, captured periodically the same way posixSpawn.ts's shared
-// processDescendants lets a backgrounded descendant stay reachable after its
-// own wrapper exits and gets reparented away in the process table.
+// wrapper pid. It has nothing to walk once that wrapper has exited, the same
+// gap posixSpawn.ts's module comment describes for "-pid" process groups. So
+// siteRunner's stopChild needs a snapshot taken while the wrapper was alive,
+// captured periodically, which keeps a backgrounded descendant reachable
+// after its wrapper exits.
 //
-// Win32_Process (via CIM) is used rather than `wmic` — Windows 11 24H2
-// removed wmic.exe by default — or `tasklist`, whose plain-text table has no
-// machine-stable delimiter; Get-CimInstance is available from the Windows
-// PowerShell 5.1 that ships on every supported Windows host, no pwsh (7)
-// install required. Its output is reduced to the same "pid ppid startedAt"
-// shape posixSpawn's parseProcessTable already parses (CreationDate is CIM's
-// own per-process start-time equivalent to POSIX's `lstart` column — a
-// single token, no internal whitespace, so it satisfies the same "one
-// trailing non-space-bounded field" capture group `lstart`'s own multi-word
-// value needs), so the tree-walk itself (posixSpawn.ts's processDescendants)
-// stays a single, platform-agnostic implementation shared by both platforms
-// — this module supplies only the platform-specific text source. A process
-// with no CreationDate (some system processes report none) renders as a
-// trailing space with nothing after it — parseProcessTable's own "ignores
-// lines it cannot read" contract already drops that row rather than fail
-// the whole read, the same as any other malformed line.
+// Win32_Process (via CIM) is the source. Windows 11 24H2 removed wmic.exe by
+// default, and `tasklist` prints a table with no machine-stable delimiter.
+// Get-CimInstance comes with the Windows PowerShell 5.1 on every supported
+// Windows host, so no pwsh (7) install is required. The output is reduced to
+// the "pid ppid startedAt" shape posixSpawn's parseProcessTable parses, with
+// CreationDate as the start time, so both platforms share one tree walk
+// (posixSpawn.ts's processDescendants). A process with no CreationDate (some
+// system processes report none) renders as a trailing space, and
+// parseProcessTable drops that row like any other line it cannot read.
+//
 // A read takes about 1 s on a desktop with some 650 processes. The bound
 // leaves room for a loaded machine, and ends a stalled PowerShell so a stop
 // that waits for captures in flight still ends. A read cut off at the bound
@@ -168,7 +158,7 @@ export function readProcessTableWithPowershell(
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate)\" }",
+        'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate)" }',
       ],
       { windowsHide: true, timeout: readTimeoutMs },
       (error, stdout) => {

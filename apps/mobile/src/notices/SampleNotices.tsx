@@ -11,7 +11,7 @@ import { demoMode, demoScroll } from "../demo";
 import { NoticesFrameProbe } from "../firstScreenProbe";
 import { NoticeRow } from "./NoticeRow";
 import { useNotices } from "./NoticesState";
-import type { PhoneNotice } from "./sample";
+import type { PhoneNotice } from "./phoneNotice";
 import { useSyncBandHost, type BandRecord } from "./useSyncBandHost";
 import { useTheme } from "../theme";
 
@@ -26,8 +26,14 @@ export function SampleNotices() {
   useEffect(() => {
     if (opened && demoMode === "notices-open") markOpen("focusAt");
     if (ready) return;
-    const readyBy = (how: string) => { if (demoMode === "notices-open") markOpen("readyBy", how); setReady(true); };
-    if (opened) { readyBy("focus"); return; }
+    const readyBy = (how: string) => {
+      if (demoMode === "notices-open") markOpen("readyBy", how);
+      setReady(true);
+    };
+    if (opened) {
+      readyBy("focus");
+      return;
+    }
     const idle = requestIdleCallback(() => readyBy("idle"));
     return () => cancelIdleCallback(idle);
   }, [opened, ready]);
@@ -37,8 +43,10 @@ export function SampleNotices() {
   const { problem: shownProblem, bandHeight, coverHeight } = band;
   useEffect(() => {
     if (!announcing) return;
-    const finished = AccessibilityInfo.addEventListener("announcementFinished", ({ announcement, success }) =>
-      markAnnouncement({ finished: announcement, success }));
+    const finished = AccessibilityInfo.addEventListener(
+      "announcementFinished",
+      ({ announcement, success }) => markAnnouncement({ finished: announcement, success }),
+    );
     return () => finished.remove();
   }, []);
 
@@ -55,11 +63,20 @@ export function SampleNotices() {
   if (!openFrozen.current) openBar.current = restingBar.current;
   useEffect(() => {
     if (demoMode === "band-scrolled") {
-      const timer = setTimeout(() => list.current?.scrollToOffset({ offset: 420, animated: false }), 800);
+      const timer = setTimeout(
+        () => list.current?.scrollToOffset({ offset: 420, animated: false }),
+        800,
+      );
       return () => clearTimeout(timer);
     }
     if (demoMode !== "band-half-fold") return;
-    const timer = setTimeout(() => list.current?.getNativeScrollRef().scrollTo({ y: demoScroll - restingBar.current - restingCover.current, animated: false }), 1500);
+    const timer = setTimeout(
+      () =>
+        list.current
+          ?.getNativeScrollRef()
+          .scrollTo({ y: demoScroll - restingBar.current - restingCover.current, animated: false }),
+      1500,
+    );
     return () => clearTimeout(timer);
   }, []);
 
@@ -67,7 +84,10 @@ export function SampleNotices() {
   // once, with no finger on it, while the host still settles the return.
   const away = useRef(false);
   useEffect(() => {
-    if (!opened) { away.current = true; return; }
+    if (!opened) {
+      away.current = true;
+      return;
+    }
     if (!away.current) return;
     away.current = false;
     if (demoMode === "band-return-scroll" || demoMode === "band-cycle-scroll") {
@@ -87,51 +107,68 @@ export function SampleNotices() {
           our own made its label read as disabled on dark glass. */}
       {unread > 0 ? (
         <Stack.Toolbar placement="right">
-          <Stack.Toolbar.Button onPress={markAllRead}>{noticesWords.markAllRead}</Stack.Toolbar.Button>
+          <Stack.Toolbar.Button onPress={markAllRead}>
+            {noticesWords.markAllRead}
+          </Stack.Toolbar.Button>
         </Stack.Toolbar>
       ) : null}
     </>
   );
-  // One list in every state, so nothing remounts when the band comes or goes. The band reports the whole workspace
-  // and never scrolls away, so it's drawn over the list at the bar's bottom. On iOS the native host covers the band's
-  // strip, so iOS keeps rows, focus and the indicator below it. On Android the list's first row is an empty space of
-  // the band's height instead, arriving and leaving in the band's commit.
   restingCover.current = coverHeight;
   const items: Item[] = band.spacer
-    ? [{ kind: "band" as const }, ...notices.map(notice => ({ kind: "notice" as const, notice }))]
-    : notices.map(notice => ({ kind: "notice" as const, notice }));
+    ? [{ kind: "band" as const }, ...notices.map((notice) => ({ kind: "notice" as const, notice }))]
+    : notices.map((notice) => ({ kind: "notice" as const, notice }));
   const rows = (
     <LegendList
       ref={list}
       data={items}
       {...band.scrollHandlers}
-      onScrollBeginDrag={() => { openFrozen.current = true; band.scrollHandlers.onScrollBeginDrag(); }}
+      onScrollBeginDrag={() => {
+        openFrozen.current = true;
+        band.scrollHandlers.onScrollBeginDrag();
+      }}
       // The space's key carries its height, so the list never reuses a size it cached for an earlier height.
-      keyExtractor={item => item.kind === "band" ? `band:${bandHeight}` : item.notice.id}
-      getItemType={item => item.kind}
-      getFixedItemSize={item => item.kind === "band" ? bandHeight : undefined}
+      keyExtractor={(item) => (item.kind === "band" ? `band:${bandHeight}` : item.notice.id)}
+      getItemType={(item) => item.kind}
+      getFixedItemSize={(item) => (item.kind === "band" ? bandHeight : undefined)}
       estimatedItemSize={128}
       style={{ backgroundColor: theme.bg }}
       // Room for the bar and the tab bar, so the last row ends at the tab bar, with or without the band.
       contentInsetAdjustmentBehavior="automatic"
       // Design review only: lets the partway-fold demo scroll to a resting offset above zero, or below the top for a
       // pull-down.
-      scrollToOverflowEnabled={demoMode === "band-half-fold" || demoMode === "band-return-scroll" || demoMode === "band-cycle-scroll"}
+      scrollToOverflowEnabled={
+        demoMode === "band-half-fold" ||
+        demoMode === "band-return-scroll" ||
+        demoMode === "band-cycle-scroll"
+      }
       // On Android the indicator starts where the content does, below the band. On iOS the covered strip does it.
-      scrollIndicatorInsets={nativeBarBand ? undefined : { top: shownProblem ? bandHeight ?? 0 : 0 }}
-      ListFooterComponent={notices.length === 0 ? (
-        <View style={styles.empty} testID="notices-empty">
-          {/* Under a problem band nothing is all clear, so the empty list says only that no other notices wait. */}
-          {shownProblem ? null : <Check size={40} color={theme.subtle} strokeWidth={1.75} />}
-          <Text style={[styles.emptyText, { color: theme.ink }]}>{shownProblem ? noticesWords.noOtherNotices : noticesWords.allClear}</Text>
-        </View>
-      ) : undefined}
-      renderItem={({ item }) => item.kind === "band"
-        ? <View style={{ height: bandHeight }} />
-        : item.notice.id === notices[0]?.id && demoMode === "notices-open"
+      scrollIndicatorInsets={
+        nativeBarBand ? undefined : { top: shownProblem ? (bandHeight ?? 0) : 0 }
+      }
+      ListFooterComponent={
+        notices.length === 0 ? (
+          <View style={styles.empty} testID="notices-empty">
+            {/* Under a problem band nothing is all clear, so the empty list says only that no other notices wait. */}
+            {shownProblem ? null : <Check size={40} color={theme.subtle} strokeWidth={1.75} />}
+            <Text style={[styles.emptyText, { color: theme.ink }]}>
+              {shownProblem ? noticesWords.noOtherNotices : noticesWords.allClear}
+            </Text>
+          </View>
+        ) : undefined
+      }
+      renderItem={({ item }) =>
+        item.kind === "band" ? (
+          <View style={{ height: bandHeight }} />
+        ) : item.notice.id === notices[0]?.id && demoMode === "notices-open" ? (
           // Design review only: when the first row is laid out, for the time from a tab tap to rows on screen.
-          ? <View onLayout={() => markOpen("rowsAt")}><NoticeRow notice={item.notice} onDismiss={dismiss} /></View>
-          : <NoticeRow notice={item.notice} onDismiss={dismiss} />}
+          <View onLayout={() => markOpen("rowsAt")}>
+            <NoticeRow notice={item.notice} onDismiss={dismiss} />
+          </View>
+        ) : (
+          <NoticeRow notice={item.notice} onDismiss={dismiss} />
+        )
+      }
     />
   );
 
@@ -186,9 +223,9 @@ function markSpace(height: number) {
 
 /** Design review only: what the band did, in the demos whose records a script reads. */
 const noticesRecord: BandRecord = {
-  space: demoMode === "band" ? height => markSpace(height) : undefined,
-  hold: demoMode === "band-toggle" ? step => markHold(step) : undefined,
-  sent: announcing ? sent => markAnnouncement({ sent }) : undefined,
+  space: demoMode === "band" ? (height) => markSpace(height) : undefined,
+  hold: demoMode === "band-toggle" ? (step) => markHold(step) : undefined,
+  sent: announcing ? (sent) => markAnnouncement({ sent }) : undefined,
 };
 
 type Item = { kind: "band" } | { kind: "notice"; notice: PhoneNotice };

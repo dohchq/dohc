@@ -1,128 +1,125 @@
-import { describe, expect, it, vi } from 'vitest'
-import { Node as PMNode } from '@tiptap/pm/model'
-import { EditorState } from '@tiptap/pm/state'
-import { Decoration, type DecorationSet } from '@tiptap/pm/view'
-import { getDohcProseMirrorSchema } from '@dohc/ydoc-projection'
-import { codeBlock, doc, paragraph, randomEdit, seededRandom } from './testDocs'
+import { describe, expect, it, vi } from "vitest";
+import { Node as PMNode } from "@tiptap/pm/model";
+import { EditorState } from "@tiptap/pm/state";
+import { Decoration, type DecorationSet } from "@tiptap/pm/view";
+import { getDohcProseMirrorSchema } from "@dohc/ydoc-projection";
+import { codeBlock, doc, paragraph, randomEdit, seededRandom } from "./testDocs";
 import {
   codeHighlightKey,
   computeCodeHighlightRanges,
   highlightSpans,
   makeCodeHighlightPlugin,
-} from './codeHighlight'
+} from "./codeHighlight";
 
 // --- pure `highlightSpans` (no ProseMirror/jsdom involved) ---
 
-describe('highlightSpans', () => {
-  it('tokenizes a TypeScript snippet into keyword and string spans', () => {
-    const spans = highlightSpans('typescript', 'const greeting = "hi";')
-    const classNames = spans.map((s) => s.className)
-    expect(classNames).toContain('hljs-keyword')
-    expect(classNames).toContain('hljs-string')
+describe("highlightSpans", () => {
+  it("tokenizes a TypeScript snippet into keyword and string spans", () => {
+    const spans = highlightSpans("typescript", 'const greeting = "hi";');
+    const classNames = spans.map((s) => s.className);
+    expect(classNames).toContain("hljs-keyword");
+    expect(classNames).toContain("hljs-string");
 
-    const keyword = spans.find((s) => s.className === 'hljs-keyword')!
-    expect('const greeting = "hi";'.slice(keyword.start, keyword.end)).toBe('const')
+    const keyword = spans.find((s) => s.className === "hljs-keyword")!;
+    expect('const greeting = "hi";'.slice(keyword.start, keyword.end)).toBe("const");
 
-    const string = spans.find((s) => s.className === 'hljs-string')!
-    expect('const greeting = "hi";'.slice(string.start, string.end)).toBe('"hi"')
-  })
+    const string = spans.find((s) => s.className === "hljs-string")!;
+    expect('const greeting = "hi";'.slice(string.start, string.end)).toBe('"hi"');
+  });
 
-  it('returns no spans for an unregistered/empty language', () => {
-    expect(highlightSpans('', 'const x = 1;')).toEqual([])
-    expect(highlightSpans('plain', 'const x = 1;')).toEqual([])
-    expect(highlightSpans('not-a-real-language', 'const x = 1;')).toEqual([])
-  })
+  it("returns no spans for an unregistered/empty language", () => {
+    expect(highlightSpans("", "const x = 1;")).toEqual([]);
+    expect(highlightSpans("plain", "const x = 1;")).toEqual([]);
+    expect(highlightSpans("not-a-real-language", "const x = 1;")).toEqual([]);
+  });
 
-  it('returns no spans for empty text', () => {
-    expect(highlightSpans('typescript', '')).toEqual([])
-  })
+  it("returns no spans for empty text", () => {
+    expect(highlightSpans("typescript", "")).toEqual([]);
+  });
 
-  it('maps tsx/jsx onto the typescript/javascript grammars', () => {
-    const tsx = highlightSpans('tsx', 'const x = 1;')
-    const jsx = highlightSpans('jsx', 'const x = 1;')
-    expect(tsx.map((s) => s.className)).toContain('hljs-keyword')
-    expect(jsx.map((s) => s.className)).toContain('hljs-keyword')
-  })
-})
+  it("maps tsx/jsx onto the typescript/javascript grammars", () => {
+    const tsx = highlightSpans("tsx", "const x = 1;");
+    const jsx = highlightSpans("jsx", "const x = 1;");
+    expect(tsx.map((s) => s.className)).toContain("hljs-keyword");
+    expect(jsx.map((s) => s.className)).toContain("hljs-keyword");
+  });
+});
 
-// --- pure `computeCodeHighlightRanges` over real documents (testDocs.ts) ---
-
-describe('computeCodeHighlightRanges', () => {
-  it('maps highlight spans into absolute doc coordinates (content starts at pos + 1)', () => {
+describe("computeCodeHighlightRanges", () => {
+  it("maps highlight spans into absolute doc coordinates (content starts at pos + 1)", () => {
     // paragraph("ab") is nodeSize 4, so the code block sits at pos 4.
-    const d = doc(paragraph('ab'), codeBlock('const x = 1;', 'typescript'))
-    const ranges = computeCodeHighlightRanges(d, new WeakMap())
-    expect(ranges.length).toBeGreaterThan(0)
-    const keyword = ranges.find((r) => r.className === 'hljs-keyword')!
+    const d = doc(paragraph("ab"), codeBlock("const x = 1;", "typescript"));
+    const ranges = computeCodeHighlightRanges(d, new WeakMap());
+    expect(ranges.length).toBeGreaterThan(0);
+    const keyword = ranges.find((r) => r.className === "hljs-keyword")!;
     // blockStart = pos + 1 = 5; "const" is the first 5 chars of the text.
-    expect(keyword.from).toBe(5)
-    expect(keyword.to).toBe(10)
-  })
+    expect(keyword.from).toBe(5);
+    expect(keyword.to).toBe(10);
+  });
 
-  it('produces no ranges for a plain-text block', () => {
-    const d = doc(codeBlock('const x = 1;'))
-    expect(computeCodeHighlightRanges(d, new WeakMap())).toEqual([])
-  })
+  it("produces no ranges for a plain-text block", () => {
+    const d = doc(codeBlock("const x = 1;"));
+    expect(computeCodeHighlightRanges(d, new WeakMap())).toEqual([]);
+  });
 
-  it('produces no ranges for an unrecognized language', () => {
-    const d = doc(codeBlock('DISPLAY "hi".', 'cobol'))
-    expect(computeCodeHighlightRanges(d, new WeakMap())).toEqual([])
-  })
+  it("produces no ranges for an unrecognized language", () => {
+    const d = doc(codeBlock('DISPLAY "hi".', "cobol"));
+    expect(computeCodeHighlightRanges(d, new WeakMap())).toEqual([]);
+  });
 
-  it('skips blocks over the 20k-char guard', () => {
-    const hugeText = `const x = 1; ${'a'.repeat(20_000)}`
-    expect(hugeText.length).toBeGreaterThan(20_000)
-    const d = doc(codeBlock(hugeText, 'typescript'))
-    expect(computeCodeHighlightRanges(d, new WeakMap())).toEqual([])
-  })
+  it("skips blocks over the 20k-char guard", () => {
+    const hugeText = `const x = 1; ${"a".repeat(20_000)}`;
+    expect(hugeText.length).toBeGreaterThan(20_000);
+    const d = doc(codeBlock(hugeText, "typescript"));
+    expect(computeCodeHighlightRanges(d, new WeakMap())).toEqual([]);
+  });
 
-  it('reuses cached spans for the same node object (only recomputes on identity change)', () => {
-    const d = doc(codeBlock('const x = 1;', 'typescript'))
-    const block = d.child(0)
-    const cache = new WeakMap<PMNode, ReturnType<typeof highlightSpans>>()
+  it("reuses cached spans for the same node object (only recomputes on identity change)", () => {
+    const d = doc(codeBlock("const x = 1;", "typescript"));
+    const block = d.child(0);
+    const cache = new WeakMap<PMNode, ReturnType<typeof highlightSpans>>();
 
-    computeCodeHighlightRanges(d, cache)
-    const cachedAfterFirstRun = cache.get(block)
-    expect(cachedAfterFirstRun).toBeDefined()
+    computeCodeHighlightRanges(d, cache);
+    const cachedAfterFirstRun = cache.get(block);
+    expect(cachedAfterFirstRun).toBeDefined();
 
-    computeCodeHighlightRanges(d, cache)
-    // Same node object -> same cached array reference, i.e. not recomputed.
-    expect(cache.get(block)).toBe(cachedAfterFirstRun)
-  })
+    computeCodeHighlightRanges(d, cache);
+    expect(cache.get(block)).toBe(cachedAfterFirstRun);
+  });
 
-  it('recomputes when the node identity changes (e.g. a language-attr edit)', () => {
-    const cache = new WeakMap<PMNode, ReturnType<typeof highlightSpans>>()
-    const first = doc(codeBlock('const x = 1;', 'typescript'))
-    computeCodeHighlightRanges(first, cache)
+  it("recomputes when the node identity changes (e.g. a language-attr edit)", () => {
+    const cache = new WeakMap<PMNode, ReturnType<typeof highlightSpans>>();
+    const first = doc(codeBlock("const x = 1;", "typescript"));
+    computeCodeHighlightRanges(first, cache);
 
     // A new node object (as ProseMirror produces on setNodeMarkup) with a
     // different language over the same text.
-    const second = doc(codeBlock('const x = 1;', 'python'))
-    const ranges = computeCodeHighlightRanges(second, cache)
+    const second = doc(codeBlock("const x = 1;", "python"));
+    const ranges = computeCodeHighlightRanges(second, cache);
     // "const" isn't a Python keyword, but "x" as a bare identifier and the
     // block itself should differ from the TS run — assert the language
     // actually changed the tokenization rather than reusing the ts cache.
-    expect(ranges.map((r) => r.className)).not.toContain('hljs-keyword')
-  })
-})
+    expect(ranges.map((r) => r.className)).not.toContain("hljs-keyword");
+  });
+});
 
 // --- integration: real ProseMirror EditorState + schema, mirroring the
 // setNodeMarkup transaction shape codeBlockChrome.tsx's language <select>
 // dispatches on change ---
 
 function stateWithCodeBlock(language: string, text: string): EditorState {
-  const schema = getDohcProseMirrorSchema()
+  const schema = getDohcProseMirrorSchema();
   const doc = PMNode.fromJSON(schema, {
-    type: 'doc',
+    type: "doc",
     content: [
       {
-        type: 'codeBlock',
+        type: "codeBlock",
         attrs: { language },
-        content: text.length > 0 ? [{ type: 'text', text }] : [],
+        content: text.length > 0 ? [{ type: "text", text }] : [],
       },
     ],
-  })
-  return EditorState.create({ doc, plugins: [makeCodeHighlightPlugin()] })
+  });
+  return EditorState.create({ doc, plugins: [makeCodeHighlightPlugin()] });
 }
 
 // `Decoration.inline(from, to, attrs)` renders `attrs` straight into the DOM
@@ -135,95 +132,106 @@ function stateWithCodeBlock(language: string, text: string): EditorState {
 // wiring (schema, node walk, blockStart math, caching) matches the pure
 // range math.
 function decorationCount(state: EditorState, from = 0, to = state.doc.content.size): number {
-  const decorations = codeHighlightKey.getState(state) as DecorationSet
-  return decorations.find(from, to).length
+  const decorations = codeHighlightKey.getState(state) as DecorationSet;
+  return decorations.find(from, to).length;
 }
 
-describe('makeCodeHighlightPlugin', () => {
-  const TEXT = 'const greeting = "hi";'
+describe("makeCodeHighlightPlugin", () => {
+  const TEXT = 'const greeting = "hi";';
   // blockPos 0 -> blockStart = 1 (content starts right after the node's own
   // open token), matching computeCodeHighlightRanges' `pos + 1` convention.
-  const BLOCK_START = 1
-  const expectedSpans = highlightSpans('typescript', TEXT)
+  const BLOCK_START = 1;
+  const expectedSpans = highlightSpans("typescript", TEXT);
 
-  it('decorates a typescript code block with keyword/string spans', () => {
-    const state = stateWithCodeBlock('typescript', TEXT)
+  it("decorates a typescript code block with keyword/string spans", () => {
+    const state = stateWithCodeBlock("typescript", TEXT);
     expect(expectedSpans.map((s) => s.className)).toEqual(
-      expect.arrayContaining(['hljs-keyword', 'hljs-string']),
-    )
+      expect.arrayContaining(["hljs-keyword", "hljs-string"]),
+    );
     for (const span of expectedSpans) {
-      expect(decorationCount(state, BLOCK_START + span.start, BLOCK_START + span.end)).toBeGreaterThan(0)
+      expect(
+        decorationCount(state, BLOCK_START + span.start, BLOCK_START + span.end),
+      ).toBeGreaterThan(0);
     }
-  })
+  });
 
-  it('does not decorate a plain-text code block', () => {
-    const state = stateWithCodeBlock('', TEXT)
-    expect(decorationCount(state)).toBe(0)
-  })
+  it("does not decorate a plain-text code block", () => {
+    const state = stateWithCodeBlock("", TEXT);
+    expect(decorationCount(state)).toBe(0);
+  });
 
-  it('updates decorations when the language attribute changes via setNodeMarkup', () => {
-    const state = stateWithCodeBlock('typescript', TEXT)
-    expect(decorationCount(state)).toBeGreaterThan(0)
+  it("updates decorations when the language attribute changes via setNodeMarkup", () => {
+    const state = stateWithCodeBlock("typescript", TEXT);
+    expect(decorationCount(state)).toBeGreaterThan(0);
 
     // Same transaction shape as codeBlockChrome.tsx's language <select> commit().
-    const blockPos = 0
-    const current = state.doc.nodeAt(blockPos)!
+    const blockPos = 0;
+    const current = state.doc.nodeAt(blockPos)!;
     const tr = state.tr.setNodeMarkup(blockPos, undefined, {
       ...current.attrs,
-      language: '',
-    })
-    const nextState = state.apply(tr)
+      language: "",
+    });
+    const nextState = state.apply(tr);
 
-    expect(decorationCount(nextState)).toBe(0)
-  })
+    expect(decorationCount(nextState)).toBe(0);
+  });
 
-  it('skips a code block over the 20k-char guard', () => {
-    const hugeText = `const x = 1; ${'a'.repeat(20_000)}`
-    const state = stateWithCodeBlock('typescript', hugeText)
-    expect(decorationCount(state)).toBe(0)
-  })
-})
+  it("skips a code block over the 20k-char guard", () => {
+    const hugeText = `const x = 1; ${"a".repeat(20_000)}`;
+    const state = stateWithCodeBlock("typescript", hugeText);
+    expect(decorationCount(state)).toBe(0);
+  });
+});
 
-describe('makeCodeHighlightPlugin — edits', () => {
-  const byPosition = (a: { from: number; to: number }, b: { from: number; to: number }) => a.from - b.from || a.to - b.to
+describe("makeCodeHighlightPlugin — edits", () => {
+  const byPosition = (a: { from: number; to: number }, b: { from: number; to: number }) =>
+    a.from - b.from || a.to - b.to;
 
-  it('matches a full highlight after every edit', () => {
-    const random = seededRandom(2260)
+  it("matches a full highlight after every edit", () => {
+    const random = seededRandom(2260);
     let state = EditorState.create({
       doc: doc(
-        codeBlock('const x = "a";', 'typescript'),
-        paragraph('plain text'),
-        codeBlock('def f(): return 1', 'python'),
-        codeBlock('no language'),
-        paragraph('const not code'),
+        codeBlock('const x = "a";', "typescript"),
+        paragraph("plain text"),
+        codeBlock("def f(): return 1", "python"),
+        codeBlock("no language"),
+        paragraph("const not code"),
       ),
       plugins: [makeCodeHighlightPlugin()],
-    })
+    });
     for (let step = 0; step < 400; step += 1) {
-      state = state.apply(randomEdit(state, random, ['const ', '"', '1', ' ', '# c', 'return ', '\n']))
+      state = state.apply(
+        randomEdit(state, random, ["const ", '"', "1", " ", "# c", "return ", "\n"]),
+      );
       const shown = (codeHighlightKey.getState(state) as DecorationSet)
         .find()
         .map(({ from, to }) => ({ from, to }))
-        .sort(byPosition)
+        .sort(byPosition);
       expect(shown, `step ${step}`).toEqual(
-        computeCodeHighlightRanges(state.doc, new WeakMap()).map(({ from, to }) => ({ from, to })).sort(byPosition),
-      )
+        computeCodeHighlightRanges(state.doc, new WeakMap())
+          .map(({ from, to }) => ({ from, to }))
+          .sort(byPosition),
+      );
     }
-  })
+  });
 
-  it('highlights only the edited block when typing in a note with 2,000 code blocks', () => {
-    const blocks = Array.from({ length: 2000 }, (_, i) => codeBlock(`const value${i} = "${i}";`, 'typescript'))
-    let state = EditorState.create({ doc: doc(...blocks), plugins: [makeCodeHighlightPlugin()] })
-    const middle = blocks.slice(0, 1000).reduce((pos, block) => pos + block.nodeSize, 0)
-    const inline = vi.spyOn(Decoration, 'inline')
+  it("highlights only the edited block when typing in a note with 2,000 code blocks", () => {
+    const blocks = Array.from({ length: 2000 }, (_, i) =>
+      codeBlock(`const value${i} = "${i}";`, "typescript"),
+    );
+    let state = EditorState.create({ doc: doc(...blocks), plugins: [makeCodeHighlightPlugin()] });
+    const middle = blocks.slice(0, 1000).reduce((pos, block) => pos + block.nodeSize, 0);
+    const inline = vi.spyOn(Decoration, "inline");
     try {
-      state = state.apply(state.tr.insertText('x', middle + 1))
+      state = state.apply(state.tr.insertText("x", middle + 1));
       // One block holds a few spans. Before this bound, each key built the
       // spans of all 2,000 blocks again.
-      expect(inline.mock.calls.length).toBeLessThan(20)
+      expect(inline.mock.calls.length).toBeLessThan(20);
     } finally {
-      inline.mockRestore()
+      inline.mockRestore();
     }
-    expect(decorationCount(state)).toBe(computeCodeHighlightRanges(state.doc, new WeakMap()).length)
-  })
-})
+    expect(decorationCount(state)).toBe(
+      computeCodeHighlightRanges(state.doc, new WeakMap()).length,
+    );
+  });
+});

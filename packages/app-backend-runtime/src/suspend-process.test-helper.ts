@@ -3,47 +3,63 @@ import { createInterface } from "node:readline";
 import { setTimeout as pause } from "node:timers/promises";
 
 function deferred<T>() {
-  let resolve!:(value:T)=>void,reject!:(error:Error)=>void;
-  const promise=new Promise<T>((yes,no)=>{resolve=yes;reject=no;});
-  return {promise,resolve,reject};
+  let resolve!: (value: T) => void, reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
 }
 
 // A hang guard, not a performance assertion. The six-second stop is the test stimulus.
-async function guarded<T>(result:Promise<T>,step:string):Promise<T> {
-  let timer:ReturnType<typeof setTimeout>|undefined;
+async function guarded<T>(result: Promise<T>, step: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([result,new Promise<never>((_,reject)=>{
-      timer=setTimeout(()=>reject(new Error(`Suspend helper timed out ${step}.`)),60_000);
-    })]);
-  } finally {clearTimeout(timer);}
+    return await Promise.race([
+      result,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Suspend helper timed out ${step}.`)), 60_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function processSuspender() {
-  if(process.platform!=="win32") {
-    const cancel=new AbortController();
-    let stopped:Promise<number>|undefined;
+  if (process.platform !== "win32") {
+    const cancel = new AbortController();
+    let stopped: Promise<number> | undefined;
     return {
-      ready:Promise.resolve(),
-      failed:new Promise<never>(()=>{}),
-      suspend(pid:number) {
-        return stopped=(async()=>{
+      ready: Promise.resolve(),
+      failed: new Promise<never>(() => {}),
+      suspend(pid: number) {
+        return (stopped = (async () => {
           // If the test process itself dies during the pause, SIGCONT never runs and the
           // stopped worker is left for the OS to reap with its killed parent's process group.
-          process.kill(pid,"SIGSTOP");
-          let resumedAt:number;
-          try {await pause(6_000,undefined,{signal:cancel.signal});}
-          catch(error) {if(!cancel.signal.aborted) throw error;}
-          finally {resumedAt=Date.now();process.kill(pid,"SIGCONT");}
+          process.kill(pid, "SIGSTOP");
+          let resumedAt: number;
+          try {
+            await pause(6_000, undefined, { signal: cancel.signal });
+          } catch (error) {
+            if (!cancel.signal.aborted) throw error;
+          } finally {
+            resumedAt = Date.now();
+            process.kill(pid, "SIGCONT");
+          }
           return resumedAt;
-        })();
+        })());
       },
-      async close() {cancel.abort();await stopped?.catch(()=>{});},
+      async close() {
+        cancel.abort();
+        await stopped?.catch(() => {});
+      },
     };
   }
 
   // One helper owns the handle and the entire stop. Closing stdin also releases
   // the pause, so cleanup never depends on a separate resume command.
-  const script=`
+  const script = `
 $ErrorActionPreference='Stop'
 try {
   Add-Type -TypeDefinition @'
@@ -81,37 +97,65 @@ public static class SuspendHelper {
   }
 } catch {[Console]::Error.WriteLine($_.Exception.ToString()); exit 1}
 `;
-  const child=spawn("powershell.exe",["-NoProfile","-NonInteractive","-Command",script],{windowsHide:true,stdio:["pipe","pipe","pipe"]});
-  const ready=deferred<void>(),finished=deferred<number>(),failed=deferred<never>();
-  let stderr="",resumedAt:number|undefined,requested=false;
-  const fail=(error:Error)=>{ready.reject(error);finished.reject(error);failed.reject(error);};
-  child.stderr.setEncoding("utf8").on("data",chunk=>{stderr+=chunk;});
-  child.on("error",fail);child.stdin.on("error",fail);
-  const lines=createInterface({input:child.stdout});
-  lines.on("line",line=>{
-    if(line==="ready") ready.resolve();
-    else if(/^resumed \d+$/.test(line)) resumedAt=Number(line.slice(8));
+  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const ready = deferred<void>(),
+    finished = deferred<number>(),
+    failed = deferred<never>();
+  let stderr = "",
+    resumedAt: number | undefined,
+    requested = false;
+  const fail = (error: Error) => {
+    ready.reject(error);
+    finished.reject(error);
+    failed.reject(error);
+  };
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.on("error", fail);
+  child.stdin.on("error", fail);
+  const lines = createInterface({ input: child.stdout });
+  lines.on("line", (line) => {
+    if (line === "ready") ready.resolve();
+    else if (/^resumed \d+$/.test(line)) resumedAt = Number(line.slice(8));
     else fail(new Error(`Suspend helper said: ${line}`));
   });
-  const exited=new Promise<void>(resolve=>child.on("close",(code,signal)=>{
-    if(code!==0 || (requested && resumedAt===undefined)) fail(new Error(`Suspend helper exited (${signal ?? code}): ${stderr.trim() || "no resume acknowledgement"}`));
-    else if(resumedAt!==undefined) finished.resolve(resumedAt);
-    else fail(new Error("Suspend helper exited before suspension."));
-    lines.close();resolve();
-  }));
+  const exited = new Promise<void>((resolve) =>
+    child.on("close", (code, signal) => {
+      if (code !== 0 || (requested && resumedAt === undefined))
+        fail(
+          new Error(
+            `Suspend helper exited (${signal ?? code}): ${stderr.trim() || "no resume acknowledgement"}`,
+          ),
+        );
+      else if (resumedAt !== undefined) finished.resolve(resumedAt);
+      else fail(new Error("Suspend helper exited before suspension."));
+      lines.close();
+      resolve();
+    }),
+  );
   // Failures can arrive before the caller reaches either await.
-  void ready.promise.catch(()=>{});void finished.promise.catch(()=>{});void failed.promise.catch(()=>{});
+  void ready.promise.catch(() => {});
+  void finished.promise.catch(() => {});
+  void failed.promise.catch(() => {});
   return {
-    ready:guarded(ready.promise,"waiting for ready"),
-    failed:failed.promise,
-    suspend(pid:number) {
-      requested=true;child.stdin.write(`${pid}\n`);
-      return guarded(finished.promise,"waiting for resume");
+    ready: guarded(ready.promise, "waiting for ready"),
+    failed: failed.promise,
+    suspend(pid: number) {
+      requested = true;
+      child.stdin.write(`${pid}\n`);
+      return guarded(finished.promise, "waiting for resume");
     },
     async close() {
       child.stdin.end();
-      try {await guarded(exited,"waiting for cleanup");}
-      finally {if(child.exitCode===null && child.signalCode===null) child.kill();}
+      try {
+        await guarded(exited, "waiting for cleanup");
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+      }
     },
   };
 }

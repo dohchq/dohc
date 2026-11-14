@@ -18,7 +18,9 @@ export function contrastRatio(first: string, second: string): number {
 export function mixHex(top: string, bottom: string, amount: number): string {
   const channel = (hex: string, index: number) => parseInt(hex.slice(index, index + 2), 16);
   return `#${[1, 3, 5]
-    .map((index) => Math.round(channel(top, index) * amount + channel(bottom, index) * (1 - amount)))
+    .map((index) =>
+      Math.round(channel(top, index) * amount + channel(bottom, index) * (1 - amount)),
+    )
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("")}`;
 }
@@ -38,9 +40,11 @@ export function accentReads(accent: string, mode: "light" | "dark"): boolean {
   const paper = palette[mode].bg;
   return SURFACES.every((name) => {
     const surface = palette[mode][name];
-    return contrastRatio(accent, surface) >= ACCENT_MIN_CONTRAST &&
+    return (
+      contrastRatio(accent, surface) >= ACCENT_MIN_CONTRAST &&
       contrastRatio(accent, mixHex(accent, surface, ACCENT_TINT)) >= ACCENT_MIN_CONTRAST &&
-      contrastRatio(paper, mixHex(accent, surface, ACCENT_HOVER)) >= ACCENT_MIN_CONTRAST;
+      contrastRatio(paper, mixHex(accent, surface, ACCENT_HOVER)) >= ACCENT_MIN_CONTRAST
+    );
   });
 }
 

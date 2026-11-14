@@ -11,7 +11,7 @@ pub enum FilesError {
     /// The scan exceeded the configured `max_files` bound. This is a hard,
     /// fail-closed error — never a silent truncation: a truncated listing fed
     /// into reconcile would look like a mass deletion and retire every file
-    /// past the cap (`plan §Rust policy`: bounded everything, fail closed).
+    /// past the cap.
     #[error("workspace scan exceeded the max-files bound of {cap}")]
     TooManyFiles { cap: usize },
 

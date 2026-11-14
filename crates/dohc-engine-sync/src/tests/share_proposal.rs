@@ -1,9 +1,5 @@
 use super::*;
 
-// ---------------------------------------------------------------------------
-// The recipient submits its own changes as a proposal.
-// ---------------------------------------------------------------------------
-
 /// A share-view store with an identity, a main version, and the blobs a
 /// proposed change names. `seed_identity` journals the origin's op 0, so the
 /// first moment below lands at origin_seq 1.
@@ -627,7 +623,6 @@ fn share_proposal_submit_drops_a_half_stated_base() {
 #[test]
 fn share_proposal_submit_offers_no_delete_of_a_file_the_granter_never_had() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2"]);
-    // Created locally, then deleted locally: the granter never saw either op.
     journal_local_moment(
         &mut engine,
         &local_moment_payload("m-1", "object-a", "write", None, "shared/docs/a.md", "v1"),
@@ -691,7 +686,6 @@ fn share_proposal_submit_offers_no_delete_of_a_file_the_granter_never_had() {
     );
 }
 
-/// A local write to file `index`, inside the grant.
 fn journal_numbered_write(engine: &mut EngineStore, index: usize, at_ms: i64) {
     let text = format!("v{index}");
     seed_blob(engine, &text);
@@ -835,7 +829,6 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
     for index in 0..crate::MAX_SHARE_PROPOSAL_OPS {
         journal_numbered_write(&mut engine, index, 1_001 + index as i64);
     }
-    // A later edit to a file already held. It must fold into this submit.
     seed_blob(&mut engine, "0-final");
     journal_local_moment(
         &mut engine,
@@ -849,7 +842,6 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
         ),
         9_001,
     );
-    // The new file that stops the scan.
     journal_numbered_write(&mut engine, crate::MAX_SHARE_PROPOSAL_OPS, 9_002);
 
     let client = RelaySyncClient::new(PagedShareRelay::new([], []));
@@ -922,7 +914,6 @@ fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
         &local_moment_payload("m-1", "object-a", "write", None, "shared/docs/a.md", "v1"),
         1_001,
     );
-    // The same file, moved out of the grant.
     journal_local_moment(
         &mut engine,
         &local_moment_payload(
@@ -988,7 +979,6 @@ fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
 #[test]
 fn share_proposal_submit_counts_files_outside_the_shared_paths_when_it_offers_nothing() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["one", "two"]);
-    // Neither file was ever inside the shared paths. Both are counted anyway.
     for (index, (moment_id, object_id, path, text)) in [
         ("m-1", "object-a", "other/a.md", "one"),
         ("m-2", "object-b", "elsewhere/b.md", "two"),
@@ -1027,7 +1017,6 @@ fn share_proposal_submit_counts_files_outside_the_shared_paths_when_it_offers_no
     );
 }
 
-/// One local write to a file the grant does not cover.
 fn journal_numbered_outside_write(engine: &mut EngineStore, index: usize, at_ms: i64) {
     let text = format!("out{index}");
     seed_blob(engine, &text);
@@ -1125,19 +1114,6 @@ fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
     );
 }
 
-/// A pulled granter change must never be offered back to the granter.
-///
-/// The scan reads this replica's journal under the workspace's single
-/// `sync_identity` origin and filters per op by `op_kind` alone, so if the
-/// share-view pull journaled what it applied, the recipient's next submit
-/// would offer the granter its own edit back with a stale base.
-///
-/// It does not: `replay_share_write` writes through
-/// `VersionedTextStore::write_text` in `dohc-engine-domain`, and that door
-/// appends no `replication_log` row. The `replication_log` row the scan
-/// reads is appended by `journal_moment_outbound_in_tx`
-/// (`dohc-engine-runtime/src/actor.rs`), which sits on the LOCAL write path
-/// alone. This test is the standing proof of that gap.
 #[test]
 fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["mine"]);
@@ -1233,8 +1209,6 @@ fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
     );
 }
 
-/// The granter's two moments for one file: `granter-m0` produced `v0`, and
-/// `granter-m1` produced `v1` and is the head.
 fn granter_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let (scratch, path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)

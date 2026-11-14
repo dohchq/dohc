@@ -3,12 +3,30 @@ import { isComposingKey } from "./ui/keys";
 import { EmptyState, SectionLabel } from "./ui/controls";
 import { EMPTY_ART } from "./workbench/EmptyArt";
 import { SkeletonRows } from "./ui/SkeletonRows";
-import { ArrowDown, ArrowUp, Binary, Database, Hash, Search, TriangleAlert, Type, type LucideIcon } from "lucide-react";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
-import type {
-  DatabaseEditResult,
-  DatabaseSnapshotResult,
-} from "../ipc/bridgeContract";
+import {
+  ArrowDown,
+  ArrowUp,
+  Binary,
+  Database,
+  Hash,
+  Search,
+  TriangleAlert,
+  Type,
+  type LucideIcon,
+} from "lucide-react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FocusEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
+import type { DatabaseEditResult, DatabaseSnapshotResult } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
@@ -93,7 +111,6 @@ function cellText(value: unknown): string {
   return String(value);
 }
 
-// The text an edit starts from: a NULL cell starts empty.
 function editText(value: unknown): string {
   return value === null || value === undefined ? "" : String(value);
 }
@@ -102,8 +119,6 @@ function isNumericColumn(column: Column): boolean {
   return /int|real|num|floa|doub|dec/.test(column.type.toLowerCase());
 }
 
-// A column's type as an icon: numbers, text, or bytes. An untyped column has
-// none.
 function typeIcon(column: Column): LucideIcon | null {
   if (isNumericColumn(column)) return Hash;
   const type = column.type.toLowerCase();
@@ -125,8 +140,7 @@ function columnDetails(column: Column): string {
 }
 
 function compareCells(a: unknown, b: unknown, numeric: boolean): number {
-  if (a === null || a === undefined)
-    return b === null || b === undefined ? 0 : 1;
+  if (a === null || a === undefined) return b === null || b === undefined ? 0 : 1;
   if (b === null || b === undefined) return -1;
   if (numeric) {
     const left = Number(a);
@@ -139,10 +153,7 @@ function compareCells(a: unknown, b: unknown, numeric: boolean): number {
   });
 }
 
-function mergeEditPage(
-  snapshot: Snapshot,
-  result: DatabaseEditResult,
-): Snapshot {
+function mergeEditPage(snapshot: Snapshot, result: DatabaseEditResult): Snapshot {
   if (result.path !== snapshot.path || result.page.offset !== 0) return snapshot;
   let changed = false;
   const tables = snapshot.tables.map((table) => {
@@ -157,7 +168,6 @@ function mergeEditPage(
   return changed ? { ...snapshot, tables } : snapshot;
 }
 
-// The snapshot with a pending write's value in its cell.
 function withWrite(snapshot: Snapshot, write: CellWrite): Snapshot {
   const identity = editIdentity(write.key);
   const tables = snapshot.tables.map((table) =>
@@ -167,7 +177,9 @@ function withWrite(snapshot: Snapshot, write: CellWrite): Snapshot {
           ...table,
           rows: table.rows.map((row) => {
             const key = editKeyFor(table, row);
-            return key && editIdentity(key) === identity ? { ...row, [write.column]: write.to } : row;
+            return key && editIdentity(key) === identity
+              ? { ...row, [write.column]: write.to }
+              : row;
           }),
         },
   );
@@ -203,15 +215,8 @@ export function DatabaseStudioView(props: {
 
   const { workspaceId, path, refreshKey, onError } = props;
   const currentSnapshotRef = useRef({ workspaceId, path, loadId: 0 });
-  const onShare = props.onSharePath
-    ? () => props.onSharePath?.(path)
-    : undefined;
+  const onShare = props.onSharePath ? () => props.onSharePath?.(path) : undefined;
 
-  // One effect handles both path switches and activity refreshes. Switching
-  // paths blanks the view immediately — stale rows from the previous database
-  // must never stay visible (or editable) under the new header. A failed
-  // (re)load also clears the snapshot for the same reason. The cancelled flag
-  // drops slow responses that arrive after another switch.
   useEffect(() => {
     const switched =
       currentSnapshotRef.current.workspaceId !== workspaceId ||
@@ -260,10 +265,7 @@ export function DatabaseStudioView(props: {
   // snapshot read → first page of rows on screen.
   useEffect(() => {
     if (snapshot) {
-      rendererMarks.measureSince(
-        "sqlite-first-page",
-        props.fileOpenStartMark ?? "file-open-start",
-      );
+      rendererMarks.measureSince("sqlite-first-page", props.fileOpenStartMark ?? "file-open-start");
       // Last-wins: readers poll this epoch for freshness (see FileInspector).
       rendererMarks.mark("sqlite-first-page-rendered");
     }
@@ -274,15 +276,13 @@ export function DatabaseStudioView(props: {
     () =>
       snapshot &&
       pending.reduce(
-        (rows, write) => (write.workspaceId === workspaceId && write.path === path ? withWrite(rows, write) : rows),
+        (rows, write) =>
+          write.workspaceId === workspaceId && write.path === path ? withWrite(rows, write) : rows,
         snapshot,
       ),
     [snapshot, pending, workspaceId, path],
   );
-  const active =
-    shown?.tables.find((t) => t.name === activeName) ??
-    shown?.tables[0] ??
-    null;
+  const active = shown?.tables.find((t) => t.name === activeName) ?? shown?.tables[0] ?? null;
   const visibleRows = useMemo(() => {
     if (!active) return [];
     const needle = query.trim().toLowerCase();
@@ -304,20 +304,20 @@ export function DatabaseStudioView(props: {
       const leftMissing = leftValue === null || leftValue === undefined;
       const rightMissing = rightValue === null || rightValue === undefined;
       if (leftMissing || rightMissing) {
-        if (leftMissing && rightMissing)
-          return left.sourceIndex - right.sourceIndex;
+        if (leftMissing && rightMissing) return left.sourceIndex - right.sourceIndex;
         return leftMissing ? 1 : -1;
       }
       const compared = compareCells(leftValue, rightValue, numeric);
-      return compared === 0
-        ? left.sourceIndex - right.sourceIndex
-        : compared * factor;
+      return compared === 0 ? left.sourceIndex - right.sourceIndex : compared * factor;
     });
   }, [active, query, sort]);
 
   // Why no cell takes an edit, said by the tab row's read-only mark.
   const keyless = useMemo(
-    () => active !== null && active.rows.length > 0 && !active.rows.some((row) => editKeyFor(active, row)),
+    () =>
+      active !== null &&
+      active.rows.length > 0 &&
+      !active.rows.some((row) => editKeyFor(active, row)),
     [active],
   );
   const readOnlyReason = props.readOnly
@@ -376,12 +376,22 @@ export function DatabaseStudioView(props: {
         } catch (cause) {
           // A row is named only by a key column the grid shows; a rowid is
           // SQLite's own number, which no column or row number shows.
-          const row = cell.key.pkColumn === "rowid" ? "" : ` for ${cell.key.pkColumn} ${String(cell.key.rowId)}`;
+          const row =
+            cell.key.pkColumn === "rowid"
+              ? ""
+              : ` for ${cell.key.pkColumn} ${String(cell.key.rowId)}`;
           onError?.(
             `dohc could not save the change to the ${cell.column} column${row} in the ${cell.table} table.`,
             cause,
             () => write(cell),
-            ["database-cell", cell.workspaceId, cell.path, cell.table, editIdentity(cell.key), cell.column].join("\0"),
+            [
+              "database-cell",
+              cell.workspaceId,
+              cell.path,
+              cell.table,
+              editIdentity(cell.key),
+              cell.column,
+            ].join("\0"),
           );
         }
         setPending((writes) => writes.filter((write) => write !== pendingWrite));
@@ -395,7 +405,6 @@ export function DatabaseStudioView(props: {
     [onError],
   );
 
-  // An unchanged draft writes nothing.
   function commitEdit(table: Table, draft: string) {
     if (!editing) return;
     setEditing(null);
@@ -412,10 +421,7 @@ export function DatabaseStudioView(props: {
 
   if (!snapshot) {
     return (
-      <div
-        className="flex min-h-0 flex-1 flex-col bg-bg"
-        data-testid="file-inspector"
-      >
+      <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
         <DatabaseViewActions onShare={onShare} readOnlyReason={readOnlyReason} />
         {error ? (
           <EmptyState
@@ -432,10 +438,7 @@ export function DatabaseStudioView(props: {
   }
 
   return (
-    <div
-      className="flex min-h-0 flex-1 flex-col bg-bg"
-      data-testid="file-inspector"
-    >
+    <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
       <DatabaseViewActions onShare={onShare} readOnlyReason={readOnlyReason} />
       <div
         className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)]"
@@ -446,9 +449,7 @@ export function DatabaseStudioView(props: {
           data-testid="db-table-list"
         >
           <div className="border-b border-line px-3 py-2.5">
-            <SectionLabel as="div" >
-              Tables
-            </SectionLabel>
+            <SectionLabel as="div">Tables</SectionLabel>
             <div className="mt-0.5 text-[12px] text-muted">
               {snapshot.tables.length} table
               {snapshot.tables.length === 1 ? "" : "s"} loaded
@@ -478,13 +479,10 @@ export function DatabaseStudioView(props: {
                     }`}
                   />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px]">
-                      {table.name}
-                    </span>
+                    <span className="block truncate text-[13px]">{table.name}</span>
                     <span className="block truncate text-[11px] text-subtle">
                       {table.rows.length} row
-                      {table.rows.length === 1 ? "" : "s"} ·{" "}
-                      {table.columns.length} column
+                      {table.rows.length === 1 ? "" : "s"} · {table.columns.length} column
                       {table.columns.length === 1 ? "" : "s"}
                     </span>
                   </span>
@@ -519,8 +517,7 @@ export function DatabaseStudioView(props: {
                 sort={sort}
                 onSort={(column) =>
                   setSort((current) => {
-                    if (current?.column !== column)
-                      return { column, direction: "asc" };
+                    if (current?.column !== column) return { column, direction: "asc" };
                     return {
                       column,
                       direction: current.direction === "asc" ? "desc" : "asc",
@@ -547,7 +544,10 @@ export function DatabaseStudioView(props: {
 
 // A database's actions in its tab row: Share, and the read-only mark, whose
 // tooltip says why no cell takes an edit.
-export function DatabaseViewActions(props: { onShare?: () => void; readOnlyReason: string | null }) {
+export function DatabaseViewActions(props: {
+  onShare?: () => void;
+  readOnlyReason: string | null;
+}) {
   return (
     <ViewActions
       onShare={props.onShare}
@@ -585,7 +585,10 @@ function useGridColumns(table: Table): DataGridColumn[] {
 }
 
 function columnChanged(before: Row[], after: Row[], name: string): boolean {
-  return before.length !== after.length || before.some((row, index) => !Object.is(row[name], after[index]![name]));
+  return (
+    before.length !== after.length ||
+    before.some((row, index) => !Object.is(row[name], after[index]![name]))
+  );
 }
 
 // A column holds numbers by its declared type. Its widest cell is the one
@@ -650,10 +653,15 @@ export function DatabaseGrid(props: {
   // focus first lands in the grid, the stop is the first cell of the first
   // row, or the header while there are no rows, so rows that load after the
   // grid still take it.
-  const [chosen, setActive] = useState<{ key: string | null; place: number; column: number } | null>(null);
+  const [chosen, setActive] = useState<{
+    key: string | null;
+    place: number;
+    column: number;
+  } | null>(null);
   const active = chosen ?? { key: rowIds[0]?.key ?? null, place: 0, column: 0 };
   const found = active.key === null ? -1 : rowIds.findIndex((id) => id.key === active.key);
-  const activeRow = active.key === null ? -1 : found !== -1 ? found : Math.min(active.place, rows.length - 1);
+  const activeRow =
+    active.key === null ? -1 : found !== -1 ? found : Math.min(active.place, rows.length - 1);
   const activeColumn = Math.min(active.column, table.columns.length - 1);
   const frame = useRef<HTMLDivElement>(null);
   // Enter and Escape end an edit with focus on its cell, also when the new
@@ -666,7 +674,9 @@ export function DatabaseGrid(props: {
     const focused = document.activeElement;
     if (focused && focused !== document.body && !frame.current?.contains(focused)) return;
     frame.current
-      ?.querySelector<HTMLElement>(`[data-grid-row="${activeRow}"][data-grid-column="${activeColumn}"]`)
+      ?.querySelector<HTMLElement>(
+        `[data-grid-row="${activeRow}"][data-grid-column="${activeColumn}"]`,
+      )
       ?.focus();
   });
   const endEdit = (draft: string | null, fromKeyboard: boolean) => {
@@ -779,7 +789,8 @@ export function DatabaseGrid(props: {
           ) : null}
           {rows.map(({ row }, index) => {
             const editKey = editKeyFor(table, row);
-            const editingHere = editor !== null && editKey !== null && editor.rowKey === editIdentity(editKey);
+            const editingHere =
+              editor !== null && editKey !== null && editor.rowKey === editIdentity(editKey);
             return (
               <DatabaseRow
                 key={rowIds[index]!.key}
@@ -837,7 +848,11 @@ function DatabaseHeader(props: {
         {numeric ? hidden : null}
         {Icon ? <Icon size={12} aria-hidden className="shrink-0 text-subtle" /> : null}
         <span className={`truncate ${sort ? "text-ink" : ""}`}>{column.name}</span>
-        {sort ? <Arrow size={12} aria-hidden className="shrink-0 text-ink" /> : numeric ? null : hidden}
+        {sort ? (
+          <Arrow size={12} aria-hidden className="shrink-0 text-ink" />
+        ) : numeric ? null : (
+          hidden
+        )}
       </span>
     </DataGridHeaderCell>
   );

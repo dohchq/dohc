@@ -46,8 +46,7 @@ const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
 // Shown through the shell's error hook, with Try again.
 const SHARE_BUILD_REPLACED_MESSAGE =
   "dohc did not share this app. Another view started its preview again before the build finished.";
-const NO_SHARE_OUTPUT_MESSAGE =
-  "This app has no static entry file or build output to share.";
+const NO_SHARE_OUTPUT_MESSAGE = "This app has no static entry file or build output to share.";
 
 type LoadState =
   | { status: "loading" }
@@ -136,8 +135,6 @@ export function SitePreviewPage(props: {
   onShowSource?: () => void;
   onShareSite?: (target: SiteShareTarget) => void;
   reportError?: (fallback: string, error: unknown, retry: (() => void) | null) => void;
-  // Opens an app of this workspace in a tab. A notice that outlives this page
-  // uses it to take the person back to the app it is about.
   onOpenApp?: (siteRoot: string) => void;
   // Notices by identity, so a later success takes back an app's failure.
   notices?: AppViewNotices;
@@ -147,16 +144,13 @@ export function SitePreviewPage(props: {
   focused?: boolean;
   // Changes each time the person presses this page's tab, which puts focus in the app.
   focusRequest?: number;
-  // The app's title, for its tab.
   onTitle?: (title: string) => void;
   // The workspace's server connection, for Review app's Share links.
   access?: ComponentProps<typeof OwnerAppPublication>["access"];
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
-  const [previewLogs, setPreviewLogs] = useState<StartSitePreviewResult["logs"]>(
-    [],
-  );
+  const [previewLogs, setPreviewLogs] = useState<StartSitePreviewResult["logs"]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const optionsRef = useRef<HTMLDetailsElement | null>(null);
@@ -177,7 +171,8 @@ export function SitePreviewPage(props: {
   // again. The static preview never waits for trust.
   const reportTrustError = props.reportError;
   const trust = useWorkspaceTrust(props.workspaceId, !props.sharedView, (error, retry) =>
-    reportTrustError?.(TRUST_READ_FAILED_MESSAGE, error, retry));
+    reportTrustError?.(TRUST_READ_FAILED_MESSAGE, error, retry),
+  );
   const trustedRef = useRef(trust.trusted);
   trustedRef.current = trust.trusted;
   // Counts changes to this app's approval on this device, from either
@@ -209,7 +204,10 @@ export function SitePreviewPage(props: {
   // The app whose review is open. Another app or workspace never shows it.
   const [reviewFor, setReviewFor] = useState<string | null>(null);
   const reviewOpen = reviewFor === siteContext;
-  const setReviewOpen = useCallback((open: boolean) => setReviewFor(open ? siteContext : null), [siteContext]);
+  const setReviewOpen = useCallback(
+    (open: boolean) => setReviewFor(open ? siteContext : null),
+    [siteContext],
+  );
 
   const reloadSite = useCallback(async () => {
     const request = ++loadRequestRef.current;
@@ -239,14 +237,15 @@ export function SitePreviewPage(props: {
           .catch((): WorkspaceSettingsResult | null => null),
       ]);
       if (!isCurrent()) return;
-      setLoad(site
-        ? {
-            status: "ready",
-            site,
-            defaultPreviewMode:
-              workspaceResult?.settings.sites.defaultPreviewMode ?? "auto",
-          }
-        : { status: "missing" });
+      setLoad(
+        site
+          ? {
+              status: "ready",
+              site,
+              defaultPreviewMode: workspaceResult?.settings.sites.defaultPreviewMode ?? "auto",
+            }
+          : { status: "missing" },
+      );
       setActionError(null);
     } catch (error) {
       if (!isCurrent()) return;
@@ -275,7 +274,6 @@ export function SitePreviewPage(props: {
     };
   }, [holderId, props.workspaceId, props.siteRoot]);
 
-
   // getSitePackage intentionally returns the deepest containing site for a
   // path (see requireExactSiteRoot's doc comment), so a stale tab whose own
   // root stopped being a detected site can still get back a detected
@@ -299,7 +297,6 @@ export function SitePreviewPage(props: {
     onClose: () => setOptionsOpen(false),
   });
 
-  // Shows one start of the app's preview, or nothing when none runs.
   const showPreview = useCallback((result: StartSitePreviewResult | null) => {
     logsRequestRef.current += 1;
     setActionError(null);
@@ -347,66 +344,65 @@ export function SitePreviewPage(props: {
   // even when another surface already shows it in this mode.
   // `remember` false keeps the person's mode for next time: the static
   // preview Restricted Mode shows in place of Dev or Build is not a choice.
-  const start = useCallback(async (mode: SitePreviewMode, restart: boolean, remember = true) => {
-    const request = ++previewStartRequestRef.current;
-    const requestContext = siteContext;
-    const isCurrent = () =>
-      request === previewStartRequestRef.current &&
-      requestContext === siteContextRef.current;
-    const generationAtStart = generationRef.current;
-    // Another surface replaced this start with a newer one; this surface
-    // keeps saying it is starting until that one arrives.
-    let replaced = false;
-    logsRequestRef.current += 1;
-    setLogsOpen(false);
-    setPreviewLogs([]);
-    setRunningMode(mode);
-    setActionError(null);
-    setIdleReason(null);
-    try {
-      const result = await bridge().startSitePreview({
-        workspaceId: props.workspaceId,
-        siteRoot: props.siteRoot,
-        mode,
-        holderId,
-        restart,
-      });
-      if (!isCurrent()) return;
-      if ("replaced" in result) {
-        replaced = true;
-        return "replaced" as const;
-      }
-      // A newer start another surface made is already on screen, and its
-      // mode is the one to open next time.
-      if (result.generation < generationRef.current) return result;
-      if (remember) rememberMode(props.workspaceId, props.siteRoot, mode);
-      generationRef.current = result.generation;
-      showPreview(result);
-      return result;
-    } catch (error) {
-      // A newer start another surface made replaced this one.
-      if (!isCurrent() || generationRef.current > generationAtStart) return;
-      // Main refused before it touched the preview that shows now.
-      if (isWorkspaceRestricted(error)) {
-        setBlocked({ mode, share: false });
+  const start = useCallback(
+    async (mode: SitePreviewMode, restart: boolean, remember = true) => {
+      const request = ++previewStartRequestRef.current;
+      const requestContext = siteContext;
+      const isCurrent = () =>
+        request === previewStartRequestRef.current && requestContext === siteContextRef.current;
+      const generationAtStart = generationRef.current;
+      // Another surface replaced this start with a newer one; this surface
+      // keeps saying it is starting until that one arrives.
+      let replaced = false;
+      logsRequestRef.current += 1;
+      setLogsOpen(false);
+      setPreviewLogs([]);
+      setRunningMode(mode);
+      setActionError(null);
+      setIdleReason(null);
+      try {
+        const result = await bridge().startSitePreview({
+          workspaceId: props.workspaceId,
+          siteRoot: props.siteRoot,
+          mode,
+          holderId,
+          restart,
+        });
+        if (!isCurrent()) return;
+        if ("replaced" in result) {
+          replaced = true;
+          return "replaced" as const;
+        }
+        // A newer start another surface made is already on screen, and its
+        // mode is the one to open next time.
+        if (result.generation < generationRef.current) return result;
+        if (remember) rememberMode(props.workspaceId, props.siteRoot, mode);
+        generationRef.current = result.generation;
+        showPreview(result);
+        return result;
+      } catch (error) {
+        // A newer start another surface made replaced this one.
+        if (!isCurrent() || generationRef.current > generationAtStart) return;
+        // Main refused before it touched the preview that shows now.
+        if (isWorkspaceRestricted(error)) {
+          setBlocked({ mode, share: false });
+          return null;
+        }
+        setPreview(null);
+        setActionError(ipcErrorMessage(error, `Could not start ${modeLabel(mode)} preview.`));
         return null;
+      } finally {
+        if (isCurrent() && !replaced) setRunningMode(null);
       }
-      setPreview(null);
-      setActionError(
-        ipcErrorMessage(error, `Could not start ${modeLabel(mode)} preview.`),
-      );
-      return null;
-    } finally {
-      if (isCurrent() && !replaced) setRunningMode(null);
-    }
-  }, [holderId, props.siteRoot, props.workspaceId, showPreview, siteContext]);
+    },
+    [holderId, props.siteRoot, props.workspaceId, showPreview, siteContext],
+  );
 
   const prepareShare = useCallback(async () => {
     const request = ++shareRequestRef.current;
     const requestContext = siteContext;
     const isCurrent = () =>
-      request === shareRequestRef.current &&
-      requestContext === siteContextRef.current;
+      request === shareRequestRef.current && requestContext === siteContextRef.current;
     try {
       // Share-what-you-previewed: this tab's own current mode — a stored
       // per-tab choice or the automatic pick, either way something main.ts
@@ -430,10 +426,7 @@ export function SitePreviewPage(props: {
       }
       let latest = fresh;
       let target = shareTargetForSite(latest);
-      if (
-        !target &&
-        needsBuiltArtifact(latest)
-      ) {
+      if (!target && needsBuiltArtifact(latest)) {
         if (!latest.configuredScripts.build && !latest.scripts.build) {
           if (isCurrent()) {
             setActionError("This app needs a static build before it can be shared.");
@@ -494,16 +487,22 @@ export function SitePreviewPage(props: {
         setActionError(ipcErrorMessage(error, "Could not prepare this app for sharing."));
       }
     }
-  }, [preview, props.onOpenApp, props.onShareSite, props.reportError, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
+  }, [
+    preview,
+    props.onOpenApp,
+    props.onShareSite,
+    props.reportError,
+    props.siteRoot,
+    props.workspaceId,
+    runningMode,
+    siteContext,
+    start,
+  ]);
   const prepareShareRef = useRef(prepareShare);
   prepareShareRef.current = prepareShare;
 
   const refreshPreviewLogs = useCallback(async () => {
-    if (
-      !preview ||
-      preview.mode !== "dev" ||
-      preview.siteRoot !== props.siteRoot
-    ) return;
+    if (!preview || preview.mode !== "dev" || preview.siteRoot !== props.siteRoot) return;
     const request = ++logsRequestRef.current;
     const requestContext = siteContext;
     const previewRequest = previewStartRequestRef.current;
@@ -516,7 +515,8 @@ export function SitePreviewPage(props: {
         request !== logsRequestRef.current ||
         requestContext !== siteContextRef.current ||
         previewRequest !== previewStartRequestRef.current
-      ) return;
+      )
+        return;
       setPreviewLogs((prev) => (sameLogs(prev, result.logs) ? prev : result.logs));
       if (result.exited) {
         setPreview(null);
@@ -546,7 +546,8 @@ export function SitePreviewPage(props: {
       load.site.root !== props.siteRoot ||
       preview ||
       idleReason !== null
-    ) return;
+    )
+      return;
     const mode = preferredMode(
       load.site,
       modes,
@@ -609,7 +610,11 @@ export function SitePreviewPage(props: {
     try {
       await requestTrust();
     } catch (error) {
-      reportError?.("dohc could not trust this workspace.", error, () => void trustWorkspaceRef.current());
+      reportError?.(
+        "dohc could not trust this workspace.",
+        error,
+        () => void trustWorkspaceRef.current(),
+      );
     }
   }, [reportError, requestTrust]);
   trustWorkspaceRef.current = trustWorkspace;
@@ -641,12 +646,12 @@ export function SitePreviewPage(props: {
   // Same exact-root requirement as `modes` above — an ancestor site never
   // renders as if it were this tab's own.
   const site = load.status === "ready" && load.site.root === props.siteRoot ? load.site : null;
-  const canShare =
-    !props.sharedView &&
-    site?.authority.kind === "workspace" &&
-    !!props.onShareSite;
-  const declaresApp = !!site?.sourceFiles.includes(props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json");
-  const needsPublication = !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0 && declaresApp;
+  const canShare = !props.sharedView && site?.authority.kind === "workspace" && !!props.onShareSite;
+  const declaresApp = !!site?.sourceFiles.includes(
+    props.siteRoot ? `${props.siteRoot}/app.publish.json` : "app.publish.json",
+  );
+  const needsPublication =
+    !props.sharedView && site?.authority.kind === "workspace" && modes.length === 0 && declaresApp;
   const appView = useAppView({
     workspaceId: props.workspaceId,
     appRoot: props.siteRoot,
@@ -670,10 +675,14 @@ export function SitePreviewPage(props: {
       data-testid="site-preview-page"
       className="flex min-h-0 flex-1 flex-col bg-bg"
       // The mouse's back and forward buttons, where they reach dohc.
-      onMouseUp={needsPublication ? (event) => {
-        if (event.button === 3) appView.navigate("back");
-        if (event.button === 4) appView.navigate("forward");
-      } : undefined}
+      onMouseUp={
+        needsPublication
+          ? (event) => {
+              if (event.button === 3) appView.navigate("back");
+              if (event.button === 4) appView.navigate("forward");
+            }
+          : undefined
+      }
     >
       <header className="flex min-h-10 shrink-0 items-center gap-2 border-b border-line px-2 py-1.5">
         {needsPublication ? (
@@ -705,7 +714,10 @@ export function SitePreviewPage(props: {
             <RefreshCcw size={13} aria-hidden />
           </IconButton>
         )}
-        <span className="min-w-0 truncate text-[13px] font-medium text-ink" title={site?.title ?? props.siteRoot}>
+        <span
+          className="min-w-0 truncate text-[13px] font-medium text-ink"
+          title={site?.title ?? props.siteRoot}
+        >
           {site?.title ?? props.siteRoot}
         </span>
         {site?.authority.kind === "share" ? (
@@ -738,10 +750,23 @@ export function SitePreviewPage(props: {
             </IconButton>
           ) : null}
           {!props.sharedView && site?.authority.kind === "workspace" ? (
-            <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} title={site.title} reportError={props.reportError} access={props.access}
+            <OwnerAppPublication
+              workspaceId={props.workspaceId}
+              appRoot={props.siteRoot}
+              title={site.title}
+              reportError={props.reportError}
+              access={props.access}
               localApproval={needsPublication ? "tab" : declaresApp ? "browser" : null}
-              testId={needsPublication ? "app-view-review" : "site-preview-review"} open={reviewOpen} onOpenChange={setReviewOpen}
-              onLocalChange={localApprovalChanged} onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
+              testId={needsPublication ? "app-view-review" : "site-preview-review"}
+              open={reviewOpen}
+              onOpenChange={setReviewOpen}
+              onLocalChange={localApprovalChanged}
+              onShareSource={
+                props.onShareSite
+                  ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title })
+                  : undefined
+              }
+            />
           ) : null}
           {needsPublication ? (
             <IconButton
@@ -790,9 +815,7 @@ export function SitePreviewPage(props: {
               >
                 <Settings2 size={13} aria-hidden />
               </summary>
-              <div
-                className="absolute right-0 top-8 z-20 w-40 rounded-lg border border-line bg-panel p-1 shadow-lg"
-              >
+              <div className="absolute right-0 top-8 z-20 w-40 rounded-lg border border-line bg-panel p-1 shadow-lg">
                 <div className="px-2 py-1 text-[11px] text-subtle">Run preview as</div>
                 {modes.map((mode) => (
                   <button
@@ -803,7 +826,12 @@ export function SitePreviewPage(props: {
                     onClick={() => {
                       setOptionsOpen(false);
                       optionsTriggerRef.current?.focus();
-                      if (trust.trusted !== true && !props.sharedView && site && previewRunsAppCode(site, mode)) {
+                      if (
+                        trust.trusted !== true &&
+                        !props.sharedView &&
+                        site &&
+                        previewRunsAppCode(site, mode)
+                      ) {
                         setBlocked({ mode, share: false });
                         return;
                       }
@@ -858,13 +886,14 @@ export function SitePreviewPage(props: {
                 >
                   <AlertTriangle size={12} aria-hidden />
                   <span className="font-mono">{diagnostic.code}</span>
-                  <span>
-                    {diagnostic.message || APP_CHECK_FALLBACK_MESSAGE}
-                  </span>
+                  <span>{diagnostic.message || APP_CHECK_FALLBACK_MESSAGE}</span>
                 </div>
               ))}
               {actionError ? (
-                <div data-testid="site-preview-error" className="flex items-center gap-1.5 text-[12px] text-danger">
+                <div
+                  data-testid="site-preview-error"
+                  className="flex items-center gap-1.5 text-[12px] text-danger"
+                >
                   <AlertTriangle size={12} aria-hidden />
                   <span>{actionError}</span>
                 </div>
@@ -873,11 +902,18 @@ export function SitePreviewPage(props: {
           ) : null}
 
           {blocked && (preview || runningMode) ? (
-            <RestrictedModeState variant="band" asking={trust.asking} onTrust={() => void trustWorkspace()} />
+            <RestrictedModeState
+              variant="band"
+              asking={trust.asking}
+              onTrust={() => void trustWorkspace()}
+            />
           ) : null}
 
           {preview && !previewUrlAllowed ? (
-            <div data-testid="site-preview-error" className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger">
+            <div
+              data-testid="site-preview-error"
+              className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger"
+            >
               This app tried to preview from an address dohc does not trust. Reload the preview.
             </div>
           ) : null}
@@ -892,6 +928,7 @@ export function SitePreviewPage(props: {
                 data-testid="site-preview-frame"
                 title={site.title}
                 src={preview.url}
+                // oxlint-disable-next-line react/iframe-missing-sandbox -- deliberate; see the comment above this frame
                 sandbox="allow-forms allow-same-origin allow-scripts"
                 referrerPolicy="no-referrer"
                 style={{ colorScheme: "light", backgroundColor: "Canvas" }}
@@ -911,7 +948,11 @@ export function SitePreviewPage(props: {
           {needsPublication ? (
             <AppViewBody view={appView} onReview={() => setReviewOpen(true)} />
           ) : !preview && blocked && !runningMode ? (
-            <RestrictedModeState variant="page" asking={trust.asking} onTrust={() => void trustWorkspace()} />
+            <RestrictedModeState
+              variant="page"
+              asking={trust.asking}
+              onTrust={() => void trustWorkspace()}
+            />
           ) : !preview ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
               <Globe2 size={24} aria-hidden className="text-subtle" />
@@ -920,13 +961,13 @@ export function SitePreviewPage(props: {
                   ? idleReason === "exited"
                     ? "Dev server exited. Use Preview options to run it again."
                     : idleReason === "stopped"
-                    ? "Preview stopped. Use Preview options to run it again."
-                    : runningMode
-                    ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
-                    // The start waits for main's answer about trust.
-                    : !props.sharedView && trust.trusted === null && !trust.readFailed
-                    ? null
-                    : "This app did not start automatically. Choose another mode in Preview options."
+                      ? "Preview stopped. Use Preview options to run it again."
+                      : runningMode
+                        ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
+                        : // The start waits for main's answer about trust.
+                          !props.sharedView && trust.trusted === null && !trust.readFailed
+                          ? null
+                          : "This app did not start automatically. Choose another mode in Preview options."
                   : "This app has no previewable entry, dev script, or build output yet."}
               </div>
               {idleReason === "exited" && previewLogs.length > 0 ? (

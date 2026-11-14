@@ -1,4 +1,3 @@
-import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { createPortal } from "react-dom";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
@@ -12,7 +11,11 @@ import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
-import { NARROW_GROUP_HIDDEN, usePlainActionsRow, useTabRowActionsSlot } from "./workbench/tabRowActions";
+import {
+  NARROW_GROUP_HIDDEN,
+  usePlainActionsRow,
+  useTabRowActionsSlot,
+} from "./workbench/tabRowActions";
 import { useShownAfter } from "./ui/useShownAfter";
 import { PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
 import { SAVE_STATE } from "./ui/StateMark";
@@ -86,7 +89,14 @@ export function ViewActions(props: {
     </>
   );
   if (slot === undefined) {
-    return <div data-testid="view-actions" className={`flex items-center justify-end gap-1 pl-2 pr-1 ${plain ? "h-8 border-t border-line" : "h-9 border-b border-line bg-panel"}`}>{content}</div>;
+    return (
+      <div
+        data-testid="view-actions"
+        className={`flex items-center justify-end gap-1 pl-2 pr-1 ${plain ? "h-8 border-t border-line" : "h-9 border-b border-line bg-panel"}`}
+      >
+        {content}
+      </div>
+    );
   }
   return slot ? createPortal(content, slot) : null;
 }
@@ -99,11 +109,6 @@ export const OPENING_TITLE = "You can edit this document when it finishes openin
 // (styles.css, dohc-reveal-if-slow).
 export const OPENING_WORDS_DELAY_MS = 150;
 
-// A document still opening, as its save state slot says it. An open can last
-// (until the engine's retry deadline, or while a guest waits for the host),
-// and meanwhile the page shows the disk copy read-only, so a slow open says
-// "Opening…" in words. A quick one keeps them for screen readers only: it
-// draws nothing, and the actions stay where the ready document draws them.
 export function OpeningState() {
   const slow = useShownAfter(true, OPENING_WORDS_DELAY_MS);
   return (
@@ -144,7 +149,7 @@ export function DocumentControls(props: {
         data-testid={toggle.testId}
         aria-pressed={toggle.pressed}
         disabled={toggle.disabled && !toggle.title}
-        aria-disabled={toggle.disabled && !!toggle.title || undefined}
+        aria-disabled={(toggle.disabled && !!toggle.title) || undefined}
         title={toggle.title}
         onClick={() => {
           if (toggle.disabled) return;
@@ -154,12 +159,14 @@ export function DocumentControls(props: {
       >
         {toggle.label}
       </button>
-      {props.menu ? <DocumentMenu {...props.menu} /> : <span aria-hidden className="size-6 shrink-0" />}
+      {props.menu ? (
+        <DocumentMenu {...props.menu} />
+      ) : (
+        <span aria-hidden className="size-6 shrink-0" />
+      )}
     </>
   );
 }
-
-
 
 // What each save state says and how it is marked lives in ui/StateMark.tsx,
 // one map over every union a chip can show.
@@ -174,7 +181,6 @@ export function EngineMayHoldDocumentNotice(props: {
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
-  // Actions left of Try again.
   children?: ReactNode;
 }) {
   return (
@@ -224,17 +230,24 @@ export function OpenExternallyControl(props: {
   useEffect(() => {
     let live = true;
     void Promise.resolve()
-      .then(() => bridge().readExternalOpen({ workspaceId: props.workspaceId, relativePath: props.path }))
-      .then(({ readOnlyCopy }) => {
-        if (live) setAnswer({ asked, readOnlyCopy });
-      }, () => undefined);
+      .then(() =>
+        bridge().readExternalOpen({ workspaceId: props.workspaceId, relativePath: props.path }),
+      )
+      .then(
+        ({ readOnlyCopy }) => {
+          if (live) setAnswer({ asked, readOnlyCopy });
+        },
+        () => undefined,
+      );
     return () => {
       live = false;
     };
   }, [asked, props.workspaceId, props.path]);
   const readOnlyCopy = answer?.asked === asked && answer.readOnlyCopy;
   return (
-    <span className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap ${props.className ?? ""}`}>
+    <span
+      className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap ${props.className ?? ""}`}
+    >
       {props.children(readOnlyCopy ? id : undefined)}
       {readOnlyCopy ? (
         <span className="inline-flex items-center gap-1 text-subtle">
@@ -246,8 +259,11 @@ export function OpenExternallyControl(props: {
   );
 }
 
-// The file Open externally opens, and where a failed open is reported.
-export type OpenExternallyTarget = { workspaceId: string; path: string; onError?: ReportButtonError };
+export type OpenExternallyTarget = {
+  workspaceId: string;
+  path: string;
+  onError?: ReportButtonError;
+};
 
 // Opens a read-only note in the system's app for the file. A surface that can
 // show beside a lossy note's notice gives the link its own test ID.
@@ -256,7 +272,12 @@ export function OpenExternallyLink(props: OpenExternallyTarget & { testId?: stri
     void bridge()
       .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
       .catch((error: unknown) =>
-        props.onError?.("dohc could not open this note externally.", error, openExternally, `lossy-note-open:${props.path}`),
+        props.onError?.(
+          "dohc could not open this note externally.",
+          error,
+          openExternally,
+          `lossy-note-open:${props.path}`,
+        ),
       );
   };
   return (
@@ -302,7 +323,11 @@ export function ReadOnlyPropertiesFlag(props: {
   );
 }
 
-export function LossyNoteNoticeView(props: { held?: boolean; tooLarge?: boolean; children: ReactNode }) {
+export function LossyNoteNoticeView(props: {
+  held?: boolean;
+  tooLarge?: boolean;
+  children: ReactNode;
+}) {
   return (
     <div
       data-testid="lossy-note-notice"
@@ -314,8 +339,8 @@ export function LossyNoteNoticeView(props: { held?: boolean; tooLarge?: boolean;
         {props.tooLarge
           ? SAVE_STATE["too-large"].title
           : props.held
-          ? "dohc held a change, because saving it would rewrite parts it can't show."
-          : LOSSY_NOTE_TITLE}
+            ? "dohc held a change, because saving it would rewrite parts it can't show."
+            : LOSSY_NOTE_TITLE}
       </span>
       <span className="flex shrink-0 items-center gap-3">{props.children}</span>
     </div>
@@ -336,7 +361,6 @@ export function LossyNoteNotice(props: {
   tooLarge?: boolean;
   onError?: ReportButtonError;
   onNotice?: (message: string, undo?: () => void) => void;
-  // Binds the editor for this open, after the person confirms the warning.
   onEditAnyway?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -356,28 +380,50 @@ export function LossyNoteNotice(props: {
   useEffect(() => {
     if (!confirming) return;
     let live = true;
-    void historyKeeps(props.workspaceId, props.path, props.contentHash)
-      .then((keeps) => {
+    void historyKeeps(props.workspaceId, props.path, props.contentHash).then(
+      (keeps) => {
         if (live && keeps !== null) setHistory({ asked, keeps });
-      }, () => undefined);
+      },
+      () => undefined,
+    );
     return () => {
       live = false;
     };
   }, [confirming, asked, props.workspaceId, props.path, props.contentHash]);
-  const historyLine = history?.asked !== asked ? null
-    : history.keeps === "kept" ? "History keeps the original."
-    : history.keeps === "untracked" ? "History does not track this file, so dohc can't restore the original."
-    : "dohc could not confirm that History can restore the original.";
+  const historyLine =
+    history?.asked !== asked
+      ? null
+      : history.keeps === "kept"
+        ? "History keeps the original."
+        : history.keeps === "untracked"
+          ? "History does not track this file, so dohc can't restore the original."
+          : "dohc could not confirm that History can restore the original.";
   return (
     <>
       <LossyNoteNoticeView held={props.held} tooLarge={props.tooLarge}>
-        <OpenExternallyLink workspaceId={props.workspaceId} path={props.path} onError={props.onError} />
+        <OpenExternallyLink
+          workspaceId={props.workspaceId}
+          path={props.path}
+          onError={props.onError}
+        />
         {props.held ? (
-          <button type="button" data-testid="lossy-note-show-change" onClick={() => setReviewing(true)} className="whitespace-nowrap text-muted hover:text-ink">
+          <button
+            type="button"
+            data-testid="lossy-note-show-change"
+            onClick={() => setReviewing(true)}
+            className="whitespace-nowrap text-muted hover:text-ink"
+          >
             Show change
           </button>
         ) : null}
-        {props.held && onEditAnyway ? <HeldNoteDrop workspaceId={props.workspaceId} path={props.path} onError={props.onError} onNotice={props.onNotice} /> : null}
+        {props.held && onEditAnyway ? (
+          <HeldNoteDrop
+            workspaceId={props.workspaceId}
+            path={props.path}
+            onError={props.onError}
+            onNotice={props.onNotice}
+          />
+        ) : null}
         {onEditAnyway ? (
           <button
             type="button"
@@ -392,7 +438,13 @@ export function LossyNoteNotice(props: {
           </button>
         ) : null}
       </LossyNoteNoticeView>
-      {reviewing && props.held ? <HeldChangeDialog workspaceId={props.workspaceId} path={props.path} onClose={() => setReviewing(false)} /> : null}
+      {reviewing && props.held ? (
+        <HeldChangeDialog
+          workspaceId={props.workspaceId}
+          path={props.path}
+          onClose={() => setReviewing(false)}
+        />
+      ) : null}
       {confirming && onEditAnyway ? (
         <ConfirmDialog
           icon={FilePenLine}
@@ -422,11 +474,19 @@ type HistoryKeeps = "kept" | "untracked" | "not-recorded";
 
 // Whether History's latest moment for the note holds the bytes `contentHash`
 // names; null when History can't say.
-async function historyKeeps(workspaceId: string, path: string, contentHash: string | null): Promise<HistoryKeeps | null> {
+async function historyKeeps(
+  workspaceId: string,
+  path: string,
+  contentHash: string | null,
+): Promise<HistoryKeeps | null> {
   const chats = await bridge().listFileChats({ workspaceId, path });
   if (!("fileObjectId" in chats)) return null;
   if (chats.fileObjectId === null) return "untracked";
-  const moments = await bridge().listEngineMoments({ workspaceId, objectId: chats.fileObjectId, limit: 1 });
+  const moments = await bridge().listEngineMoments({
+    workspaceId,
+    objectId: chats.fileObjectId,
+    limit: 1,
+  });
   if (!("moments" in moments)) return null;
   const latest = moments.moments[0];
   if (latest === undefined || contentHash === null) return "not-recorded";
@@ -434,18 +494,29 @@ async function historyKeeps(workspaceId: string, path: string, contentHash: stri
   if ("status" in read) return read.status === "untracked" ? "untracked" : null;
   const text = read.moment?.afterText;
   if (typeof text !== "string") return "not-recorded";
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)),
+  );
   const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return hex === contentHash ? "kept" : "not-recorded";
 }
 
 // Opens a file in the system's app for it. A failure goes to the shell's
 // toasts and Notices, with Try again.
-export function openExternally(props: { workspaceId: string; path: string; onError?: ReportButtonError }): void {
+export function openExternally(props: {
+  workspaceId: string;
+  path: string;
+  onError?: ReportButtonError;
+}): void {
   void bridge()
     .openFileExternally({ workspaceId: props.workspaceId, relativePath: props.path })
     .catch((error: unknown) =>
-      props.onError?.("dohc could not open this file externally.", error, () => openExternally(props), `open-externally:${props.path}`),
+      props.onError?.(
+        "dohc could not open this file externally.",
+        error,
+        () => openExternally(props),
+        `open-externally:${props.path}`,
+      ),
     );
 }
 
@@ -459,9 +530,7 @@ export function EngineArtifactAssetsInvalidNotice(props: {
       data-testid="engine-artifact-assets-invalid-notice"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
-      <span>
-        dohc could not verify this drawing's images. The drawing is read-only.
-      </span>
+      <span>dohc could not verify this drawing's images. The drawing is read-only.</span>
       <OpenExternallyControl workspaceId={props.workspaceId} path={props.path}>
         {(describedBy) => (
           <button
@@ -480,7 +549,11 @@ export function EngineArtifactAssetsInvalidNotice(props: {
 
 // The next step in a file view that cannot show its file: the system's app
 // for it.
-export function OpenExternallyButton(props: { workspaceId: string; path: string; onError?: ReportButtonError }) {
+export function OpenExternallyButton(props: {
+  workspaceId: string;
+  path: string;
+  onError?: ReportButtonError;
+}) {
   return (
     <OpenExternallyControl workspaceId={props.workspaceId} path={props.path} className="text-xs">
       {(describedBy) => (
@@ -496,9 +569,11 @@ export function OpenExternallyButton(props: { workspaceId: string; path: string;
 export const REPLACED_HISTORY_DRAFT_NOTICE =
   "This document changed while you were editing. Your earlier edits are set aside here.";
 // So does the notice for a save refused because the file is gone.
-export const DELETED_FILE_DRAFT_NOTICE = "The file was moved or deleted outside dohc. Copy your edits to keep them.";
+export const DELETED_FILE_DRAFT_NOTICE =
+  "The file was moved or deleted outside dohc. Copy your edits to keep them.";
 // The row for an edit dohc refused to save for good, in either editor.
-export const DOCUMENT_NOT_SAVED_DRAFT_NOTICE = "dohc could not save this document. Copy your edits to keep them.";
+export const DOCUMENT_NOT_SAVED_DRAFT_NOTICE =
+  "dohc could not save this document. Copy your edits to keep them.";
 
 export function OrphanedDraftNotices(props: {
   workspaceId: string;
@@ -518,11 +593,13 @@ export function OrphanedDraftNotices(props: {
         <SetAsideEditRow
           key={draft.id}
           message={
-            (props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
+            (props.messageDraftId === undefined || props.messageDraftId === draft.id
+              ? props.message
+              : undefined) ??
             (draft.recovery?.reason === "deleted"
               ? DELETED_FILE_DRAFT_NOTICE
-              // Until storage keeps the draft, a copy is still the way to keep it.
-              : props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
+              : // Until storage keeps the draft, a copy is still the way to keep it.
+                props.replacedDraftIds?.includes(draft.id) && isOrphanedDraftStored(draft.id)
                 ? REPLACED_HISTORY_DRAFT_NOTICE
                 : "This document reopened before your last edit saved. Copy your edits to keep them.")
           }
@@ -537,7 +614,6 @@ export function OrphanedDraftNotices(props: {
   );
 }
 
-// One set-aside edit above the page, with its Copy edits and Dismiss.
 export function SetAsideEditRow(props: {
   message: string;
   getText: ComponentProps<typeof CopyButton>["getText"];
@@ -551,16 +627,18 @@ export function SetAsideEditRow(props: {
       <span className="text-danger">{props.message}</span>
       <div className="flex items-center gap-2">
         <CopyButton testId="orphaned-draft-copy" label="Copy edits" getText={props.getText} />
-        {/* Deleting the only copy needs the explicit confirm step (#579
-            review, r6) — the same control the recovery list uses. */}
+        {/* Deleting the only copy needs the explicit confirm step, the same
+            control the recovery list uses. */}
         <DismissDraftControls onDismiss={props.onDismiss} />
       </div>
     </div>
   );
 }
 
-// The strip over the markdown source view, with the source's Copy.
-export function MarkdownSourceStrip(props: { words: string; getText: ComponentProps<typeof CopyButton>["getText"] }) {
+export function MarkdownSourceStrip(props: {
+  words: string;
+  getText: ComponentProps<typeof CopyButton>["getText"];
+}) {
   return (
     <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px] text-muted">
       <span>{props.words}</span>
@@ -580,11 +658,7 @@ export function EngineRemovalInProgressNotice(props: {
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
       <span>{props.removal.message} Wait for it to finish.</span>
-      <button
-        type="button"
-        onClick={props.onRetry}
-        className="text-subtle hover:text-ink"
-      >
+      <button type="button" onClick={props.onRetry} className="text-subtle hover:text-ink">
         Try again
       </button>
     </div>

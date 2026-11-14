@@ -75,7 +75,9 @@ if (host) {
       return false;
     }
   };
-  retry?.addEventListener("click", () => { void mount(); });
+  retry?.addEventListener("click", () => {
+    void mount();
+  });
 
   if ("IntersectionObserver" in window) {
     const observer = new IntersectionObserver(

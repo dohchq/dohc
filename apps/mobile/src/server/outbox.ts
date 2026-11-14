@@ -1,6 +1,14 @@
 import type { AccountState, SignIn } from "./account";
 import { isFields, text } from "./api";
-import { derivedMessageId, isRefusalReason, readChatWrite, sendWrite, type ChatWrite, type RefusalReason, type WriteAnswer } from "./chatWrites";
+import {
+  derivedMessageId,
+  isRefusalReason,
+  readChatWrite,
+  sendWrite,
+  type ChatWrite,
+  type RefusalReason,
+  type WriteAnswer,
+} from "./chatWrites";
 import { ServerError } from "./client";
 import { sleep as timerSleep } from "./deviceFlow";
 import { DurableFileError, type DurableFiles } from "./durableFiles";
@@ -43,7 +51,12 @@ type OutboxStage = "queued" | "sending" | "saved" | "stalled" | "refused";
 /** How a record settled. `missing` is a target the server can't find or hides, as reads answer one. */
 type OutboxResult =
   | { readonly kind: "saved"; readonly threadId: string | null; readonly messageId: string | null }
-  | { readonly kind: "refused"; readonly reason: RefusalReason; readonly threadId: string | null; readonly winnerMessageId: string | null }
+  | {
+      readonly kind: "refused";
+      readonly reason: RefusalReason;
+      readonly threadId: string | null;
+      readonly winnerMessageId: string | null;
+    }
   | { readonly kind: "missing"; readonly reason: string };
 
 /** The thread or stream a record waits its turn in. */
@@ -100,7 +113,10 @@ interface OutboxState {
  * `retryEnqueue` sends it as that one operation. `not-deleted`: Sign out couldn't make its delete safe.
  */
 export class OutboxError extends Error {
-  constructor(readonly kind: "closed" | "invalid" | "indeterminate" | "not-deleted", readonly operationId: string | null = null) {
+  constructor(
+    readonly kind: "closed" | "invalid" | "indeterminate" | "not-deleted",
+    readonly operationId: string | null = null,
+  ) {
     super(MESSAGES[kind]);
     this.name = "OutboxError";
   }
@@ -120,7 +136,12 @@ export interface Outbox {
    * names, in `dependsOn`, the outbox post or send it replies to. A reaction names its message's `thread`. Rejects with
    * a disk error when nothing was kept, and as `indeterminate` when the record may have been.
    */
-  enqueue(input: { readonly workspaceId: string; readonly write: ChatWrite; readonly dependsOn?: string; readonly thread?: string }): Promise<OutboxRecord>;
+  enqueue(input: {
+    readonly workspaceId: string;
+    readonly write: ChatWrite;
+    readonly dependsOn?: string;
+    readonly thread?: string;
+  }): Promise<OutboxRecord>;
   /** Keeps a withheld record for sending, with its own operation ID and arguments, and resolves once that's durable. */
   retryEnqueue(operationId: string): Promise<OutboxRecord>;
   /**
@@ -129,7 +150,11 @@ export interface Outbox {
    */
   signOutCounts(): { readonly unsent: number; readonly maySend: number } | null;
   /** A read of the workspace showed these messages: saved records whose result they show are deleted. */
-  handoff(account: Pick<SignIn, "origin" | "userId">, workspaceId: string, messages: readonly ChatMessage[]): void;
+  handoff(
+    account: Pick<SignIn, "origin" | "userId">,
+    workspaceId: string,
+    messages: readonly ChatMessage[],
+  ): void;
   /**
    * Stops sending and deletes every record, calling `leave` once the delete can't be lost: after the marker lands, or
    * after the folder is empty. Resolves once the delete is done, or has failed after `leave` and waits for `wake`.
@@ -140,7 +165,10 @@ export interface Outbox {
   /** Tries again what failed: reading, a Sign out's delete, dependency changes and marks. Cuts every retry wait short. */
   wake(): void;
   /** Reads the records, then sends with each sign-in. A 401 only pauses. Returns a stop. */
-  follow(account: { state(): AccountState; subscribe(listener: () => void): () => void }): () => void;
+  follow(account: {
+    state(): AccountState;
+    subscribe(listener: () => void): () => void;
+  }): () => void;
 }
 
 const FORMAT = 1;
@@ -167,34 +195,49 @@ const UNREACHABLE_AFTER = 3;
 /** The most messages from reads the outbox keeps for handing off writes saved later. */
 const OBSERVED_MAX = 1000;
 
-const unfinished = (record: OutboxRecord) => record.stage === "queued" || record.stage === "sending" || record.stage === "stalled";
+const unfinished = (record: OutboxRecord) =>
+  record.stage === "queued" || record.stage === "sending" || record.stage === "stalled";
 /** A reply still waiting for the thread its outbox post or send will name. */
-const needsThread = (record: OutboxRecord) => record.write.operation === "reply" && record.write.args.threadId === null;
+const needsThread = (record: OutboxRecord) =>
+  record.write.operation === "reply" && record.write.args.threadId === null;
 const ownedBy = (record: OutboxRecord, account: Pick<SignIn, "origin" | "userId">) =>
   record.origin === account.origin && record.accountId === account.userId;
 const scopeOf = (record: Pick<OutboxRecord, "origin" | "accountId" | "workspaceId">) =>
   JSON.stringify([record.origin, record.accountId, record.workspaceId]);
-const savedThread = (record: OutboxRecord | undefined) => record?.result?.kind === "saved" ? record.result.threadId : null;
+const savedThread = (record: OutboxRecord | undefined) =>
+  record?.result?.kind === "saved" ? record.result.threadId : null;
 
 /** 400 and 413: the route refused the write's form or size, so asking again can't help. Anything else may have saved it. */
-const isTerminal = (error: unknown) => error instanceof ServerError && (error.status === 400 || error.status === 413);
-const isNotFound = (error: unknown) => error instanceof ServerError && error.problem === "not-found";
+const isTerminal = (error: unknown) =>
+  error instanceof ServerError && (error.status === 400 || error.status === 413);
+const isNotFound = (error: unknown) =>
+  error instanceof ServerError && error.problem === "not-found";
 
 /** Where a write waits its turn, or undefined for a reaction without its message's thread. */
 function targetOf(write: ChatWrite, thread: string | undefined): Target | null | undefined {
   switch (write.operation) {
-    case "post": return { kind: "stream", id: write.args.groupId };
-    case "send": return { kind: "stream", id: write.args.streamId };
-    case "reply": return write.args.threadId === null ? null : { kind: "thread", id: write.args.threadId };
-    case "react": return thread === undefined ? undefined : { kind: "thread", id: thread };
+    case "post":
+      return { kind: "stream", id: write.args.groupId };
+    case "send":
+      return { kind: "stream", id: write.args.streamId };
+    case "reply":
+      return write.args.threadId === null ? null : { kind: "thread", id: write.args.threadId };
+    case "react":
+      return thread === undefined ? undefined : { kind: "thread", id: thread };
   }
 }
 
 /** A reply given the thread its saved outbox post or send named, or null while it named none. */
-function withThread(write: ChatWrite, parent: OutboxRecord | undefined): { readonly write: ChatWrite; readonly target: Target } | null {
+function withThread(
+  write: ChatWrite,
+  parent: OutboxRecord | undefined,
+): { readonly write: ChatWrite; readonly target: Target } | null {
   const threadId = savedThread(parent);
   if (threadId === null || write.operation !== "reply") return null;
-  return { write: { operation: "reply", args: { ...write.args, threadId } }, target: { kind: "thread", id: threadId } };
+  return {
+    write: { operation: "reply", args: { ...write.args, threadId } },
+    target: { kind: "thread", id: threadId },
+  };
 }
 
 export function createOutbox(options: {
@@ -209,7 +252,8 @@ export function createOutbox(options: {
   const { files } = options;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? timerSleep;
-  const retryMs = options.retryMs ?? (failures => Math.min(RETRY_MS * 2 ** (failures - 1), RETRY_MAX_MS));
+  const retryMs =
+    options.retryMs ?? ((failures) => Math.min(RETRY_MS * 2 ** (failures - 1), RETRY_MAX_MS));
   const stalledAfterMs = options.stalledAfterMs ?? STALLED_AFTER_MS;
   const stalledRetryMs = options.stalledRetryMs ?? STALLED_RETRY_MS;
 
@@ -233,7 +277,8 @@ export function createOutbox(options: {
   /** Workspaces, by scope, whose records wait after repeated 404s. */
   const unreachable = new Set<string>();
   /** The latest messages reads showed, for one account and workspace. */
-  let observed: { readonly scope: string; readonly messages: Map<string, ChatMessage> } | null = null;
+  let observed: { readonly scope: string; readonly messages: Map<string, ChatMessage> } | null =
+    null;
   let changeFailures = 0;
   let retrying = false;
   /** Aborts to cut every retry wait short. */
@@ -247,12 +292,21 @@ export function createOutbox(options: {
     return result;
   }
 
-  const changed = () => { snapshot = null; };
+  const changed = () => {
+    snapshot = null;
+  };
   const find = (operationId: string | null, scope: string) =>
-    [...records.values()].find(record => record.operationId === operationId && scopeOf(record) === scope);
+    [...records.values()].find(
+      (record) => record.operationId === operationId && scopeOf(record) === scope,
+    );
   /** A reply still waiting for this saved write's thread needs the record. */
   const needed = (record: OutboxRecord) =>
-    [...records.values()].some(other => other.dependsOn === record.operationId && scopeOf(other) === scopeOf(record) && needsThread(other));
+    [...records.values()].some(
+      (other) =>
+        other.dependsOn === record.operationId &&
+        scopeOf(other) === scopeOf(record) &&
+        needsThread(other),
+    );
 
   /** Waits `ms`, or less: `wake` cuts it short, and so does `stop`. */
   async function pause(ms: number, stop: AbortSignal | null) {
@@ -277,7 +331,11 @@ export function createOutbox(options: {
    * returned null, or the write failed. After an `unsynced` failure the disk may hold either version; the next change
    * writes over it.
    */
-  function commit(sequence: number, change: (record: OutboxRecord) => OutboxRecord | null, valid = () => true): Promise<boolean> {
+  function commit(
+    sequence: number,
+    change: (record: OutboxRecord) => OutboxRecord | null,
+    valid = () => true,
+  ): Promise<boolean> {
     const at = epoch;
     return serial(async () => {
       const current = records.get(sequence);
@@ -300,7 +358,7 @@ export function createOutbox(options: {
   function change(sequence: number, update: (record: OutboxRecord) => OutboxRecord | null) {
     changing.add(sequence);
     const at = epoch;
-    void commit(sequence, update).then(written => {
+    void commit(sequence, update).then((written) => {
       changing.delete(sequence);
       if (epoch !== at) return;
       if (!written) return later();
@@ -337,10 +395,13 @@ export function createOutbox(options: {
         const recovery = await files.recover();
         const unreadable = new Set(recovery.unreadable);
         kept.push(...recovery.leftovers);
-        const readable = (name: string) => unreadable.has(name) ? Promise.resolve(null) : files.read(name).catch((error: unknown) => {
-          if (error instanceof DurableFileError && error.kind === "unreadable") return null;
-          throw error;
-        });
+        const readable = (name: string) =>
+          unreadable.has(name)
+            ? Promise.resolve(null)
+            : files.read(name).catch((error: unknown) => {
+                if (error instanceof DurableFileError && error.kind === "unreadable") return null;
+                throw error;
+              });
         for (const name of listed) {
           if (name === COUNTER) {
             // A counter that can't be read is only a number: the records' names give it again.
@@ -384,11 +445,16 @@ export function createOutbox(options: {
    */
   async function clearFolder(keep: string | null): Promise<boolean> {
     let failed = false;
-    const attempt = (run: () => Promise<void>) => run().catch(() => { failed = true; });
+    const attempt = (run: () => Promise<void>) =>
+      run().catch(() => {
+        failed = true;
+      });
     try {
-      for (const name of await files.list()) if (name !== keep) await attempt(() => files.remove(name));
-      for (const name of (await files.recover()).leftovers) if (TEMPORARY_NAME.test(name)) await attempt(() => files.removeLeftover(name));
-      return !failed && (await files.list()).every(name => name === keep);
+      for (const name of await files.list())
+        if (name !== keep) await attempt(() => files.remove(name));
+      for (const name of (await files.recover()).leftovers)
+        if (TEMPORARY_NAME.test(name)) await attempt(() => files.removeLeftover(name));
+      return !failed && (await files.list()).every((name) => name === keep);
     } catch {
       return false;
     }
@@ -401,14 +467,20 @@ export function createOutbox(options: {
   function erase(): Promise<void> {
     return serial(async () => {
       if (!owed) return false;
-      if (!await clearFolder(SIGNING_OUT) || !await files.remove(SIGNING_OUT).then(() => true, () => false)) {
+      if (
+        !(await clearFolder(SIGNING_OUT)) ||
+        !(await files.remove(SIGNING_OUT).then(
+          () => true,
+          () => false,
+        ))
+      ) {
         status = "failed";
         changed();
         return false;
       }
       owed = false;
       return true;
-    }).then(done => {
+    }).then((done) => {
       if (done) return load();
     });
   }
@@ -417,7 +489,9 @@ export function createOutbox(options: {
   function reconcile() {
     if (status !== "ready" || !observed) return;
     const { scope, messages } = observed;
-    for (const record of records.values()) if (record.stage === "saved" && scopeOf(record) === scope && shows(record, messages)) forget(record.sequence);
+    for (const record of records.values())
+      if (record.stage === "saved" && scopeOf(record) === scope && shows(record, messages))
+        forget(record.sequence);
   }
 
   function forget(sequence: number) {
@@ -442,15 +516,23 @@ export function createOutbox(options: {
     if (status !== "ready") return;
     for (const sequence of unmarked) {
       if (!records.get(sequence)?.withheld) unmarked.delete(sequence);
-      else if (!changing.has(sequence)) change(sequence, record => record.withheld ? { ...record } : null);
+      else if (!changing.has(sequence))
+        change(sequence, (record) => (record.withheld ? { ...record } : null));
     }
     const ordered = [...records.values()].sort((a, b) => a.sequence - b.sequence);
     const heads = new Map<string, OutboxRecord>();
     const busy = new Set<string>();
     for (const record of ordered) {
       if (!unfinished(record) || record.withheld) continue;
-      const parentThread = record.target || record.dependsOn === null ? null : savedThread(find(record.dependsOn, scopeOf(record)));
-      const waitsIn = record.target ? `${record.target.kind}:${record.target.id}` : parentThread !== null ? `thread:${parentThread}` : `after:${record.dependsOn}`;
+      const parentThread =
+        record.target || record.dependsOn === null
+          ? null
+          : savedThread(find(record.dependsOn, scopeOf(record)));
+      const waitsIn = record.target
+        ? `${record.target.kind}:${record.target.id}`
+        : parentThread !== null
+          ? `thread:${parentThread}`
+          : `after:${record.dependsOn}`;
       const lane = JSON.stringify([scopeOf(record), waitsIn]);
       if (running.has(record.sequence)) busy.add(lane);
       if (!heads.has(lane)) heads.set(lane, record);
@@ -467,20 +549,33 @@ export function createOutbox(options: {
         if (parent && needsThread(record)) {
           const binding = withThread(record.write, parent);
           if (binding === null) refuse(record.sequence, COULD_NOT_SEND);
-          else change(record.sequence, current => current.stage === "queued" && needsThread(current) ? { ...current, ...binding } : null);
+          else
+            change(record.sequence, (current) =>
+              current.stage === "queued" && needsThread(current)
+                ? { ...current, ...binding }
+                : null,
+            );
           continue;
         }
       }
-      if (running.has(record.sequence) || busy.has(lane) || unreachable.has(scopeOf(record))) continue;
-      if (!paused && session?.isCurrent() && ownedBy(record, session)) void run(record.sequence, session);
+      if (running.has(record.sequence) || busy.has(lane) || unreachable.has(scopeOf(record)))
+        continue;
+      if (!paused && session?.isCurrent() && ownedBy(record, session))
+        void run(record.sequence, session);
     }
   }
 
   /** Refuses a record never sent, keeping its text. */
   function refuse(sequence: number, reason: RefusalReason) {
-    change(sequence, record => record.stage === "queued" && !record.attempted
-      ? { ...record, stage: "refused", result: { kind: "refused", reason, threadId: null, winnerMessageId: null } }
-      : null);
+    change(sequence, (record) =>
+      record.stage === "queued" && !record.attempted
+        ? {
+            ...record,
+            stage: "refused",
+            result: { kind: "refused", reason, threadId: null, winnerMessageId: null },
+          }
+        : null,
+    );
   }
 
   /** Sends one record, and asks again until it settles or this sender has to stop. */
@@ -488,7 +583,8 @@ export function createOutbox(options: {
     const own = new AbortController();
     running.set(sequence, own);
     const at = epoch;
-    const live = () => !own.signal.aborted && epoch === at && session === signIn && signIn.isCurrent();
+    const live = () =>
+      !own.signal.aborted && epoch === at && session === signIn && signIn.isCurrent();
     let failures = 0;
     let notFound = 0;
     /**
@@ -506,7 +602,12 @@ export function createOutbox(options: {
         if (!record || !unfinished(record) || record.withheld) return;
         if (record.stage === "queued") {
           // Written before the request goes, so a relaunch knows the server may have it.
-          const marked = await commit(sequence, current => current.stage === "queued" ? { ...current, stage: "sending", attempted: true } : null, live);
+          const marked = await commit(
+            sequence,
+            (current) =>
+              current.stage === "queued" ? { ...current, stage: "sending", attempted: true } : null,
+            live,
+          );
           if (!live()) return;
           if (!marked) {
             await rest(false);
@@ -517,12 +618,26 @@ export function createOutbox(options: {
         if (!sent || !unfinished(sent)) return;
         let answer: WriteAnswer;
         try {
-          answer = await sendWrite(signIn.client, sent.workspaceId, sent.operationId, sent.write, own.signal);
+          answer = await sendWrite(
+            signIn.client,
+            sent.workspaceId,
+            sent.operationId,
+            sent.write,
+            own.signal,
+          );
         } catch (error) {
           // A 401, or the sign-in ending, has already stopped this sender.
           if (!live()) return;
           if (isTerminal(error)) {
-            if (await settle(sequence, { kind: "refused", reason: COULD_NOT_SEND, threadId: null, winnerMessageId: null }, live) || !live()) return;
+            if (
+              (await settle(
+                sequence,
+                { kind: "refused", reason: COULD_NOT_SEND, threadId: null, winnerMessageId: null },
+                live,
+              )) ||
+              !live()
+            )
+              return;
             await rest(sent.stage === "stalled");
             continue;
           }
@@ -535,7 +650,14 @@ export function createOutbox(options: {
           // A failed request ends a run of pending answers: only continuous pending counts toward stalled.
           pendingSince = null;
           if (sent.stage === "sending" && sent.pendingSinceMs !== null) {
-            await commit(sequence, current => current.stage === "sending" && current.pendingSinceMs !== null ? { ...current, pendingSinceMs: null } : null, live);
+            await commit(
+              sequence,
+              (current) =>
+                current.stage === "sending" && current.pendingSinceMs !== null
+                  ? { ...current, pendingSinceMs: null }
+                  : null,
+              live,
+            );
           }
           // Offline, a timeout, a dropped answer, or a server failure: the write may be saved. Ask again, the same.
           await rest(sent.stage === "stalled");
@@ -546,16 +668,22 @@ export function createOutbox(options: {
         if (answer.kind === "pending") {
           pendingSince ??= now();
           const since = pendingSince;
-          const stage = sent.stage === "stalled" || now() - since >= stalledAfterMs ? "stalled" : "sending";
-          await commit(sequence, current => unfinished(current) && (current.pendingSinceMs !== since || current.stage !== stage)
-            ? { ...current, pendingSinceMs: since, stage }
-            : null, live);
+          const stage =
+            sent.stage === "stalled" || now() - since >= stalledAfterMs ? "stalled" : "sending";
+          await commit(
+            sequence,
+            (current) =>
+              unfinished(current) && (current.pendingSinceMs !== since || current.stage !== stage)
+                ? { ...current, pendingSinceMs: since, stage }
+                : null,
+            live,
+          );
           if (!live()) return;
           await rest(stage === "stalled");
           continue;
         }
         // A record whose answer couldn't be written is asked again; the server answers the same.
-        if (await settle(sequence, answer, live) || !live()) return;
+        if ((await settle(sequence, answer, live)) || !live()) return;
         await rest(sent.stage === "stalled");
       }
     } finally {
@@ -565,10 +693,24 @@ export function createOutbox(options: {
     }
   }
 
-  async function settle(sequence: number, result: OutboxResult, valid: () => boolean): Promise<boolean> {
-    const written = await commit(sequence, record => unfinished(record)
-      ? { ...record, stage: result.kind === "saved" ? "saved" : "refused", pendingSinceMs: null, result }
-      : null, valid);
+  async function settle(
+    sequence: number,
+    result: OutboxResult,
+    valid: () => boolean,
+  ): Promise<boolean> {
+    const written = await commit(
+      sequence,
+      (record) =>
+        unfinished(record)
+          ? {
+              ...record,
+              stage: result.kind === "saved" ? "saved" : "refused",
+              pendingSinceMs: null,
+              result,
+            }
+          : null,
+      valid,
+    );
     // A read may have shown it before the answer came.
     if (written && result.kind === "saved") reconcile();
     return written;
@@ -589,7 +731,10 @@ export function createOutbox(options: {
     } catch (error) {
       if (!(error instanceof DurableFileError && error.kind === "unsynced")) throw error;
       const withheld = { ...record, withheld: true };
-      const markedOnDisk = await files.write(nameOf(record.sequence), serialize(withheld)).then(() => true, () => false);
+      const markedOnDisk = await files.write(nameOf(record.sequence), serialize(withheld)).then(
+        () => true,
+        () => false,
+      );
       if (epoch === at) {
         records.set(record.sequence, withheld);
         if (!markedOnDisk) {
@@ -598,7 +743,9 @@ export function createOutbox(options: {
         }
         changed();
       }
-      throw epoch === at ? new OutboxError("indeterminate", record.operationId) : new OutboxError("closed");
+      throw epoch === at
+        ? new OutboxError("indeterminate", record.operationId)
+        : new OutboxError("closed");
     }
     // Signed out meanwhile: the delete queued behind this write removes it.
     if (epoch !== at) throw new OutboxError("closed");
@@ -611,7 +758,11 @@ export function createOutbox(options: {
 
   return {
     state() {
-      snapshot ??= { status, records: [...records.values()].sort((a, b) => a.sequence - b.sequence), aside };
+      snapshot ??= {
+        status,
+        records: [...records.values()].sort((a, b) => a.sequence - b.sequence),
+        aside,
+      };
       return snapshot;
     },
 
@@ -619,11 +770,20 @@ export function createOutbox(options: {
       const write = readChatWrite(input.write);
       const signIn = session;
       const dependsOn = input.dependsOn ?? null;
-      if (status !== "ready" || !signIn || !signIn.isCurrent()) return Promise.reject(new OutboxError("closed"));
+      if (status !== "ready" || !signIn || !signIn.isCurrent())
+        return Promise.reject(new OutboxError("closed"));
       const { workspaceId } = input;
       const target = write ? targetOf(write, input.thread) : undefined;
-      if (!write || target === undefined || (input.thread !== undefined && !text(input.thread, 256)) || !text(workspaceId, 256) ||
-        workspaceId === "." || workspaceId === ".." || (dependsOn !== null && !text(dependsOn, 128)) || (target === null && dependsOn === null)) {
+      if (
+        !write ||
+        target === undefined ||
+        (input.thread !== undefined && !text(input.thread, 256)) ||
+        !text(workspaceId, 256) ||
+        workspaceId === "." ||
+        workspaceId === ".." ||
+        (dependsOn !== null && !text(dependsOn, 128)) ||
+        (target === null && dependsOn === null)
+      ) {
         return Promise.reject(new OutboxError("invalid"));
       }
       const scope = scopeOf({ origin: signIn.origin, accountId: signIn.userId, workspaceId });
@@ -638,7 +798,12 @@ export function createOutbox(options: {
           // Checked inside the queue, after every change queued before it, so the parent can't go between the check and
           // the write. A reply waiting for its thread needs the outbox post or send it replies to.
           const parent = find(dependsOn, scope);
-          if (!parent || parent.stage === "refused" || (parent.write.operation !== "post" && parent.write.operation !== "send")) throw new OutboxError("invalid");
+          if (
+            !parent ||
+            parent.stage === "refused" ||
+            (parent.write.operation !== "post" && parent.write.operation !== "send")
+          )
+            throw new OutboxError("invalid");
           const binding = withThread(accepted, parent);
           if (parent.stage === "saved" && binding === null) throw new OutboxError("invalid");
           if (binding) {
@@ -652,11 +817,25 @@ export function createOutbox(options: {
         await files.write(COUNTER, JSON.stringify({ format: FORMAT, next }));
         if (epoch !== at) throw new OutboxError("closed");
         const operationId = crypto.randomUUID();
-        return place({
-          origin: signIn.origin, accountId: signIn.userId, workspaceId, operationId, sequence, dependsOn, target: waitsIn, write: accepted,
-          messageId: await derivedMessageId(signIn.userId, workspaceId, operationId, accepted),
-          stage: "queued", attempted: false, withheld: false, pendingSinceMs: null, result: null,
-        }, at);
+        return place(
+          {
+            origin: signIn.origin,
+            accountId: signIn.userId,
+            workspaceId,
+            operationId,
+            sequence,
+            dependsOn,
+            target: waitsIn,
+            write: accepted,
+            messageId: await derivedMessageId(signIn.userId, workspaceId, operationId, accepted),
+            stage: "queued",
+            attempted: false,
+            withheld: false,
+            pendingSinceMs: null,
+            result: null,
+          },
+          at,
+        );
       });
     },
 
@@ -665,7 +844,9 @@ export function createOutbox(options: {
       return serial(async () => {
         const signIn = session;
         if (epoch !== at || status !== "ready" || !signIn) throw new OutboxError("closed");
-        const record = [...records.values()].find(entry => entry.operationId === operationId && entry.withheld && ownedBy(entry, signIn));
+        const record = [...records.values()].find(
+          (entry) => entry.operationId === operationId && entry.withheld && ownedBy(entry, signIn),
+        );
         if (!record) throw new OutboxError("invalid");
         return place(record, at);
       });
@@ -673,11 +854,15 @@ export function createOutbox(options: {
 
     signOutCounts() {
       if (status !== "ready" || owed) return null;
-      let unsent = aside.filter(name => RECORD_NAME.test(name)).length;
+      let unsent = aside.filter((name) => RECORD_NAME.test(name)).length;
       let maySend = 0;
       for (const record of records.values()) {
         // An answer refused as already answered still published its reply.
-        if (record.stage === "refused") unsent += record.result?.kind === "refused" && record.result.reason === "already answered" ? 0 : 1;
+        if (record.stage === "refused")
+          unsent +=
+            record.result?.kind === "refused" && record.result.reason === "already answered"
+              ? 0
+              : 1;
         else if (!unfinished(record)) continue;
         else if (record.attempted && !record.withheld) maySend += 1;
         else unsent += 1;
@@ -715,7 +900,12 @@ export function createOutbox(options: {
       changed();
       return serial(async () => {
         // With the marker on disk, a delete a kill interrupts finishes at the next launch.
-        if (await files.write(SIGNING_OUT, "{}").then(() => true, () => false)) {
+        if (
+          await files.write(SIGNING_OUT, "{}").then(
+            () => true,
+            () => false,
+          )
+        ) {
           owed = true;
           return "marked";
         }
@@ -723,7 +913,7 @@ export function createOutbox(options: {
         if (await clearFolder(null)) return "deleted";
         paused = true;
         return "kept";
-      }).then(async outcome => {
+      }).then(async (outcome) => {
         if (outcome === "kept") {
           await load();
           throw new OutboxError("not-deleted");
@@ -777,18 +967,30 @@ function shows(record: OutboxRecord, shown: ReadonlyMap<string, ChatMessage>): b
     const target = shown.get(write.args.messageId);
     if (!target) return false;
     const emoji = emojiKey(write.args.emoji);
-    const has = target.reactions.some(reaction =>
-      emojiKey(reaction.emoji) === emoji && reaction.authorKind === "human" && reaction.authorId === record.accountId);
+    const has = target.reactions.some(
+      (reaction) =>
+        emojiKey(reaction.emoji) === emoji &&
+        reaction.authorKind === "human" &&
+        reaction.authorId === record.accountId,
+    );
     return has === (write.args.state === "added");
   }
   const returned = result?.kind === "saved" ? result.messageId : null;
-  if (!(record.messageId !== null && shown.has(record.messageId)) && !(returned !== null && shown.has(returned))) return false;
+  if (
+    !(record.messageId !== null && shown.has(record.messageId)) &&
+    !(returned !== null && shown.has(returned))
+  )
+    return false;
   // An answer's question, when the read shows it, shows it answered.
-  const question = write.operation === "reply" && write.args.resolves ? shown.get(write.args.resolves.messageId) : undefined;
+  const question =
+    write.operation === "reply" && write.args.resolves
+      ? shown.get(write.args.resolves.messageId)
+      : undefined;
   return question === undefined || question.decisionState === "resolved";
 }
 
-const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const count = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
 function readCounter(saved: string | null): number {
   try {
@@ -799,8 +1001,15 @@ function readCounter(saved: string | null): number {
   }
 }
 
-const STAGES: ReadonlySet<string> = new Set<OutboxStage>(["queued", "sending", "saved", "stalled", "refused"]);
-const isStage = (value: unknown): value is OutboxStage => typeof value === "string" && STAGES.has(value);
+const STAGES: ReadonlySet<string> = new Set<OutboxStage>([
+  "queued",
+  "sending",
+  "saved",
+  "stalled",
+  "refused",
+]);
+const isStage = (value: unknown): value is OutboxStage =>
+  typeof value === "string" && STAGES.has(value);
 const id = (value: unknown): value is string => text(value, 256);
 const idOrNull = (value: unknown): value is string | null => value === null || id(value);
 
@@ -810,16 +1019,29 @@ function readResult(value: unknown): OutboxResult | null | undefined {
   if (value.kind === "saved" && idOrNull(value.threadId) && idOrNull(value.messageId)) {
     return { kind: "saved", threadId: value.threadId, messageId: value.messageId };
   }
-  if (value.kind === "refused" && isRefusalReason(value.reason) && idOrNull(value.threadId) && idOrNull(value.winnerMessageId)) {
-    return { kind: "refused", reason: value.reason, threadId: value.threadId, winnerMessageId: value.winnerMessageId };
+  if (
+    value.kind === "refused" &&
+    isRefusalReason(value.reason) &&
+    idOrNull(value.threadId) &&
+    idOrNull(value.winnerMessageId)
+  ) {
+    return {
+      kind: "refused",
+      reason: value.reason,
+      threadId: value.threadId,
+      winnerMessageId: value.winnerMessageId,
+    };
   }
-  if (value.kind === "missing" && text(value.reason)) return { kind: "missing", reason: value.reason };
+  if (value.kind === "missing" && text(value.reason))
+    return { kind: "missing", reason: value.reason };
   return undefined;
 }
 
 function readTarget(value: unknown): Target | null | undefined {
   if (value === null) return null;
-  return isFields(value) && (value.kind === "thread" || value.kind === "stream") && id(value.id) ? { kind: value.kind, id: value.id } : undefined;
+  return isFields(value) && (value.kind === "thread" || value.kind === "stream") && id(value.id)
+    ? { kind: value.kind, id: value.id }
+    : undefined;
 }
 
 /** A record as this build writes it, or null for anything else, which is kept aside. */
@@ -834,14 +1056,54 @@ function readRecord(saved: string | null, sequence: number): OutboxRecord | null
   const write = readChatWrite(value.write);
   const result = readResult(value.result);
   const target = readTarget(value.target);
-  const { origin, accountId, workspaceId, operationId, messageId, dependsOn, stage, attempted, withheld, pendingSinceMs } = value;
-  if (!write || result === undefined || target === undefined || !text(origin) || !id(accountId) || !id(workspaceId) || !text(operationId, 128) ||
-    !idOrNull(messageId) || !(dependsOn === null || text(dependsOn, 128)) || !isStage(stage) || typeof attempted !== "boolean" ||
-    typeof withheld !== "boolean" || !(pendingSinceMs === null || count(pendingSinceMs))) return null;
+  const {
+    origin,
+    accountId,
+    workspaceId,
+    operationId,
+    messageId,
+    dependsOn,
+    stage,
+    attempted,
+    withheld,
+    pendingSinceMs,
+  } = value;
+  if (
+    !write ||
+    result === undefined ||
+    target === undefined ||
+    !text(origin) ||
+    !id(accountId) ||
+    !id(workspaceId) ||
+    !text(operationId, 128) ||
+    !idOrNull(messageId) ||
+    !(dependsOn === null || text(dependsOn, 128)) ||
+    !isStage(stage) ||
+    typeof attempted !== "boolean" ||
+    typeof withheld !== "boolean" ||
+    !(pendingSinceMs === null || count(pendingSinceMs))
+  )
+    return null;
   // The stage and the result agree, and only a reply waiting for a write it names lacks a target.
   if ((stage === "saved") !== (result?.kind === "saved")) return null;
-  if ((stage === "refused") !== (result?.kind === "refused" || result?.kind === "missing")) return null;
+  if ((stage === "refused") !== (result?.kind === "refused" || result?.kind === "missing"))
+    return null;
   const waiting = write.operation === "reply" && write.args.threadId === null;
   if ((target === null) !== waiting || (waiting && dependsOn === null)) return null;
-  return { origin, accountId, workspaceId, operationId, messageId, sequence, dependsOn, target, write, stage, attempted, withheld, pendingSinceMs, result };
+  return {
+    origin,
+    accountId,
+    workspaceId,
+    operationId,
+    messageId,
+    sequence,
+    dependsOn,
+    target,
+    write,
+    stage,
+    attempted,
+    withheld,
+    pendingSinceMs,
+    result,
+  };
 }

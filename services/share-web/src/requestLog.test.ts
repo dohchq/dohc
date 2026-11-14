@@ -22,7 +22,9 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date(AT));
   lines = [];
-  vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+  vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+    lines.push(String(line));
+  });
 });
 
 afterEach(async () => {
@@ -35,7 +37,6 @@ afterEach(async () => {
   assets = undefined;
 });
 
-// The share-web application behind the same node server main.ts runs.
 async function listen(): Promise<string> {
   assets = await mkdtemp(join(tmpdir(), "share-web-request-log-"));
   await writeFile(join(assets, "index.html"), "<!doctype html>");
@@ -49,9 +50,15 @@ async function listen(): Promise<string> {
     fetchRelay: async (relayRequest) => {
       const pathname = new URL(relayRequest.url).pathname;
       if (pathname === "/sync/link-exchange") {
-        return Response.json({ ok: true, grantId: "grant-log", capabilityToken: CAPABILITY, capabilityExpiresAtMs: 901_000 });
+        return Response.json({
+          ok: true,
+          grantId: "grant-log",
+          capabilityToken: CAPABILITY,
+          capabilityExpiresAtMs: 901_000,
+        });
       }
-      if (pathname.endsWith(SHA)) return new Response(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      if (pathname.endsWith(SHA))
+        return new Response(Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
       return new Response("missing", { status: 404 });
     },
   });
@@ -77,7 +84,6 @@ it("logs a share-link page as its route, never what follows /s/", async () => {
   const base = await listen();
   // A share link puts its secret after #, which a browser never sends.
   expect((await read(fetch(`${base}/s/`))).status).toBe(200);
-  // A link pasted with its # dropped puts the secret in the path.
   expect((await read(fetch(`${base}/s/${SECRET}`))).status).toBe(200);
   const agent = await read(fetch(`${base}/mcp/s/${SECRET}`, { method: "POST" }));
   expect(lines).toEqual([
@@ -96,8 +102,13 @@ it("logs a share page file request as its route, never its session", async () =>
   });
   expect(exchanged.status).toBe(200);
   const { session } = (await exchanged.json()) as { session: string };
-  const cookie = exchanged.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
-  const file = await read(fetch(`${base}/api/view/blob/${SHA}?session=${session}`, { headers: { cookie } }));
+  const cookie = exchanged.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+  const file = await read(
+    fetch(`${base}/api/view/blob/${SHA}?session=${session}`, { headers: { cookie } }),
+  );
   expect(file.status).toBe(200);
   expect(lines).toEqual([
     `[share-web] request ${AT} POST /api/exchange 200`,
@@ -123,11 +134,14 @@ it("logs a published app's request as app, even on a path the viewer also serves
   });
   const appHost = `${"a".repeat(48)}.example.net`;
   const statuses: number[] = [];
-  for (const [host, path] of [[appHost, "/api/apps/launch"], [appHost, "/bootstrap"], [viewer, "/api/apps/launch"]] as const) {
+  for (const [host, path] of [
+    [appHost, "/api/apps/launch"],
+    [appHost, "/bootstrap"],
+    [viewer, "/api/apps/launch"],
+  ] as const) {
     const request = new Request(`https://${host}${path}`, { method: "POST", headers: { host } });
     const response = await application.handle(request);
     statuses.push(response.status);
-    // What the node server writes once the application answers.
     SHARE_WEB_REQUEST_LOG.write(request, "POST", response.status, Date.now());
   }
   expect(lines).toEqual([

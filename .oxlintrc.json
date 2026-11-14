@@ -1,0 +1,88 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript", "oxc", "unicorn", "react"],
+  // Every enabled rule fails the gate. A rule that only warns is off.
+  "categories": { "correctness": "error" },
+  "options": { "typeAware": true },
+  "rules": {
+    // An async callback may go where a void one is expected: tests and callers await what a handler returns.
+    "typescript/no-misused-promises": ["error", { "checksVoidReturn": false }],
+    "typescript/switch-exhaustiveness-check": ["error", { "considerDefaultExhaustiveForUnions": true }],
+    // Sites, apps, and HTML previews run sandboxed. A frame without a sandbox needs a stated reason.
+    "react/iframe-missing-sandbox": "error",
+    // Parameters stay unchecked: they document a callback's signature.
+    "eslint/no-unused-vars": [
+      "error",
+      { "args": "none", "varsIgnorePattern": "^_", "caughtErrorsIgnorePattern": "^_", "ignoreRestSiblings": true }
+    ],
+
+    // The automatic JSX runtime needs no React import.
+    "react/react-in-jsx-scope": "off",
+
+    // These rules assume the React Compiler, which dohc does not use.
+    "react/refs": "off",
+    "react/set-state-in-effect": "off",
+    "react/purity": "off",
+    "react/immutability": "off",
+    "react/static-components": "off",
+    "react/preserve-manual-memoization": "off",
+    "react/incompatible-library": "off",
+    // Its existing reports need a person to sort stale closures from intended ones.
+    "react-hooks/exhaustive-deps": "off",
+
+    // `for (const x of [...set])` copies on purpose: the loop changes the collection.
+    "unicorn/no-useless-spread": "off",
+    // `[...text]` iterates code points on purpose.
+    "typescript/no-misused-spread": "off",
+    // Cleanup in `finally` throws on purpose when the cleanup itself fails.
+    "eslint/no-unsafe-finally": "off",
+    // `new Array<T>(n)` preallocates.
+    "unicorn/no-new-array": "off",
+    // Path and text checks match control characters on purpose.
+    "eslint/no-control-regex": "off",
+    // Unions such as `string | "unusable"` name a sentinel for the reader.
+    "typescript/no-redundant-type-constituents": "off",
+    "typescript/no-duplicate-type-constituents": "off",
+    // Too many reports on correct code to act as a gate.
+    "typescript/unbound-method": "off",
+    "typescript/no-base-to-string": "off",
+    "typescript/restrict-template-expressions": "off",
+    "typescript/require-array-sort-compare": "off"
+  },
+  "overrides": [
+    {
+      // Tests start promises without awaiting them, build odd values, and take Playwright's `({}, testInfo)`.
+      "files": [
+        "**/*.{test,spec,test-d,fixture,playwright}.{ts,tsx,mts,mjs,js}",
+        "**/*.{integration,integration-helper,test-helper}.{ts,tsx,mjs}",
+        "**/*.integration.fixture.ts",
+        "**/e2e/**",
+        "**/testing/**"
+      ],
+      "rules": {
+        "typescript/no-floating-promises": "off",
+        "typescript/no-misused-promises": "off",
+        "typescript/await-thenable": "off",
+        "typescript/no-this-alias": "off",
+        "typescript/no-implied-eval": "off",
+        "typescript/no-non-null-asserted-optional-chain": "off",
+        "eslint/no-empty-pattern": "off",
+        "eslint/no-unsafe-optional-chaining": "off",
+        "eslint/no-constant-condition": "off",
+        "unicorn/no-thenable": "off",
+        "react/globals": "off"
+      }
+    },
+    {
+      // An example's backend source is hashed into its pinned revision, so its text stays as published.
+      "files": ["examples/**/backend.ts"],
+      "rules": { "eslint/no-unused-vars": "off" }
+    },
+    {
+      // This function's source text runs inside the QuickJS sandbox, where it compiles the automation's own source.
+      "files": ["packages/app-backend-runtime/src/automation-guest.ts"],
+      "rules": { "typescript/no-implied-eval": "off" }
+    }
+  ],
+  "ignorePatterns": ["vendor/**", "crates/**/generated/**", "**/dist/**", "**/out/**", "**/*.d.ts"]
+}

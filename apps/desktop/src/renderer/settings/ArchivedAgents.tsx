@@ -19,25 +19,47 @@ type OnNotice = (message: string, undo?: () => void) => void;
  * putting it back. Its messages stay. Chats and Settings both use it.
  */
 export async function hideAgentChat(input: {
-  workspaceId: string; channelId: string; name: string; onError: OnError; onNotice?: OnNotice | undefined;
+  workspaceId: string;
+  channelId: string;
+  name: string;
+  onError: OnError;
+  onNotice?: OnNotice | undefined;
 }): Promise<void> {
   const { workspaceId, channelId, name, onError, onNotice } = input;
   try {
     await bridge().setChatArchived({ workspaceId, channelId, state: "hidden" });
   } catch (cause) {
-    onError(ipcErrorMessage(cause, `dohc could not remove ${name}'s chat from the list.`), cause, () => hideAgentChat(input));
+    onError(
+      ipcErrorMessage(cause, `dohc could not remove ${name}'s chat from the list.`),
+      cause,
+      () => hideAgentChat(input),
+    );
     return;
   }
-  onNotice?.(`Removed ${name}'s chat from the list.`, () => void bridge().setChatArchived({ workspaceId, channelId, state: "active" })
-    .catch((cause: unknown) => onError(ipcErrorMessage(cause, `dohc could not bring back ${name}'s chat.`), cause)));
+  onNotice?.(
+    `Removed ${name}'s chat from the list.`,
+    () =>
+      void bridge()
+        .setChatArchived({ workspaceId, channelId, state: "active" })
+        .catch((cause: unknown) =>
+          onError(ipcErrorMessage(cause, `dohc could not bring back ${name}'s chat.`), cause),
+        ),
+  );
 }
 
 /**
  * This workspace's agent chats, or null until they are read. They are read
  * again when `changed` changes, such as when an agent leaves Settings.
  */
-export function useAgentChats(workspaceId: string, changed: string, onError: OnError | undefined): readonly ChatChannelRecord[] | null {
-  const [chats, setChats] = useState<{ workspaceId: string; channels: readonly ChatChannelRecord[] } | null>(null);
+export function useAgentChats(
+  workspaceId: string,
+  changed: string,
+  onError: OnError | undefined,
+): readonly ChatChannelRecord[] | null {
+  const [chats, setChats] = useState<{
+    workspaceId: string;
+    channels: readonly ChatChannelRecord[];
+  } | null>(null);
   const requests = useRequestSequence([workspaceId]);
   const report = useRef(onError);
   report.current = onError;
@@ -47,17 +69,25 @@ export function useAgentChats(workspaceId: string, changed: string, onError: OnE
     const token = requests.next();
     try {
       const { channels } = await bridge().listChatChannels({ workspaceId });
-      if (requests.isCurrent(token)) setChats({ workspaceId, channels: channels.filter((channel) => channel.kind === "agent") });
+      if (requests.isCurrent(token))
+        setChats({ workspaceId, channels: channels.filter((channel) => channel.kind === "agent") });
     } catch (cause) {
-      if (requests.isCurrent(token)) report.current?.(ipcErrorMessage(cause, "dohc could not read this workspace's agent chats."), cause, async () => {
-        if (shown.current === workspaceId) await read();
-      });
+      if (requests.isCurrent(token))
+        report.current?.(
+          ipcErrorMessage(cause, "dohc could not read this workspace's agent chats."),
+          cause,
+          async () => {
+            if (shown.current === workspaceId) await read();
+          },
+        );
     }
   }, [requests, workspaceId]);
   useEffect(() => {
     shown.current = workspaceId;
     void read();
-    return () => { shown.current = null; };
+    return () => {
+      shown.current = null;
+    };
   }, [read, workspaceId, changed]);
   return chats?.workspaceId === workspaceId ? chats.channels : null;
 }
@@ -105,30 +135,78 @@ export function ArchivedAgents(props: {
   onNotice?: OnNotice | undefined;
 }) {
   const { workspaceId, onError } = props;
-  const [hiding, setHiding] = useState<{ workspaceId: string; chat: ChatChannelRecord; name: string } | null>(null);
-  if (hiding && (hiding.workspaceId !== workspaceId || !props.removed.some((chat) => chat.id === hiding.chat.id))) setHiding(null);
+  const [hiding, setHiding] = useState<{
+    workspaceId: string;
+    chat: ChatChannelRecord;
+    name: string;
+  } | null>(null);
+  if (
+    hiding &&
+    (hiding.workspaceId !== workspaceId ||
+      !props.removed.some((chat) => chat.id === hiding.chat.id))
+  )
+    setHiding(null);
   if (props.agents.length === 0 && props.removed.length === 0) return null;
   const unarchive = (agent: Agent, chat: ChatChannelRecord) => {
-    void bridge().setChatArchived({ workspaceId, channelId: chat.id, state: "active" }).catch((cause: unknown) =>
-      onError(ipcErrorMessage(cause, `dohc could not unarchive ${agent.name}.`), cause, async () => unarchive(agent, chat)));
+    void bridge()
+      .setChatArchived({ workspaceId, channelId: chat.id, state: "active" })
+      .catch((cause: unknown) =>
+        onError(
+          ipcErrorMessage(cause, `dohc could not unarchive ${agent.name}.`),
+          cause,
+          async () => unarchive(agent, chat),
+        ),
+      );
   };
   return (
     <section data-testid="agents-archived" aria-labelledby="agents-archived-title">
-      <h4 id="agents-archived-title" className="m-0 mb-1.5 mt-5 text-[12px] font-medium text-subtle">Archived</h4>
+      <h4
+        id="agents-archived-title"
+        className="m-0 mb-1.5 mt-5 text-[12px] font-medium text-subtle"
+      >
+        Archived
+      </h4>
       <div className="rounded-lg border border-line bg-panel">
         {props.agents.map(({ agent, chat }) => (
-          <div key={agent.id} data-testid="agent-row-archived" data-agent-id={agent.id} className={ROW}>
-            <button type="button" aria-label={agent.name} onClick={() => props.onOpen(agent.id)}
-              className="-my-1 -ml-1 flex min-w-0 flex-1 items-center gap-3 rounded-md py-1 pl-1 text-left hover:bg-hover">
-              <ChatAvatar name={agent.name} kind="agent" presentation={agentChatIdentity(chat, [agent]).presentation} size="row" className="opacity-50" />
-              <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-muted">{agent.name}</span>
+          <div
+            key={agent.id}
+            data-testid="agent-row-archived"
+            data-agent-id={agent.id}
+            className={ROW}
+          >
+            <button
+              type="button"
+              aria-label={agent.name}
+              onClick={() => props.onOpen(agent.id)}
+              className="-my-1 -ml-1 flex min-w-0 flex-1 items-center gap-3 rounded-md py-1 pl-1 text-left hover:bg-hover"
+            >
+              <ChatAvatar
+                name={agent.name}
+                kind="agent"
+                presentation={agentChatIdentity(chat, [agent]).presentation}
+                size="row"
+                className="opacity-50"
+              />
+              <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-muted">
+                {agent.name}
+              </span>
               <ChevronRight size={16} aria-hidden className="shrink-0 text-subtle" />
             </button>
-            <SecondaryButton data-testid="agent-unarchive" size="row" aria-label={`Unarchive ${agent.name}`} onClick={() => unarchive(agent, chat)}>
+            <SecondaryButton
+              data-testid="agent-unarchive"
+              size="row"
+              aria-label={`Unarchive ${agent.name}`}
+              onClick={() => unarchive(agent, chat)}
+            >
               Unarchive
             </SecondaryButton>
-            <SecondaryButton data-testid="agent-archived-remove" size="row" className="text-danger" aria-label={`Remove ${agent.name}…`}
-              onClick={() => props.onRemove(agent)}>
+            <SecondaryButton
+              data-testid="agent-archived-remove"
+              size="row"
+              className="text-danger"
+              aria-label={`Remove ${agent.name}…`}
+              onClick={() => props.onRemove(agent)}
+            >
               Remove…
             </SecondaryButton>
           </div>
@@ -136,14 +214,30 @@ export function ArchivedAgents(props: {
         {props.removed.map((chat) => {
           const { label, presentation } = agentChatIdentity(chat, []);
           return (
-            <div key={chat.id} data-testid="agent-row-removed" data-agent-id={chat.agentId} className={ROW}>
-              <ChatAvatar name={label} kind="agent" presentation={presentation} size="row" className="opacity-50" />
+            <div
+              key={chat.id}
+              data-testid="agent-row-removed"
+              data-agent-id={chat.agentId}
+              className={ROW}
+            >
+              <ChatAvatar
+                name={label}
+                kind="agent"
+                presentation={presentation}
+                size="row"
+                className="opacity-50"
+              />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-[13px] font-medium text-muted">{label}</span>
                 <span className="m-0 mt-0.5 block text-[12px] text-muted">Removed</span>
               </span>
-              <SecondaryButton data-testid="agent-hide-chat" size="row" className="text-danger" aria-label={`Remove ${label}'s chat from the list…`}
-                onClick={() => setHiding({ workspaceId, chat, name: label })}>
+              <SecondaryButton
+                data-testid="agent-hide-chat"
+                size="row"
+                className="text-danger"
+                aria-label={`Remove ${label}'s chat from the list…`}
+                onClick={() => setHiding({ workspaceId, chat, name: label })}
+              >
                 Remove from list…
               </SecondaryButton>
             </div>
@@ -156,7 +250,13 @@ export function ArchivedAgents(props: {
           onCancel={() => setHiding(null)}
           onConfirm={() => {
             setHiding(null);
-            void hideAgentChat({ workspaceId, channelId: hiding.chat.id, name: hiding.name, onError, onNotice: props.onNotice });
+            void hideAgentChat({
+              workspaceId,
+              channelId: hiding.chat.id,
+              name: hiding.name,
+              onError,
+              onNotice: props.onNotice,
+            });
           }}
         />
       ) : null}

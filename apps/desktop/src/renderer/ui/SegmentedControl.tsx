@@ -34,7 +34,6 @@ export function useRadioGroup<T extends string>(props: {
     optionRefs.current[index]?.focus();
   };
 
-  // The next enabled option from `from` in `direction`, wrapping.
   const step = (from: number, direction: 1 | -1) => {
     const count = props.options.length;
     for (let moved = 1; moved <= count; moved += 1) {
@@ -46,13 +45,12 @@ export function useRadioGroup<T extends string>(props: {
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (props.disabled || props.options.length === 0) return;
-    // The arrows move from the focused radio. The checked one can be disabled
-    // or absent, and then the tab stop is where the person started from.
     const focused = optionRefs.current.indexOf(event.target as HTMLButtonElement);
     const from = focused >= 0 ? focused : tabbableIndex;
     let target: number;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") target = step(from, 1);
-    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") target = step(Math.max(from, 0), -1);
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp")
+      target = step(Math.max(from, 0), -1);
     else if (event.key === "Home") target = firstEnabled;
     else if (event.key === "End") target = step(0, -1);
     else return;
@@ -60,7 +58,6 @@ export function useRadioGroup<T extends string>(props: {
     choose(target);
   };
 
-  // The props each radio takes, by its index.
   const radio = (index: number) => {
     const option = props.options[index]!;
     return {

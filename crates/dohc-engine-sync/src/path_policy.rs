@@ -1,12 +1,12 @@
-//! Minimal share-boundary path floor for R10.
+//! Minimal share-boundary path floor for replication.
 //!
 //! This is intentionally not a port of `@dohc/workspace-core` path
-//! normalization. R07 (`dohc-engine-files::{watch,policy}`) owns the definitive
+//! normalization. `dohc-engine-files::{watch,policy}` owns the definitive
 //! Rust path floor, including percent decoding, host-specific aliases, device
-//! names, Unicode/path normalization, and containment. R10 only recognizes
-//! already-normalized, slash-separated relative paths needed to prevent secret
-//! materialization across share boundaries. Any path outside that narrow
-//! grammar is [`PathClass::Unsafe`] and therefore fails closed.
+//! names, Unicode/path normalization, and containment. This module only
+//! recognizes already-normalized, slash-separated relative paths needed to
+//! prevent secret materialization across share boundaries. Any path outside
+//! that narrow grammar is [`PathClass::Unsafe`] and therefore fails closed.
 //!
 //! Which paths hold secret material is not decided here. That narrow grammar
 //! is exactly the input contract of

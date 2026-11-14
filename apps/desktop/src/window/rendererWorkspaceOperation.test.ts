@@ -36,28 +36,31 @@ describe("renderer workspace operation runner", () => {
         TestSession
       >({
         currentSession: () => session,
-        withPhysicalOperation: async (_workspaceId, work) => work({
-          workspace: {
-            workspaceId: "workspace",
-            attachmentId,
-            rootPath: "C:/canonical",
-          },
-          state: {},
-          signal: new AbortController().signal,
-          assertCurrent: () => {
-            if (retiredOwner === "physical" && !current) {
-              throw new Error("physical retired");
-            }
-          },
-        }),
+        withPhysicalOperation: async (_workspaceId, work) =>
+          work({
+            workspace: {
+              workspaceId: "workspace",
+              attachmentId,
+              rootPath: "C:/canonical",
+            },
+            state: {},
+            signal: new AbortController().signal,
+            assertCurrent: () => {
+              if (retiredOwner === "physical" && !current) {
+                throw new Error("physical retired");
+              }
+            },
+          }),
       });
 
-      await expect(run({}, "workspace", "renderer retired", (operation) => {
-        const isCurrent = operation.isCurrent;
-        expect(isCurrent()).toBe(true);
-        current = false;
-        expect(isCurrent()).toBe(false);
-      })).rejects.toThrow(`${retiredOwner} retired`);
+      await expect(
+        run({}, "workspace", "renderer retired", (operation) => {
+          const isCurrent = operation.isCurrent;
+          expect(isCurrent()).toBe(true);
+          current = false;
+          expect(isCurrent()).toBe(false);
+        }),
+      ).rejects.toThrow(`${retiredOwner} retired`);
     },
   );
 
@@ -83,8 +86,7 @@ describe("renderer workspace operation runner", () => {
       TestSession
     >({
       currentSession: () => session,
-      withPhysicalOperation: (workspaceId, work) =>
-        owner.withOperation(workspaceId, work),
+      withPhysicalOperation: (workspaceId, work) => owner.withOperation(workspaceId, work),
     });
     const entered = deferred();
     const resume = deferred();
@@ -141,9 +143,7 @@ describe("renderer workspace operation runner", () => {
     });
 
     await expect(
-      run({}, "workspace-a", "inactive", (operation) =>
-        operation.workspace.rootPath,
-      ),
+      run({}, "workspace-a", "inactive", (operation) => operation.workspace.rootPath),
     ).resolves.toBe("C:/canonical-a");
 
     session = {
@@ -152,9 +152,7 @@ describe("renderer workspace operation runner", () => {
       generation: 2,
       isCurrent: () => true,
     };
-    await expect(
-      run({}, "workspace-a", "inactive", () => "wrong"),
-    ).rejects.toThrow("inactive");
+    await expect(run({}, "workspace-a", "inactive", () => "wrong")).rejects.toThrow("inactive");
   });
 
   it("rejects an old same-id renderer after attachment replacement", async () => {
@@ -187,9 +185,7 @@ describe("renderer workspace operation runner", () => {
     });
     const effect = vi.fn();
 
-    await expect(
-      run({}, "workspace", "inactive", effect),
-    ).rejects.toThrow("inactive");
+    await expect(run({}, "workspace", "inactive", effect)).rejects.toThrow("inactive");
     expect(effect).not.toHaveBeenCalled();
   });
 
@@ -261,15 +257,12 @@ describe("renderer workspace operation runner", () => {
       object,
       TestWorkspace,
       {
-        lastKnownDmRequestLanes: ReturnType<
-          typeof createLastKnownDmRequestLanesCache
-        >;
+        lastKnownDmRequestLanes: ReturnType<typeof createLastKnownDmRequestLanesCache>;
       },
       TestSession
     >({
       currentSession: () => session,
-      withPhysicalOperation: (workspaceId, work) =>
-        owner.withOperation(workspaceId, work),
+      withPhysicalOperation: (workspaceId, work) => owner.withOperation(workspaceId, work),
     });
 
     await run({}, "workspace", "inactive", (operation) => {
