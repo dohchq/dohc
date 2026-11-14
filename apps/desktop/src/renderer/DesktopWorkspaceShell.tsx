@@ -262,7 +262,7 @@ import {
   type LiveStopRefusal,
 } from "../ipc/liveEditingStop";
 import { OpenSharedView, opensForLiveEditing } from "./OpenSharedView";
-import { youCan } from "./workbench/membershipWords";
+import { levelChangedWords, youCan } from "./workbench/membershipWords";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
@@ -3153,11 +3153,7 @@ export function DesktopWorkspaceShell(props: {
       else if (result.access && result.access !== shareAccess)
         setAccessFor({ view: shareView, access: result.access });
       if (shareView.membership && result.levelChanged && result.access) {
-        showSuccessNotice(
-          result.levelChangedBy
-            ? `${result.levelChangedBy} changed members to ${({ view: "View", comment: "Comment", edit: "Edit" } as const)[result.access]}.`
-            : `Members can now ${result.access}.`,
-        );
+        showSuccessNotice(levelChangedWords(result.access, result.levelChangedBy));
       }
       if (result.status === "ended" || (result.access && result.access !== shareAccess)) {
         void props.refreshWorkspaceRegistry().catch(() => undefined);

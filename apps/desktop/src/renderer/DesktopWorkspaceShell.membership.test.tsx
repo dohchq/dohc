@@ -138,10 +138,10 @@ describe("a joined workspace", () => {
   it("applies a level change at once, with a toast and a Notices row", async () => {
     const bridge = withGroup("comment", { status: "current", access: "view", role: "member", levelChanged: true });
     const toast = await screen.findByTestId("workspace-shell-notice");
-    expect(toast.textContent).toContain("Members can now view.");
+    expect(toast.textContent).toContain("Members can now view only.");
     expect(screen.getByTestId("notice-toasts").contains(toast)).toBe(true);
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(await within(screen.getByTestId("notice-center")).findByText("Members can now view.")).toBeTruthy();
+    expect(await within(screen.getByTestId("notice-center")).findByText("Members can now view only.")).toBeTruthy();
     fireEvent.click(screen.getByTestId("activity-chats"));
     fireEvent.click(await screen.findByTestId("chats-channel"));
     expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe("Only people who can comment post here.");
@@ -168,9 +168,9 @@ describe("a joined workspace", () => {
   it("names who changed the level in the toast and its Notices row", async () => {
     withGroup("comment", { status: "current", access: "view", role: "member", levelChanged: true, levelChangedBy: "Ana" });
     const toast = await screen.findByTestId("workspace-shell-notice");
-    expect(toast.textContent).toContain("Ana changed members to View.");
+    expect(toast.textContent).toContain("Ana now lets members view only.");
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(await within(screen.getByTestId("notice-center")).findByText("Ana changed members to View.")).toBeTruthy();
+    expect(await within(screen.getByTestId("notice-center")).findByText("Ana now lets members view only.")).toBeTruthy();
   });
 
   it("says nothing when the check finds the level it already had", async () => {

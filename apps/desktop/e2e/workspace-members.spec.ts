@@ -701,7 +701,7 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     await expect(note).toHaveText("Only people who can comment post here.", { timeout: 120_000 });
     await expect(composer).toHaveCount(0);
     // The test relay names each account by its id.
-    const changed = `${OWNER.user} changed members to View.`;
+    const changed = `${OWNER.user} now lets members view only.`;
     const toast = mine.getByTestId("notice-toasts").getByTestId("workspace-shell-notice").filter({ hasText: changed });
     await expect(toast).toBeVisible({ timeout: 30_000 });
     await mine.screenshot({ path: shot("level-toast-light") });
@@ -1022,7 +1022,7 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     await setLevel("comment");
     await expect(header.getByRole("button", { name: "New page" })).toHaveCount(0, { timeout: 120_000 });
     // The toast names who changed the level. Its light picture comes from the Group test.
-    const changed = `${OWNER.user} changed members to Comment.`;
+    const changed = `${OWNER.user} now lets members comment.`;
     await expect(mine.getByTestId("notice-toasts").getByTestId("workspace-shell-notice").filter({ hasText: changed })).toBeVisible({ timeout: 30_000 });
     await mine.screenshot({ path: shot("level-toast-dark") });
     await explorerRow(mine, "notes/plan.md").click();
