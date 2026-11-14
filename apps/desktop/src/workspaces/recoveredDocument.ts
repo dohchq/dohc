@@ -74,8 +74,11 @@ function notDeleted(
   return spans;
 }
 
-const same = (left: unknown, right: unknown) =>
-  JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+/** JSON with each exact large integer, which JSON.stringify refuses, as its digits. */
+const json = (value: unknown) =>
+  JSON.stringify(value, (_key, part: unknown) => (typeof part === "bigint" ? `${part}` : part));
+
+const same = (left: unknown, right: unknown) => json(left ?? null) === json(right ?? null);
 
 /**
  * The kept edits a rebuilt document dropped. Yjs merges a kept edit with
@@ -212,7 +215,7 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
 const shown = (value: unknown) =>
   value === undefined || value === null
     ? null
-    : `“${typeof value === "string" ? value : JSON.stringify(value)}”`;
+    : `“${typeof value === "string" || typeof value === "bigint" ? value : json(value)}”`;
 
 function quoteOf(text: string): string {
   const line = text.replace(/\s+/gu, " ").trim();

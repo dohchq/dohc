@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { open } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { z } from "zod";
-import { atomicCreateFile } from "../atomicReplaceFile";
+import { atomicCreateFile, syncAndClose, type DurableFileOperations } from "../atomicReplaceFile";
 import { localStateFolder, type LocalStateWorkspace } from "./workspaceLocalState";
 import {
   parseLiveObjectBinding,
@@ -56,7 +57,11 @@ const KEPT_FOLDER = "live-recovery";
  * Keeps a package in `.dohc/local/live-recovery` on this computer, in the
  * folders of the copy it goes with, so it never syncs.
  */
-export function keepOnThisComputer(workspace: LocalStateWorkspace): LiveRecoveryWrites["keep"] {
+export function keepOnThisComputer(
+  workspace: LocalStateWorkspace,
+  operations: Pick<DurableFileOperations, "open" | "platform"> = {},
+): LiveRecoveryWrites["keep"] {
+  const { open: openFolder = open, platform = process.platform } = operations;
   return async (relativePath, text) => {
     const slash = relativePath.lastIndexOf("/");
     const name = slash < 0 ? KEPT_FOLDER : `${KEPT_FOLDER}/${relativePath.slice(0, slash)}`;
@@ -64,9 +69,16 @@ export function keepOnThisComputer(workspace: LocalStateWorkspace): LiveRecovery
       path: `.dohc/local/${name}`,
       lead: "dohc could not open the folder on this computer where it keeps recovery packages.",
     });
-    return (await atomicCreateFile(join(folder, relativePath.slice(slash + 1)), text, 0o600))
-      ? `.dohc/local/${KEPT_FOLDER}/${relativePath}`
-      : null;
+    const file = join(folder, relativePath.slice(slash + 1));
+    if (!(await atomicCreateFile(file, text, 0o600, operations))) return null;
+    // The package's own folder is flushed with it. Any of the folders above
+    // it may be new, so each one's entry is flushed in its parent as well.
+    if (platform !== "win32")
+      for (let up = folder, depth = name.split("/").length; depth > 0; depth -= 1) {
+        up = dirname(up);
+        await syncAndClose(await openFolder(up, "r"));
+      }
+    return `.dohc/local/${KEPT_FOLDER}/${relativePath}`;
   };
 }
 

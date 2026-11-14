@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { access, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, open as openFile, readFile, writeFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
@@ -483,6 +483,13 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     "Set status to “mine”. The note has “theirs”.\n",
   ],
   [
+    "a whole number too large for a float, in a field someone else set at the same moment",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740993n),
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740995n),
+    "---\ncount: 9007199254740995\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    "Set count to “9007199254740993”. The note has “9007199254740995”.\n",
+  ],
+  [
     "a to-do someone else set at the same moment",
     (doc: Y.Doc) => task(doc).setAttribute("checked", true as never),
     (doc: Y.Doc) => task(doc).setAttribute("checked", false as never),
@@ -597,6 +604,7 @@ it("lists nothing when someone else set the same value at the same moment", asyn
   const same = (doc: Y.Doc) => {
     task(doc).setAttribute("checked", true as never);
     doc.getMap("frontmatter").set("status", "done");
+    doc.getMap("frontmatter").set("count", 9007199254740993n);
   };
   const saved = await saveLiveRecoveryCopy(
     liveRecoveryPackage(conflict(same, same), source),
@@ -605,6 +613,24 @@ it("lists nothing when someone else set the same value at the same moment", asyn
   );
   expect(saved.notInNote).toBe(0);
   expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(
-    "---\nstatus: done\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [x] tick me\n",
+    "---\ncount: 9007199254740993\nstatus: done\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [x] tick me\n",
   );
+});
+
+it("flushes the entry of every folder a kept package sits in", async () => {
+  const root = await createTestScratch("dohc-live-recovery-");
+  const local = { workspaceId: "live-recovery", rootPath: root };
+  await openedLocalState(local);
+  // Only a folder is opened read-only; its flush is recorded, not made.
+  const flushed: string[] = [];
+  const open = async (path: string, flags: string, mode?: number) => {
+    if (flags !== "r") return openFile(path, flags, mode);
+    flushed.push(relative(root, path).replaceAll("\\", "/"));
+    return { sync: async () => {}, close: async () => {}, writeFile: async () => {} };
+  };
+  const keep = keepOnThisComputer(local, { open, platform: "linux" });
+  expect(await keep("notes/plan (recovered).dohc-recovery.json", "{}")).toBe(
+    `${KEPT}/notes/plan (recovered).dohc-recovery.json`,
+  );
+  expect(flushed.toSorted()).toEqual([".dohc/local", KEPT, `${KEPT}/notes`]);
 });
