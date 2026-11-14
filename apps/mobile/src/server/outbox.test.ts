@@ -1448,6 +1448,349 @@ describe("recovery", () => {
   });
 });
 
+describe("discard", () => {
+  it("deletes an owned record and stops its sender, so a later answer, or a relaunch, brings nothing back", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const posts = answerLater(server, "post");
+    const first = launch(disk, server);
+    await ready(first.outbox);
+    const queued = await first.outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+
+    // The server saves it while the discard's withheld write is under way.
+    const release = disk.holdWrites();
+    const discarding = first.outbox.discard({ kind: "record", operationId: queued.operationId });
+    await vi.waitFor(() => expect(temporaries(disk)).toHaveLength(1));
+    expect(server.calls[0]?.signal.aborted).toBe(true);
+    posts[0]?.answer(SAVED("thread-p", queued.messageId ?? ""));
+    release();
+    await discarding;
+    expect(first.outbox.state().records).toEqual([]);
+    expect(records(disk)).toEqual([]);
+    first.outbox.wake();
+    await settled();
+    expect(first.outbox.state().records).toEqual([]);
+    expect(records(disk)).toEqual([]);
+    expect(requests(server, "post")).toHaveLength(1);
+    expect(first.outbox.signOutCounts()).toEqual({ unsent: 0, maySend: 0 });
+    first.stop();
+
+    const second = launch(disk, server);
+    await ready(second.outbox);
+    await settled();
+    expect(second.outbox.state().records).toEqual([]);
+    expect(requests(server, "post")).toHaveLength(1);
+    second.stop();
+  });
+
+  it("reports a delete that fails at the unlink, and keeps the record shown and withheld, so neither its sender nor a relaunch sends it", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const first = launch(disk, server);
+    await ready(first.outbox);
+    const queued = await first.outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+
+    disk.failRemoves = "unlink";
+    const error = await first.outbox
+      .discard({ kind: "record", operationId: queued.operationId })
+      .catch((reason: unknown) => reason);
+    expect(error instanceof DurableFileError && error.kind).toBe("failed");
+    expect(record(first.outbox, 1)).toMatchObject({
+      operationId: queued.operationId,
+      stage: "sending",
+      attempted: true,
+      withheld: true,
+    });
+    expect(onDisk(disk, 1)).toMatchObject({ withheld: true });
+    // Its request may have reached the server.
+    expect(first.outbox.signOutCounts()).toEqual({ unsent: 0, maySend: 1 });
+    first.outbox.wake();
+    await settled();
+    expect(requests(server, "post")).toHaveLength(1);
+    disk.crash();
+    disk.failRemoves = null;
+
+    const second = launch(disk, server);
+    await ready(second.outbox);
+    await settled();
+    expect(record(second.outbox, 1)).toMatchObject({
+      operationId: queued.operationId,
+      withheld: true,
+    });
+    expect(requests(server, "post")).toHaveLength(1);
+    await second.outbox.discard({ kind: "record", operationId: queued.operationId });
+    expect(second.outbox.state().records).toEqual([]);
+    expect(records(disk)).toEqual([]);
+    second.stop();
+  });
+
+  it("reports a delete whose folder sync fails after the unlink, keeps the record shown, and confirms it when tried again", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    const queued = await outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+
+    disk.failRemoves = "sync-folder";
+    const error = await outbox
+      .discard({ kind: "record", operationId: queued.operationId })
+      .catch((reason: unknown) => reason);
+    expect(error instanceof DurableFileError && error.kind).toBe("unsynced");
+    expect(records(disk)).toEqual([]);
+    expect(record(outbox, 1)).toMatchObject({ operationId: queued.operationId, withheld: true });
+    outbox.wake();
+    await settled();
+    expect(requests(server, "post")).toHaveLength(1);
+
+    disk.failRemoves = null;
+    await outbox.discard({ kind: "record", operationId: queued.operationId });
+    expect(outbox.state().records).toEqual([]);
+    expect(disk.log.filter((entry) => entry === "remove m-000000000001")).toHaveLength(2);
+    stop();
+  });
+
+  it("waits for the record's disk change under way, and its sender writes and asks nothing after", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const posts = answerLater(server, "post");
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    const queued = await outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+
+    // The pending answer's write is under way when the discard comes.
+    const release = disk.holdWrites();
+    posts[0]?.answer(PENDING);
+    await vi.waitFor(() => expect(temporaries(disk)).toHaveLength(1));
+    const discarding = outbox.discard({ kind: "record", operationId: queued.operationId });
+    await settled();
+    expect(record(outbox, 1)).toMatchObject({ stage: "sending", withheld: false });
+    release();
+    await discarding;
+    expect(outbox.state().records).toEqual([]);
+    expect(records(disk)).toEqual([]);
+    expect(disk.log.lastIndexOf("write m-000000000001")).toBeLessThan(
+      disk.log.lastIndexOf("remove m-000000000001"),
+    );
+    outbox.wake();
+    await settled();
+    expect(posts).toHaveLength(1);
+    expect(records(disk)).toEqual([]);
+    stop();
+  });
+
+  it("refuses to delete a post a waiting reply needs, keeping both and still sending the post, and deletes it once the reply is gone", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const posts = answerLater(server, "post");
+    server.on("POST", path("reply"), held);
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    const parent = await outbox.enqueue({ workspaceId: "ws-1", write: post("Plans") });
+    const child = await outbox.enqueue({
+      workspaceId: "ws-1",
+      write: reply("Me too", null),
+      dependsOn: parent.operationId,
+    });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+
+    await expect(
+      outbox.discard({ kind: "record", operationId: parent.operationId }),
+    ).rejects.toEqual(new OutboxError("has-dependents"));
+    expect(stages(outbox)).toEqual(["sending", "queued"]);
+    expect(record(outbox, 1)?.withheld).toBe(false);
+    expect(server.calls[0]?.signal.aborted).toBe(false);
+    expect(records(disk)).toHaveLength(2);
+
+    await outbox.discard({ kind: "record", operationId: child.operationId });
+    await outbox.discard({ kind: "record", operationId: parent.operationId });
+    expect(outbox.state().records).toEqual([]);
+    expect(records(disk)).toEqual([]);
+    expect(requests(server, "reply")).toHaveLength(0);
+    stop();
+  });
+
+  it("refuses to delete a saved post while a reply still waits for the thread it names", async () => {
+    const disk = durableDisk();
+    placeRecord(disk, 1, {
+      operationId: "op-parent",
+      write: post("Plans"),
+      target: { kind: "stream", id: "group-1" },
+      stage: "saved",
+      attempted: true,
+      messageId: "message-p",
+      result: { kind: "saved", threadId: "thread-t", messageId: "message-p" },
+    });
+    placeRecord(disk, 2, {
+      operationId: "op-child",
+      write: reply("Yes", null),
+      dependsOn: "op-parent",
+    });
+    // The reply's thread can't be written, so it keeps waiting for it.
+    disk.failWrites = "write";
+    const server = testServer();
+    server.on("POST", path("reply"), held);
+    const { outbox, wait, stop } = launch(disk, server);
+    await ready(outbox);
+    await vi.waitFor(() => expect(wait.pending).toHaveLength(1));
+    await expect(outbox.discard({ kind: "record", operationId: "op-parent" })).rejects.toEqual(
+      new OutboxError("has-dependents"),
+    );
+    expect(outbox.state().records).toHaveLength(2);
+    expect(records(disk)).toEqual(["m-000000000001", "m-000000000002"]);
+    stop();
+  });
+
+  it("never deletes another account's record, or a record with no account signed in", async () => {
+    const disk = durableDisk();
+    placeRecord(disk, 1, {
+      operationId: "op-1",
+      write: post("From u-1"),
+      target: { kind: "stream", id: "group-1" },
+    });
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const { outbox, account, stop } = launch(disk);
+    await ready(outbox);
+    const mine = { kind: "record", operationId: "op-1" } as const;
+    await expect(outbox.discard(mine)).rejects.toEqual(new OutboxError("closed"));
+    account.signIn(server, "u-2");
+    await expect(outbox.discard(mine)).rejects.toEqual(new OutboxError("invalid"));
+    // The same account, on another server.
+    account.signIn(testServer("https://other.example.com"), "u-1");
+    await expect(outbox.discard(mine)).rejects.toEqual(new OutboxError("invalid"));
+    expect(record(outbox, 1)).toMatchObject({
+      operationId: "op-1",
+      stage: "queued",
+      withheld: false,
+    });
+    expect(records(disk)).toEqual(["m-000000000001"]);
+
+    account.signIn(server);
+    await outbox.discard(mine);
+    expect(outbox.state().records).toEqual([]);
+    expect(records(disk)).toEqual([]);
+    stop();
+  });
+
+  it("rejects as closed when Sign out comes during the delete, which Sign out's own delete then finishes", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const { outbox, account, stop } = launch(disk, server);
+    await ready(outbox);
+    const queued = await outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+
+    const release = disk.holdWrites();
+    const discarding = outbox
+      .discard({ kind: "record", operationId: queued.operationId })
+      .catch((reason: unknown) => reason);
+    await vi.waitFor(() => expect(temporaries(disk)).toHaveLength(1));
+    const signingOut = account.signOut();
+    release();
+    expect(await discarding).toEqual(new OutboxError("closed"));
+    await signingOut;
+    expect(disk.names()).toEqual([]);
+    expect(outbox.state()).toMatchObject({ records: [], unreadable: [], deletion: "none" });
+    stop();
+  });
+
+  it("rejects as closed while a Sign out's delete is owed, and takes no handle from before Sign out", async () => {
+    const disk = durableDisk();
+    disk.files.set("m-000000000009", "{ broken");
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const { outbox, account, stop } = launch(disk, server);
+    await ready(outbox);
+    const [handle = ""] = outbox.state().unreadable;
+    const queued = await outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+
+    disk.failRemoves = "unlink";
+    await account.signOut();
+    account.signIn(server);
+    expect(outbox.state().deletion).not.toBe("none");
+    await expect(
+      outbox.discard({ kind: "record", operationId: queued.operationId }),
+    ).rejects.toEqual(new OutboxError("closed"));
+    await expect(outbox.discard({ kind: "unreadable", handle })).rejects.toEqual(
+      new OutboxError("closed"),
+    );
+
+    disk.failRemoves = null;
+    outbox.wake();
+    await ready(outbox);
+    expect(disk.names()).toEqual([]);
+    await expect(
+      outbox.discard({ kind: "record", operationId: queued.operationId }),
+    ).rejects.toEqual(new OutboxError("invalid"));
+    await expect(outbox.discard({ kind: "unreadable", handle })).rejects.toEqual(
+      new OutboxError("invalid"),
+    );
+    stop();
+  });
+
+  it("deletes an unreadable record only by its handle, never another file kept aside, and never by a handle from an earlier read", async () => {
+    const disk = durableDisk();
+    disk.files.set("m-000000000003", "{ broken");
+    disk.files.set("m-000000000004", "{}");
+    disk.unreadable.add("m-000000000004");
+    disk.files.set("probe-1", "someone else's");
+    const leftover = `m-000000000005.${"0".repeat(32)}.tmp`;
+    disk.files.set(leftover, '{"format":');
+    // No account is signed in: an unreadable record's account can't be known.
+    const first = launch(disk);
+    await ready(first.outbox);
+    const { aside, unreadable } = first.outbox.state();
+    expect(aside).toEqual(["m-000000000003", "m-000000000004", leftover, "probe-1"]);
+    expect(unreadable).toHaveLength(2);
+    for (const name of [...aside, "counter", "signing-out"]) {
+      expect(unreadable).not.toContain(name);
+      await expect(first.outbox.discard({ kind: "unreadable", handle: name })).rejects.toEqual(
+        new OutboxError("invalid"),
+      );
+    }
+    expect(first.outbox.signOutCounts()).toEqual({ unsent: 2, maySend: 0 });
+
+    const [broken = "", damaged = ""] = unreadable;
+    disk.failRemoves = "sync-folder";
+    const error = await first.outbox
+      .discard({ kind: "unreadable", handle: broken })
+      .catch((reason: unknown) => reason);
+    expect(error instanceof DurableFileError && error.kind).toBe("unsynced");
+    expect(first.outbox.state().unreadable).toEqual(unreadable);
+    disk.failRemoves = null;
+    await first.outbox.discard({ kind: "unreadable", handle: broken });
+    expect(first.outbox.state()).toMatchObject({
+      unreadable: [damaged],
+      aside: ["m-000000000004", leftover, "probe-1"],
+    });
+    await expect(first.outbox.discard({ kind: "unreadable", handle: broken })).rejects.toEqual(
+      new OutboxError("invalid"),
+    );
+    first.stop();
+
+    const second = launch(disk);
+    await ready(second.outbox);
+    await expect(second.outbox.discard({ kind: "unreadable", handle: damaged })).rejects.toEqual(
+      new OutboxError("invalid"),
+    );
+    const [current = ""] = second.outbox.state().unreadable;
+    await second.outbox.discard({ kind: "unreadable", handle: current });
+    expect(second.outbox.state()).toMatchObject({ unreadable: [], aside: [leftover, "probe-1"] });
+    expect(disk.names()).toEqual([leftover, "probe-1"]);
+    expect(second.outbox.signOutCounts()).toEqual({ unsent: 0, maySend: 0 });
+    expect(disk.log.some((entry) => entry.startsWith("removeLeftover"))).toBe(false);
+    second.stop();
+  });
+});
+
 describe("signing out with the account's token store", () => {
   /** A signed-in run with one queued record whose request the server holds. */
   async function signedInWithRecord(disk: Disk, server: Server, store: SignInStore) {
