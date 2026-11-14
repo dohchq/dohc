@@ -1,5 +1,6 @@
 import { hasPrimaryModifier, shortcutTitle } from "../shortcuts/shortcutRegistry";
 import {
+  PENDING_SHARE,
   SAVED_HERE,
   SAVING,
   saveProblem,
@@ -317,6 +318,9 @@ export function MarkdownView(props: {
   // sends its queue or a Stop releases the note. The session stays bound, so
   // remote edits still show.
   liveEditingPaused?: "refused" | "full";
+  // A share shows this new note, and its first file reaches the server only
+  // once its editor is left. Saved here then reads as pending share.
+  pendingShare?: boolean;
   // Opens Live documents at this note's row, the way out of a refused pause.
   onOpenLiveDocuments?: (path: string) => void;
   // Version-switch re-bind token (the shell's versionEpoch), forwarded
@@ -873,7 +877,9 @@ export function MarkdownView(props: {
       : (engine.goneCause ??
         (reloadedShown && engine.saveState.kind === "saved-here" && engine.changedOutside === null
           ? ("reloaded" as const)
-          : engine.saveState));
+          : props.pendingShare && engine.saveState.kind === "saved-here"
+            ? PENDING_SHARE
+            : engine.saveState));
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /

@@ -170,6 +170,7 @@ interface DesktopCliServerDependencies<State> {
   ownerLiveRecovery?: {
     keptEdits(workspaceId: string): readonly OwnerLiveQuarantine[];
     pendingShare(workspaceId: string): readonly string[];
+    pendingShareWhileOpen(workspaceId: string): readonly string[];
     /** With an incident, saves exactly that row's kept edits. */
     save(
       workspace: RegistryEntry,
@@ -1038,6 +1039,10 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                     pendingShare: () =>
                       withOwnerLiveRecovery(async (operation) =>
                         ownerLiveRecovery.pendingShare(operation.workspace.workspaceId),
+                      ),
+                    pendingShareWhileOpen: () =>
+                      withOwnerLiveRecovery(async (operation) =>
+                        ownerLiveRecovery.pendingShareWhileOpen(operation.workspace.workspaceId),
                       ),
                     saveRecoveryCopy: (path: string, incident?: string) =>
                       withOwnerLiveRecovery((operation) =>

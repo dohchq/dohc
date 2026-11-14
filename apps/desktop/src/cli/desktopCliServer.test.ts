@@ -2001,6 +2001,7 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
     other: [row("object-elsewhere", "elsewhere.md")],
   };
   const pending: Record<string, string[]> = {};
+  const notSent: Record<string, string[]> = {};
   const save = vi.fn(async (workspace: RegistryEntry, path: string, incident?: string) => {
     const found = kept[workspace.workspaceId]?.find(
       (candidate) =>
@@ -2051,6 +2052,7 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
     f.dependencies.ownerLiveRecovery = {
       keptEdits: (workspaceId) => kept[workspaceId] ?? [],
       pendingShare: (workspaceId) => pending[workspaceId] ?? [],
+      pendingShareWhileOpen: (workspaceId) => notSent[workspaceId] ?? [],
       save,
       retry,
       stopAgain,
@@ -2092,7 +2094,12 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
       list: async () => {
         const status = await workspaceStatus(ctx);
         return "keptEdits" in status
-          ? { ok: true, keptEdits: status.keptEdits, pendingShare: status.pendingShare }
+          ? {
+              ok: true,
+              keptEdits: status.keptEdits,
+              pendingShare: status.pendingShare,
+              pendingShareWhileOpen: status.pendingShareWhileOpen,
+            }
           : { ok: false, reason: "no keptEdits" };
       },
       save: (path: string, incident?: string) =>
@@ -2109,6 +2116,7 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
     transport,
     kept,
     pending,
+    notSent,
     row,
     save,
     retry,
@@ -2117,6 +2125,22 @@ async function keptEditsFixture(options: { engine?: boolean; caller?: string } =
     doors,
   };
 }
+
+describe.each(["cli", "mcp"] as const)("notes not on the server through %s", (door) => {
+  it("lists the new notes a share shows that the server has no file for, as the editor does", async () => {
+    const f = await keptEditsFixture();
+    f.kept.workspace = [];
+    f.pending.workspace = ["notes/waiting.md"];
+    f.notSent.workspace = ["notes/new.md"];
+    f.notSent.other = ["notes/elsewhere.md"];
+    expect(await f.doors[door].list()).toEqual({
+      ok: true,
+      keptEdits: [],
+      pendingShare: ["notes/waiting.md"],
+      pendingShareWhileOpen: ["notes/new.md"],
+    });
+  });
+});
 
 describe.each(["mcp"] as const)("kept edits through %s", (door) => {
   it("retries reading an unreadable save-only queue without sending its edits", async () => {
@@ -2149,6 +2173,7 @@ describe.each(["mcp"] as const)("kept edits through %s", (door) => {
         },
       ],
       pendingShare: [],
+      pendingShareWhileOpen: [],
     });
     expect(await f.doors[door].save("notes/plan.md")).toMatchObject({
       ok: true,

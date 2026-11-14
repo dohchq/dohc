@@ -666,6 +666,7 @@ const DOCUMENT_VERBS = {
       "A recovery of unreadable means dohc could not read the edits it keeps on this computer, and reason says why. Run retry-kept-edits to read them again.",
       "earlier is true when the server keeps the edits in an earlier copy of the workspace. Save a recovery copy to get them back; try again cannot reach them.",
       "pendingShare lists shared notes whose edits wait on this computer for the server. Each file holds older text until the server accepts them; document read returns the current text.",
+      "pendingShareWhileOpen lists new notes a share link shows that the server has no file for yet. Each file is current here and reaches the server once its editor in dohc is left. A link made on another computer counts after dohc next lists this workspace's shares.",
     ],
     parse: (input) => {
       noExtraArgs(input.operands, "document kept-edits");

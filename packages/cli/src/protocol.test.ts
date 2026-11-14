@@ -40,16 +40,25 @@ it("preserves each save-only restore queue and its incident in kept edits", () =
     saveOnly: true,
     incident,
   }));
-  expect(parseCliResult("liveKeptEdits", { ok: true, keptEdits, pendingShare: [] })).toEqual({
+  expect(
+    parseCliResult("liveKeptEdits", {
+      ok: true,
+      keptEdits,
+      pendingShare: [],
+      pendingShareWhileOpen: [],
+    }),
+  ).toEqual({
     ok: true,
     keptEdits,
     pendingShare: [],
+    pendingShareWhileOpen: [],
   });
   expect(() =>
     parseCliResult("liveKeptEdits", {
       ok: true,
       keptEdits: [{ ...keptEdits[0], saveOnly: false }],
       pendingShare: [],
+      pendingShareWhileOpen: [],
     }),
   ).toThrow();
 });
