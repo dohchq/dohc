@@ -13,6 +13,7 @@ import { ProblemLine } from "../account/ProblemLine";
 import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
 import {
+  clearOutstanding,
   clearSent,
   closePost,
   EMPTY_DRAFT,
@@ -84,14 +85,15 @@ export function Composer({
   // A stream that takes only posts is always writing one.
   const mode = lanes.send ? draft.chosen : "post";
   const [height, setHeight] = useState(FIELD_MIN);
-  // The last clear asked of the field, and the draft it was for. Token 0 asks nothing.
+  // The last clear asked of the field, and the draft it was for. Token 0 asks nothing. Send waits for its answer.
   const [clear, setClear] = useState<{ readonly request: ClearRequest; readonly sent: Draft }>({
     request: { revision: 0, token: 0 },
     sent: EMPTY_DRAFT,
   });
   const [submitting, setSubmitting] = useState(false);
   const [notKept, setNotKept] = useState(false);
-  const ready = text.trim().length > 0 && blocked === null && !submitting;
+  const busy = submitting || clearOutstanding(clear.request, draft.textRevision);
+  const ready = text.trim().length > 0 && blocked === null && !busy;
 
   async function submit() {
     if (!ready) return;
@@ -197,7 +199,7 @@ export function Composer({
           disabled={!ready}
           accessibilityRole="button"
           accessibilityLabel={label}
-          accessibilityState={{ disabled: !ready, busy: submitting }}
+          accessibilityState={{ disabled: !ready, busy }}
           onPress={() => void submit()}
           style={[styles.round, ready && { backgroundColor: theme.accent }]}
         >

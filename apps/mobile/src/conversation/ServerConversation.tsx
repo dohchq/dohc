@@ -118,12 +118,16 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
   const problemText = useProblemText();
   const state = useOutboxState(outbox);
   // The screen's store and chat, from the commit that shows them until another replaces them or the screen closes, so a
-  // controller made for them stops asking.
+  // controller made for them stops asking, and stays stopped if they return.
   const [scope] = useState(createWriteScope);
-  useLayoutEffect(() => (data ? scope.show(data, groupId) : undefined), [scope, data, groupId]);
+  const activation = useMemo(
+    () => (data ? { store: data, target: groupId } : null),
+    [data, groupId],
+  );
+  useLayoutEffect(() => (activation ? scope.show(activation) : undefined), [scope, activation]);
   const isCurrent = useCallback(
-    () => signIn.isCurrent() && data !== null && scope.shows(data, groupId),
-    [signIn, scope, data, groupId],
+    () => signIn.isCurrent() && activation !== null && scope.shows(activation),
+    [signIn, scope, activation],
   );
   const writes = useConversationWrites(outbox, phoneWrites, isCurrent);
   const blocked = state ? blockedBy(state, phoneWrites) : "loading";

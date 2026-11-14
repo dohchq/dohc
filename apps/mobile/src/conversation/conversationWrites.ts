@@ -1,3 +1,4 @@
+import type { ClearRequest } from "../../modules/chat-composer";
 import type { ChatWrite } from "../server/chatWrites";
 import { OutboxError, type DiscardTarget, type Outbox, type OutboxState } from "../server/outbox";
 
@@ -100,22 +101,34 @@ export function closePost(current: Draft, sent: Draft): Draft {
 }
 
 /**
- * The workspace store and chat a screen shows, which its write controllers check before each step. A controller made
- * for another store or chat, or one kept past the screen's close, asks nothing.
+ * Whether the native field still owes an answer to `request`: it answers with its next revision, its own clear or an
+ * edit, so a body sent again can't replace the request whose clear closes New post. Token 0 asks nothing.
+ */
+export function clearOutstanding(request: ClearRequest, textRevision: number): boolean {
+  return request.token !== 0 && textRevision <= request.revision;
+}
+
+/** One showing of a workspace store and chat. Showing the same ones again is another activation. */
+export interface WriteActivation {
+  readonly store: object;
+  readonly target: string;
+}
+
+/**
+ * The activation a screen shows, which its write controllers check before each step. A controller made for another
+ * activation, an ended one even when its store and chat return, or one kept past the screen's close, asks nothing.
  */
 export function createWriteScope() {
-  let shown: { readonly store: object; readonly target: string } | null = null;
+  let shown: WriteActivation | null = null;
   return {
-    /** Shows `store` and `target` until the function returned, or the next `show`. */
-    show(store: object, target: string): () => void {
-      const scope = { store, target };
-      shown = scope;
+    /** Shows `activation` until the function returned, or the next `show`. */
+    show(activation: WriteActivation): () => void {
+      shown = activation;
       return () => {
-        if (shown === scope) shown = null;
+        if (shown === activation) shown = null;
       };
     },
-    shows: (store: object, target: string) =>
-      shown !== null && shown.store === store && shown.target === target,
+    shows: (activation: WriteActivation) => shown === activation,
   };
 }
 

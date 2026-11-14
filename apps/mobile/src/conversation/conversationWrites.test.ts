@@ -10,12 +10,14 @@ import { deferred, testServer, type Answer } from "../server/testServer";
 import {
   blockedBy,
   chatWrite,
+  clearOutstanding,
   clearSent,
   closePost,
   createConversationWrites,
   createWriteScope,
   lanesOf,
   type Draft,
+  type WriteActivation,
   type WriteOutbox,
 } from "./conversationWrites";
 
@@ -416,42 +418,109 @@ describe("a sent draft", () => {
   });
 });
 
+describe("a clear asked of the field", () => {
+  const request = { revision: 5, token: 1 };
+
+  it("is outstanding until the field answers, so a second Send can't replace it", () => {
+    expect(clearOutstanding(request, 5)).toBe(true);
+  });
+
+  it("settles when the field clears for it", () => {
+    expect(clearOutstanding(request, 6)).toBe(false);
+  });
+
+  it("settles when a newer edit made the field refuse it", () => {
+    expect(clearOutstanding(request, 9)).toBe(false);
+  });
+
+  it("stays outstanding through an older change", () => {
+    expect(clearOutstanding(request, 4)).toBe(true);
+  });
+
+  it("asks nothing before the first send", () => {
+    expect(clearOutstanding({ revision: 0, token: 0 }, 0)).toBe(false);
+  });
+});
+
 describe("a write scope", () => {
+  /** A controller for `activation`, as the screen makes one. */
+  const controller = (
+    outbox: WriteOutbox,
+    scope: ReturnType<typeof createWriteScope>,
+    activation: WriteActivation,
+  ) =>
+    createConversationWrites({ outbox, enabled: true, isCurrent: () => scope.shows(activation) });
+
   it("stops a controller made for another chat in the same store", async () => {
     const { outbox, asked } = fakeOutbox(READY);
     const scope = createWriteScope();
     const store = {};
-    const leave = scope.show(store, "group-a");
-    const forA = createConversationWrites({
-      outbox,
-      enabled: true,
-      isCurrent: () => scope.shows(store, "group-a"),
-    });
+    const a = { store, target: "group-a" };
+    const b = { store, target: "group-b" };
+    const leave = scope.show(a);
+    const forA = controller(outbox, scope, a);
     const confirmation = deferred<boolean>();
     const pending = confirmation.promise.then(() =>
       forA.discard({ kind: "record", operationId: "op-1" }),
     );
     leave();
-    scope.show(store, "group-b");
+    scope.show(b);
     confirmation.resolve(true);
     expect(await pending).toEqual({ kind: "stale" });
     expect(asked).toEqual([]);
-    expect(scope.shows(store, "group-b")).toBe(true);
+    expect(scope.shows(b)).toBe(true);
+  });
+
+  it("keeps a controller stopped when its chat is shown again", async () => {
+    const { outbox, asked } = fakeOutbox(READY);
+    const scope = createWriteScope();
+    const store = {};
+    const first = { store, target: "group-a" };
+    const leaveFirst = scope.show(first);
+    const forA = controller(outbox, scope, first);
+    const confirmation = deferred<boolean>();
+    const pending = confirmation.promise.then(() =>
+      forA.discard({ kind: "record", operationId: "op-1" }),
+    );
+    leaveFirst();
+    scope.show({ store, target: "group-b" })();
+    const again = { store, target: "group-a" };
+    scope.show(again);
+    confirmation.resolve(true);
+    expect(await pending).toEqual({ kind: "stale" });
+    expect(asked).toEqual([]);
+    expect(scope.shows(again)).toBe(true);
+  });
+
+  it("calls a held enqueue stale when its chat is shown again before it lands", async () => {
+    const answer = deferred<Awaited<ReturnType<WriteOutbox["enqueue"]>>>();
+    const { outbox } = fakeOutbox(READY, () => answer.promise);
+    const scope = createWriteScope();
+    const store = {};
+    const first = { store, target: "group-a" };
+    const leaveFirst = scope.show(first);
+    const pending = controller(outbox, scope, first).submit("ws-1", send("Late"));
+    leaveFirst();
+    scope.show({ store, target: "group-b" })();
+    scope.show({ store, target: "group-a" });
+    answer.resolve({} as Awaited<ReturnType<WriteOutbox["enqueue"]>>);
+    expect(await pending).toEqual({ kind: "stale" });
   });
 
   it("keeps a newer chat shown when an older one's end comes late", () => {
     const scope = createWriteScope();
     const store = {};
-    const leaveA = scope.show(store, "group-a");
-    scope.show(store, "group-b");
+    const leaveA = scope.show({ store, target: "group-a" });
+    const b = { store, target: "group-b" };
+    scope.show(b);
     leaveA();
-    expect(scope.shows(store, "group-b")).toBe(true);
+    expect(scope.shows(b)).toBe(true);
   });
 
   it("shows nothing once the screen closes", () => {
     const scope = createWriteScope();
-    const store = {};
-    scope.show(store, "group-a")();
-    expect(scope.shows(store, "group-a")).toBe(false);
+    const a = { store: {}, target: "group-a" };
+    scope.show(a)();
+    expect(scope.shows(a)).toBe(false);
   });
 });
