@@ -55,11 +55,12 @@ const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc
 // refuses them in any other share view, and the relay decides each one.
 const JOINED_TOOLS = {
   view: ["dohc_members"],
-  comment: ["dohc_members", "dohc_start_group_chat", "dohc_reply_to_chat"],
+  comment: ["dohc_members", "dohc_start_group_chat", "dohc_reply_to_chat", "dohc_start_file_chat"],
   edit: [
     "dohc_members",
     "dohc_start_group_chat",
     "dohc_reply_to_chat",
+    "dohc_start_file_chat",
     "dohc_create_document",
     "dohc_create_group",
     "dohc_switch_automation",

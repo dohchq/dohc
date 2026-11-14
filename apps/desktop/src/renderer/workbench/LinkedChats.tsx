@@ -30,17 +30,16 @@ import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
 import { AgentThreadLines } from "./AgentThreadLines";
 
-// The composer's replacement for every received file share.
-// Same words main throws (SharedFileReadOnlyError) and the same shape the
-// Chats view's read-only notice uses.
-const READ_ONLY = "Chats are read-only in this shared view.";
-function ReadOnlyNotice() {
+// The composer's replacement when this person cannot comment. The shell
+// names the reason main refuses with; this is the same shape the Chats
+// view's read-only notice uses.
+function ReadOnlyNotice({ reason }: { reason: string }) {
   return (
     <p
       data-testid="linked-chat-readonly-note"
       className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
     >
-      {READ_ONLY}
+      {reason}
     </p>
   );
 }
@@ -109,13 +108,12 @@ export function LinkedChatsPanel(props: {
   // With no file or conversation focused: whether another tab holds a file
   // or a conversation. The empty state then says to switch instead of to open.
   aboutTabOpen?: boolean;
-  // A shared view always passes true. Absent means a workspace this machine
-  // owns, which is writable by definition.
-  //
-  // The decision, not the level: this panel only ever asked the level one
-  // yes/no question, and a level it might not have — a damaged grant carries
-  // none — would answer that question generously.
-  shareReadOnly?: boolean;
+  // A shared view, which has no conversations of its own in About.
+  shared?: boolean;
+  // Why this person cannot comment here, in the words main refuses with.
+  // Absent means they can. The shell passes the decision, not the level: a
+  // damaged grant carries no level, and reading one would answer generously.
+  readOnly?: string;
   initialThread?: ChatThreadRecord | null;
   initialFocusMessageId?: string;
   // Fired once when initialThread is consumed so the parent can clear the
@@ -160,9 +158,8 @@ export function LinkedChatsPanel(props: {
   const [sectionsOpen, setSectionsOpen] = useState(SECTIONS_OPEN);
   const toggleSection = (id: AboutSectionId) => () =>
     setSectionsOpen((current) => ({ ...current, [id]: !current[id] }));
-  // Every received file share reads the chat about its files and adds nothing
-  // to it. Main refuses every chat write with these words before the store.
-  const readOnly = props.shareReadOnly === true;
+  const readOnlyReason = props.readOnly;
+  const readOnly = readOnlyReason !== undefined;
   const [threadsState, setThreadsState] = useState<ThreadsState>({ status: "loading" });
   const [activeThread, setActiveThread] = useState<ChatThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
@@ -550,7 +547,7 @@ export function LinkedChatsPanel(props: {
           className="shrink-0 px-3 py-1"
         />
         {readOnly ? (
-          <ReadOnlyNotice />
+          <ReadOnlyNotice reason={readOnlyReason!} />
         ) : (
           <ChatComposer
             pinned
@@ -571,15 +568,16 @@ export function LinkedChatsPanel(props: {
   if (!filePath) {
     // About covers a file or a conversation. A shared view has no
     // conversations, so there it names a file's own chats.
-    const subject = readOnly ? "a file" : "a file or a conversation";
-    const shows = readOnly ? "its comments and access" : "who has access";
+    const shared = props.shared === true;
+    const subject = shared ? "a file" : "a file or a conversation";
+    const shows = shared ? "its comments and access" : "who has access";
     return (
       <EmptyState
         data-testid="linked-chats-empty"
         icon={Info}
         title={
           props.aboutTabOpen
-            ? `Switch to ${readOnly ? "a file's tab" : subject} to see ${shows}.`
+            ? `Switch to ${shared ? "a file's tab" : subject} to see ${shows}.`
             : `Open ${subject} to see ${shows}.`
         }
       />
@@ -663,8 +661,8 @@ export function LinkedChatsPanel(props: {
                   />
                 </div>
               ) : null}
-              {readOnly ? (
-                <AboutNote testId="linked-chat-readonly-note">{READ_ONLY}</AboutNote>
+              {readOnlyReason !== undefined ? (
+                <AboutNote testId="linked-chat-readonly-note">{readOnlyReason}</AboutNote>
               ) : untracked ? (
                 <AboutNote testId="linked-chats-untracked">
                   dohc does not track this file, so it cannot have comments.

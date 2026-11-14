@@ -3413,18 +3413,30 @@ export function DesktopWorkspaceShell(props: {
   // A joined workspace lists its Groups from the view's own store, which
   // needs no capture. Members post in them at Comment and Edit.
   const chatsAvailable = captureAvailable || (membershipView && captureDecided);
+  // Why a member cannot post in Groups or comment on files. Main refuses the
+  // same writes.
+  const membershipPostingClosed = shareViewEnded
+    ? shareEndedRefusal
+    : shareAccess === "view"
+      ? "Only people who can comment post here."
+      : undefined;
   const chatsJoinedWorkspace = membershipView
     ? {
         joinedWorkspace: {
-          ...(shareViewEnded
-            ? { postingClosed: shareEndedRefusal }
-            : shareAccess === "view"
-              ? { postingClosed: "Only people who can comment post here." }
-              : {}),
+          ...(membershipPostingClosed ? { postingClosed: membershipPostingClosed } : {}),
           createsGroups: !shareViewEnded && membershipRole === "admin",
         },
       }
     : {};
+  // A path share reads its files' comments and adds none. A damaged
+  // membership has no level to read, so it adds none either.
+  const fileCommentsClosed = !shareView
+    ? undefined
+    : !membershipView
+      ? "Chats are read-only in this shared view."
+      : shareViewDamaged && !shareViewEnded
+        ? shareWriteRefusal
+        : membershipPostingClosed;
   useEffect(() => {
     if (!workspaceIsReady) return;
     void refreshHistory().catch((error) => reportShellError("Could not refresh history.", error));
@@ -9295,7 +9307,7 @@ export function DesktopWorkspaceShell(props: {
                                         siteRoot={siteRoot}
                                         onShowSource={() => showPathInExplorer(siteRoot, true)}
                                         membership={!!shareView?.membership}
-                              sharedView={!!shareView}
+                                        sharedView={!!shareView}
                                         onShareSite={(target) =>
                                           setShareTarget({
                                             kind: "paths",
@@ -9334,6 +9346,7 @@ export function DesktopWorkspaceShell(props: {
                                 activeDocumentPath={activeDocumentPath}
                                 aboutTabOpen={aboutTabOpen}
                                 shareView={shareView}
+                                fileCommentsClosed={fileCommentsClosed}
                                 searchChatTarget={searchChatTarget}
                                 onSearchHitRead={onSearchHitRead}
                                 onSearchHitClosed={onSearchHitClosed}

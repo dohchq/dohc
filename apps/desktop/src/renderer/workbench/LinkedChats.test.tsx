@@ -548,6 +548,7 @@ describe("LinkedChatsPanel thread and file reads", () => {
 });
 
 describe("LinkedChatsPanel share level", () => {
+  const READ_ONLY = "Chats are read-only in this shared view.";
   function panel(extra: Partial<Parameters<typeof LinkedChatsPanel>[0]> = {}) {
     return (
       <LinkedChatsPanel
@@ -560,7 +561,7 @@ describe("LinkedChatsPanel share level", () => {
   }
 
   it("offers no comment when the share refuses writes, and never asks main to create one", async () => {
-    render(panel({ shareReadOnly: true }));
+    render(panel({ shared: true, readOnly: READ_ONLY }));
 
     await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
     expect(screen.queryByTestId("linked-chat-new")).toBeNull();
@@ -571,12 +572,12 @@ describe("LinkedChatsPanel share level", () => {
   });
 
   it("keeps the composer and the comment control when the share allows writes", async () => {
-    const view = render(panel({ shareReadOnly: false }));
+    const view = render(panel({ shared: true }));
 
     await waitFor(() => expect(screen.getByTestId("linked-chat-new")).toBeTruthy());
     expect(screen.queryByTestId("linked-chat-readonly-note")).toBeNull();
 
-    view.rerender(panel({ shareReadOnly: false, initialThread: searchThread }));
+    view.rerender(panel({ shared: true, initialThread: searchThread }));
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(screen.getByTestId("linked-chat-composer")).toBeTruthy();
     expect(screen.queryByTestId("linked-chat-readonly-note")).toBeNull();
@@ -612,7 +613,7 @@ describe("LinkedChatsPanel share level", () => {
       viewerAuthorId: "you@example.com",
     });
 
-    render(panel({ shareReadOnly: true, initialThread: searchThread }));
+    render(panel({ shared: true, readOnly: READ_ONLY, initialThread: searchThread }));
 
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(
@@ -838,3 +839,26 @@ describe("commentTitle", () => {
     expect(commentTitle("🎉".repeat(150))).toBe(`${"🎉".repeat(99)}…`);
   });
 });
+
+  it("names the reason it gives, and offers no comment control or composer", async () => {
+    const view = render(panel({ shared: true, readOnly: "Only people who can comment post here." }));
+
+    await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
+    expect(screen.queryByTestId("linked-chat-new")).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
+      "Only people who can comment post here.",
+    );
+
+    view.rerender(panel({ shared: true, readOnly: "Only people who can comment post here.", initialThread: searchThread }));
+    await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
+    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
+      "Only people who can comment post here.",
+    );
+    expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
+  });
+
+  // A shared view always states the answer, so an absent prop can only mean
+  // a workspace this machine owns. The shell is what guarantees that, and it
+  // is why this prop carries the decision rather than the level: a damaged
+  // grant has no level to read, and reading one would answer "writable".

@@ -1044,9 +1044,13 @@ const LISTED_CAPABILITIES = {
   ),
   "file.chat.start": capability("Start a chat linked to a file.", {
     ipc: ["createFileChat"],
-    mcp: { owner: ["dohc_start_file_chat"] },
+    mcp: {
+      owner: ["dohc_start_file_chat"],
+      comment: ["dohc_start_file_chat"],
+      edit: ["dohc_start_file_chat"],
+    },
     mcpReason:
-      "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+      "Comment and Edit profiles offer it for a joined workspace's files. View profiles omit it; the socket refuses other share views.",
   }),
   "automation.runs.list": capability("List an automation's runs on this computer, newest first.", {
     ipcReason:

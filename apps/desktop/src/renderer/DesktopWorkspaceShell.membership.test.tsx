@@ -154,6 +154,26 @@ describe("a joined workspace", () => {
     expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
   });
 
+  // File comments follow the member's level, like Groups do.
+  it.each(["comment", "edit"] as const)("offers Comment on this file at %s", async (access) => {
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access } }));
+    expect(await screen.findByTestId("linked-chat-new")).toBeTruthy();
+    expect(screen.queryByTestId("linked-chat-readonly-note")).toBeNull();
+  });
+
+  it.each([
+    ["at View", { access: "view" as const }, "Only people who can comment post here."],
+    ["after the membership ends", { ended: true }, "Your membership ended."],
+  ])("says who comments %s, with no comment control", async (_, change, note) => {
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, ...change } }));
+    expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe(note);
+    expect(screen.queryByTestId("linked-chat-new")).toBeNull();
+  });
+
   it("shows the ended band and keeps the copy readable after the membership ends", async () => {
     const bridge = makeShareBridge();
     bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "plan.md", kind: "file" }], folders: [] });

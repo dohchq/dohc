@@ -106,9 +106,10 @@ type ChatWorkspace = Pick<
 interface Admission {
   target: ChatRelayIdentityTarget;
   channelWireId: string | null | undefined;
-  // In a joined workspace, whether the target is in a Group. A channel's
-  // kind and wire id never change, so admission decides it once.
-  inGroup: boolean;
+  // In a joined workspace, whether the target is in a Group or on a file. A
+  // thread's place, a channel's kind and its wire id never change, so
+  // admission decides it once.
+  inReach: boolean;
   generation: number;
   authorUserId: string | undefined;
   actorCredentials: Pick<CloudCredentials, "serverUrl" | "userId"> | null;
@@ -201,8 +202,8 @@ export function createChatWrites(dependencies: {
     notifyRenderer,
   } = dependencies;
 
-  // A joined workspace at Comment or Edit posts in its Groups, which the
-  // relay's append lane admits. Every other received share is read-only for
+  // A joined workspace at Comment or Edit posts in its Groups and comments on
+  // its files, which the relay's append lane admits. Every other received share is read-only for
   // chat, whatever its cached relay capability: there is no durable per-row
   // relay receipt yet.
   function joinedWorkspacePosts(workspace: ChatWorkspace): boolean {
@@ -228,24 +229,34 @@ export function createChatWrites(dependencies: {
   }
 
   // The admitted workspace for one write. In a joined workspace only a Group
-  // takes it.
-  function writableWorkspace(workspaceId: string, inGroup: boolean): ChatWorkspace {
+  // or a file's thread takes it.
+  function writableWorkspace(workspaceId: string, inReach: boolean): ChatWorkspace {
     const workspace = chatWorkspace(workspaceId);
-    if (shareViewIsPresent(workspace.shareView) && !inGroup) {
-      throw new SharedFileReadOnlyError("In a joined workspace you can post in Groups only.");
+    if (shareViewIsPresent(workspace.shareView) && !inReach) {
+      throw new SharedFileReadOnlyError(
+        "In a joined workspace you can post in Groups and comment on files only.",
+      );
     }
     return workspace;
   }
 
-  // Whether a target in a joined workspace is in a Group: an ordinary
-  // channel, never General, a direct message or an agent's chat.
-  async function targetIsGroup(
+  // Whether a target in a joined workspace is one a member writes to: a Group,
+  // which is an ordinary channel and never General, a direct message or an
+  // agent's chat; or a file's thread.
+  async function targetInReach(
     place: ChatWritePlace,
     target: ChatRelayIdentityTarget,
     wire: string | null,
   ): Promise<boolean> {
-    if (wire === null || wire === GENERAL_CHANNEL_WIRE_ID || agentIdForChannelWireId(wire) !== null)
-      return false;
+    if (wire === null) {
+      if ("channelId" in target) return false;
+      const { thread } = await place.store.getThread({
+        workspaceId: place.workspaceId,
+        threadId: target.threadId,
+      });
+      return thread.linkedFile !== undefined && thread.channelId === undefined;
+    }
+    if (wire === GENERAL_CHANNEL_WIRE_ID || agentIdForChannelWireId(wire) !== null) return false;
     const channelId =
       "channelId" in target
         ? target.channelId
@@ -324,9 +335,9 @@ export function createChatWrites(dependencies: {
     place: ChatWritePlace,
     channelWireId: string | null | undefined,
     generation: number,
-    inGroup: boolean,
+    inReach: boolean,
   ): string | undefined {
-    const workspace = writableWorkspace(place.workspaceId, inGroup);
+    const workspace = writableWorkspace(place.workspaceId, inReach);
     const joinedChannel =
       channelWireId === undefined
         ? null
@@ -364,8 +375,8 @@ export function createChatWrites(dependencies: {
       joinedWorkspace || hasJoinedChannels(place.workspaceId)
         ? await lookUpWireId(place, target)
         : undefined;
-    const inGroup = joinedWorkspace && (await targetIsGroup(place, target, channelWireId ?? null));
-    const authorUserId = check(place, channelWireId, generation, inGroup);
+    const inReach = joinedWorkspace && (await targetInReach(place, target, channelWireId ?? null));
+    const authorUserId = check(place, channelWireId, generation, inReach);
     const credentials = currentCredentials();
     const actorCredentials =
       credentials === null
@@ -377,7 +388,7 @@ export function createChatWrites(dependencies: {
     return {
       target,
       channelWireId,
-      inGroup,
+      inReach,
       generation,
       authorUserId,
       actorCredentials,
@@ -402,7 +413,7 @@ export function createChatWrites(dependencies: {
       admission.channelWireId = await lookUpWireId(place, admission.target);
     }
     if (
-      check(place, admission.channelWireId, admission.generation, admission.inGroup) !==
+      check(place, admission.channelWireId, admission.generation, admission.inReach) !==
       expected.authorUserId
     ) {
       throw new Error(SESSION_CHANGED);
@@ -580,6 +591,8 @@ export function createChatWrites(dependencies: {
 
   // A file chat has no author and belongs to no channel, so only the shared
   // view gate applies. It links the file's stable object id, never the path.
+  // A joined workspace sends it to the owner, so it needs the account that
+  // joined, as a post does.
   async function createFileThread(
     place: ChatWritePlace,
     input: {
@@ -587,10 +600,17 @@ export function createChatWrites(dependencies: {
       linkedFile(): Promise<{ objectId: string; pathHint: string }>;
     },
   ) {
-    writableWorkspace(place.workspaceId, false);
+    const joinedWorkspace = shareViewIsPresent(chatWorkspace(place.workspaceId).shareView);
+    if (joinedWorkspace) await warmCredentials();
+    const generation = currentCredentialGeneration();
+    const admitted = () =>
+      joinedWorkspace
+        ? check(place, undefined, generation, true)
+        : writableWorkspace(place.workspaceId, false);
+    admitted();
     const linkedFile = await input.linkedFile();
     // The recheck and the store call share one synchronous block.
-    writableWorkspace(place.workspaceId, false);
+    admitted();
     const thread = await place.store.createThread({
       workspaceId: place.workspaceId,
       title: input.title,

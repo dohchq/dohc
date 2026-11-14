@@ -4941,13 +4941,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 }
                 last_scanned = op.origin_seq;
                 if eligible {
+                    let payload = shared_chat_push_payload(
+                        store,
+                        workspace_id,
+                        scope,
+                        &op.op_kind,
+                        op.payload,
+                    )?;
                     pending.push((
                         op.origin_seq,
                         ShareReplicationEnvelope {
                             origin_id: identity.origin_id.clone(),
                             origin_seq: dense_seq,
                             op_kind: op.op_kind,
-                            payload: op.payload,
+                            payload,
                             recorded_at_ms: op.recorded_at_ms,
                         },
                     ));
@@ -7523,8 +7530,9 @@ fn shared_dense_seq_through(
 enum SharedPushScope<'a> {
     /// One joined channel, named by its wire id, including its create.
     Channel(&'a str),
-    /// Every Group a whole-workspace share view reaches. Never a channel's
-    /// create: only the relay creates a Group for a member.
+    /// Every Group a whole-workspace share view reaches, and its Comments on
+    /// the files it holds. Never a channel's create: only the relay creates a
+    /// Group for a member.
     WorkspaceGroups,
 }
 
@@ -7546,7 +7554,7 @@ fn shared_chat_op_allowed(
                     .and_then(serde_json::Value::as_str)
                 {
                     Some(wire) => crate::share::wire_is_group(conn, workspace_id, wire),
-                    None => Ok(false),
+                    None => Ok(file_thread_path(conn, workspace_id, &op.payload)?.is_some()),
                 },
                 "chat.message.append"
                 | "chat.decision.set"
@@ -7563,13 +7571,68 @@ fn shared_chat_op_allowed(
                         Some(channel_id) => {
                             crate::share::channel_is_group(conn, workspace_id, &channel_id)
                         }
-                        None => Ok(false),
+                        None => thread_file_here(conn, workspace_id, thread_id),
                     }
                 }
                 _ => Ok(false),
             })
             .map_err(local),
     }
+}
+
+/// Whether a thread is about a file this view still holds.
+fn thread_file_here(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<bool, SyncError> {
+    let Some(object_id) = crate::share::thread_linked_object(conn, workspace_id, thread_id)? else {
+        return Ok(false);
+    };
+    Ok(crate::share::object_main_path(conn, workspace_id, &object_id)?.is_some())
+}
+
+/// Where the file a local file thread's create links sits in this view now.
+/// None for a thread with no file, or a file no longer here.
+fn file_thread_path(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    payload: &serde_json::Value,
+) -> Result<Option<String>, SyncError> {
+    match payload
+        .get("linkedObjectId")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(object_id) => crate::share::object_main_path(conn, workspace_id, object_id),
+        None => Ok(None),
+    }
+}
+
+/// What a share view sends for one of its own eligible chat ops. The relay
+/// knows a view's file by its path, never by the view's object token, so a
+/// file thread's create names the path the file has here now.
+fn shared_chat_push_payload(
+    store: &EngineStore,
+    workspace_id: &str,
+    scope: SharedPushScope<'_>,
+    op_kind: &str,
+    mut payload: serde_json::Value,
+) -> Result<serde_json::Value, RelayError> {
+    if !matches!(scope, SharedPushScope::WorkspaceGroups)
+        || op_kind != "chat.thread.create"
+        || payload.get("channelWireId").is_some()
+    {
+        return Ok(payload);
+    }
+    let path = store
+        .read_with(|conn| file_thread_path(conn, workspace_id, &payload))
+        .map_err(local)?
+        .ok_or(RelayError::InvalidResponse)?;
+    let fields = payload.as_object_mut().ok_or(RelayError::InvalidResponse)?;
+    fields.remove("linkedObjectId");
+    fields.remove("linkedPathHint");
+    fields.insert("linkedPath".to_owned(), serde_json::Value::String(path));
+    Ok(payload)
 }
 
 fn shared_channel_op_allowed(

@@ -2627,7 +2627,7 @@ describe("CLI socket server", () => {
           needsDecision: false,
           body: "Hi all",
         }),
-      ).rejects.toThrow("In a joined workspace you can post in Groups only.");
+      ).rejects.toThrow("In a joined workspace you can post in Groups and comment on files only.");
       expect(
         await store!.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: general.id }),
       ).toEqual([]);
@@ -2647,18 +2647,56 @@ describe("CLI socket server", () => {
       ).resolves.toMatchObject({ thread: { id: posted.threadId } });
     });
 
+    it("comments on a file and replies on it at Comment and Edit, and refuses View", async () => {
+      for (const access of ["comment", "edit"] as const) {
+        joinAs(access);
+        const commented = await invoke("fileChatStart", {
+          ...args(),
+          path: "tracked.md",
+          title: "Review",
+          body: `At ${access}`,
+        });
+        if (!commented.ok) throw new Error(commented.reason);
+        await invoke("reply", {
+          ...args(),
+          thread: commented.threadId,
+          attachments: [],
+          needsDecision: false,
+          body: "And more",
+        });
+        await expect(
+          store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: commented.threadId }),
+        ).resolves.toMatchObject([{ body: `At ${access}` }, { body: "And more" }]);
+      }
+      joinAs("view");
+      await expect(
+        invoke("fileChatStart", {
+          ...args(),
+          path: "tracked.md",
+          title: "Review",
+          body: "At View",
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("Only people who can comment post here."),
+      });
+    });
+
     // Members goes to the owner's workspace with the person's own account;
     // the relay decides what it lists and allows.
     it("reaches Members in a joined workspace, and not in a path share", async () => {
       const members = vi.fn(async () => ({ status: "refused" as const }));
       joinAs("comment");
       context = { ...context, members };
-      await expect(invoke("members", { ...args(), request: { action: "list" } })).resolves.toEqual({ status: "refused" });
+      await expect(invoke("members", { ...args(), request: { action: "list" } })).resolves.toEqual({
+        status: "refused",
+      });
       expect(members).toHaveBeenCalledWith({ action: "list" });
       context = { ...context, joined: false };
       registryWorkspace = { ...registryWorkspace, joined: false };
-      await expect(invoke("members", { ...args(), request: { action: "list" } }))
-        .rejects.toThrow("Open the original workspace to manage its members.");
+      await expect(invoke("members", { ...args(), request: { action: "list" } })).rejects.toThrow(
+        "Open the original workspace to manage its members.",
+      );
       expect(members).toHaveBeenCalledOnce();
     });
 

@@ -4986,8 +4986,8 @@ async function workspaceContextForRequest(
 }
 
 // What an agent may write in a joined workspace is what the person may: a
-// post or reply in a Group, a reaction, a page at Edit, and a Group for an
-// admin. Each verb's own path and the relay decide the level and the role.
+// post or reply in a Group, a comment on a file, a reaction, a page at Edit,
+// and a Group for an admin. Each verb's own path and the relay decide the level and the role.
 // Every other write refuses here with its reason.
 function joinedWorkspaceWriteRefusal(
   verb: CliVerb,

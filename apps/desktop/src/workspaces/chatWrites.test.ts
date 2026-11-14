@@ -119,7 +119,7 @@ function fixture() {
       messages: [],
       nextAfterMessageOrder: 0,
     })),
-    findThreadChannelId: vi.fn(async () => {
+    findThreadChannelId: vi.fn(async (): Promise<string | null> => {
       await reach("channel");
       return "channel";
     }),
@@ -890,6 +890,7 @@ describe("chat writes", () => {
   );
 
   describe("a joined workspace", () => {
+    const JOINED_REACH = "In a joined workspace you can post in Groups and comment on files only.";
     function member(access: "view" | "comment" | "edit", extra: { ended?: true } = {}) {
       const test = fixture();
       delete test.row.remote;
@@ -951,10 +952,67 @@ describe("chat writes", () => {
           },
         ]);
       for (const kind of ["send", "start", "react"] as const) {
-        await expect(test.writeEach[kind]()).rejects.toThrow(
-          "In a joined workspace you can post in Groups only.",
-        );
+        await expect(test.writeEach[kind]()).rejects.toThrow(JOINED_REACH);
       }
+      expectNothingWritten(test);
+    });
+
+    // A file's thread: no channel, and the file it is about.
+    function onFile(test: ReturnType<typeof member>, linked = true) {
+      test.store.findThreadChannelId.mockResolvedValue(null);
+      test.store.getThread.mockResolvedValue({
+        thread: {
+          id: "thread",
+          workspaceId: "workspace",
+          title: "Food",
+          createdAtMs: 1,
+          updatedAtMs: 1,
+          ...(linked
+            ? { linkedFile: { objectId: "object", pathHint: "plans/day-1.md", linkedAtMs: 1 } }
+            : {}),
+        },
+        channel: null,
+        messageCount: 1,
+      });
+    }
+
+    it.each(["comment", "edit"] as const)(
+      "comments on a file and replies on its thread at %s as the account that joined",
+      async (access) => {
+        const test = member(access);
+        const thread = await test.writes.createFileThread(test.place, {
+          title: "Food",
+          linkedFile: async () => ({ objectId: "object", pathHint: "plans/day-1.md" }),
+        });
+        expect(thread.linkedFile?.objectId).toBe("object");
+        await vi.waitFor(() =>
+          expect(test.effects.pushShareViewChat).toHaveBeenCalledWith("workspace"),
+        );
+        onFile(test);
+        await test.writeEach.send();
+        expect(test.store.sendMessage.mock.calls[0]?.[0].authorUserId).toBe("user-1");
+        await vi.waitFor(() => expect(test.effects.pushShareViewChat).toHaveBeenCalledTimes(2));
+        expect(test.effects.queueCloudSync).not.toHaveBeenCalled();
+      },
+    );
+
+    it("refuses a file comment signed out or as another account", async () => {
+      for (const credentials of [null, signedIn("user-2")]) {
+        const test = member("comment");
+        test.setCredentials(credentials);
+        const linkedFile = vi.fn(async () => ({ objectId: "object", pathHint: "plans/day-1.md" }));
+        await expect(
+          test.writes.createFileThread(test.place, { title: "Food", linkedFile }),
+        ).rejects.toThrow("Sign in to the account that joined this workspace.");
+        expect(linkedFile).not.toHaveBeenCalled();
+        expectNothingWritten(test);
+      }
+    });
+
+    it("refuses a reply on a thread that is in no Group and on no file", async () => {
+      const test = member("comment");
+      onFile(test, false);
+      await expect(test.writeEach.send()).rejects.toThrow(JOINED_REACH);
       expectNothingWritten(test);
     });
 
