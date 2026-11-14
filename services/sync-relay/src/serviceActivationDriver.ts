@@ -743,23 +743,9 @@ export class ServiceActivationDriver {
       )
       .every((target) => this.#completedTargets.has(targetKey(target)));
   }
-  // Whether an unready workspace may still push. A document with no owner that waits out a backoff after a failed
-  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. A workspace
-  // that may push also passes `workspaceWaiting`.
-  workspacePushes(workspaceId: string) {
-    return this.#targets
-      .filter(
-        (target) =>
-          target.workspaceId === workspaceId &&
-          !this.dormant(target) &&
-          !this.#held.has(targetKey(target)) &&
-          !this.#blocked.has(targetKey(target)) &&
-          !this.#backingOff(targetKey(target)),
-      )
-      .every((target) => this.#completedTargets.has(targetKey(target)));
-  }
   // Whether each document that holds a workspace's readiness has completed or waits out a back-off. Until a wait lapses,
-  // such a workspace has nothing more to do than a ready one.
+  // such a workspace has nothing more to do than a ready one, and it pushes as one does: a document that cannot go live
+  // never holds back what its siblings settled.
   workspaceWaiting(workspaceId: string) {
     return this.#targets
       .filter(
@@ -774,9 +760,6 @@ export class ServiceActivationDriver {
           this.#completedTargets.has(targetKey(target)) || this.#waitingOut(targetKey(target)),
       );
   }
-  #backingOff(key: string) {
-    return this.#waiting(key) && ![...this.#owners.values()].some((owner) => owner.target === key);
-  }
   // Whether a target that has not completed waits out a failed activation's back-off, as `#activate` checks before it
   // tries again.
   #waitingOut(key: string) {
@@ -784,7 +767,7 @@ export class ServiceActivationDriver {
     return !owner?.completed && this.#waiting(key, owner !== undefined);
   }
   // Whether a failed activation's wait before its next capture or drain has not yet lapsed. A target whose owner the host
-  // holds waits at most 30 s: its document, its Stop and its workspace's push wait for that owner to complete.
+  // holds waits at most 30 s: its document and its Stop wait for that owner to complete.
   #waiting(key: string, owned = false) {
     const failure = this.#failures.get(key);
     if (!failure) return false;

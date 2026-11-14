@@ -6973,8 +6973,8 @@ it("pushes a live document's settled edit on the next pass while another documen
   ).toBe(pulled);
 });
 
-// #4093 probe: one note's owner activation can never settle, so it never completes. Its workspace's sibling settles an
-// accepted edit. Does the server push that settlement, so the owner's computer gets it?
+// Proves: a note whose owner activation can never settle, as in #4093, does not hold back its workspace's push. A sibling's
+// settled edit is pushed while the note waits to retry, so the owner's computer gets it.
 it("pushes a settled sibling while another note's owner activation keeps failing to settle", async () => {
   const o = await enrolledServiceHost(),
     workspaces = [o.workspace];
@@ -7020,7 +7020,8 @@ it("pushes a settled sibling while another note's owner activation keeps failing
     actor = { kind: "owner" as const, userId: "owner" };
   const current = o.f.storage.resolveCurrentLiveDocumentBinding({ document, actor }),
     read = o.f.storage.readLiveUpdateJournalCut({ document });
-  if (current.kind !== "current" || read.kind !== "cut") throw new Error("Missing sibling authority.");
+  if (current.kind !== "current" || read.kind !== "cut")
+    throw new Error("Missing sibling authority.");
   const doc = new Y.Doc(),
     suffix = read.cut.suffix.map((row) => row.bytes);
   for (const bytes of [read.cut.checkpoint.bytes, ...suffix]) Y.applyUpdate(doc, bytes);
