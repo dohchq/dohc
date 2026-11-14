@@ -22,6 +22,8 @@ export function ShellTitlebar(props: {
   setQuickOpenOpen: (open: boolean) => void;
   syncStatus: SyncStatusResult | null;
   failedSaves: number;
+  // A joined workspace whose account is not the one signed in.
+  otherAccount?: boolean;
   showWorkbenchMenu: (context: "status") => Promise<void>;
   agentActive: boolean;
   restrictedMode?: { asking: boolean; onTrust: () => void };
@@ -53,7 +55,7 @@ export function ShellTitlebar(props: {
       version={props.version}
       workspaceStatus={
         <>
-          <WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} />
+          <WorkspaceSyncStatus syncStatus={syncStatus} failedSaves={failedSaves} otherAccount={props.otherAccount} />
           {props.restrictedMode ? <RestrictedModeIndicator {...props.restrictedMode} /> : null}
         </>
       }

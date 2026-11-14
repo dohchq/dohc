@@ -125,6 +125,11 @@ function syncWaitsOnBusyServer(syncStatus: SyncStatusResult | null | undefined):
   return syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-busy";
 }
 const SERVER_BUSY_LABEL = "Server busy";
+// A joined workspace that another account on this computer can't sync. The
+// toast and Notices row name the account and offer Switch account.
+const OTHER_ACCOUNT_LABEL = "Another account signed in";
+const OTHER_ACCOUNT_DESCRIPTION =
+  "Not syncing. This computer is signed in to another account than the one the owner invited.";
 const SERVER_BUSY_DESCRIPTION = "Server busy. dohc keeps trying to sync.";
 
 // The title bar says "Server unreachable". Features that need the server
@@ -158,16 +163,21 @@ function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: numbe
 export function WorkspaceSyncStatus({
   syncStatus,
   failedSaves,
+  otherAccount = false,
 }: {
   syncStatus: SyncStatusResult | null;
   failedSaves: number;
+  // A joined workspace whose account is not the one signed in: nothing syncs,
+  // whatever the last state main reported.
+  otherAccount?: boolean;
 }) {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? (syncStatus?.conflictCount ?? 0) : 0;
   // A failed sync names the server when the server is what failed.
   const busy = syncWaitsOnBusyServer(syncStatus);
-  const stateLabel =
-    state === "sync-failed" && syncNamesServer(syncStatus)
+  const stateLabel = otherAccount
+    ? OTHER_ACCOUNT_LABEL
+    : state === "sync-failed" && syncNamesServer(syncStatus)
       ? "Server unreachable"
       : busy
         ? SERVER_BUSY_LABEL
@@ -185,14 +195,16 @@ export function WorkspaceSyncStatus({
       : state === "syncing" && syncStatus?.claimingIdentity
         ? "Setting up sync…"
         : label);
-  const stateDescription = busy
-    ? SERVER_BUSY_DESCRIPTION
-    : state
-      ? SYNC_DESCRIPTION[state]
-      : undefined;
+  const stateDescription = otherAccount
+    ? OTHER_ACCOUNT_DESCRIPTION
+    : busy
+      ? SERVER_BUSY_DESCRIPTION
+      : state
+        ? SYNC_DESCRIPTION[state]
+        : undefined;
   const description = (shownLabel === label ? stateDescription : undefined) ?? shownLabel;
   const dot: DotKind =
-    saveFailed || syncStatus?.updateRequired
+    saveFailed || syncStatus?.updateRequired || otherAccount
       ? "attention"
       : busy
         ? "working"
