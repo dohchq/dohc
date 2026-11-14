@@ -51,9 +51,14 @@ const routes = [
   ["GET", "/api/account/session"],
   ["POST", "/api/account/sign-in"],
   ["POST", "/api/account/sign-out"],
-  ...["link-document", "link-ticket", "named-session", "named-ticket", "named-documents"].map(
-    (path) => ["POST", "/api/live/" + path],
-  ),
+  ...[
+    "link-document",
+    "link-document-state",
+    "link-ticket",
+    "named-session",
+    "named-ticket",
+    "named-documents",
+  ].map((path) => ["POST", "/api/live/" + path]),
   ["GET", "/api/apps"],
   ["POST", "/api/apps/launch"],
   ["POST", "/api/apps/summary"],

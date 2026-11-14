@@ -103,6 +103,7 @@ import {
 import type { ServiceActivationReplica } from "./serviceActivationDriver";
 import { createLogLineCap } from "./logLineCap.js";
 import { asRelayWrite } from "./relayMainThreadTiming.js";
+import { readAppliedState } from "./liveAwakeState.js";
 interface ServiceLiveHostConfig {
   readonly version: 1;
   readonly engineExecutable: string;
@@ -4014,6 +4015,58 @@ export async function startServiceLiveHost(options: {
               drain,
               takeAppliedAck: appliedAcks.take,
             });
+          },
+          /**
+           * What the host applied of a note it already holds awake, without waking, draining or registering it, and
+           * without counting as use that keeps it awake. Undefined when the note sleeps, is unloading, or the host has
+           * not applied its first state yet.
+           */
+          async readAwakeState(
+            value: LiveObjectBinding,
+            maxOutputBytes: number,
+            callerSignal: AbortSignal,
+          ) {
+            if (!changes || !config.sync || signal.aborted) return undefined;
+            const binding = parseLiveObjectBinding(value);
+            const document = parseLiveDocumentKey({
+              workspaceId: binding.workspaceId,
+              mainVersionId: binding.mainVersionId,
+              objectId: binding.objectId,
+              lineageClaimId: binding.lineageClaimId,
+            });
+            const key = hostedKey(document);
+            if (key !== undefined && (unloading.has(key) || activation!.asleep(document)))
+              return undefined;
+            let registration, read;
+            try {
+              // An owner's activation completes only once a drain of it returned done, as an editor's open waits
+              // for, and the engine has its first state. Its seed is acknowledged before it applies, so no seed flag
+              // proves that here. Another workspace's note needs its acknowledged bootstrap.
+              const owner = attachments.has(document.workspaceId)
+                ? activation!.consumer(document)
+                : undefined;
+              const plain = owner ? undefined : consumers.get(document.workspaceId);
+              const consumer = owner?.consumer ?? plain;
+              if (!consumer || (plain && !plain.bootstrapApplied(document))) return undefined;
+              registration = consumer.captureRegistration(binding);
+              read = {
+                client: owner ? owner.transport.client : client!,
+                workspace: consumer.workspace,
+              };
+            } catch {
+              return undefined;
+            }
+            return readAppliedState(
+              {
+                ...read,
+                registration,
+                coordinate,
+                nextRequestId,
+                deadlineMs: config.client.requestDeadlineMs,
+              },
+              maxOutputBytes,
+              AbortSignal.any([signal, callerSignal]),
+            );
           },
           /**
            * The documents a hosted replica of this daemon holds for retained work a

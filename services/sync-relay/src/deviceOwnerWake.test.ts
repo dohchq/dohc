@@ -12,7 +12,9 @@ const state = vi.hoisted(() => ({
   restore: vi.fn(),
   madeOwner: false,
   registration: undefined as unknown,
+  unregistered: false,
   seedApplied: vi.fn(),
+  read: vi.fn(),
 }));
 vi.mock("@dohc/workspace-engine-client/daemon", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>()),
@@ -26,6 +28,9 @@ vi.mock("@dohc/workspace-engine-client/daemon", async (importOriginal) => ({
       return state.dispose;
     }
     async ready() {}
+    openLiveAppliedSync(...args: unknown[]) {
+      return state.read(...args);
+    }
     async sendRequest() {
       return {
         result: {
@@ -51,6 +56,7 @@ vi.mock("./ownerCommittedDelivery.js", () => ({
       state.madeOwner = true;
     }
     captureRegistration() {
+      if (state.unregistered) throw new Error("Live host registration is unavailable.");
       return state.registration;
     }
     captureDocumentRegistration() {
@@ -121,6 +127,14 @@ beforeEach(() => {
   state.settle.mockReset().mockResolvedValue({ materialized: true });
   state.settleWanted.mockReset().mockResolvedValue({ materialized: true });
   state.seedApplied.mockReset().mockReturnValue(true);
+  state.unregistered = false;
+  state.read.mockReset().mockResolvedValue({
+    binding,
+    position: { journalCursor: 5, eventCount: 2 },
+    observedLocalYDocHeadSequence: 0,
+    hostVector: Buffer.from([1, 2]),
+    missingStateUpdate: Buffer.from([3, 4, 5]),
+  });
 });
 async function fixture(changes = createNamedFrameChanges(16)) {
   const lifetime = new AbortController(),
@@ -333,6 +347,66 @@ it("carries bounded continuation and drops a dirty registration invalidated befo
     expect(state.drain).toHaveBeenCalledTimes(2);
   } finally {
     release.resolve({ kind: "done", continueDrain: false });
+    f.delivery.close();
+  }
+});
+
+// A link reader's page asks for the state of a note before it opens a connection. The owner's computer answers only
+// for a note it holds, so the read neither drains nor registers it.
+const readAwake = (f: Awaited<ReturnType<typeof fixture>>) =>
+  f.delivery.readAwakeState(binding, 10_000, new AbortController().signal);
+
+// Proves: a read of a note the owner's computer holds no registration for, or whose adoption seed it has not applied,
+// answers no state, and neither drains nor reads the note.
+it("a document read gives a note the host has not registered no state and sends the host no request", async () => {
+  const f = await fixture();
+  try {
+    state.unregistered = true;
+    await expect(readAwake(f)).resolves.toBeUndefined();
+    state.unregistered = false;
+    state.seedApplied.mockReturnValueOnce(false);
+    await expect(readAwake(f)).resolves.toBeUndefined();
+    expect(state.read).not.toHaveBeenCalled();
+    expect(state.drain).not.toHaveBeenCalled();
+  } finally {
+    f.delivery.close();
+  }
+});
+
+// Proves: a read of a registered note returns what the owner's computer applied at its journal cursor, under the
+// registration it holds, from an empty state vector, without draining the note.
+it("a document read of a registered note returns the applied state at its cursor without registering again", async () => {
+  const f = await fixture();
+  try {
+    await expect(readAwake(f)).resolves.toEqual({
+      binding,
+      coordinate: {
+        hostId: "host",
+        hostEpoch: parseHostEpoch(1),
+        instanceId: "instance",
+        connectionId: "connection",
+        mode: "device",
+      },
+      hostVector: Buffer.from([1, 2]),
+      missingStateUpdate: Buffer.from([3, 4, 5]),
+      appliedThroughJournalCursor: 5,
+    });
+    expect(state.read).toHaveBeenCalledOnce();
+    const [request, vector, bounds] = state.read.mock.calls[0]!;
+    expect(request).toMatchObject({ workspace: "handle", registrationId: 9 });
+    expect(vector).toEqual(new Uint8Array([0]));
+    expect(bounds).toEqual({ maxInputBytes: 1, maxOutputBytes: 10_000 });
+    expect(state.drain).not.toHaveBeenCalled();
+    // A registration the host replaced while the read ran gives no state.
+    state.read.mockResolvedValueOnce({
+      binding: { ...binding, restoreFenceGeneration: 2 },
+      position: { journalCursor: 6, eventCount: 3 },
+      observedLocalYDocHeadSequence: 0,
+      hostVector: Buffer.from([1]),
+      missingStateUpdate: Buffer.from([1]),
+    });
+    await expect(readAwake(f)).resolves.toBeUndefined();
+  } finally {
     f.delivery.close();
   }
 });

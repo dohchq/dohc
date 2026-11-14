@@ -52,7 +52,7 @@ describe("bounded JSON stream", () => {
     for (const limit of [NaN, Infinity, -1, 1.5]) {
       const response = new Response("{}");
       await expect(readBoundedJson(response, limit, new AbortController().signal)).rejects.toThrow(
-        "Invalid JSON body limit.",
+        "Invalid body limit.",
       );
       expect(response.bodyUsed).toBe(false);
     }

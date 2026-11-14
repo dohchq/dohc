@@ -226,11 +226,15 @@ it("shares persisted bootstrap identity and serializes acknowledgement edges acr
       b = f.storage.commitLiveUpdateJournal(second);
     expect(b.result.kind).toBe("accepted");
     const { store } = delivery(f),
-      d = store.open({ host, document: f.input.evidence.document }),
+      applied = () => store.bootstrapApplied({ host, document: f.input.evidence.document });
+    expect(applied()).toBe(false);
+    const d = store.open({ host, document: f.input.evidence.document }),
       id = d.baseline.bootstrapId;
     const duplicate = store.open({ host, document: f.input.evidence.document });
     expect(duplicate.baseline.bootstrapId).toBe(id);
+    expect(applied()).toBe(false);
     ackBaseline(store, d);
+    expect(applied()).toBe(true);
     const one = store.next(d);
     expect(one.kind).toBe("next");
     if (one.kind !== "next") throw Error("next");

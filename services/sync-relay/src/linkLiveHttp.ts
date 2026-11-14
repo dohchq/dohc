@@ -1,6 +1,14 @@
 import type { BinaryLike } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { PublicEditRelease } from "@dohc/security-contract";
+import {
+  encodeLiveFrameSync,
+  type LiveFrameReceivePolicy,
+} from "@dohc/live-session-contract/live-frame";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { readBoundedJson } from "@dohc/service-http";
+import type { AwakeLiveState } from "./liveAwakeState";
+import { liveBrowserActor } from "./liveBrowserContext";
 import { createLinkLiveResolver } from "./linkLiveBrowserAuth";
 import type { LinkAuthorityResolver } from "./linkAuthority";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
@@ -15,7 +23,18 @@ import {
   type SessionHostBlock,
 } from "./linkRefusal";
 
-/** Private relay metadata. The viewer receives only the selected object ID. */
+// A note's early state is read before its page opens a socket, so these limits hold for a caller that never opens
+// one. Each read reaches the note's host, which for a desktop host is the owner's computer. The host reads under a
+// socket's opening-sync bound, so a note whose state is past STATE_MAX_BYTES is still read in full, then dropped.
+const STATE_READS_AT_ONCE = 4;
+const STATE_READS_PER_GRANT = 20;
+const STATE_READ_WINDOW_MS = 10_000;
+const STATE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Private relay metadata. The viewer receives only the selected object ID, and on the state route what the note's
+ * host applied of it, as the opening sync of its socket would carry it.
+ */
 export function createLinkLiveHttp(options: {
   storage: SyncRelayStorage;
   linkKey: BinaryLike;
@@ -31,6 +50,17 @@ export function createLinkLiveHttp(options: {
   }) => SessionHostBlock | undefined;
   /** Authenticates a connected agent, as the link's other routes do. */
   linkAuthority: Pick<LinkAuthorityResolver, "resolve">;
+  /**
+   * What the note's current host applied, if it holds the note awake. Without it the state route refuses. It reads
+   * under the bound a socket's opening sync reads under, so the route drops a larger state rather than ask for less.
+   */
+  readAwakeState?: (
+    binding: LiveObjectBinding,
+    signal: AbortSignal,
+  ) => Promise<AwakeLiveState | undefined>;
+  /** The frame limits a browser receives an opening sync under. */
+  frames?: LiveFrameReceivePolicy;
+  nowMs?: () => number;
 }) {
   const limits = parseNamedLiveRouteLimits(options.limits),
     hosts = new Set(options.hosts);
@@ -44,13 +74,32 @@ export function createLinkLiveHttp(options: {
     throw new TypeError("Invalid link live metadata configuration.");
   const exchangeHash = hashRelayExchangeKey(options.exchangeKey),
     resolver = createLinkLiveResolver(options);
-  const refused = opaqueLinkRefusal;
-  let pending = 0;
+  const refused = opaqueLinkRefusal,
+    nowMs = options.nowMs ?? Date.now,
+    asleep = () =>
+      new Response(null, { status: 204, headers: { "cache-control": "private, no-store" } });
+  let pending = 0,
+    stateReads = 0,
+    windowStartMs = Number.NEGATIVE_INFINITY;
+  const grantReads = new Map<string, number>();
+  // Whether a grant may read one more state in this window. Every grant's count restarts together.
+  const admitStateRead = (grantId: string) => {
+    if (nowMs() - windowStartMs >= STATE_READ_WINDOW_MS) {
+      windowStartMs = nowMs();
+      grantReads.clear();
+    }
+    const count = grantReads.get(grantId) ?? 0;
+    if (count >= STATE_READS_PER_GRANT) return false;
+    grantReads.set(grantId, count + 1);
+    return true;
+  };
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url),
-      document = url.pathname === "/sync/live/link-document";
+      state = url.pathname === "/sync/live/link-document-state",
+      document = state || url.pathname === "/sync/live/link-document";
     if (
       (!document && url.pathname !== "/sync/live/link-session") ||
+      (state && (!options.readAwakeState || !options.frames)) ||
       url.search ||
       request.method !== "POST" ||
       !hosts.has(request.headers.get("host") ?? "") ||
@@ -132,7 +181,10 @@ export function createLinkLiveHttp(options: {
             workspaceId: context.workspaceId,
             objectId,
           });
-          return block ? sessionHostRefusal(block) : { objectId };
+          if (block) return sessionHostRefusal(block);
+          // The state comes only where a ticket would: a link that takes no more browsers refuses this one.
+          if (state && options.storage.liveLinkFull(context)) return linkRefusal("link_full");
+          return { objectId, current };
         }
         // Only a browser gateway opens a link session; an agent has no profile.
         if ("agentConnectionId" in context) return null;
@@ -161,7 +213,16 @@ export function createLinkLiveHttp(options: {
       signal.throwIfAborted();
       if (!body) return refused();
       if (body instanceof Response) return body;
-      const encoded = JSON.stringify(body);
+      if (state && body.current) {
+        if (stateReads >= STATE_READS_AT_ONCE || !admitStateRead(context.grantId)) return asleep();
+        stateReads++;
+        try {
+          return await readState(context, body.objectId, body.current, signal);
+        } finally {
+          stateReads--;
+        }
+      }
+      const encoded = JSON.stringify(body.current ? { objectId: body.objectId } : body);
       if (Buffer.byteLength(encoded) > limits.maxResponseBytes) return refused();
       return new Response(encoded, {
         headers: { "content-type": "application/json", "cache-control": "private, no-store" },
@@ -172,4 +233,51 @@ export function createLinkLiveHttp(options: {
       pending--;
     }
   };
+
+  // The note's state as its host applied it, shown as this reader's socket would show it. A reader's browser enrolls
+  // only with its first ticket, so this reads the binding as the ticket does, before enrollment. No state when the host
+  // does not hold the note awake, or when its binding, its host or what this reader is shown changed during the read.
+  async function readState(
+    context: Parameters<typeof liveBrowserActor>[0],
+    objectId: string,
+    before: Extract<
+      ReturnType<SyncRelayStorage["resolveLiveObjectHostBinding"]>,
+      { kind: "current" }
+    >,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const read = await options.readAwakeState!(before.binding, signal);
+    signal.throwIfAborted();
+    const after = options.storage.resolveLiveObjectHostBinding(context, objectId);
+    if (
+      !read ||
+      read.hostVector.byteLength + read.missingStateUpdate.byteLength > STATE_MAX_BYTES ||
+      after.kind !== "current" ||
+      !isDeepStrictEqual(read.binding, before.binding) ||
+      !isDeepStrictEqual(read.coordinate, after.host) ||
+      !isDeepStrictEqual(after, before)
+    )
+      return asleep();
+    let bytes: Uint8Array;
+    try {
+      bytes = encodeLiveFrameSync(
+        {
+          binding: before.view,
+          hostVector: read.hostVector,
+          missingStateUpdate: read.missingStateUpdate,
+        },
+        options.frames!,
+      );
+    } catch {
+      return asleep();
+    }
+    return new Response(Buffer.from(bytes), {
+      headers: {
+        "content-type": "application/octet-stream",
+        "cache-control": "private, no-store",
+        "x-dohc-live-object-id": objectId,
+        "x-dohc-live-applied-through": String(read.appliedThroughJournalCursor),
+      },
+    });
+  }
 }

@@ -11,7 +11,7 @@ export { carryRequestMark, createRequestLog, type RequestLog } from "./requestLo
 export { DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody } from "./pipeResponseBody";
 export { TokenBucketLimiter } from "./tokenBucketLimiter";
 export { WaiterRegistry, type WaiterCaps } from "./waiterRegistry";
-export { readBoundedJson } from "./readBoundedJson";
+export { readBoundedBytes, readBoundedJson } from "./readBoundedJson";
 export { canonicalIpAddress } from "./canonicalIpAddress";
 export { closeServer, fatal, installShutdown, parseGracePeriodMs } from "./process";
 export { createDeviceControlRequestParser, refuseDeviceControl } from "./deviceControlRequest";
