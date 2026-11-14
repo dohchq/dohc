@@ -107,7 +107,7 @@ describe("dohc members", () => {
         "Community: members can comment.",
         "Invite link: https://share.test/join#token",
         "",
-        "Ice · Owner · ice@test · owner",
+        "Ice · Owner · ice@test",
         "Ana · Admin · ana@test · m-ana",
         "",
         "Invites (dohc sends no email; each joins when they sign in with that address)",
@@ -120,7 +120,7 @@ describe("dohc members", () => {
     );
   });
 
-  it("names the command that lists Members where the desktop says Reload Members, and names dohc once", async () => {
+  it("starts a refusal as the other refusals do, and names the command that lists Members where the desktop says Reload Members", async () => {
     const request = async () => {
       throw new Error(
         "dohc could not send the invite because your role in this workspace does not allow it. Reload Members to see what you can do.",
@@ -136,7 +136,7 @@ describe("dohc members", () => {
       exitCode: 1,
       stdout: "",
       stderr:
-        "dohc could not send the invite because your role in this workspace does not allow it. Run dohc members list to see what you can do.\n",
+        "dohc: Could not send the invite because your role in this workspace does not allow it. Run dohc members list to see what you can do.\n",
     });
   });
 

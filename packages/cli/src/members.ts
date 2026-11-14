@@ -131,7 +131,8 @@ export const MEMBERS_REFUSED = "Your server does not list Members for this works
 // The desktop's Members words point at its page. A terminal has no page to
 // reload, so they name the command that lists Members.
 export function membersWordsForCli(error: unknown): unknown {
-  return error instanceof Error && error.message.includes("Reload Members")
-    ? new Error(error.message.replaceAll("Reload Members", "Run dohc members list"))
-    : error;
+  if (!(error instanceof Error)) return error;
+  // The other CLI refusals read "dohc: ...", so a sentence that starts "dohc could not" takes that form too.
+  const words = error.message.replaceAll("Reload Members", "Run dohc members list").replace(/^dohc could not /u, "Could not ");
+  return words === error.message ? error : new Error(words);
 }
