@@ -1648,3 +1648,11 @@ describe("SettingsDialog", () => {
     });
   });
 });
+
+  it("shows Members in a joined workspace, which lists the owner's people", async () => {
+    render(<SettingsDialog workspaceIsReady sharedView membership workspaceId="ws-1" workspacePath="/shared/trip" workspaceName="Trip" onClose={() => {}} />);
+    await screen.findByTestId("settings-sidebar");
+    expect(screen.getByTestId("settings-nav-members")).toBeTruthy();
+    fireEvent.change(screen.getByTestId("settings-search"), { target: { value: "invite" } });
+    expect(screen.getByTestId("settings-nav-members")).toBeTruthy();
+  });

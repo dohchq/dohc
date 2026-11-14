@@ -86,9 +86,17 @@ function sameServer(a: string, b: string): boolean {
   }
 }
 
-export function membersGate(cloud: CloudSettings | undefined): MembersGate {
+// A joined workspace has no sync of its own: the signed-in account reaches the
+// owner's Members, and main checks it is the account that joined.
+export function membersGate(cloud: CloudSettings | undefined, joined = false): MembersGate {
   const status = cloud?.status;
   if (!cloud || !status) return cloud?.unreadable ? { kind: "unreadable" } : { kind: "checking" };
+  if (joined) {
+    if (!status.connected) return { kind: "signed-out", server: null };
+    if (cloud.signInExpired) return { kind: "expired" };
+    return { kind: "ready", account: `${status.serverUrl ?? ""}
+${status.email ?? ""}` };
+  }
   // A paused workspace keeps its place on the server, so its Members still load.
   if (!status.workspaceSynced && !status.syncPause) return { kind: "not-synced" };
   if (!status.connected) return { kind: "signed-out", server: status.workspaceServerUrl ?? null };
@@ -146,13 +154,15 @@ export function MembersSettings(props: {
   workspaceId: string;
   // The folder's name, until the server names the workspace.
   workspaceName: string;
+  // A workspace this person joined: the owner's Members, as the relay shows them to this account.
+  joined?: boolean;
   cloud?: CloudSettings;
   onOpenSync: () => void;
   onError?: ReportError;
   onClearError?: (identity: string) => void;
 }) {
   const { workspaceId } = props;
-  const gate = membersGate(props.cloud);
+  const gate = membersGate(props.cloud, props.joined);
   const account = gate.kind === "ready" ? gate.account : null;
   const scopeKey = account === null ? null : `${workspaceId}\n${account}`;
   // Bumped when the workspace or the account changes and when the page

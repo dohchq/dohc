@@ -9294,7 +9294,8 @@ export function DesktopWorkspaceShell(props: {
                                         onOpenApp={openAppTab}
                                         siteRoot={siteRoot}
                                         onShowSource={() => showPathInExplorer(siteRoot, true)}
-                                        sharedView={!!shareView}
+                                        membership={!!shareView?.membership}
+                              sharedView={!!shareView}
                                         onShareSite={(target) =>
                                           setShareTarget({
                                             kind: "paths",

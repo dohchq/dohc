@@ -242,6 +242,50 @@ describe("Members page", () => {
     },
   );
 
+  describe("in a joined workspace", () => {
+    // A joined workspace has no sync of its own: the account that joined reaches the owner's Members.
+    const joined = (overrides: Partial<CloudStatusResult> = {}) => cloud({ status: status({ email: "bo@test", workspaceSynced: false, workspaceSyncConnected: false, workspaceServerUrl: undefined, ...overrides }) });
+
+    it("lists names and roles for a member, with no invite, link, or row controls", async () => {
+      bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: memberView() }));
+      renderMembers({ cloud: joined(), joined: true });
+      const page = await screen.findByTestId("settings-members-page");
+      expect(bridge.workspaceMembers).toHaveBeenCalledWith({ workspaceId: "ws-1", request: { action: "list" } });
+      expect(page.dataset.viewerRole).toBe("member");
+      expect(page.textContent).not.toMatch(/@test/u);
+      expect(within(screen.getByTestId("settings-members-people")).getAllByTestId("settings-members-row").map((entry) => entry.dataset.memberId))
+        .toEqual(["owner", "m-ana", "m-bo"]);
+      expect(screen.queryByTestId("settings-members-invite")).toBeNull();
+      expect(screen.queryByTestId("settings-members-link")).toBeNull();
+      expect(screen.queryAllByTestId("settings-members-row-menu")).toHaveLength(0);
+    });
+
+    it("gives an admin Invite and Remove for members, and not for admins", async () => {
+      bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: adminView() }));
+      renderMembers({ cloud: joined(), joined: true });
+      await screen.findByTestId("settings-members-page");
+      expect(screen.getByTestId("settings-members-invite")).toBeTruthy();
+      expect(within(row("m-ana")).queryByTestId("settings-members-row-menu")).toBeNull();
+      expect(await openMenu("m-bo")).toEqual(["Remove from workspace"]);
+    });
+
+    it("asks a signed-out person to connect before asking the server", async () => {
+      const { props } = renderMembers({ cloud: joined({ connected: false }), joined: true });
+      const gate = screen.getByTestId("settings-members-gate");
+      expect(gate.dataset.reason).toBe("signed-out");
+      expect(gate.textContent).toContain("Connect your server to see who is in this workspace.");
+      await userEvent.click(within(gate).getByRole("button", { name: "Connect server" }));
+      expect(props.cloud!.onConnect).toHaveBeenCalled();
+      expect(bridge.workspaceMembers).not.toHaveBeenCalled();
+    });
+
+    it("asks to sign in again when the server stopped accepting this computer's sign-in", () => {
+      expect(membersGate(joined(), true).kind).toBe("ready");
+      expect(membersGate(cloud({ ...joined(), signInExpired: true }), true).kind).toBe("expired");
+      expect(membersGate(joined(), false).kind).toBe("not-synced");
+    });
+  });
+
   it("loads a paused workspace, which keeps its place on the server", () => {
     expect(
       membersGate(
