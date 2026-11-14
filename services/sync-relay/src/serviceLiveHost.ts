@@ -101,6 +101,7 @@ import {
 } from "./heldDocumentRoutes";
 import type { ServiceActivationReplica } from "./serviceActivationDriver";
 import { createLogLineCap } from "./logLineCap.js";
+import { asRelayWrite } from "./relayMainThreadTiming.js";
 interface ServiceLiveHostConfig {
   readonly version: 1;
   readonly engineExecutable: string;
@@ -3429,7 +3430,7 @@ export async function startServiceLiveHost(options: {
                       const numbered = requestId,
                         sent = sentRequests,
                         counted = idleRequests + probeCredits;
-                      const failed = await pass();
+                      const failed = await asRelayWrite("pass", pass);
                       const due = nextIdleDue(),
                         sweeping = due !== undefined && due <= idleClock.nowMs();
                       if (sweeping) await sweep();

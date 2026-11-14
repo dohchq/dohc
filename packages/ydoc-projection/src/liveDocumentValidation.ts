@@ -337,6 +337,13 @@ type RefusedJournal = {
 export type LiveMarkdownJournalResult =
   | { readonly kind: "accepted"; readonly evidence: LiveMarkdownJournalEvidence }
   | RefusedJournal;
+/** Where one journal check spent its time, in milliseconds, for the caller's own timing line. */
+export interface LiveMarkdownJournalTiming {
+  /** Rebuilding the document from the checkpoint, the suffix and the candidate. */
+  replayMs?: number;
+  /** Projecting the rebuilt document to Markdown and finishing the cut. */
+  projectionMs?: number;
+}
 /**
  * The projection of each prefix that ends at input `from` or later, before the
  * candidate, checked in the pass that validates the journal. Input 0 is the
@@ -382,12 +389,14 @@ function captureSuffix(value: unknown): Uint8Array[] {
   return suffix;
 }
 
+/** `timing`, when given, receives each check's replay and projection times. */
 export function createLiveMarkdownJournalValidator(
   policy: OrderedLiveUpdateCutPolicy,
   engineReader = false,
+  timing?: LiveMarkdownJournalTiming,
 ): (input: unknown) => LiveMarkdownJournalResult {
   const validate = journalValidator(policy, engineReader);
-  return (input) => validate(input);
+  return (input) => validate(input, undefined, timing);
 }
 
 /** A journal validator that also checks each prefix's projection in the same pass. */
@@ -401,7 +410,11 @@ export function createLiveMarkdownHistoryValidator(
 function journalValidator(
   policy: OrderedLiveUpdateCutPolicy,
   engineReader: boolean,
-): (input: unknown, prefixes?: LiveMarkdownJournalPrefixes) => LiveMarkdownJournalResult {
+): (
+  input: unknown,
+  prefixes?: LiveMarkdownJournalPrefixes,
+  timing?: LiveMarkdownJournalTiming,
+) => LiveMarkdownJournalResult {
   const ownedPolicy = capturePolicy(policy);
 
   function prefixProjection(prefixes: LiveMarkdownJournalPrefixes): JournalPrefixProjection {
@@ -440,9 +453,11 @@ function journalValidator(
     input: LiveMarkdownJournalInput,
     includeEvidence: boolean,
     prefixes?: LiveMarkdownJournalPrefixes,
+    timing?: LiveMarkdownJournalTiming,
   ):
     | { kind: "accepted"; evidence?: LiveMarkdownJournalEvidence }
     | { kind: "refused"; failure: Pick<OrderedLiveUpdateCutRefusal, "reason" | "stage"> } {
+    const replayStarted = timing && performance.now();
     const result = validateJournalCutForProjection(
       {
         mode: "journal-candidate",
@@ -454,10 +469,12 @@ function journalValidator(
       engineReader,
       prefixes && prefixProjection(prefixes),
     );
+    if (timing) timing.replayMs = performance.now() - replayStarted!;
     let failure: Pick<OrderedLiveUpdateCutRefusal, "reason" | "stage">;
     if (result.kind === "refused") failure = result;
     else {
       const { cut, topology } = result;
+      const projectionStarted = timing && performance.now();
       const projected = projectAndFinalize(
         cut,
         ownedPolicy,
@@ -466,6 +483,7 @@ function journalValidator(
         undefined,
         engineReader,
       );
+      if (timing) timing.projectionMs = performance.now() - projectionStarted!;
       if (projected.kind === "refused")
         failure = { reason: projected.reason, stage: { kind: "final" } };
       else {
@@ -503,15 +521,17 @@ function journalValidator(
     input: LiveMarkdownJournalInput,
     diagnose: true,
     prefixes?: LiveMarkdownJournalPrefixes,
+    timing?: LiveMarkdownJournalTiming,
   ): LiveMarkdownJournalResult;
   function validateCaptured(input: LiveMarkdownJournalInput, diagnose: false): ValidationOutcome;
   function validateCaptured(
     input: LiveMarkdownJournalInput,
     diagnose: boolean,
     prefixes?: LiveMarkdownJournalPrefixes,
+    timing?: LiveMarkdownJournalTiming,
   ): LiveMarkdownJournalResult | ValidationOutcome {
     // Let the completed cut become collectible before replaying its prefix.
-    const attempt = validateAttempt(input, diagnose, prefixes);
+    const attempt = validateAttempt(input, diagnose, prefixes, timing);
     if (attempt.kind === "accepted") return attempt;
     const { failure } = attempt;
     if (failure.stage.kind === "call") return refusal(failure.reason, "call");
@@ -543,7 +563,7 @@ function journalValidator(
     return refusal(failure.reason, "final");
   }
 
-  return (input, prefixes): LiveMarkdownJournalResult => {
+  return (input, prefixes, timing): LiveMarkdownJournalResult => {
     let captured: LiveMarkdownJournalInput;
     try {
       const snapshot = exactDataFields(input, JOURNAL_INPUT_FIELDS);
@@ -571,7 +591,7 @@ function journalValidator(
       if (engineReader && !(error instanceof Refusal)) throw error;
       return refusal(error instanceof Refusal ? error.reason : "invalid-input", "call");
     }
-    return validateCaptured(captured, true, prefixes);
+    return validateCaptured(captured, true, prefixes, timing);
   };
 }
 

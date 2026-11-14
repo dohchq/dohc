@@ -33,6 +33,7 @@ import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type {
   AcceptedLiveDocument,
+  JournalCutReadTiming,
   LiveUpdateJournalCutResult,
   LiveUpdateJournalCommitInput,
   RelayLiveUpdateJournalResult,
@@ -819,8 +820,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   readLiveUpdateJournalCut(
     input: { document: LiveDocumentKey },
     reserveBytes?: (size: number) => void,
+    timing?: JournalCutReadTiming,
   ): LiveUpdateJournalCutResult {
-    return liveUpdateJournalStorage.readLiveUpdateJournalCut(this, input, reserveBytes);
+    return liveUpdateJournalStorage.readLiveUpdateJournalCut(this, input, reserveBytes, timing);
   }
 
   commitLiveUpdateJournal(

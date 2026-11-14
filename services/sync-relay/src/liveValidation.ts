@@ -56,6 +56,8 @@ export type LiveValidationWork = { policy: OrderedLiveUpdateCutPolicy } & (
   | { kind: "activation"; input: OrdinaryActivationWork | OrdinaryFoldWork }
   | { kind: "restore"; input: LiveRestoreWork }
 );
+/** What the worker adds to a journal verdict about its own time. */
+type WorkerTiming = { replayMs?: number; projectionMs?: number; workerMs: number };
 type CapacityRetry = {
   kind: "retry";
   reason: "admission-unavailable";
@@ -286,16 +288,33 @@ export function createLiveValidationExecutor(
   }
   function validator(policy: OrderedLiveUpdateCutPolicy): CapacityLiveAdmissionValidator {
     const ownedPolicy = Object.freeze({ ...policy });
-    const validate: OwnerOutboxAdmission["validate"] = (input, signal) =>
-      submit<LiveJournalValidation>(
+    const validate: OwnerOutboxAdmission["validate"] = (input, signal, timing) => {
+      const sentAt = performance.now();
+      return submit<LiveJournalValidation & { timing?: WorkerTiming }>(
         { kind: "journal", policy: ownedPolicy, input },
         { kind: "refused", reason: "capacity-refused", source: "final" },
         signal,
-      ).catch((error: unknown) => {
-        if (error instanceof LiveValidatorFailure)
-          logValidatorFailure(input.document, input.candidate, error.errorClass);
-        throw error;
-      });
+      ).then(
+        (answer) => {
+          if (answer.kind === "retry" || !("timing" in answer)) return answer;
+          const { timing: steps, ...verdict } = answer;
+          if (timing && steps) {
+            const replayMs = steps.replayMs ?? 0,
+              projectionMs = steps.projectionMs ?? 0;
+            timing.hopMs += performance.now() - sentAt - steps.workerMs;
+            timing.replayMs += replayMs;
+            timing.projectionMs += projectionMs;
+            timing.workerOtherMs += steps.workerMs - replayMs - projectionMs;
+          }
+          return verdict as LiveJournalValidation;
+        },
+        (error: unknown) => {
+          if (error instanceof LiveValidatorFailure)
+            logValidatorFailure(input.document, input.candidate, error.errorClass);
+          throw error;
+        },
+      );
+    };
     return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
   /**

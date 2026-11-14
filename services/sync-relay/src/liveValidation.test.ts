@@ -59,10 +59,15 @@ it("runs the same validator without detaching input", async () => {
     expected = createLiveMarkdownJournalValidator(policy)(input);
   expect(expected.kind).toBe("accepted");
   const original = input.checkpoint.slice();
-  const pending = validate(input);
+  const timing = { hopMs: 0, replayMs: 0, projectionMs: 0, workerOtherMs: 0 };
+  const pending = validate(input, undefined, timing);
   if (expected.kind !== "accepted") throw Error("Expected accepted validation");
   const { stateUpdate: _stateUpdate, ...evidence } = expected.evidence;
+  // The worker's own times reach the caller's timing and never the verdict.
   expect(await pending).toEqual({ kind: "accepted", evidence });
+  expect(timing.replayMs).toBeGreaterThan(0);
+  expect(timing.projectionMs).toBeGreaterThan(0);
+  for (const ms of Object.values(timing)) expect(Number.isFinite(ms)).toBe(true);
   expect(input.checkpoint).toEqual(original);
   expect(await validate({ ...input, candidate: Uint8Array.of(255) })).toEqual(
     createLiveMarkdownJournalValidator(policy)({ ...input, candidate: Uint8Array.of(255) }),

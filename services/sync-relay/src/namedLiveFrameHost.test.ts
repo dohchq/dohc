@@ -634,34 +634,51 @@ it("logs a slow or unsuccessful submission with cut ids, timings and a fixed wor
     reason: "capacity-refused",
   });
   const object = binding.objectId.slice(0, 8);
+  // The clock stands still inside each step, so every step's time is 0; no loop sampler runs here.
+  const steps = {
+    checkMs: 0,
+    waitMs: 0,
+    queryMs: 0,
+    verifyMs: 0,
+    copyMs: 0,
+    hopMs: 0,
+    replayMs: 0,
+    projectionMs: 0,
+    workerOtherMs: 0,
+    freshMs: 0,
+    loopMaxMs: null,
+    loopHeldMs: null,
+  };
+  const refused = {
+    submitter: "named",
+    object,
+    ...steps,
+    commitMs: null,
+    drainMs: null,
+    attempts: 0,
+    rows: null,
+    suffixBytes: null,
+    checkpointBytes: null,
+    result: "capacity-refused",
+  };
   expect(log.mock.calls).toEqual([
     [
       "Live submit answered.",
-      { submitter: "named", object, checkMs: 0, commitMs: 0, drainMs: 600, result: "success" },
-    ],
-    [
-      "Live submit answered.",
       {
         submitter: "named",
         object,
-        checkMs: 0,
-        commitMs: null,
-        drainMs: null,
-        result: "capacity-refused",
+        ...steps,
+        commitMs: 0,
+        drainMs: 600,
+        attempts: 1,
+        rows: 0,
+        suffixBytes: 0,
+        checkpointBytes: 2,
+        result: "success",
       },
     ],
-    [
-      "Live submit answered.",
-      {
-        submitter: "named",
-        object,
-        checkMs: 0,
-        commitMs: null,
-        drainMs: null,
-        result: "capacity-refused",
-        repeated: 2,
-      },
-    ],
+    ["Live submit answered.", refused],
+    ["Live submit answered.", { ...refused, repeated: 2 }],
   ]);
   const shown = JSON.stringify(log.mock.calls);
   // No part of a delivery id, which the client chooses, reaches the log.

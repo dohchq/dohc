@@ -32,6 +32,7 @@ import type { StopRestoreLookup } from "./storage/liveRestoreOperation";
 import type { LiveRestorePreparation } from "./liveRestorePreparation";
 import { LiveHostRegistrations } from "./liveHostRegistration";
 import type { ServiceSeedDelivery } from "./serviceOwnerTransport";
+import { asRelayWrite } from "./relayMainThreadTiming.js";
 
 type OwnerDeliveryOutcome = CommittedDeliveryOutcome & { continueDrain: boolean };
 // The host settled but its file write has not landed. The pass waits for the next wake instead of draining on.
@@ -287,7 +288,9 @@ export class OwnerCommittedDelivery {
           check();
           latest.assertCurrent();
           if (ack) {
-            this.#store.acknowledgeOwnerDeliveryApplication(latest, ack);
+            asRelayWrite("drain-acknowledge", () =>
+              this.#store.acknowledgeOwnerDeliveryApplication(latest, ack),
+            );
             progress = this.#store.ownerDeliveryProgress(latest);
           }
         }
@@ -427,7 +430,9 @@ export class OwnerCommittedDelivery {
             break;
           }
           if (result.status !== "applied") throw new Error("Owner application did not commit.");
-          this.#store.acknowledgeOwnerDeliveryApplication(latest, result.ack);
+          asRelayWrite("drain-acknowledge", () =>
+            this.#store.acknowledgeOwnerDeliveryApplication(latest, result.ack),
+          );
           progress = this.#store.ownerDeliveryProgress(latest);
           appliedCount++;
           settledSinceApply = false;

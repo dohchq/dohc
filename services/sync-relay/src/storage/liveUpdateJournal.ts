@@ -71,6 +71,7 @@ import type {
   LiveHostConnectionCoordinate,
   LiveUpdateJournalCut,
   LiveUpdateJournalCutResult,
+  JournalCutReadTiming,
   LiveUpdateJournalCommitInput,
   RelayLiveUpdateJournalResult,
   CommittedLiveUpdateResult,
@@ -1453,7 +1454,9 @@ export function readLiveUpdateJournalCut(
   storage: StorageContext,
   input: { document: LiveDocumentKey },
   reserveBytes?: (size: number) => void,
+  timing?: JournalCutReadTiming,
 ): LiveUpdateJournalCutResult {
+  const startedAt = timing ? performance.now() : 0;
   const outer = baselineRecord(input, ["document"]),
     document = journalDocument(outer.document);
   let current: (() => boolean) | undefined;
@@ -1478,9 +1481,14 @@ export function readLiveUpdateJournalCut(
     if (read.kind === "cut") current = captureSqliteReadRevisionMatches(storage.db);
     return read;
   });
+  const readAt = timing ? performance.now() : 0;
+  if (timing) timing.queryMs += readAt - startedAt;
   if (result.kind === "cut") {
     verifyJournalCut(result.cut);
+    const verifiedAt = timing ? performance.now() : 0;
+    if (timing) timing.verifyMs += verifiedAt - readAt;
     const cut = structuredClone(result.cut);
+    if (timing) timing.copyMs += performance.now() - verifiedAt;
     issuedJournalCuts.set(cut, { storage, cut: result.cut, current: current! });
     return { kind: "cut", cut };
   }

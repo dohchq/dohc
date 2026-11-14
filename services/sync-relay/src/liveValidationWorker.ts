@@ -1,5 +1,8 @@
 import { createLiveMarkdownRegistrationValidator } from "@dohc/ydoc-projection/live-journal-validation";
-import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
+import {
+  createLiveMarkdownJournalValidator,
+  type LiveMarkdownJournalTiming,
+} from "@dohc/ydoc-projection/live-journal-validation";
 import type { LiveValidationWork } from "./liveValidation.js";
 import { liveJournalCheckpointDue } from "./storage/liveJournalCheckpoint.js";
 import { validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
@@ -33,10 +36,12 @@ process.on("message", (message) => {
     return;
   }
   const { policy, input } = work;
+  const startedAt = performance.now();
+  const steps: LiveMarkdownJournalTiming = {};
   const { retainStateUpdate, ...projectionInput } = input;
   let result: ReturnType<ReturnType<typeof createLiveMarkdownJournalValidator>>;
   try {
-    result = createLiveMarkdownJournalValidator(policy)(projectionInput);
+    result = createLiveMarkdownJournalValidator(policy, false, steps)(projectionInput);
   } catch (error) {
     // A validator failure is no verdict on the edit: the relay tries it again and names the failure.
     send({ kind: "failed", errorClass: error instanceof Error ? error.name : typeof error });
@@ -53,8 +58,12 @@ process.on("message", (message) => {
     // Do not invoke the stateUpdate getter or clone its bytes before a checkpoint is due.
     const evidence: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(result.evidence);
     delete evidence.stateUpdate;
-    send({ kind: result.kind, evidence: Object.defineProperties({}, evidence) });
+    send({ kind: result.kind, evidence: Object.defineProperties({}, evidence), timing: timing() });
   } else {
-    send(result);
+    send({ ...result, timing: timing() });
+  }
+  // The parent takes these off the answer for its timing line; they are not part of the verdict.
+  function timing() {
+    return { ...steps, workerMs: performance.now() - startedAt };
   }
 });
