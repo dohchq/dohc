@@ -33,6 +33,7 @@ const line = (more: Partial<AgentThreadLine> = {}): AgentThreadLine => ({
   agentId: "nova",
   chatThreadId: "thread-1",
   forwardedAtMs: 0,
+  questionId: null,
   state: "working",
   sinceMs: NOW - 4_000,
   ...more,
@@ -149,6 +150,23 @@ it.each([
   const status = screen.getByRole("status");
   expect(within(status).getByText(words)).toBeTruthy();
   expect(within(status).getByText("Nova")).toBeTruthy();
+});
+
+it("offers Answer here only while the thread waits on a question", () => {
+  const { push } = stubDesktop();
+  render(chat());
+  const buttons = () => screen.getAllByRole("button").map((button) => button.textContent);
+
+  // An approval, say, is answered in the tool.
+  push([line({ state: "waiting-in-tool" })]);
+  expect(buttons()).toEqual(["Open in T3 Code"]);
+
+  push([line({ state: "waiting-in-tool", questionId: "question-1" })]);
+  expect(buttons()).toEqual(["Answer here", "Open in T3 Code"]);
+  expect(within(screen.getByRole("status")).getByText("Waiting for you in T3 Code")).toBeTruthy();
+
+  push([line({ state: "working" })]);
+  expect(buttons()).toEqual(["Open in T3 Code"]);
 });
 
 it("shows nothing for another workspace's lines", async () => {

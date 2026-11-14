@@ -62,6 +62,7 @@ function setup(
       working: true,
       activeRunId: null,
       waitingOnPerson: false,
+      questionId: null,
       closed: false,
       runs: [],
     },
@@ -337,6 +338,7 @@ describe("agent threads", () => {
           state: "working",
           sinceMs: 9_000,
           forwardedAtMs: 9_000,
+          questionId: null,
         },
       ]),
     );

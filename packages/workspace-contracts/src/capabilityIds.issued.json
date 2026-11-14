@@ -13,6 +13,8 @@
   "agent.thread.connect",
   "agent.thread.lines.read",
   "agent.thread.open",
+  "agent.thread.question.answer",
+  "agent.thread.question.read",
   "agent.thread.t3code.allow",
   "agent.thread.t3code.list",
   "agent.thread.t3code.read",

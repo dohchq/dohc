@@ -1,4 +1,4 @@
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Reply } from "lucide-react";
 import {
   createContext,
   useCallback,
@@ -10,6 +10,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import type { AgentThreadLine } from "../../ipc/bridgeContract";
 import { withErrorWords } from "../../ipc/errorWords";
 import {
@@ -23,6 +24,7 @@ import type { ReportShellFailure } from "../shell/useShellError";
 import { formatRunDuration } from "../time";
 import { SecondaryButton } from "../ui/controls";
 import { agentChatIdentity } from "./agentChat";
+import { AgentThreadAnswerDialog } from "./AgentThreadAnswerDialog";
 import { ChatAvatar, useAgentInk } from "./ChatAvatar";
 import { WorkingDots } from "./ChatThreadPanel";
 
@@ -155,7 +157,15 @@ export function AgentThreadLines(props: {
 }) {
   const shown = useContext(AgentThreadLinesContext);
   if (!shown || shown.workspaceId !== props.workspaceId) return null;
-  return <Lines shown={shown} chatThreadIds={props.chatThreadIds} className={props.className} />;
+  // A window that changes workspaces starts over, which closes an open question.
+  return (
+    <Lines
+      key={shown.workspaceId}
+      shown={shown}
+      chatThreadIds={props.chatThreadIds}
+      className={props.className}
+    />
+  );
 }
 
 function Lines(props: {
@@ -177,13 +187,48 @@ function Lines(props: {
       }),
     [all, chatThreadIds, shown.agents],
   );
-  if (rows.length === 0) return null;
+  // The question the person is answering here. Only its id is held: the
+  // dialog reads the question and keeps it and the answer to itself. It stays
+  // open when its line goes, so it can say what became of the question.
+  const [answering, setAnswering] = useState<{
+    agent: AgentWithThread;
+    questionId: string;
+  } | null>(null);
   return (
-    <div data-testid="agent-thread-lines" className={`flex flex-col ${props.className ?? ""}`}>
-      {rows.map(({ agent, line }) => (
-        <Line key={agent.id} agent={agent} line={line} onOpen={shown.open} />
-      ))}
-    </div>
+    <>
+      {rows.length === 0 ? null : (
+        <div data-testid="agent-thread-lines" className={`flex flex-col ${props.className ?? ""}`}>
+          {rows.map(({ agent, line }) => (
+            <Line
+              key={agent.id}
+              agent={agent}
+              line={line}
+              onOpen={shown.open}
+              onAnswer={(questionId) => setAnswering({ agent, questionId })}
+            />
+          ))}
+        </div>
+      )}
+      {answering
+        ? // On the page's body, as the chat's other dialogs are, so no pane clips it.
+          createPortal(
+            <AgentThreadAnswerDialog
+              workspaceId={shown.workspaceId}
+              agentId={answering.agent.id}
+              agentName={answering.agent.name}
+              tool={TOOL_NAMES[answering.agent.thread.tool]}
+              requestId={answering.questionId}
+              asked={all.some(
+                (line) =>
+                  line.agentId === answering.agent.id && line.questionId === answering.questionId,
+              )}
+              onOpenInTool={() => shown.open(answering.agent)}
+              onClose={() => setAnswering(null)}
+            />,
+            document.body,
+          )
+        : null}
+    </>
   );
 }
 
@@ -191,8 +236,11 @@ function Line(props: {
   agent: AgentWithThread;
   line: AgentThreadLine;
   onOpen: (agent: AgentWithThread) => void;
+  onAnswer: (questionId: string) => void;
 }) {
   const { agent, line } = props;
+  // Only a question can be answered here. An approval stays in the tool.
+  const questionId = line.state === "waiting-in-tool" ? line.questionId : null;
   const { presentation } = agentChatIdentity({ agentId: agent.id, name: agent.name }, [agent]);
   const ink = useAgentInk(presentation);
   const tool = TOOL_NAMES[agent.thread.tool];
@@ -216,6 +264,16 @@ function Line(props: {
         {line.state === "working" ? <WorkingDots presentation={presentation} /> : null}
         <Elapsed key={line.sinceMs} sinceMs={line.sinceMs} />
       </span>
+      {questionId === null ? null : (
+        <SecondaryButton
+          size="row"
+          data-testid="agent-thread-answer"
+          onClick={() => props.onAnswer(questionId)}
+        >
+          <Reply size={12} aria-hidden />
+          Answer here
+        </SecondaryButton>
+      )}
       <SecondaryButton
         size="row"
         data-testid="agent-thread-open"

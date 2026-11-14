@@ -28,6 +28,10 @@ export type T3CodeProblem =
   | "thread-gone"
   /** T3 Code has no run with this id in the thread. */
   | "run-gone"
+  /** Someone already answered the question, in T3 Code or in dohc. */
+  | "question-answered"
+  /** The question no longer waits for an answer. */
+  | "question-closed"
   /** T3 Code refused the call for another reason. */
   | "refused"
   /** T3 Code answered in a shape dohc does not know. */
@@ -498,6 +502,21 @@ export async function openT3CodeSession(input: {
         // T3 Code's words for a thread it no longer has.
         if (words && /thread_not_found|is no longer available/u.test(words))
           throw new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
+        // T3 Code's words for a question that takes no answer. They are read
+        // whole: the words that tell follow a request id of any length.
+        if (words && tool === "t3_pending_request") {
+          if (/already answered|Runtime request \S+ is resolved/u.test(words))
+            throw new T3CodeError("question-answered", "This question was already answered.");
+          if (
+            /no longer pending|pending user-input request was not found|Runtime request \S+ (?:was not found|is \w+)/u.test(
+              words,
+            )
+          )
+            throw new T3CodeError(
+              "question-closed",
+              "This question no longer waits for an answer.",
+            );
+        }
         // T3 Code's own words reach Notices, so they are kept short.
         throw new T3CodeError("refused", words?.slice(0, 300) ?? "T3 Code refused the call.");
       }
@@ -650,8 +669,16 @@ export interface T3CodeThreadState {
   working: boolean;
   /** The run that is going now. It may be older than every run in `runs`. */
   activeRunId: string | null;
-  /** Something waits on the person in T3 Code: a question or an approval. */
+  /** Something waits on the person in T3 Code: a question, an approval, or another request. */
   waitingOnPerson: boolean;
+  /**
+   * The thread's question that waits on the person, by T3 Code's id for it,
+   * when questions are all that wait there. Null when nothing waits, and
+   * when anything else waits too, such as an approval. T3 Code does not say
+   * which of a thread's runs asked a question, so this is the thread's
+   * question, and may come from earlier work than the run dohc follows.
+   */
+  questionId: string | null;
   /** The thread was archived or settled, so it takes no more work. */
   closed: boolean;
   /** The thread's newest runs, newest first, as many as T3 Code gives at once. */
@@ -726,6 +753,146 @@ export async function readT3CodeRun(
   }
 }
 
+/** One question an agent asks the person in T3 Code's own question box. */
+export interface T3CodeQuestion {
+  id: string;
+  header: string;
+  question: string;
+  /** The choices T3 Code offers. `value` is what an answer carries for one. */
+  options: Array<{ label: string; description: string; value: string }>;
+  multiSelect: boolean;
+  /** The person may write an answer of their own. */
+  allowCustomAnswer: boolean;
+  required: boolean;
+}
+
+/** A question box: one request, with the questions it asks together. */
+export type T3CodeQuestionBox =
+  | { status: "open"; requestId: string; questions: T3CodeQuestion[] }
+  // Someone answered it, in T3 Code or in dohc.
+  | { status: "already-answered" }
+  // It no longer waits for an answer: its work ended, or T3 Code withdrew it.
+  | { status: "closed" };
+
+/** What the person answers, by question id: their own text, or the values of the options they picked. */
+export type T3CodeAnswers = Record<string, string | string[]>;
+
+// The limits of what dohc shows from a question box. A box past them is one
+// the person answers in T3 Code.
+const MAX_ID_CHARS = 512;
+const MAX_BOX_CHARS = 200_000;
+const QuestionIds = z.object({ requestIds: z.array(z.string().min(1)) });
+const QuestionRead = z.object({
+  requestId: z.string().min(1).max(MAX_ID_CHARS),
+  questions: z
+    .array(
+      z.object({
+        // Some providers name a question by its own words, so its id may be as
+        // long. The answers travel as a record keyed by this id, and a record
+        // cannot carry the key "__proto__", so a box with that id is not shown.
+        id: z
+          .string()
+          .min(1)
+          .max(20_000)
+          .refine((id) => id !== "__proto__"),
+        header: z.string().max(500),
+        question: z.string().max(20_000),
+        options: z
+          .array(
+            z.object({
+              label: z.string().max(2_000),
+              description: z.string().max(10_000),
+              value: z.string().max(2_000).optional(),
+            }),
+          )
+          .max(50),
+        multiSelect: z.boolean().optional(),
+        allowCustomAnswer: z.boolean().optional(),
+        required: z.boolean().optional(),
+      }),
+    )
+    .min(1)
+    .max(20),
+});
+
+// A question that no longer takes an answer. T3 Code refuses a read and an
+// answer the same way.
+function closedQuestion(error: unknown): "already-answered" | "closed" | null {
+  if (!(error instanceof T3CodeError)) return null;
+  if (error.problem === "question-answered") return "already-answered";
+  return error.problem === "question-closed" ? "closed" : null;
+}
+
+/** T3 Code's ids for the questions that wait on the person in a thread. */
+async function listT3CodeQuestions(session: T3CodeSession, threadId: string): Promise<string[]> {
+  try {
+    return shaped(
+      QuestionIds,
+      await session.call("t3_pending_request", { action: "list", threadId }),
+    ).requestIds;
+  } catch (error) {
+    // A T3 Code that refuses to list questions still says what the thread is doing.
+    if (error instanceof T3CodeError && error.problem === "refused") return [];
+    throw error;
+  }
+}
+
+/** The question box that waits on the person in a thread. dohc keeps no copy of it. */
+export async function readT3CodeQuestion(
+  session: T3CodeSession,
+  input: { threadId: string; requestId: string },
+): Promise<T3CodeQuestionBox> {
+  try {
+    const answer = await session.call("t3_pending_request", { action: "read", ...input });
+    // A box too large to lay out at once is one the person answers in T3 Code.
+    if (JSON.stringify(answer ?? null).length > MAX_BOX_CHARS)
+      throw new T3CodeError("unexpected", "This question is too long for dohc to show.");
+    const box = shaped(QuestionRead, answer);
+    return {
+      status: "open",
+      requestId: box.requestId,
+      questions: box.questions.map((question) => ({
+        id: question.id,
+        header: question.header,
+        question: question.question,
+        options: question.options.map((option) => ({
+          label: option.label,
+          description: option.description,
+          value: option.value ?? option.label,
+        })),
+        multiSelect: question.multiSelect === true,
+        // T3 Code takes the person's own text unless the question says not to,
+        // and wants an answer unless the question says it may go without.
+        allowCustomAnswer: question.allowCustomAnswer !== false,
+        required: question.required !== false,
+      })),
+    };
+  } catch (error) {
+    const status = closedQuestion(error);
+    if (status === null) throw error;
+    return { status };
+  }
+}
+
+/**
+ * Answers a thread's question box. T3 Code lets this call answer a question
+ * and never an approval. The first answer wins: one that comes second, from
+ * here or from T3 Code, is told so.
+ */
+export async function answerT3CodeQuestion(
+  session: T3CodeSession,
+  input: { threadId: string; requestId: string; answers: T3CodeAnswers },
+): Promise<"answered" | "already-answered" | "closed"> {
+  try {
+    await session.call("t3_pending_request", { action: "respond", ...input });
+    return "answered";
+  } catch (error) {
+    const status = closedQuestion(error);
+    if (status === null) throw error;
+    return status;
+  }
+}
+
 /** What a thread is doing now. */
 export async function readT3CodeThread(
   session: T3CodeSession,
@@ -741,11 +908,25 @@ export async function readT3CodeThread(
       runLimit: RUNS_READ,
     }),
   );
+  // T3 Code counts every request that waits on the person together. Only its
+  // list of questions tells a question from an approval. A question is given
+  // only when every request that waits is one: beside an approval, an answer
+  // here would leave the thread waiting, on something the chat cannot show.
+  const questions =
+    thread.pendingRequestCount > 0 ? await listT3CodeQuestions(session, threadId) : [];
+  const first = questions[0];
+  const questionId =
+    first !== undefined &&
+    questions.length === thread.pendingRequestCount &&
+    first.length <= MAX_ID_CHARS
+      ? first
+      : null;
   return {
     title: thread.title,
     working: thread.activeRunId !== null,
     activeRunId: thread.activeRunId,
     waitingOnPerson: thread.pendingRequestCount > 0,
+    questionId,
     closed: thread.archived || thread.settled,
     runs: recentRuns.map((run) => ({
       id: run.runId,

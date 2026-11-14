@@ -8187,7 +8187,7 @@ export const AgentThreadLine = z.strictObject({
   agentId: z.string().min(1),
   chatThreadId: z.string().min(1),
   // in-line: the tool took the message and other work is ahead of it.
-  // waiting-in-tool: the thread's own question or approval is open there.
+  // waiting-in-tool: something waits on the person there, such as the thread's own question or an approval.
   // silent: its work ended, dohc reminded it once, and it posted nothing.
   state: z.enum(["in-line", "working", "waiting-in-tool", "silent"]),
   // When this state began.
@@ -8195,8 +8195,53 @@ export const AgentThreadLine = z.strictObject({
   // When the message went to the thread. A chat that shows several chat
   // threads shows the line of the newest.
   forwardedAtMs: z.number(),
+  // The tool's id for the question the thread waits on, when it waits on a
+  // question. The question itself travels only when the person asks to answer it.
+  questionId: z.string().min(1).max(512).nullable(),
 });
 export type AgentThreadLine = z.infer<typeof AgentThreadLine>;
+// A question an agent asks the person in its tool's own question box.
+export const AgentThreadQuestion = z.strictObject({
+  // Some tools name a question by its own words.
+  id: z.string().min(1).max(20_000),
+  header: z.string(),
+  question: z.string(),
+  // What an answer carries for an option is its value.
+  options: z.array(
+    z.strictObject({ label: z.string(), description: z.string(), value: z.string() }),
+  ),
+  multiSelect: z.boolean(),
+  // The person may write an answer of their own.
+  allowCustomAnswer: z.boolean(),
+  required: z.boolean(),
+});
+export type AgentThreadQuestion = z.infer<typeof AgentThreadQuestion>;
+export const AgentThreadQuestionBox = z.discriminatedUnion("status", [
+  z.strictObject({
+    status: z.literal("open"),
+    requestId: z.string().min(1).max(512),
+    questions: z.array(AgentThreadQuestion),
+  }),
+  // Someone answered it first, in the tool or here.
+  z.strictObject({ status: z.literal("already-answered") }),
+  // It no longer waits for an answer.
+  z.strictObject({ status: z.literal("closed") }),
+]);
+export type AgentThreadQuestionBox = z.infer<typeof AgentThreadQuestionBox>;
+// Answers by question id: the person's own text, or the values of the options they picked.
+export const AgentThreadAnswers = z
+  .record(
+    z.string().min(1).max(20_000),
+    // Every option of the largest question dohc shows, and the person's own text.
+    z.union([z.string().max(20_000), z.array(z.string().max(2_000)).max(51)]),
+  )
+  .refine((answers) => Object.keys(answers).length <= 20);
+export type AgentThreadAnswers = z.infer<typeof AgentThreadAnswers>;
+const AgentThreadQuestionTarget = {
+  workspaceId: z.string().min(1),
+  agentId: AgentId,
+  requestId: z.string().min(1).max(512),
+};
 export const AgentThreadLinesEvent = z.strictObject({
   workspaceId: z.string().min(1),
   revision: z.number().int().nonnegative(),
@@ -8267,6 +8312,28 @@ export const agentThreadOperations = {
     payload: z.strictObject({ workspaceId: z.string().min(1), agentId: AgentId }),
     guard: "active-workspace",
     inactiveMessage: "The thread was not opened because this window changed workspaces.",
+  },
+  // Reads the question the agent's thread waits on. Main finds the thread from
+  // the agent's saved settings, and keeps no copy of the question.
+  readAgentThreadQuestion: {
+    capabilityId: "agent.thread.question.read",
+    scope: "workspace",
+    channel: "desktop:read-agent-thread-question",
+    payload: z.strictObject(AgentThreadQuestionTarget),
+    result: AgentThreadQuestionBox,
+    guard: "active-workspace",
+    inactiveMessage: "The question was not read because this window changed workspaces.",
+  },
+  // Sends the person's answer to the agent's thread. The tool takes the first
+  // answer, so one that comes second is told so.
+  answerAgentThreadQuestion: {
+    capabilityId: "agent.thread.question.answer",
+    scope: "workspace",
+    channel: "desktop:answer-agent-thread-question",
+    payload: z.strictObject({ ...AgentThreadQuestionTarget, answers: AgentThreadAnswers }),
+    result: z.strictObject({ status: z.enum(["answered", "already-answered", "closed"]) }),
+    guard: "active-workspace",
+    inactiveMessage: "The answer was not sent because this window changed workspaces.",
   },
   // Readies a thread to serve this workspace as an agent, before the agent is
   // saved as on: sets aside what the agent has unread, then tells the thread

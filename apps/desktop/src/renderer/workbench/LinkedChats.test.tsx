@@ -331,6 +331,7 @@ it("shows what an agent's thread is doing over the composer of a file's chat", a
         {
           agentId: "nova",
           chatThreadId: "thread-9",
+          questionId: null,
           state: "silent",
           sinceMs: 1,
           forwardedAtMs: 1,
