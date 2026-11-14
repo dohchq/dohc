@@ -3467,17 +3467,41 @@ async fn stop_leaves_the_note_as_each_edit_in_turn_would() {
     supervisor.close_all().unwrap();
 }
 
+const RELEASED_RECORD: &str = "rec_00000000000000000000000000";
+
+fn observed_record_release_fixture() -> Fixture {
+    let mut f = observed_release_fixture();
+    f.store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]')",[]).unwrap();
+        tx.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state) VALUES ('workspace','main',?1,'notes','notes/owner.md','object','adopted')",[RELEASED_RECORD]).unwrap();
+        Ok::<_, dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    f
+}
+
+// Times a Collection record's release, which keeps one History row per edit.
+#[tokio::test]
+#[ignore = "manual release timing for a Collection record"]
+async fn measure_stop_release_of_a_collection_record() {
+    for count in [1_000, 10_000] {
+        let f = observed_record_release_fixture();
+        let updates = (0..count)
+            .map(|index| {
+                f.doc
+                    .frontmatter_set("status", &format!("Step {index}"))
+                    .unwrap()
+            })
+            .collect();
+        measure_release(f, updates, "record-fields", 0).await;
+    }
+}
+
 // A Collection record's edits keep one History row each, so its field history
 // records every value the record held, not only the first and the last.
 #[tokio::test]
 async fn stop_records_each_edit_of_a_collection_record_apart() {
-    let record = "rec_00000000000000000000000000";
-    let mut f = observed_release_fixture();
-    f.store.write_with(&NoFaults, |tx| {
-        tx.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]')",[]).unwrap();
-        tx.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state) VALUES ('workspace','main',?1,'notes','notes/owner.md','object','adopted')",[record]).unwrap();
-        Ok::<_, dohc_engine_storage::StorageError>(())
-    }).unwrap();
+    let record = RELEASED_RECORD;
+    let f = observed_record_release_fixture();
     let before = record_history(&f.store, record);
     let updates = ["To do", "Doing", "Done"]
         .map(|status| f.doc.frontmatter_set("status", status).unwrap())
