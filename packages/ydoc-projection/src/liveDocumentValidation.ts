@@ -18,7 +18,7 @@ import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
-  isShellType,
+  isEmptyShell,
   yDocToMarkdown,
 } from "./import-export.js";
 import {
@@ -855,11 +855,16 @@ function bodyFingerprint(
   for (const child of body.toArray()) {
     const fingerprint = xmlFingerprint(child, depth, budget);
     if (permitsText && fingerprint.kind === "text" && fingerprint.delta.length === 0) continue;
-    // A reading leaves out an empty shell (isEmptyShell), so the comparison does too.
+    // A reading leaves out an empty shell, so the comparison does too. A shell carrying an
+    // attribute the schema doesn't know would hide it, so that one is still compared and refused.
     if (
       fingerprint.kind === "element" &&
       fingerprint.children.length === 0 &&
-      isShellType(fingerprint.nodeName)
+      child instanceof Y.XmlElement &&
+      isEmptyShell(child) &&
+      fingerprint.attributes.every(([key]) =>
+        Object.hasOwn(schema.nodes[child.nodeName]!.spec.attrs ?? {}, key),
+      )
     )
       continue;
     children.push(fingerprint);

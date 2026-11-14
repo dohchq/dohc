@@ -893,21 +893,24 @@ export function getDohcProseMirrorSchema() {
 // Once empty, a list or item shows none of its attributes (a tick, a start number), so leaving
 // it out hides nothing. Other blocks the schema refuses empty stay refused: a callout's title
 // is text the Markdown file would keep.
-const SHELL_TYPES = new Set(["bulletList", "orderedList", "taskList", "listItem", "taskItem"]);
-
-/** Whether this element may be left out when empty, as a list or list item. */
-export function isShellType(nodeName: string): boolean {
-  return SHELL_TYPES.has(nodeName);
-}
+const SHELL_LISTS = new Set(["bulletList", "orderedList", "taskList"]);
+const SHELL_ITEMS = new Set(["listItem", "taskItem"]);
 
 /**
  * Two edits can merge into a list or item with nothing in it. The schema can't hold it, so no
- * reader shows it, and a reading leaves it out instead of refusing the document.
+ * reader shows it, and a reading leaves it out instead of refusing the document. An item that
+ * holds an empty list isn't one: the Markdown file would still keep its marker.
  */
 export function isEmptyShell(element: Y.XmlElement): boolean {
+  if (SHELL_ITEMS.has(element.nodeName)) return element.length === 0;
   return (
-    isShellType(element.nodeName) &&
-    element.toArray().every((child) => child instanceof Y.XmlElement && isEmptyShell(child))
+    SHELL_LISTS.has(element.nodeName) &&
+    element
+      .toArray()
+      .every(
+        (child) =>
+          child instanceof Y.XmlElement && SHELL_ITEMS.has(child.nodeName) && child.length === 0,
+      )
   );
 }
 

@@ -430,6 +430,22 @@ describe("public Markdown schema", () => {
         doc.getXmlFragment("body").insert(1, [list]);
       }),
     );
+    // A to-do holding an empty list keeps its box in the Markdown file, and an unknown
+    // attribute on an empty to-do would hide its text.
+    refused(
+      encode("- [ ] alpha\n- [x] ticked\n\nbravo", (doc) => {
+        const ticked = (doc.getXmlFragment("body").get(0) as Y.XmlElement).get(1) as Y.XmlElement;
+        ticked.delete(0, ticked.length);
+        ticked.insert(0, [new Y.XmlElement("taskList")]);
+      }),
+    );
+    refused(
+      encode("- [ ] alpha\n\nbravo", (doc) => {
+        const hidden = new Y.XmlElement("taskItem");
+        hidden.setAttribute("x-hidden", "secret");
+        (doc.getXmlFragment("body").get(0) as Y.XmlElement).insert(1, [hidden]);
+      }),
+    );
     // An empty callout still has a title the Markdown file would keep.
     refused(
       encode("- [ ] alpha\n\nbravo", (doc) => {
