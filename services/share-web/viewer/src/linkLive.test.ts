@@ -360,6 +360,8 @@ it.each([
   // Another person's edit lands after the page showed the note. A press past the age limit must not type on the copy
   // from before it.
   { press: SHOWN_STATE_FRESH_MS + 1, typesOn: "Shared text, edited", asks: 2 },
+  // The clock was set back after the page showed the note, so the copy's real age is unknown.
+  { press: -1, typesOn: "Shared text, edited", asks: 2 },
 ])(
   "takes the state fetched when the note was shown only while it is young ($press ms)",
   async ({ press, typesOn, asks }) => {

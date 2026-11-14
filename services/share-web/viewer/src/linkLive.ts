@@ -85,10 +85,9 @@ export function showLinkDocument(discriminator: string, path: string) {
 
 function takeShown(discriminator: string, path: string, signal: AbortSignal) {
   const taken = shown;
-  if (
-    taken?.key !== shownKey(discriminator, path) ||
-    Date.now() - taken.startedAt > SHOWN_STATE_FRESH_MS
-  ) {
+  // A clock set back since the request left gives no age the page can trust.
+  const age = taken ? Date.now() - taken.startedAt : -1;
+  if (taken?.key !== shownKey(discriminator, path) || age < 0 || age > SHOWN_STATE_FRESH_MS) {
     dropShown();
     return undefined;
   }
