@@ -5098,7 +5098,8 @@ for (const c of [
         ]),
       );
       for (let pass = 0; pass < 3; pass++) {
-        await o.nextPull();
+        // A document that backs off does not keep its workspace pulling, so this waits on passes.
+        await o.nextPass();
         expect(
           o.host.isDocumentReady(o.document),
           "The returned document must stay inactive after its text changed.",
@@ -5653,7 +5654,8 @@ for (const c of [
         ).toContainEqual(["Service activation pass failed.", `ServerLogError: ${refusal}`]),
       );
       for (let pass = 0; pass < 3; pass++) {
-        await o.nextPull();
+        // A document that backs off does not keep its workspace pulling, so this waits on passes.
+        await o.nextPass();
         expect(
           o.host.isDocumentReady(o.document),
           "The document must stay inactive while its saved text needs attention.",
@@ -6964,6 +6966,16 @@ it("pushes a live document's settled edit on the next pass while another documen
 it("retries an activation that keeps running past its pass deadline only after each back-off", async () => {
   const paced = pacedPasses(),
     o = await emptyServiceHost({ paced, limits: { passDeadlineMs: 50 } as DrainLimits });
+  // Enrolled, the note gives its workspace a hosted scope, so a quiet workspace does not pull every pass.
+  o.f.storage.ensureOwnedLiveDocument({
+    intent: "share",
+    workspaceId: "workspace",
+    ownerUserId: "owner",
+    shareId: "share",
+    path: o.sibling.path,
+    nowMs: 10,
+    guard() {},
+  });
   // The back-off reads the wall clock, which moves with the host's clock here.
   const startedAt = Date.now();
   vi.spyOn(Date, "now").mockImplementation(() => startedAt + paced.clock.nowMs());
