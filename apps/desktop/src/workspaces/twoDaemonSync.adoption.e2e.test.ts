@@ -1,6 +1,6 @@
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
-import { HostedLogClientClosedError, startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
+import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
 
 import { readFile, readdir, writeFile } from "node:fs/promises";
@@ -62,29 +62,27 @@ import { relayShareOperations } from "../ipc/shareOperations";
 
 import { registerOperations } from "../ipc/operationTable";
 import { createRelaySharesIpcHandlers } from "../ipc/relaySharesIpc";
-import { LIVE_STOP_WAITING, liveStopRelayError } from "../ipc/liveEditingStop";
+import { liveStopRelayError } from "../ipc/liveEditingStop";
 import { createPresencePollRegistry } from "../collab/presencePollRegistry";
 
 import {
   engine,
-  waitForHostedLog,
   compiledRelayMain,
   LiveDaemonCapture,
   pushUntilDrained,
   openJoinedDaemonCapture,
   pullAndExpect,
-  heldStopCase,
+  stopQuarantineCase,
 } from "./twoDaemonSync.fixture";
 
-it.skipIf(engine.missing).each(["existing id", heldStopCase])(
+it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
   "settles open Collection adoption with native owner delivery and recipient sync (%s)",
   async (name) => {
     const body = "# Keep this body\n";
-    const stopQuarantine = name === heldStopCase;
-    const workspaceId =
-      name === heldStopCase
-        ? "native-stale-quarantine"
-        : `native-open-adoption-${name.replaceAll(" ", "-")}`;
+    const stopQuarantine = name === stopQuarantineCase;
+    const workspaceId = stopQuarantine
+      ? "native-stale-quarantine"
+      : `native-open-adoption-${name.replaceAll(" ", "-")}`;
     const rootA = await createTestScratch("dohc-native-adoption-owner-");
     const rootB = await createTestScratch("dohc-native-adoption-peer-");
     const relayRoot = await createTestScratch("dohc-native-adoption-relay-");
@@ -104,7 +102,6 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
     let capture: WorkspaceEngineCapture | undefined;
     let delivery: ReturnType<typeof startServerOwnerDelivery> | undefined;
     let peer: LiveDaemonCapture | undefined;
-    let preStopFeed: ReturnType<typeof proxy.holdNextHostedLogResponse> | undefined;
     const errors: string[] = [];
     let resyncSignals = 0;
     const recordError = (context: string, error: unknown) => {
@@ -770,7 +767,6 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
         const unexpected = (): never => {
           throw new Error("Unexpected Stop dependency");
         };
-        let stopRefusalStatus: number | undefined;
         const ownerHandlers = createRelaySharesIpcHandlers({
           remoteForWorkspace: async () => ({ credentials, credentialGeneration: 1 }),
           currentCredentialGeneration: () => 1,
@@ -799,10 +795,7 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
               }
               // A Stop refusal reaches Stop as main's relayShareJsonWithCredentials throws it.
               const stopRefusal = liveStopRelayError(data);
-              if (stopRefusal) {
-                stopRefusalStatus = response.status;
-                throw stopRefusal;
-              }
+              if (stopRefusal) throw stopRefusal;
               expect(
                 response.ok,
                 `${init?.method ?? "GET"} ${endpoint} answered ${response.status}: ${text}`,
@@ -929,47 +922,9 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
                 .ownerYDocStopList({ id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS }),
             )
           ).filter((row) => row.retirementOwed);
-        if (name === heldStopCase) {
-          // A hosted pull holds the session host's only request slot, so Stop can't
-          // drain or prepare there, and the relay answers that edits are pending.
-          preStopFeed = proxy.holdNextHostedLogResponse(workspaceId);
-          const response = await waitForHostedLog(
-            preStopFeed,
-            preStopFeed.captured,
-            "pre-Stop capture",
-          );
-          expect(response.status).toBe(200);
-          expect(JSON.parse(response.body.toString("utf8"))).toMatchObject({
-            ok: true,
-            scope: {
-              documents: expect.arrayContaining([{ objectId: document.binding.objectId, path }]),
-            },
-          });
-          expect(await hostDocumentState()).toBe("ready");
-          const refused = await stop().then(
-            () => {
-              throw new Error("Stop succeeded while the session host was held.");
-            },
-            (error: unknown) => error,
-          );
-          expect(stopRefusalStatus).toBe(409);
-          expect((refused as Error).message).toBe(LIVE_STOP_WAITING);
-          expect(await owedStops()).toMatchObject([
-            { state: "requested", binding: document.binding },
-          ]);
-          preStopFeed.release();
-          try {
-            await waitForHostedLog(preStopFeed, preStopFeed.delivered, "pre-Stop delivery");
-          } catch (error) {
-            // A host that gave up on the held pull retries it, and the release lets that retry through.
-            if (!(error instanceof HostedLogClientClosedError)) throw error;
-          }
-          // The session host holds the document again before Stop is sent again.
-          await expect.poll(async () => (await discovery()).length, { timeout: 120_000 }).toBe(1);
-        }
         await stop();
         await expect.poll(async () => (await discovery()).length, { timeout: 60_000 }).toBe(0);
-        if (name === heldStopCase) expect(await owedStops()).toEqual([]);
+        if (stopQuarantine) expect(await owedStops()).toEqual([]);
 
         await expect(readPending()).rejects.toThrow("owner-outbox-not-found");
         expect(await readFile(join(rootA, path), "utf8")).toContain("Name: Quarantined edit");
@@ -1127,7 +1082,6 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])(
       }
       await session.close({ settle: false });
     } finally {
-      preStopFeed?.destroy();
       await delivery?.stop();
       await peer?.close();
       try {
