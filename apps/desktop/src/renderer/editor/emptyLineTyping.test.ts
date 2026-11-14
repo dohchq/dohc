@@ -411,6 +411,59 @@ it.each(pairs)(
   },
 );
 
+// Both line breaks look the same to the editor. Removing the second would bring the empty
+// piece beside the text, where it can't stay, so the editor removes the first.
+it.each(pairs)(
+  "keeps what one person types between two line breaks while the other removes the first of them (%s removes, %s types)",
+  async (remover, typist) => {
+    const baseline = seeded([null, "", null, "w"]);
+    const a = await pages[remover](baseline),
+      b = await pages[typist](baseline);
+    caretAt(a, 1, 1);
+    backspace(a);
+    caretAt(b, 1, 1);
+    type(b, "from b");
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    await expectKept(a, b, "from b");
+    expect(yDocToMarkdown(a.doc)).toContain("from b  \nw\n");
+  },
+);
+
+// Text on both sides: removing either break brings the empty piece beside text, where it
+// can't stay, so what was typed into it goes with it. Both people still see the same note.
+it.each(pairs)(
+  "accepts both changes but loses what one person types between two line breaks with text on both sides while the other removes one (%s removes, %s types)",
+  async (remover, typist) => {
+    const baseline = seeded(["w", null, "", null, "v"]);
+    const a = await pages[remover](baseline),
+      b = await pages[typist](baseline);
+    caretAt(a, 1, 2);
+    backspace(a);
+    caretAt(b, 1, 2);
+    type(b, "from b");
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    expect(yDocToMarkdown(b.doc)).toBe(yDocToMarkdown(a.doc));
+    expect(yDocToMarkdown(a.doc)).toContain("w  \nv\n");
+    expect(yDocToMarkdown(a.doc)).not.toContain("from b");
+  },
+);
+
 // Text, a line break and an empty piece. Removing the break would leave the empty piece
 // beside the text, and typing into it would put two pieces of text side by side, which the
 // server refuses. So the piece goes with the break, as before.
@@ -608,16 +661,17 @@ function knownRace(a: Person, editA: Edit, b: Person, editB: Edit) {
   const meets = (person: Person, edit: Edit, other: Edit) => {
     const { before, after } = around(person, edit.at);
     if (edit.kind === "type" && startsPiece(person, edit.at)) {
-      // A deleted line break among several in a row may take a different one of them out,
-      // which brings the new piece beside text.
+      // A deleted line break among several in a row next to text may take a different one
+      // of them out, which brings the new piece beside that text.
       let from = edit.at,
         to = edit.at;
       while (from > 0 && around(person, from).before && !around(person, from).before!.isText)
         from--;
       while (around(person, to).after && !around(person, to).after!.isText) to++;
+      const nearText = around(person, from).before?.isText || around(person, to).after?.isText;
       return (
         (other.kind === "type" && other.at === edit.at) ||
-        (other.kind === "delete" && other.at > from && other.at <= to)
+        (!!nearText && other.kind === "delete" && other.at > from && other.at <= to)
       );
     }
     const moved =

@@ -1,5 +1,5 @@
 diff --git a/dist/y-tiptap.cjs b/dist/y-tiptap.cjs
-index 653ffe79d5edb4a040555bb222f472af1e45edc8..8b7c88b5b927f72f52fa9ac801443d2999d211d1 100644
+index 653ffe79d5edb4a040555bb222f472af1e45edc8..cadcff414e2cfdd885bd3f3ce62d380299825885 100644
 --- a/dist/y-tiptap.cjs
 +++ b/dist/y-tiptap.cjs
 @@ -1571,6 +1571,8 @@ const marksToAttributes = (marks, meta) => {
@@ -54,7 +54,7 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..8b7c88b5b927f72f52fa9ac801443d29
      const rightY = yChildren[yChildCnt - right - 1];
      const rightP = pChildren[pChildCnt - right - 1];
      if (!mappedIdentity(meta.mapping.get(rightY), rightP)) {
-@@ -1698,33 +1721,74 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1698,33 +1721,105 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
@@ -88,14 +88,45 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..8b7c88b5b927f72f52fa9ac801443d29
 +    const kept = pChildCnt === 0 && yEmpty.length === 0
 +      ? yChildren.find(type => type instanceof Y__namespace.XmlText)
 +      : undefined;
-+    for (let i = yChildCnt - right - 1; i >= left; i--) {
++    // dohc: when the editor removed one of several identical items in a row, such as line
++    // breaks, any one of them can go. Remove the one that leaves the fewest empty pieces for
++    // the tidy pass below, which would delete them with anything typed into them.
++    let lo = left;
++    let hi = yChildCnt - right;
++    if (yEmpty.length > 0 && hi > lo && left + right === pChildCnt) {
++      const same = (a, b) =>
++        a instanceof Y__namespace.XmlElement && b instanceof Y__namespace.XmlElement && a.nodeName === b.nodeName &&
++        a.length === 0 && b.length === 0 &&
++        JSON.stringify(a.getAttributes()) === JSON.stringify(b.getAttributes());
++      const doomed = (from, to) => {
++        const gone = new Set(yAt.slice(from, to));
++        const rest = yAll.filter((_, i) => !gone.has(i));
++        return rest.filter((type, i) => isEmptyYText(type) &&
++          (rest[i - 1] instanceof Y__namespace.XmlText || (rest[i + 1] instanceof Y__namespace.XmlText && !isEmptyYText(rest[i + 1])))).length;
++      }
++      let best = doomed(lo, hi);
++      for (let step = -1; step <= 1 && best > 0; step += 2) {
++        for (let a = left, b = yChildCnt - right; ;) {
++          if (step < 0 ? a === 0 || !same(yChildren[a - 1], yChildren[b - 1]) : b === yChildCnt || !same(yChildren[b], yChildren[a])) break;
++          a += step;
++          b += step;
++          const count = doomed(a, b);
++          if (count < best) {
++            best = count;
++            lo = a;
++            hi = b;
++          }
++        }
++      }
++    }
++    for (let i = hi - 1; i >= lo; i--) {
 +      meta.mapping.delete(yChildren[i]);
 +      if (yChildren[i] === kept) {
 +        kept.delete(0, kept.length);
 +        continue
 +      }
 +      let from = i;
-+      while (from > left && yAt[from - 1] === yAt[from] - 1 && yChildren[from - 1] !== kept) {
++      while (from > lo && yAt[from - 1] === yAt[from] - 1 && yChildren[from - 1] !== kept) {
 +        meta.mapping.delete(yChildren[--from]);
 +      }
 +      yDomFragment.delete(yAt[from], i - from + 1);
@@ -147,7 +178,7 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..8b7c88b5b927f72f52fa9ac801443d29
    }, ySyncPluginKey);
  };
 diff --git a/dist/y-tiptap.js b/dist/y-tiptap.js
-index 28c55820dff13cf3d5c303970f530c17eb38f757..830cbd97cd9d6e164317231cc61cc253d1cbf279 100644
+index 28c55820dff13cf3d5c303970f530c17eb38f757..44805b344ee86c84cb0a37efd028054464859cf2 100644
 --- a/dist/y-tiptap.js
 +++ b/dist/y-tiptap.js
 @@ -1537,6 +1537,8 @@ const marksToAttributes = (marks, meta) => {
@@ -202,7 +233,7 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..830cbd97cd9d6e164317231cc61cc253
      const rightY = yChildren[yChildCnt - right - 1];
      const rightP = pChildren[pChildCnt - right - 1];
      if (!mappedIdentity(meta.mapping.get(rightY), rightP)) {
-@@ -1664,33 +1687,74 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1664,33 +1687,105 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
@@ -236,14 +267,45 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..830cbd97cd9d6e164317231cc61cc253
 +    const kept = pChildCnt === 0 && yEmpty.length === 0
 +      ? yChildren.find(type => type instanceof Y.XmlText)
 +      : undefined;
-+    for (let i = yChildCnt - right - 1; i >= left; i--) {
++    // dohc: when the editor removed one of several identical items in a row, such as line
++    // breaks, any one of them can go. Remove the one that leaves the fewest empty pieces for
++    // the tidy pass below, which would delete them with anything typed into them.
++    let lo = left;
++    let hi = yChildCnt - right;
++    if (yEmpty.length > 0 && hi > lo && left + right === pChildCnt) {
++      const same = (a, b) =>
++        a instanceof Y.XmlElement && b instanceof Y.XmlElement && a.nodeName === b.nodeName &&
++        a.length === 0 && b.length === 0 &&
++        JSON.stringify(a.getAttributes()) === JSON.stringify(b.getAttributes());
++      const doomed = (from, to) => {
++        const gone = new Set(yAt.slice(from, to));
++        const rest = yAll.filter((_, i) => !gone.has(i));
++        return rest.filter((type, i) => isEmptyYText(type) &&
++          (rest[i - 1] instanceof Y.XmlText || (rest[i + 1] instanceof Y.XmlText && !isEmptyYText(rest[i + 1])))).length;
++      }
++      let best = doomed(lo, hi);
++      for (let step = -1; step <= 1 && best > 0; step += 2) {
++        for (let a = left, b = yChildCnt - right; ;) {
++          if (step < 0 ? a === 0 || !same(yChildren[a - 1], yChildren[b - 1]) : b === yChildCnt || !same(yChildren[b], yChildren[a])) break;
++          a += step;
++          b += step;
++          const count = doomed(a, b);
++          if (count < best) {
++            best = count;
++            lo = a;
++            hi = b;
++          }
++        }
++      }
++    }
++    for (let i = hi - 1; i >= lo; i--) {
 +      meta.mapping.delete(yChildren[i]);
 +      if (yChildren[i] === kept) {
 +        kept.delete(0, kept.length);
 +        continue
 +      }
 +      let from = i;
-+      while (from > left && yAt[from - 1] === yAt[from] - 1 && yChildren[from - 1] !== kept) {
++      while (from > lo && yAt[from - 1] === yAt[from] - 1 && yChildren[from - 1] !== kept) {
 +        meta.mapping.delete(yChildren[--from]);
 +      }
 +      yDomFragment.delete(yAt[from], i - from + 1);
