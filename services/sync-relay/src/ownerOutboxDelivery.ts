@@ -275,7 +275,7 @@ export async function drainOwnerOutbox(
     seedDelivery?: ServiceSeedDelivery;
     applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
   },
-): Promise<{ admittedEntries: number; hasMore: boolean; retryReady?: boolean }> {
+): Promise<{ admittedEntries: number; hasMore: boolean; retryReady?: boolean; empty?: boolean }> {
   const { storage, admission, client, registrationId, binding, host, signal, adoption } = options;
   for (const value of [admission.maxEntriesPerDrain, admission.maxBytesPerDrain]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid owner drain budget.");
@@ -370,7 +370,7 @@ export async function drainOwnerOutbox(
   }
   if (status.pendingBytes === 0) {
     if (!receiptFirst) adoption.applied();
-    return { admittedEntries: 0, hasMore: false };
+    return { admittedEntries: 0, hasMore: false, empty: true };
   }
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
   const quarantine = async (known: OwnerKnownRefusal) => {

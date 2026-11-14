@@ -482,6 +482,26 @@ const IDLE_PASS_REQUESTS = new Set(["liveApplication.ownerState", "sync.push"]);
 // changes nothing a pass acts on, so it counts with the requests an idle pass sends. Otherwise a pass that ran
 // beside an open connection would never be idle.
 const CONNECTION_READS = new Set<PropertyKey>(["openLiveAppliedSync", "readNextLiveApplied"]);
+// The engine requests that cannot add to any document's owner queue: reads, a push out, and the steps a drain takes on
+// the document it holds. Every other request and client call counts as a change, so an open drains a document again
+// after any of them, as after a hosted pull.
+const OWNER_QUEUE_QUIET_REQUESTS = new Set([
+  "liveApplication.hosts",
+  "liveApplication.register",
+  "liveApplication.ownerState",
+  "liveApplication.ownerOutbox",
+  "liveApplication.readOwnerOutbox",
+  "liveApplication.acknowledgeOwnerOutbox",
+  "sync.push",
+  "sync.heldDocuments",
+  "sync.heldDocument",
+]);
+const OWNER_QUEUE_QUIET_CALLS = new Set<PropertyKey>([
+  ...CONNECTION_READS,
+  "sendLiveApplication",
+  "readLiveApplicationAck",
+  "onEvent",
+]);
 // Whether the departed list of a pull numbered at least `required` reached the document; for `goneSince`, without listing it.
 const reachedSince = (attached: HostedAttachment, objectId: string, required: number) =>
   (attached.reached.get(objectId)?.pull ?? 0) >= required;
@@ -760,7 +780,10 @@ export async function startServiceLiveHost(options: {
   let requestId = 0,
     sentRequests = 0,
     idleRequests = 0,
-    probeCredits = 0;
+    probeCredits = 0,
+    // Moves as a request that could add to an owner queue is sent and again as it ends, so a drain that ran while one
+    // was in flight sees it moved.
+    ownerQueueChanges = 0;
   const appliedAcks = createAppliedAcks();
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER)
@@ -942,6 +965,11 @@ export async function startServiceLiveHost(options: {
     check();
     const document = parseLiveDocumentKey(value),
       key = JSON.stringify(document);
+    // An open drains its document at each step. One that would send the engine nothing returns without waiting for
+    // the document's lock or the engine.
+    const consumer = configuredConsumer(document);
+    const drained = "drained" in consumer ? consumer.drained(document) : undefined;
+    if (drained) return drained;
     applications.set(key, (applications.get(key) ?? 0) + 1);
     try {
       return await deliver(
@@ -1084,7 +1112,12 @@ export async function startServiceLiveHost(options: {
         const sendRequest: EngineClient["sendRequest"] = (request, ...rest) => {
           sentRequests++;
           if (IDLE_PASS_REQUESTS.has(request.method)) idleRequests++;
-          return queued.sendRequest(request, ...rest);
+          if (OWNER_QUEUE_QUIET_REQUESTS.has(request.method))
+            return queued.sendRequest(request, ...rest);
+          ownerQueueChanges++;
+          return queued.sendRequest(request, ...rest).finally(() => {
+            ownerQueueChanges++;
+          });
         };
         // Every drain applies through here, so a submission takes the engine's answer for its row.
         const sendLiveApplication: EngineClient["sendLiveApplication"] = async (...args) => {
@@ -1098,6 +1131,15 @@ export async function startServiceLiveHost(options: {
             if (property === "sendLiveApplication") return sendLiveApplication;
             const value: unknown = Reflect.get(target, property, target);
             if (typeof value !== "function") return value;
+            if (!OWNER_QUEUE_QUIET_CALLS.has(property))
+              return (...args: unknown[]): unknown => {
+                ownerQueueChanges++;
+                const result: unknown = value.apply(target, args);
+                if (!(result instanceof Promise)) return result;
+                return result.finally(() => {
+                  ownerQueueChanges++;
+                });
+              };
             if (!CONNECTION_READS.has(property)) return value.bind(target);
             return (...args: unknown[]): unknown => {
               sentRequests++;
@@ -2976,6 +3018,7 @@ export async function startServiceLiveHost(options: {
               leftToDrain.add(key);
               return true;
             },
+            changes: () => ownerQueueChanges,
             lifetime: signal,
             wake: wakePass,
           });

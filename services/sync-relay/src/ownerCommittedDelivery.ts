@@ -35,6 +35,13 @@ import type { ServiceSeedDelivery } from "./serviceOwnerTransport";
 import { asRelayWrite } from "./relayMainThreadTiming.js";
 
 type OwnerDeliveryOutcome = CommittedDeliveryOutcome & { continueDrain: boolean };
+type OwnerAdoption = {
+  registrationId: number;
+  adoptionId: string;
+  sequence: number;
+  binding: LiveObjectBinding;
+  settled?: CommittedSettlement;
+};
 // The host settled but its file write has not landed. The pass waits for the next wake instead of draining on.
 const SETTLEMENT_UNMATERIALIZED = "Owner settlement has not reached the file.";
 
@@ -43,16 +50,10 @@ export class OwnerCommittedDelivery {
   readonly #store;
   readonly #active = new Set<string>();
   readonly #registrations: LiveHostRegistrations;
-  readonly #adopted = new Map<
-    string,
-    {
-      registrationId: number;
-      adoptionId: string;
-      sequence: number;
-      binding: LiveObjectBinding;
-      settled?: CommittedSettlement;
-    }
-  >();
+  readonly #adopted = new Map<string, OwnerAdoption>();
+  // Per document, the adoption under which its last run read the owner queue empty and ended with nothing left to
+  // apply, and the host's change count it ended at. Cleared as any run of the document starts.
+  readonly #quiet = new Map<string, { adoption: OwnerAdoption; changes: number }>();
   // The adoption, per document, whose divergent seed a pass of this connection
   // proved the host applied. Empty on a new connection; cleared with the adoption.
   readonly #seedApplied = new Map<string, string>();
@@ -76,6 +77,11 @@ export class OwnerCommittedDelivery {
       publish?(signal?: AbortSignal): Promise<unknown>;
       /** A native service transport's permission to acknowledge its adoption seed before applying it. */
       seedDelivery?(): ServiceSeedDelivery | undefined;
+      /**
+       * How many engine requests the host has sent that could add to any document's owner queue, as a hosted pull
+       * can. Without it no drain is skipped.
+       */
+      changes?(): number;
     },
   ) {
     authorityInteger(connection.bounds.maxBytes, 1);
@@ -104,6 +110,43 @@ export class OwnerCommittedDelivery {
   #forget(key: string) {
     this.#adopted.delete(key);
     this.#seedApplied.delete(key);
+    this.#quiet.delete(key);
+  }
+  /**
+   * The outcome `drain` would return, when it would send the engine nothing: the document's last run read its owner
+   * queue empty and left nothing to apply, under the adoption and binding it still has, no journal row arrived since,
+   * and the host sent no request since that could add to an owner queue. Undefined otherwise, while a run holds the
+   * document, and when a read fails, so `drain` meets the failure.
+   */
+  drained(value: LiveDocumentKey): OwnerDeliveryOutcome | undefined {
+    const document = parseLiveDocumentKey(value),
+      key = JSON.stringify(document),
+      quiet = this.#quiet.get(key);
+    if (
+      !quiet ||
+      this.#active.has(key) ||
+      this.#adopted.get(key) !== quiet.adoption ||
+      this.connection.changes?.() !== quiet.changes
+    )
+      return undefined;
+    try {
+      const current = this.#store.existingOwnerDelivery({
+        host: this.connection.host,
+        document,
+        actor: admittedOwner(this.storage, this.connection.ownerAdmission, document.workspaceId),
+      });
+      if (
+        !current ||
+        !isDeepStrictEqual(current.binding, quiet.adoption.binding) ||
+        this.#store.nextOwnerApplication(current)
+      )
+        return undefined;
+      const progress = this.#store.ownerDeliveryProgress(current);
+      if (progress.adoptionId !== quiet.adoption.adoptionId) return undefined;
+      return { kind: "done", terminalReceipt: progress.terminal, continueDrain: false };
+    } catch {
+      return undefined;
+    }
   }
   /** Ends the document's registration after the host unloaded it. */
   release(document: LiveDocumentKey) {
@@ -138,6 +181,15 @@ export class OwnerCommittedDelivery {
       c = this.connection;
     if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
     this.#active.add(key);
+    const quiet = this.#quiet.get(key),
+      changes = c.changes?.();
+    this.#quiet.delete(key);
+    // Records that this run read the owner queue empty and applied nothing, if no request that could add to an owner
+    // queue went to the engine or was answered while it ran.
+    const ended = (adopted: OwnerAdoption) => {
+      if (changes !== undefined && c.changes!() === changes && this.#adopted.get(key) === adopted)
+        this.#quiet.set(key, { adoption: adopted, changes });
+    };
     const check = () => {
       if (signal?.aborted) throw signal.reason;
     };
@@ -442,7 +494,13 @@ export class OwnerCommittedDelivery {
       // since waits for the next pass's drain.
       const outbox =
         drainedRegistration === adopted
-          ? { admittedEntries: 0, hasMore: false, retryReady: false }
+          ? {
+              admittedEntries: 0,
+              hasMore: false,
+              retryReady: false,
+              // That drain recorded whether it read the queue empty.
+              empty: quiet?.adoption === adopted,
+            }
           : await drainOwnerOutbox({
               storage: this.storage,
               admission: c.ownerAdmission,
@@ -479,16 +537,18 @@ export class OwnerCommittedDelivery {
               },
             });
       await applyPending();
-      if (!settle)
-        return outbox.hasMore || this.#store.nextOwnerApplication(latest)
-          ? {
-              kind: "pending",
-              reason: pendingReason ?? "Owner delivery pass reached its work budget.",
-              continueDrain:
-                pendingReason === null &&
-                (outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0),
-            }
-          : { kind: "done", terminalReceipt: progress.terminal, continueDrain: false };
+      if (!settle) {
+        if (outbox.hasMore || this.#store.nextOwnerApplication(latest))
+          return {
+            kind: "pending",
+            reason: pendingReason ?? "Owner delivery pass reached its work budget.",
+            continueDrain:
+              pendingReason === null &&
+              (outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0),
+          };
+        if (outbox.empty && appliedCount === 0) ended(adopted);
+        return { kind: "done", terminalReceipt: progress.terminal, continueDrain: false };
+      }
       if (
         pendingReason === "markdown-write-held" ||
         pendingReason === "markdown-witness-check-pending"
@@ -502,8 +562,10 @@ export class OwnerCommittedDelivery {
         !wanted &&
         adopted.settled &&
         adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)
-      )
+      ) {
+        if (outbox.empty && appliedCount === 0) ended(adopted);
         return adopted.settled;
+      }
       this.#settlesSent++;
       const settled = await settlementResponse(
         c.client.sendRequest(
