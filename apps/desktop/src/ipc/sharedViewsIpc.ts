@@ -255,6 +255,10 @@ export function registerSharedViewsIpcHandlers<
           "This share can't be opened: the server didn't say what it shares. Try again later.",
         );
       }
+      // fetch rejects with a TypeError when no answer arrives.
+      if (error instanceof TypeError) {
+        throw new Error(`dohc could not reach ${new URL(credentials.relayUrl).host}. Check your connection.`);
+      }
       throw error;
     }
     // A chat code has no file selector, so there is no scope to

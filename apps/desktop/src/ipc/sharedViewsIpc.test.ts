@@ -617,12 +617,13 @@ describe("registered received-view handlers", () => {
     [new ShareUnavailableError(), "No share matches"],
     [new RelayUnauthorizedError(), "session expired"],
     [new ShareSelectorInvalidError("share"), "server didn't say"],
+    [new TypeError("fetch failed"), /^dohc could not reach [^ ]+\. Check your connection\.$/],
   ])("maps preflight errors without creating local state", async (error, message) => {
     const h = await harness();
     h.fetchInfo.mockRejectedValue(error);
     await expect(
       h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
-    ).rejects.toThrow(message as string);
+    ).rejects.toThrow(message);
     expect(h.mkdir).not.toHaveBeenCalled();
     expect(h.createFolder).not.toHaveBeenCalled();
   });
