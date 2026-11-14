@@ -464,25 +464,23 @@ describe("agent threads", () => {
       await settled();
       return { runId: null };
     });
+    // Another is written once the workspace is on, while the save is still answering.
     await agentThreads.serve(WORKSPACE, agent, async () => {
       order.push("saved");
       save({ chief });
       agentThreads.settingsChanged();
-      await settled();
+      arrive("m4");
+      await vi.waitFor(() => expect(order.slice(4)).toEqual(["sent message", "read m4"]));
     });
-    await settled();
 
-    // What was written before the save landed is set aside, and never forwarded.
-    expect(order).toEqual(["read m2", "sent workspace", "saved", "read m3"]);
+    // What was written before the save is set aside, and never forwarded.
+    // Nothing written once the workspace is on is set aside with it.
+    expect(order.slice(0, 4)).toEqual(["read m2", "sent workspace", "read m3", "saved"]);
+    expect(String(sent[1]!.message)).toContain("body of m4");
     expect(sent[0]).toMatchObject({ threadId: "t3-thread-1", how: "line" });
     // The thread learns it can hold several workspaces' messages, and the name is quoted.
     expect(sent[0]!.message.split("\n")[0]).toContain('from the workspace named "Launch"');
     expect(sent[0]!.message).toContain("Do not carry what you learned from one workspace");
-
-    // What is written once it is on goes to the thread.
-    arrive("m4");
-    await vi.waitFor(() => expect(order.slice(4)).toEqual(["sent message", "read m4"]));
-    expect(String(sent[1]!.message)).toContain("body of m4");
   });
 
   it("saves no workspace for a thread dohc cannot tell, or a workspace that is gone", async () => {
@@ -535,7 +533,7 @@ describe("agent threads", () => {
       save({ chief });
       agentThreads.settingsChanged();
     });
-    expect(order).toEqual(["read m1", "sent workspace"]);
+    expect(order.slice(0, 2)).toEqual(["read m1", "sent workspace"]);
 
     // Then the tool answers for the message it took before all that.
     taken();

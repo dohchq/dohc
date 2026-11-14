@@ -10868,6 +10868,7 @@ function registerIpcHandlers(): void {
     },
     changeAgentThread: ({ workspaceId, agentId, threadId }, { operation }) =>
       oneAgentThreadChange(async () => {
+        operation.assertCurrent();
         const agent = await agentWithThreadFor(workspaceId, agentId);
         const left = agent.thread.id;
         if (left === threadId)
@@ -10894,6 +10895,8 @@ function registerIpcHandlers(): void {
     // the answer the window gets then, that nothing changed, is true.
     setAgentThreadWorkspace: ({ workspaceId, agentId, on }, { operation }) =>
       oneAgentThreadChange(async () => {
+        // The call may have waited behind another change.
+        operation.assertCurrent();
         if (!on) {
           await settingsIpc.changeAgent(agentId, (agent) => {
             operation.assertCurrent();

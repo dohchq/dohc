@@ -102,14 +102,12 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     const settings = await dependencies.readSettings();
     return {
       name: workspace.name,
-      agents: forwardingAgents(settings, workspaceId)
-        .filter((agent) => !turningOn.has(pair(workspaceId, agent.id)))
-        .flatMap((agent) => {
-          const reaching = served(agent, workspace);
-          if (!reaching) return [];
-          servedAt.set(reaching, turnedOn.get(pair(workspaceId, agent.id)) ?? 0);
-          return [reaching];
-        }),
+      agents: forwardingAgents(settings, workspaceId).flatMap((agent) => {
+        const reaching = served(agent, workspace);
+        if (!reaching) return [];
+        servedAt.set(reaching, turnedOn.get(pair(workspaceId, agent.id)) ?? 0);
+        return [reaching];
+      }),
     };
   };
   const states = createThreadStates({
@@ -175,9 +173,8 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     );
   };
   const pair = (workspaceId: string, agentId: string) => `${workspaceId}\n${agentId}`;
-  // The workspaces being turned on for an agent now, and how many times each
-  // has been. A pass keeps, for each agent it reads, the count it began with.
-  const turningOn = new Set<string>();
+  // How many times each workspace has been turned on for an agent. A pass
+  // keeps, for each agent it reads, the count it began with.
   const turnedOn = new Map<string, number>();
   const servedAt = new WeakMap<ServedAgent, number>();
   /** The agent as its thread is reached from a workspace. Throws when dohc cannot connect the thread. */
@@ -307,11 +304,15 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     /**
      * Turns a workspace on for the thread an agent has: sets aside what the
      * agent has unread there, as connecting does, tells the thread that it
-     * now holds this workspace's messages too, and then has `save` save the
-     * agent with the workspace. Rejects with nothing saved when T3 Code does
-     * not take that, so no workspace is added for a thread dohc cannot tell.
-     * What was written in the workspace before the save landed, or in the
-     * moment after it while dohc read what to set aside, is not forwarded.
+     * now holds this workspace's messages too, sets aside what was written
+     * while it was told, and then has `save` save the agent with the
+     * workspace. Rejects with nothing saved when T3 Code does not take that
+     * or the messages cannot be set aside, so no workspace is added for a
+     * thread dohc cannot tell.
+     *
+     * Everything set aside was written before the save, while the workspace
+     * was off, so nothing written once it is on is lost. A message written
+     * in the moment between the last read and the save is forwarded.
      */
     async serve(
       workspaceId: string,
@@ -321,30 +322,19 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
       const reaching = reached(workspaceId, agent);
       const workspaceName = dependencies.workspace(workspaceId)?.name ?? "";
       const turning = pair(workspaceId, agent.id);
-      // Nothing is forwarded for the agent from this workspace until what it
-      // had unread when the save landed is set aside.
-      turningOn.add(turning);
       turnedOn.set(turning, (turnedOn.get(turning) ?? 0) + 1);
-      try {
-        await forwarding.setAside(workspaceId, reaching);
-        await dependencies.t3Code.forward({
-          threadId: reaching.threadId,
-          how: "line",
-          message: anotherWorkspaceText({ agentName: agent.name, workspaceName }),
-          // One for each time a person adds this workspace.
-          forwardId: `dohc-workspace-${randomUUID()}`,
-        });
-        await save();
-        // A message written while the thread was told came before the
-        // workspace was on. The workspace is on now, so a failure here is
-        // reported and does not undo it.
-        await forwarding.setAside(workspaceId, reaching).catch((error: unknown) => {
-          dependencies.onError?.(error);
-        });
-      } finally {
-        turningOn.delete(turning);
-      }
-      void forwarding.wake(workspaceId, true);
+      await forwarding.setAside(workspaceId, reaching);
+      await dependencies.t3Code.forward({
+        threadId: reaching.threadId,
+        how: "line",
+        message: anotherWorkspaceText({ agentName: agent.name, workspaceName }),
+        // One for each time a person adds this workspace.
+        forwardId: `dohc-workspace-${randomUUID()}`,
+      });
+      // T3 Code can take seconds to answer, and a message written meanwhile
+      // came before the workspace was on.
+      await forwarding.setAside(workspaceId, reaching);
+      await save();
     },
     stop(): void {
       states.stop();
