@@ -11,6 +11,7 @@ import {
 import { renderSafeMarkdown } from "./markdown";
 import { readDraft, writeDraft } from "./drafts";
 import { CopyWork } from "./CopyWork";
+import { Icon } from "./icons";
 import {
   CHAT_FOLLOW_HOLD_MS,
   mergeChatMessages,
@@ -294,9 +295,12 @@ export function ChannelView({
     setDraftText(composerKey === null ? "" : readDraft(composerKey));
   }
   // A changed level reaches a mounted channel in place, so its messages and draft stay.
+  // A discarded draft the person can no longer post, kept only for its Undo, as the page's kept edits are.
+  const [discarded, setDiscarded] = useState<{ key: string | null; text: string } | null>(null);
   if (accessFrom !== client.access) {
     setAccessFrom(client.access);
     setAccess(client.access);
+    setDiscarded(null);
   }
   const setDraft = (text: string) => {
     setDraftText(text);
@@ -738,8 +742,9 @@ export function ChannelView({
         <div className="chat-read-only">
           <p>{readOnlyNote}</p>
           {/* Text the person wrote before they could no longer post stays theirs to copy, until they discard it. */}
-          {draft && (
+          {draft ? (
             <>
+              <h3 className="chat-unsent-title">dohc kept your unsent message</h3>
               <textarea readOnly value={draft} aria-label="Your unsent message" />
               <div className="chat-unsent-actions">
                 <CopyWork
@@ -750,12 +755,41 @@ export function ChannelView({
                 <button
                   type="button"
                   className="handoff-button secondary"
-                  onClick={() => setDraft("")}
+                  onClick={() => {
+                    setDiscarded({ key: composerKey, text: draft });
+                    setDraft("");
+                  }}
                 >
                   Discard
                 </button>
               </div>
             </>
+          ) : (
+            discarded &&
+            discarded.key === composerKey && (
+              <div className="chat-unsent-discarded">
+                <p>Discarded your unsent message.</p>
+                <button
+                  type="button"
+                  className="handoff-button secondary"
+                  onClick={() => {
+                    setDraft(discarded.text);
+                    setDiscarded(null);
+                  }}
+                >
+                  Undo
+                </button>
+                <button
+                  className="icon-button"
+                  type="button"
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                  onClick={() => setDiscarded(null)}
+                >
+                  <Icon name="x" />
+                </button>
+              </div>
+            )
           )}
         </div>
       ) : (

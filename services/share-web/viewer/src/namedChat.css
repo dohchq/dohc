@@ -75,6 +75,10 @@
 .chat-read-only { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
 .chat-read-only p { margin: 0; color: var(--viewer-muted); }
 .chat-read-only textarea { display: block; width: 100%; margin-top: 8px; }
+.chat-unsent-title { margin: 8px 0 0; color: var(--viewer-ink); font-size: 13px; font-weight: 600; }
+.chat-unsent-discarded { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--viewer-muted); font-size: 12px; }
+.chat-unsent-discarded p { min-width: 0; flex: 1; margin: 0; }
+.chat-unsent-discarded .handoff-button { padding: 3px 9px; }
 .chat-unsent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .chat-unsent-actions .copy-failed { order: 1; flex-basis: 100%; margin: 0; color: var(--viewer-danger); font-size: 12px; }
 .chat-unsent-actions .handoff-button { padding: 3px 9px; }

@@ -455,6 +455,29 @@ it("keeps unsent text to copy once the person can no longer post", async () => {
   expect(groupPanel().querySelector('textarea[aria-label="Your unsent message"]')).toBeNull();
 });
 
+it("says it kept a Group draft the person can no longer post, and brings it back with Undo after Discard", async () => {
+  server({level: "comment", postFails: {status: 403, code: "share_read_only"}});
+  await render(); await opened();
+  setControlValue(composer(), "Bring sunscreen"); await click("Send");
+  await settle(() => groupPanel().textContent?.includes("Only people who can comment post here.") === true);
+  expect(groupPanel().textContent).toContain("dohc kept your unsent message");
+  const stored = () => Object.values(sessionStorage).some(value => value.includes("Bring sunscreen"));
+  expect(stored()).toBe(true);
+  // Discard takes the text away and leaves a line with Undo, as the kept page edits do.
+  await click("Discard");
+  expect(groupPanel().querySelector('textarea[aria-label="Your unsent message"]')).toBeNull();
+  expect(groupPanel().textContent).toContain("Discarded your unsent message.");
+  expect(stored()).toBe(false);
+  await click("Undo");
+  expect(groupPanel().querySelector<HTMLTextAreaElement>('textarea[aria-label="Your unsent message"]')?.value).toBe("Bring sunscreen");
+  expect(groupPanel().textContent).not.toContain("Discarded your unsent message.");
+  expect(stored()).toBe(true);
+  // Dismiss leaves nothing behind.
+  await click("Discard"); await click("Dismiss");
+  expect(groupPanel().textContent).not.toContain("Discarded your unsent message.");
+  expect(groupPanel().querySelector('textarea[aria-label="Your unsent message"]')).toBeNull();
+});
+
 function liveSession() {
   const doc = markdownToYDoc("Leave at nine."), listeners = new Set<(value: NamedLiveBrowserState) => void>();
   let state: NamedLiveBrowserState = {status: "authorizing", reason: null, binding: null, hostEpoch: null, pendingUpdates: 0, pendingBytes: 0, lastApplied: null, membership: null};
