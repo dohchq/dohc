@@ -7124,6 +7124,12 @@ const { startDesktopCliServer } = createDesktopCliServer({
   currentDaemon: () => desktopEngine.daemon,
   agentDispatchStoreHandleFor,
   sharedViewOf,
+  joinedPages: {
+    role: memberRoleOf,
+    folderHoldsFile: async (workspaceId, folder) =>
+      (await shareViewFiles.list({ kind: "standalone", workspaceId }, { under: folder })).files.length > 0,
+    create: (workspace, path, markdown) => workspaceFileMutations.createShareViewPage(workspace, path, markdown),
+  },
   shareProjection: ownedShareProjection,
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,

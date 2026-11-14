@@ -53,6 +53,7 @@ import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthori
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { resolveEngineFileTargets } from "../workspaces/resolveEngineFiles";
+import type { ShareViewWriteScope } from "../workspaces/shareWriteGate";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
 import type {
   OwnerLiveDocumentsResult,
@@ -292,7 +293,16 @@ interface DesktopCliServerDependencies<State> {
   ): Pick<LiveAgentDispatchStoreHandle, "store">;
   // A share view's scope, or null for a workspace this computer owns. A
   // membership is a view of a whole workspace: a joined workspace.
-  sharedViewOf(workspaceId: string): { membership?: boolean } | null;
+  sharedViewOf(workspaceId: string): ShareViewWriteScope | null;
+  // An agent's new page in a joined workspace. The relay decides each one;
+  // the role and folders only give a refusal its reason first.
+  joinedPages: {
+    // The role the relay last named, or undefined before it has.
+    role(workspaceId: string): "admin" | "member" | undefined;
+    folderHoldsFile(workspaceId: string, folder: string): Promise<boolean>;
+    // The Explorer's New page in a share view. Returns the created path.
+    create(workspace: RegistryEntry, path: string, markdown: string): Promise<string>;
+  };
   // A shared view's projection status, or undefined for any other workspace.
   shareProjection(workspace: RegistryEntry): Promise<SyncStatusResult["shareProjection"]>;
   withPhysicalWorkspaceOperation<Result>(
@@ -855,6 +865,19 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           // Frontmatter would land as body blocks, so it is refused before
           // anything exists.
           if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL);
+          const view = sharedViewOf(workspace.workspaceId);
+          if (view?.membership === true) {
+            if (view.access !== "edit") throw new Error(`Adding a page needs Edit. You can ${view.access ?? "view"} here.`);
+            const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+            if (folder !== "" && dependencies.joinedPages.role(workspace.workspaceId) !== "admin" &&
+                !await dependencies.joinedPages.folderHoldsFile(workspace.workspaceId, folder)) {
+              throw new Error("Only admins add a page in a new folder. Put it in a folder that has a page.");
+            }
+            return { path: await withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
+              operation.assertCurrent();
+              return await dependencies.joinedPages.create(operation.workspace, path, markdown);
+            }) };
+          }
           // An empty file written on the capture chain, which refuses a path
           // that exists and records the agent as the file's author, and then
           // the text through the new file's live session, like typing into it.
