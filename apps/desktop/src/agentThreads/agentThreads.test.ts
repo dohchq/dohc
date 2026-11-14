@@ -7,7 +7,8 @@ import {
   forwardProblemWords,
   type AgentThreadsDependencies,
 } from "./agentThreads";
-import { T3CodeError } from "./t3Code";
+import type { ForwardLedger, ForwardRow } from "./forwardLedger";
+import { T3CodeError, type T3CodeThreadState } from "./t3Code";
 import type { T3CodeConnection } from "./t3CodeConnection";
 
 const WORKSPACE = "ws-1";
@@ -49,17 +50,54 @@ function setup(
       order.push(`read ${input.upTo.messageId}`);
       left = left.filter((messageId) => messageId > input.upTo.messageId);
     },
-    getThread: async () => ({ thread: { id: "thread-a", title: "Hello" } }),
+    getThread: async () => ({ thread: { id: "thread-a", title: "Hello" }, messageCount: 4 }),
+    // What was posted in the chat thread after the forwarded message.
+    listMessagesPage: async () => ({ messages: replies, nextAfterMessageOrder: null }),
   } as unknown as Chats;
-  const forward = vi.fn(async (input: Sent) => {
-    order.push(`sent ${input.forwardId.startsWith("dohc-intro-") ? "intro" : "message"}`);
+  const replies: Array<{ authorAgentId?: string }> = [];
+  // What the tool says the thread is doing.
+  const tool: { state: T3CodeThreadState } = {
+    state: { title: "Chief", working: true, waitingOnPerson: false, closed: false, runs: [] },
+  };
+  let saved: ForwardRow[] = [];
+  const ledger: ForwardLedger = {
+    list: async () => [...saved],
+    put: async (row) => {
+      saved = [
+        ...saved.filter(
+          (other) =>
+            !(
+              other.workspaceId === row.workspaceId &&
+              other.agentId === row.agentId &&
+              other.chatThreadId === row.chatThreadId
+            ),
+        ),
+        row,
+      ];
+    },
+    remove: async (row) => {
+      saved = saved.filter((other) => other.messageId !== row.messageId);
+    },
+    removeWhere: async (match) => {
+      saved = saved.filter((row) => !match(row));
+    },
+  };
+  const lineChanges: string[] = [];
+  const forward = vi.fn(async (input: Sent): Promise<{ runId: string | null } | void> => {
+    order.push(
+      `sent ${input.forwardId.startsWith("dohc-intro-") ? "intro" : input.forwardId.startsWith("remind-") ? "reminder" : "message"}`,
+    );
     sent.push(input);
+    return { runId: `run-${sent.length}` };
   });
   const forget = vi.fn(async () => {});
   const agentThreads = createAgentThreads({
     cli,
-    t3Code: { forward, forget } as unknown as T3CodeConnection,
+    t3Code: { forward, forget, thread: async () => tool.state } as unknown as T3CodeConnection,
     chats,
+    ledger,
+    onLines: (workspaceId) => void lineChanges.push(workspaceId),
+    nowMs: () => 9_000,
     readSettings: async () => ({ agents: settings }),
     workspace: (workspaceId) =>
       workspaceId === WORKSPACE
@@ -74,6 +112,10 @@ function setup(
     readers,
     forward,
     forget,
+    replies,
+    tool,
+    lineChanges,
+    rows: () => saved,
     save: (next: Record<string, unknown>) => {
       settings = AgentsSettings.parse(next);
     },
@@ -260,6 +302,96 @@ describe("agent threads", () => {
 
     agentThreads.watch(WORKSPACE);
     await vi.waitFor(() => expect(sent).toHaveLength(1));
+  });
+
+  it("shows what the thread is doing with a forwarded message, until the agent replies", async () => {
+    const { agentThreads, sent, tool, replies, rows, lineChanges } = started(setup({ chief }));
+    tool.state = {
+      ...tool.state,
+      runs: [
+        { id: "run-1", state: "working", requestedAtMs: 100, startedAtMs: 200, endedAtMs: null },
+      ],
+    };
+
+    agentThreads.watch(WORKSPACE);
+
+    await vi.waitFor(() =>
+      expect(agentThreads.lines(WORKSPACE)).toEqual([
+        { agentId: "chief", chatThreadId: "thread-a", state: "working", sinceMs: 200 },
+      ]),
+    );
+    expect(sent).toHaveLength(1);
+    expect(rows()).toMatchObject([
+      {
+        workspaceId: WORKSPACE,
+        agentId: "chief",
+        chatThreadId: "thread-a",
+        toolThreadId: "t3-thread-1",
+        messageId: "m1",
+        afterOrder: 3,
+        forwardedAtMs: 9_000,
+        runId: "run-1",
+      },
+    ]);
+    expect(lineChanges).toContain(WORKSPACE);
+
+    // The agent posts in the chat thread: the write takes the line away.
+    replies.push({ authorAgentId: "chief" });
+    signalChatWrite(WORKSPACE);
+    await vi.waitFor(() => expect(agentThreads.lines(WORKSPACE)).toEqual([]));
+    expect(rows()).toEqual([]);
+  });
+
+  it("reminds the thread once, in its own words for that chat thread, when its work ends in silence", async () => {
+    const { agentThreads, sent, tool, order } = started(setup({ chief }));
+    tool.state = {
+      ...tool.state,
+      working: false,
+      runs: [{ id: "run-1", state: "ended", requestedAtMs: 100, startedAtMs: 200, endedAtMs: 300 }],
+    };
+
+    agentThreads.watch(WORKSPACE);
+
+    await vi.waitFor(() => expect(order).toEqual(["sent message", "read m1", "sent reminder"]));
+    expect(sent[1]).toMatchObject({ threadId: "t3-thread-1", how: "line" });
+    expect(sent[1]!.message).toContain('you finished without replying in chat thread "Hello"');
+    expect(sent[1]!.message).toContain("chat reply th_a --workspace ws-1 --agent-id chief -");
+  });
+
+  it("takes the line away when its agent is turned off, and sends that thread no reminder", async () => {
+    const { agentThreads, tool, save, order, rows } = started(setup({ chief }));
+    tool.state = {
+      ...tool.state,
+      runs: [
+        { id: "run-1", state: "working", requestedAtMs: 100, startedAtMs: 200, endedAtMs: null },
+      ],
+    };
+    agentThreads.watch(WORKSPACE);
+    await vi.waitFor(() => expect(agentThreads.lines(WORKSPACE)).toHaveLength(1));
+
+    save({ chief: { ...chief, enabled: false } });
+    agentThreads.settingsChanged();
+
+    await vi.waitFor(() => expect(agentThreads.lines(WORKSPACE)).toEqual([]));
+    expect(rows()).toEqual([]);
+    expect(order).toEqual(["sent message", "read m1"]);
+  });
+
+  it("forgets a workspace's lines when the workspace leaves this computer", async () => {
+    const { agentThreads, tool, rows } = started(setup({ chief }));
+    tool.state = {
+      ...tool.state,
+      runs: [
+        { id: "run-1", state: "working", requestedAtMs: 100, startedAtMs: 200, endedAtMs: null },
+      ],
+    };
+    agentThreads.watch(WORKSPACE);
+    await vi.waitFor(() => expect(agentThreads.lines(WORKSPACE)).toHaveLength(1));
+
+    agentThreads.unwatch(WORKSPACE);
+
+    await vi.waitFor(() => expect(rows()).toEqual([]));
+    expect(agentThreads.lines(WORKSPACE)).toEqual([]);
   });
 
   it("forwards nothing after it stops", async () => {

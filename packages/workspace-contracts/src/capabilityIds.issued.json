@@ -11,6 +11,7 @@
   "agent.run.retry",
   "agent.run.state.read",
   "agent.thread.connect",
+  "agent.thread.lines.read",
   "agent.thread.t3code.allow",
   "agent.thread.t3code.list",
   "agent.thread.t3code.read",

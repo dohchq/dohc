@@ -240,6 +240,7 @@ export const CHANNELS = {
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",
   chatDispatchPaused: "desktop:chat-dispatch-paused",
+  agentThreadLines: "desktop:agent-thread-lines",
   agentsListening: "desktop:agents-listening",
   // Main's cached personal agents changed.
   personalAgents: "desktop:personal-agents",

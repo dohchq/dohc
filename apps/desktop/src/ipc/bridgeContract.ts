@@ -8189,7 +8189,35 @@ export const T3CodeThreadPage = z.strictObject({
   nextCursor: z.number().nullable(),
 });
 export type T3CodeThreadPage = z.infer<typeof T3CodeThreadPage>;
+// What an agent thread is doing with the last message dohc forwarded to it
+// from one chat thread, for the line at the foot of that chat.
+export const AgentThreadLine = z.strictObject({
+  agentId: z.string().min(1),
+  chatThreadId: z.string().min(1),
+  // in-line: the tool took the message and other work is ahead of it.
+  // waiting-in-tool: the thread's own question or approval is open there.
+  // silent: its work ended, dohc reminded it once, and it posted nothing.
+  state: z.enum(["in-line", "working", "waiting-in-tool", "silent"]),
+  // When this state began.
+  sinceMs: z.number(),
+});
+export type AgentThreadLine = z.infer<typeof AgentThreadLine>;
+export const AgentThreadLinesEvent = z.strictObject({
+  workspaceId: z.string().min(1),
+  revision: z.number().int().nonnegative(),
+  lines: z.array(AgentThreadLine).max(2_000),
+});
+export type AgentThreadLinesEvent = z.infer<typeof AgentThreadLinesEvent>;
 export const agentThreadOperations = {
+  readAgentThreadLines: {
+    capabilityId: "agent.thread.lines.read",
+    scope: "workspace",
+    channel: "desktop:read-agent-thread-lines",
+    payload: z.strictObject({ workspaceId: z.string().min(1) }),
+    result: AgentThreadLinesEvent,
+    guard: "active-workspace",
+    inactiveMessage: "Open this workspace to see what its agents' threads are doing.",
+  },
   readT3CodeConnection: {
     capabilityId: "agent.thread.t3code.read",
     scope: "device",
@@ -9251,6 +9279,7 @@ export interface DohcDesktopBridge
   onAgentRunState(listener: (event: AgentRunStateEvent) => void): () => void;
   // Agent dispatch was paused or resumed on this computer, from any window or the tray.
   onChatDispatchPaused(listener: (event: ChatDispatchPausedEvent) => void): () => void;
+  onAgentThreadLines(listener: (event: AgentThreadLinesEvent) => void): () => void;
   // An agent you run started or stopped waiting for messages on this computer.
   onAgentsListening(listener: (event: AgentsListeningEvent) => void): () => void;
   // Main's cached personal agents changed: a read, a change, or another account.

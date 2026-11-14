@@ -5,11 +5,15 @@ import {
   type AgentWithThread,
   type DesktopUserSettings,
 } from "../settings/userSettings";
+import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { subscribeChatWrites } from "../workspaces/chatWriteSignals";
-import { introductionText, quoted, type CliForThread } from "./forwardedText";
+import { introductionText, quoted, reminderText, type CliForThread } from "./forwardedText";
+import type { ForwardLedger } from "./forwardLedger";
 import { T3CodeError } from "./t3Code";
 import { createForwarding, type ForwardingDependencies, type ServedAgent } from "./forwarding";
 import type { T3CodeConnection } from "./t3CodeConnection";
+import { createThreadStates, type AgentThreadLine } from "./threadStates";
 
 // What the desktop does with agents that have a thread: it forwards each
 // open workspace's messages to them when a chat write lands and when their
@@ -28,7 +32,13 @@ export interface AgentThreadsDependencies {
   /** dohc's CLI as a thread runs it. */
   cli: CliForThread;
   t3Code: T3CodeConnection;
-  chats: ForwardingDependencies["chats"];
+  chats: ForwardingDependencies["chats"] & Pick<LinkedChatStore, "listMessagesPage">;
+  /** Where the forwarded messages that wait for an answer are kept. */
+  ledger: ForwardLedger;
+  /** A workspace's lines changed: what each agent thread is doing with its last message. */
+  onLines(workspaceId: string): void;
+  onError?(error: unknown): void;
+  nowMs?: () => number;
   readSettings(): Promise<Pick<DesktopUserSettings, "agents">>;
   /** Null when this computer no longer has the workspace. */
   workspace(workspaceId: string): AgentThreadsWorkspace | null;
@@ -78,23 +88,72 @@ export function forwardProblemWords(name: string | null, problem: unknown): stri
 }
 
 export function createAgentThreads(dependencies: AgentThreadsDependencies) {
+  const nowMs = dependencies.nowMs ?? Date.now;
+  /** The workspace's name and the agents dohc forwards its messages to. Null when this computer no longer has it. */
+  const serving = async (workspaceId: string) => {
+    const workspace = dependencies.workspace(workspaceId);
+    if (!workspace) return null;
+    const settings = await dependencies.readSettings();
+    return {
+      name: workspace.name,
+      agents: forwardingAgents(settings, workspaceId).flatMap(
+        (agent) => served(agent, workspace) ?? [],
+      ),
+    };
+  };
+  const states = createThreadStates({
+    ledger: dependencies.ledger,
+    tool: dependencies.t3Code,
+    chats: dependencies.chats,
+    // Only for an agent that still serves the workspace with the same thread.
+    reminder: async (row) => {
+      const agents = (await serving(row.workspaceId))?.agents ?? [];
+      if (!agents.some((agent) => agent.id === row.agentId && agent.threadId === row.toolThreadId))
+        return null;
+      const { thread } = await dependencies.chats.getThread({
+        workspaceId: row.workspaceId,
+        threadId: row.chatThreadId,
+      });
+      return reminderText({
+        cli: dependencies.cli,
+        workspace: { id: row.workspaceId },
+        agentId: row.agentId,
+        thread: { id: cliThreadId(row.chatThreadId), title: thread.title },
+      });
+    },
+    onChange: dependencies.onLines,
+    onError: dependencies.onError,
+    nowMs,
+  });
   const forwarding = createForwarding({
     cli: dependencies.cli,
     tool: dependencies.t3Code,
     chats: dependencies.chats,
     onProblem: dependencies.onProblem,
-    workspace: async (workspaceId) => {
-      const workspace = dependencies.workspace(workspaceId);
-      if (!workspace) return null;
-      const settings = await dependencies.readSettings();
-      return {
-        name: workspace.name,
-        agents: forwardingAgents(settings, workspaceId).flatMap(
-          (agent) => served(agent, workspace) ?? [],
-        ),
-      };
-    },
+    workspace: serving,
+    onForwarded: (forwarded) =>
+      states.forwarded({
+        workspaceId: forwarded.workspaceId,
+        agentId: forwarded.agent.id,
+        chatThreadId: forwarded.chatThreadId,
+        toolThreadId: forwarded.agent.threadId,
+        messageId: forwarded.messageId,
+        afterOrder: forwarded.afterOrder,
+        forwardedAtMs: nowMs(),
+        runId: forwarded.runId,
+      }),
   });
+  // A line is for an agent dohc forwards to. One that was turned off, removed,
+  // or pointed at another thread has none.
+  const dropLinesNoAgentHas = async () => {
+    const settings = await dependencies.readSettings();
+    await states.forget(
+      (row) =>
+        !forwardingAgents(settings, row.workspaceId).some(
+          (agent) => agent.id === row.agentId && agent.thread.id === row.toolThreadId,
+        ),
+    );
+  };
   const watched = new Map<string, () => void>();
   // Whether any agent had a thread when dohc last looked. Null before the first look.
   let hadThreadAgent: boolean | null = null;
@@ -121,16 +180,26 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
       if (!watched.has(workspaceId))
         watched.set(
           workspaceId,
-          subscribeChatWrites(workspaceId, () => void forwarding.wake(workspaceId)),
+          subscribeChatWrites(workspaceId, () => {
+            void forwarding.wake(workspaceId);
+            // A reply takes its line away at once.
+            void states.check();
+          }),
         );
       if (hadThreadAgent === null) keepOrDropSignIn();
       void forwarding.wake(workspaceId);
+      void states.check();
     },
+    /** What each agent thread is doing with the last message forwarded from each of the workspace's chat threads. */
+    lines: (workspaceId: string): AgentThreadLine[] => states.lines(workspaceId),
     /** Stops forwarding a workspace's messages. Call it when the workspace leaves this computer. */
     unwatch(workspaceId: string): void {
       watched.get(workspaceId)?.();
       watched.delete(workspaceId);
       forwarding.leave(workspaceId);
+      void states
+        .forget((row) => row.workspaceId === workspaceId)
+        .catch((error: unknown) => dependencies.onError?.(error));
     },
     /** Tries a workspace's waiting messages again now. */
     retry(workspaceId: string): void {
@@ -139,6 +208,7 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     /** Call it after settings are saved, so work that started before the change stops. */
     settingsChanged(): void {
       keepOrDropSignIn();
+      void dropLinesNoAgentHas().catch((error: unknown) => dependencies.onError?.(error));
       for (const workspaceId of watched.keys()) void forwarding.wake(workspaceId, true);
     },
     /**
@@ -175,6 +245,7 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
       });
     },
     stop(): void {
+      states.stop();
       forwarding.stop();
       for (const unsubscribe of watched.values()) unsubscribe();
       watched.clear();
