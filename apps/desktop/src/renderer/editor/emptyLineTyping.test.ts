@@ -716,6 +716,27 @@ it.each(Object.keys(pages) as (keyof typeof pages)[])(
   },
 );
 
+// Every choice of break here leaves one empty piece to remove, so the editor weighs them all.
+// Weighing each against the whole line took about a second per backspace.
+it.each(Object.keys(pages) as (keyof typeof pages)[])(
+  "removes one of five thousand line breaks with an empty piece in every gap within 300 ms (%s)",
+  async (maker) => {
+    const parts: (string | null)[] = [""];
+    for (let i = 0; i < 5000; i++) parts.push(null, "");
+    const baseline = seeded(parts);
+    const a = await pages[maker](baseline);
+    caretAt(a, 1, 2500);
+    const started = performance.now();
+    backspace(a);
+    const update = await a.take();
+    expect(performance.now() - started).toBeLessThan(300);
+    expect(verdict(baseline, [], update)).toBe("accepted");
+    const line = getDohcYDocBodyFragment(a.doc).get(1) as Y.XmlElement;
+    expect(line.toArray().filter((child) => child instanceof Y.XmlElement)).toHaveLength(4999);
+    expect(line.toArray().filter((child) => child instanceof Y.XmlText)).toHaveLength(5000);
+  },
+);
+
 /** A seeded source of numbers, so a failing race replays from its seed. */
 function random(seed: number) {
   let state = seed >>> 0;

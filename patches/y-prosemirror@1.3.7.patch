@@ -1,5 +1,5 @@
 diff --git a/dist/y-prosemirror.cjs b/dist/y-prosemirror.cjs
-index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..eb7f11b0f4e5c018d3ac284f79f4085f2f8b7531 100644
+index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..e2b169f68e003250615344bb5505647a9a9ab2cc 100644
 --- a/dist/y-prosemirror.cjs
 +++ b/dist/y-prosemirror.cjs
 @@ -1216,6 +1216,28 @@ const marksToAttributes = (marks, meta) => {
@@ -54,7 +54,7 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..eb7f11b0f4e5c018d3ac284f79f4085f
    const yChildCnt = yChildren.length;
    const minCnt = math__namespace.min(pChildCnt, yChildCnt);
    let left = 0;
-@@ -1340,33 +1376,94 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1340,33 +1376,99 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
@@ -100,10 +100,15 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..eb7f11b0f4e5c018d3ac284f79f4085f
 +        a instanceof Y__namespace.XmlElement && b instanceof Y__namespace.XmlElement && a.nodeName === b.nodeName &&
 +        a.length === 0 && b.length === 0 &&
 +        JSON.stringify(a.getAttributes()) === JSON.stringify(b.getAttributes());
++      // Removing items changes only the empty runs between the items kept on either side,
++      // so count the pieces dropped from that stretch alone.
++      const dropped = types => emptyRunsToDrop(types).reduce((sum, [a, b]) => sum + b - a, 0);
++      const all = dropped(yAll);
 +      const doomed = (from, to) => {
-+        const gone = new Set(yAt.slice(from, to));
-+        return emptyRunsToDrop(yAll.filter((_, i) => !gone.has(i)))
-+          .reduce((count, [a, b]) => count + b - a, 0);
++        const start = from > 0 ? yAt[from - 1] : 0;
++        const stretch = yAll.slice(start, to < yChildCnt ? yAt[to] + 1 : yAll.length);
++        const gone = new Set(yAt.slice(from, to).map(i => i - start));
++        return all - dropped(stretch) + dropped(stretch.filter((_, i) => !gone.has(i)));
 +      }
 +      let best = doomed(lo, hi);
 +      for (let step = -1; step <= 1 && best > 0; step += 2) {
@@ -167,7 +172,7 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..eb7f11b0f4e5c018d3ac284f79f4085f
    }, ySyncPluginKey);
  };
 diff --git a/src/plugins/sync-plugin.js b/src/plugins/sync-plugin.js
-index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..4d47e30f15a3e190d917f82b324b7efea2627fec 100644
+index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..662c438caa231509df44e59527efeade7cc898f6 100644
 --- a/src/plugins/sync-plugin.js
 +++ b/src/plugins/sync-plugin.js
 @@ -1142,6 +1142,28 @@ const marksToAttributes = (marks, meta) => {
@@ -222,7 +227,7 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..4d47e30f15a3e190d917f82b324b7efe
    const yChildCnt = yChildren.length
    const minCnt = math.min(pChildCnt, yChildCnt)
    let left = 0
-@@ -1266,33 +1302,94 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1266,33 +1302,99 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
            )
            right += 1
          } else {
@@ -268,10 +273,15 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..4d47e30f15a3e190d917f82b324b7efe
 +        a instanceof Y.XmlElement && b instanceof Y.XmlElement && a.nodeName === b.nodeName &&
 +        a.length === 0 && b.length === 0 &&
 +        JSON.stringify(a.getAttributes()) === JSON.stringify(b.getAttributes())
++      // Removing items changes only the empty runs between the items kept on either side,
++      // so count the pieces dropped from that stretch alone.
++      const dropped = types => emptyRunsToDrop(types).reduce((sum, [a, b]) => sum + b - a, 0)
++      const all = dropped(yAll)
 +      const doomed = (from, to) => {
-+        const gone = new Set(yAt.slice(from, to))
-+        return emptyRunsToDrop(yAll.filter((_, i) => !gone.has(i)))
-+          .reduce((count, [a, b]) => count + b - a, 0)
++        const start = from > 0 ? yAt[from - 1] : 0
++        const stretch = yAll.slice(start, to < yChildCnt ? yAt[to] + 1 : yAll.length)
++        const gone = new Set(yAt.slice(from, to).map(i => i - start))
++        return all - dropped(stretch) + dropped(stretch.filter((_, i) => !gone.has(i)))
 +      }
 +      let best = doomed(lo, hi)
 +      for (let step = -1; step <= 1 && best > 0; step += 2) {
