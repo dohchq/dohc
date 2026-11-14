@@ -1,4 +1,4 @@
-import { ClientClosedRequest, jsonResponse } from "@dohc/service-http";
+import { ClientClosedRequest, jsonResponse, RefusedRequest } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
 import { serverLogLine } from "./serverLogWords";
@@ -254,6 +254,8 @@ export function errorResponse(error: unknown): Response {
   // A client that closed its request is not a server fault, and nobody reads this answer.
   // guardRelayResponses logs it after all when the close was another request's.
   if (error instanceof ClientClosedRequest) return clientClosedResponse();
+  // The server already sent its refusal of this request's body, and nobody reads this answer.
+  if (error instanceof RefusedRequest) return errorBody("internal_error");
   console.error("[sync-relay] unhandled error", serverLogLine(error));
   return errorBody("internal_error");
 }

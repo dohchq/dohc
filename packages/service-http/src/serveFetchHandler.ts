@@ -52,6 +52,12 @@ export class ClientClosedRequest extends DOMException {
   }
 }
 
+/**
+ * The request signal's abort reason, and its body's error, when the server refused the body and already sent the
+ * refusal. The handler's own answer to that request is never sent.
+ */
+export class RefusedRequest extends DOMException {}
+
 const BODY_RECEIPT_MS = 300_000;
 const REFUSAL_LINGER_MS = 2_000;
 // The stream window a body read on demand already holds.
@@ -138,7 +144,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
           void answer(options.oversized(url), incoming);
           return;
         }
-        const refuse = (response: Response, reason: DOMException): DOMException => {
+        const refuse = (response: Response, reason: RefusedRequest): RefusedRequest => {
           clearTimeout(bodyTimer);
           disconnect.abort(reason);
           void answer(response, incoming);
@@ -148,7 +154,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
           bounded.abort(
             refuse(
               options.timedOut?.(url) ?? new Response(null, { status: 408 }),
-              new DOMException("Request body timed out", "TimeoutError"),
+              new RefusedRequest("Request body timed out", "TimeoutError"),
             ),
           );
         }, BODY_RECEIPT_MS);
@@ -176,7 +182,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
                 controller.error(
                   refuse(
                     options.oversized(url),
-                    new DOMException("Request body too large", "AbortError"),
+                    new RefusedRequest("Request body too large", "AbortError"),
                   ),
                 );
                 return;
@@ -192,7 +198,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
                   controller.error(
                     refuse(
                       options.busy?.(url) ?? new Response(null, { status: 503 }),
-                      new DOMException(
+                      new RefusedRequest(
                         "Request bodies in flight are at their budget",
                         "AbortError",
                       ),
