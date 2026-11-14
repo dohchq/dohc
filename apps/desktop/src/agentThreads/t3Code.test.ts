@@ -17,7 +17,7 @@ import {
   t3CodeOriginOnThisComputer,
 } from "./t3Code";
 import { T3CodeSignInNotKept, createT3CodeSignInStore } from "./t3CodeSignInStore";
-import { AgentThreadAnswers } from "../ipc/bridgeContract";
+import { AgentThreadAnswers, agentThreadOperations } from "../ipc/bridgeContract";
 import { browser, startFakeT3Code } from "../testing/fakeT3Code";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -715,6 +715,19 @@ describe("T3 Code's thread tools", () => {
     await expect(answerT3CodeQuestion(session, answer)).rejects.toMatchObject({
       problem: "refused",
     });
+  });
+
+  it("says something of a refusal T3 Code gave no words for, which a window can be told", () => {
+    const words = new T3CodeError("refused", "").message;
+    expect(words).toBe("T3 Code refused the call.");
+    expect(new T3CodeError("refused", " \n").message).toBe("T3 Code refused the call.");
+    // The answer a window gets about an agent's thread takes those words.
+    expect(
+      agentThreadOperations.readAgentThread.result.parse({ threadId: "t1", problem: words }),
+    ).toEqual({ threadId: "t1", problem: words });
+    expect(() =>
+      agentThreadOperations.readAgentThread.result.parse({ threadId: "t1", problem: "" }),
+    ).toThrow();
   });
 
   it("tells a sign-in T3 Code no longer takes from a call it refused and an answer it cannot read", async () => {

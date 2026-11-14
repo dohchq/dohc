@@ -320,7 +320,7 @@ describe("forwarding", () => {
 
   it("does not give the next thread a message the last one took, and goes on to the messages after it", async () => {
     let agents: ServedAgent[] = [agent];
-    const { forwarding, sent, marks, failMarks } = setup([request("m1", 10)], {
+    const { forwarding, sent, marks, failMarks } = setup([request("m1", 10), request("m2", 20)], {
       retryAfterMs: [60_000],
       workspace: async () => ({ name: "Launch", agents }),
     });
@@ -337,8 +337,12 @@ describe("forwarding", () => {
     agents = [{ ...agent, threadId: "t3-thread-new" }];
     await forwarding.wake(WORKSPACE, true);
 
-    expect(sent).toHaveLength(1);
-    expect(marks).toEqual(["m1"]);
+    // m1 is only marked read. m2, which waited behind it, goes to the new thread.
+    expect(sent.map((message) => [message.threadId, message.forwardId])).toEqual([
+      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m1")],
+      ["t3-thread-new", forwardIdOf(WORKSPACE, "chief", "m2")],
+    ]);
+    expect(marks).toEqual(["m1", "m2"]);
     forwarding.stop();
   });
 
