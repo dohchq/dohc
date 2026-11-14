@@ -137,17 +137,22 @@ test("package typechecks and native proofs stay complete when changed files sele
     (pkg) => pkg.manifest.scripts?.typecheck,
   );
   const tasks = await javascriptTasks({ changed: ["docs/guide.md"], proofs: true });
-  // Each native test runs alone in the cloud, selected by its own file.
+  // The long proof runs one task per test. Every other native file runs as one task.
   const native = Map.groupBy(
     tasks.filter((task) => task.kind === "self-host-native"),
     (task) => task.file,
   );
+  const split = native.get("services/share-web/src/selfHostedLiveNative.integration.ts") ?? [];
+  assert.ok(split.length > 1);
+  for (const task of split) assert.equal(task.id, `self-host-native:${task.name}`);
   for (const file of [
-    "services/share-web/src/selfHostedLiveNative.integration.ts",
     "services/share-web/src/namedRecipientAuthenticatedNative.integration.ts",
     "services/share-web/src/remoteMcpNative.integration.ts",
   ])
-    assert.ok(native.get(file)?.length, file);
+    assert.deepEqual(
+      native.get(file)?.map(({ id, name }) => ({ id, name })),
+      [{ id: `self-host-native:${file}`, name: undefined }],
+    );
   for (const file of native.keys()) assert.ok(existsSync(resolve(file)), file);
   const typechecks = tasks.filter((task) => task.id.startsWith("typecheck:"));
   assert.deepEqual(

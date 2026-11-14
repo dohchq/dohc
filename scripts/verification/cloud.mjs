@@ -79,6 +79,21 @@ function passingBrowserReport(path) {
   return report;
 }
 
+/** A named task passes its one test. A file task passes every test in its file, at least one. */
+export function assertNativeProof(task, result) {
+  const cases = result.testResults
+    .flatMap((module) => module.assertionResults)
+    .filter((test) => !task.name || test.fullName === task.name);
+  if (
+    !result.success ||
+    !cases.length ||
+    cases.some((test) => test.status !== "passed") ||
+    result.numFailedTests ||
+    (task.name && (cases.length !== 1 || result.numPassedTests !== 1))
+  )
+    throw new Error(`Native proof did not pass: ${task.name ?? task.file}.`);
+}
+
 export async function runJavascript(
   groups,
   record,
@@ -178,7 +193,7 @@ export async function runJavascript(
       const proofDirectory = join(directory, `self-host-${record.steps.length}`);
       mkdirSync(proofDirectory, { recursive: true });
       const sha256 = hashFile(stagedEnginePath);
-      const escaped = task.name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      const escaped = task.name?.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
       await command(
         task,
         ...pnpm([
@@ -191,8 +206,7 @@ export async function runJavascript(
           "vitest.self-host-native.config.ts",
           // Vitest matches a filter against the path from its root.
           relative(resolve(repoRoot, "services/share-web"), resolve(repoRoot, task.file)),
-          "--testNamePattern",
-          `^${escaped}$`,
+          ...(escaped ? ["--testNamePattern", `^${escaped}$`] : []),
           "--reporter=default",
           "--reporter=json",
           `--outputFile.json=${join(proofDirectory, "vitest.json")}`,
@@ -206,19 +220,11 @@ export async function runJavascript(
           },
         },
       );
-      const result = JSON.parse(readFileSync(join(proofDirectory, "vitest.json"), "utf8"));
-      const cases = result.testResults
-        .flatMap((module) => module.assertionResults)
-        .filter((test) => test.fullName === task.name);
-      if (
-        !result.success ||
-        cases.length !== 1 ||
-        cases[0].status !== "passed" ||
-        result.numPassedTests !== 1 ||
-        result.numFailedTests
-      )
-        throw new Error(`Native proof did not pass: ${task.name}.`);
-      if (task.name.startsWith("enrolls a self-hosted document,")) {
+      assertNativeProof(
+        task,
+        JSON.parse(readFileSync(join(proofDirectory, "vitest.json"), "utf8")),
+      );
+      if (task.name?.startsWith("enrolls a self-hosted document,")) {
         // The canonical reader also checks the complete saved delivery record.
         record.selfHostNative = readSelfHostDeliveryProof(proofDirectory, stagedEnginePath, sha256);
       }

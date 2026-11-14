@@ -15,10 +15,59 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { cancellationScope } from "./cancellation.mjs";
 import { run } from "./process.mjs";
-import { runJavascript } from "./cloud.mjs";
+import { assertNativeProof, runJavascript } from "./cloud.mjs";
 import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences } from "./selection.mjs";
 import { copyFlakyFixture } from "./flaky-fixture.mjs";
+
+test("a native file task passes only when every test in its file ran and passed", () => {
+  // Shapes from vitest's JSON reporter: an empty file, one failure, and a skipped test.
+  const report = (success, tests) => ({
+    success,
+    numPassedTests: tests.filter(([, status]) => status === "passed").length,
+    numFailedTests: tests.filter(([, status]) => status === "failed").length,
+    testResults: [{ assertionResults: tests.map(([fullName, status]) => ({ fullName, status })) }],
+  });
+  const file = { file: "services/share-web/src/a.integration.ts" };
+  assertNativeProof(
+    file,
+    report(true, [
+      ["a", "passed"],
+      ["b", "passed"],
+    ]),
+  );
+  for (const result of [
+    report(false, []),
+    report(false, [
+      ["a", "passed"],
+      ["b", "failed"],
+    ]),
+    report(true, [
+      ["a", "passed"],
+      ["b", "skipped"],
+    ]),
+    { ...report(true, []), testResults: [] },
+  ])
+    assert.throws(() => assertNativeProof(file, result), /did not pass: services/);
+  // A named task runs one test; the file's others show as skipped.
+  const named = { ...file, name: "b" };
+  assertNativeProof(
+    named,
+    report(true, [
+      ["a", "skipped"],
+      ["b", "passed"],
+    ]),
+  );
+  assert.throws(() =>
+    assertNativeProof(
+      named,
+      report(true, [
+        ["a", "passed"],
+        ["b", "skipped"],
+      ]),
+    ),
+  );
+});
 
 test("a malformed proof continuation cannot silently omit proofs", async () => {
   await assert.rejects(testWorkspace({ runProofs: true }), /runProofs must be a function/);
