@@ -110,6 +110,7 @@ import {
 } from "../workspaces/workspaceTextLimits";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import { sharedWaitingLine } from "../ipc/sharedDocumentOpenState";
+import type { LevelMark } from "./workbench/membershipWords";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -325,8 +326,8 @@ export function MarkdownView(props: {
   // Read-only shared views: editing is disabled regardless of size,
   // and live collab never activates.
   forceReadOnly?: boolean;
-  // The level allows no editing here, so the page has no Edit toggle.
-  levelReadOnly?: boolean;
+  // The level allows no editing here, so the page shows this mark in place of its Edit toggle.
+  levelMark?: LevelMark | null;
   // Main takes no live edits to this note from this computer until Try again
   // sends its queue or a Stop releases the note. The session stays bound, so
   // remote edits still show.
@@ -2503,8 +2504,9 @@ export function MarkdownView(props: {
         }
         actions={
           <DocumentControls
+            mark={props.levelMark}
             toggle={
-              props.levelReadOnly
+              props.levelMark
                 ? null
                 : {
                     label:
@@ -2569,6 +2571,7 @@ export function MarkdownView(props: {
         <EngineMayHoldDocumentNotice
           onRetry={props.onRetryHeldCapture}
           contentShown
+          noun="page"
           message={captureHeldLiveMessage(props.path)}
         >
           <OpenExternallyLink
@@ -2593,6 +2596,7 @@ export function MarkdownView(props: {
         <EngineMayHoldDocumentNotice
           onRetry={props.onRetryEngineOpen}
           contentShown
+          noun="page"
           message={engine.openRefusal ?? sharedWaitingLine(engine.sharedWaiting)}
           waiting={!engine.openRefusal && engine.sharedWaiting?.awaitsHost === true}
           action={

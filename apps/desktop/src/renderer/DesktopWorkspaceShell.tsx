@@ -268,7 +268,8 @@ import {
   type LiveStopRefusal,
 } from "../ipc/liveEditingStop";
 import { OpenSharedView, opensForLiveEditing } from "./OpenSharedView";
-import { levelChangedWords, youCan } from "./workbench/membershipWords";
+import { levelChangedWords, levelMark, youCan } from "./workbench/membershipWords";
+import { shareSenderParts } from "./ShareSender";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
@@ -3238,7 +3239,7 @@ export function DesktopWorkspaceShell(props: {
       if (shareView.membership && result.levelChanged && result.access) {
         const words = levelChangedWords(result.access, result.levelChangedBy);
         if (shareAccess && LEVEL_RANK[result.access] < LEVEL_RANK[shareAccess])
-          showWarningNotice(words);
+          showWarningNotice(words, { change: true });
         else showSuccessNotice(words);
       }
       if (result.status === "ended" || (result.access && result.access !== shareAccess)) {
@@ -3942,7 +3943,7 @@ export function DesktopWorkspaceShell(props: {
               const them = saved.keptEdits === "kept" ? "A copy of them is" : "They are";
               showWarningNotice(
                 `dohc could not make a readable copy of your kept edits for ${path}. ${them} saved on this computer, in the file below.${kept}`,
-                [saved.packagePath],
+                { paths: [saved.packagePath] },
               );
               return;
             }
@@ -6646,6 +6647,9 @@ export function DesktopWorkspaceShell(props: {
     shareAccess === "comment" &&
     shareView?.genericChatWritable === true;
   const shareGranterName = shareSenderLabel(shareView?.sharerName, shareView?.granterEmail);
+  // The sender as Sharing's row names them: their name alone when they have one.
+  const shareSenderNames = shareSenderParts(shareView?.sharerName, shareView?.granterEmail);
+  const shareSenderShort = shareSenderNames.displayName ?? shareSenderNames.full;
   const shareBannerText = !shareView
     ? ""
     : shareViewEnded
@@ -7638,19 +7642,21 @@ export function DesktopWorkspaceShell(props: {
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         ...(error.paths ? { paths: error.paths } : {}),
         ...(error.command ? { command: error.command } : {}),
-        ...(error.kind === "share-capture"
-          ? shareCaptureCopy(error.details?.map((detail) => String(detail[1])) ?? [])
-          : {
-              copy: {
-                report: errorDetails([
-                  [error.tone ? "Notice" : "Error", error.message],
-                  ...(error.title ? [["Title", error.title] as const] : []),
-                  ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
-                  ...(error.details ?? []),
-                  ...reportFacts(error.atMs),
-                ]),
-              },
-            }),
+        ...(error.change
+          ? {}
+          : error.kind === "share-capture"
+            ? shareCaptureCopy(error.details?.map((detail) => String(detail[1])) ?? [])
+            : {
+                copy: {
+                  report: errorDetails([
+                    [error.tone ? "Notice" : "Error", error.message],
+                    ...(error.title ? [["Title", error.title] as const] : []),
+                    ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
+                    ...(error.details ?? []),
+                    ...reportFacts(error.atMs),
+                  ]),
+                },
+              }),
         atMs: error.atMs,
         canRetry: error.retry !== null && !filedBeforeStop?.has(error.id),
         retryBusy: error.retryBusy,
@@ -8194,6 +8200,7 @@ export function DesktopWorkspaceShell(props: {
                           setQuickOpenOpen={setQuickOpenOpen}
                           syncStatus={syncStatus}
                           failedSaves={failedSaves}
+                        otherAccount={otherAccountApplies}
                           showWorkbenchMenu={showWorkbenchMenu}
                           agentActive={agentActive}
                           restrictedMode={
@@ -8656,12 +8663,7 @@ export function DesktopWorkspaceShell(props: {
                                         isMountedSharePath(path)
                                       }
                                       // The lists name this workspace's own notes, never a received share's.
-                                      levelReadOnly={
-                                        membershipView &&
-                                        (shareViewEnded ||
-                                          shareAccess === "view" ||
-                                          shareAccess === "comment")
-                                      }
+                                      levelMark={membershipView ? levelMark(shareAccess, shareViewEnded, shareSenderShort) : null}
                                       liveEditingPaused={
                                         shareView || isMountedSharePath(path)
                                           ? undefined
@@ -8694,7 +8696,11 @@ export function DesktopWorkspaceShell(props: {
                                             activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                                             tabLabels={tabLabels}
                                             tabGlyphs={chatEditors.glyphs}
-                                            tabUnread={membershipView && shareViewEnded ? undefined : chatEditors.unread}
+                                            tabUnread={
+                                              membershipView && shareViewEnded
+                                                ? undefined
+                                                : chatEditors.unread
+                                            }
                                             files={fileEntries}
                                             recoveryPaths={recoveryPaths}
                                             groupNumber={groupIndex + 1}

@@ -146,6 +146,9 @@ export interface ShellError {
   // Facts for a report, one "label: value" line each, such as the error as
   // it arrived. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
+  // A change of state, such as a new level, not a failure: nothing to
+  // report, so it has no Details.
+  change?: true;
   // Answers false when it could not run, so the row stays.
   retry: (() => void | false) | null;
   retryBusy?: boolean;
@@ -1232,8 +1235,8 @@ export function useShellError(
     [clearKind, push],
   );
   const showWarningNotice = useCallback(
-    (message: string, paths?: readonly string[]) => {
-      push({ message, retry: null, tone: "warning", ...(paths ? { paths } : {}) });
+    (message: string, options?: { change?: true; paths?: readonly string[] }) => {
+      push({ message, retry: null, tone: "warning", ...(options?.paths ? { paths: options.paths } : {}), ...(options?.change ? { change: true } : {}) });
     },
     [push],
   );

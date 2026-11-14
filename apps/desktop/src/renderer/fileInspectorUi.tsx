@@ -103,7 +103,8 @@ export function ViewActions(props: {
 
 export const LOSSY_NOTE_TITLE = "This note has parts dohc can't show.";
 
-export const OPENING_TITLE = "You can edit this document when it finishes opening.";
+// Only a Markdown page shows it, so it says page.
+export const OPENING_TITLE = "You can edit this page when it finishes opening.";
 
 // The wait before a slow open says so, the same wait as the loading lines'
 // (styles.css, dohc-reveal-if-slow).
@@ -131,7 +132,10 @@ export function OpeningState() {
 // has the whole document to copy, so it has no menu, and the menu's place
 // stays empty instead of closing up. A level that allows no editing has no
 // toggle at all.
+// `mark` stands in the toggle's place when the level allows no editing, in the
+// recipe of StateMark's held "Read-only" chip.
 export function DocumentControls(props: {
+  mark?: { label: string; title: string } | null;
   toggle: {
     label: string;
     testId?: string;
@@ -142,9 +146,19 @@ export function DocumentControls(props: {
   } | null;
   menu: ComponentProps<typeof DocumentMenu> | null;
 }) {
-  const { toggle } = props;
+  const { toggle, mark } = props;
   return (
     <>
+      {mark && (
+        <span
+          data-testid="level-mark"
+          title={mark.title}
+          className="inline-flex shrink-0 items-center gap-1.5 text-[11px] leading-4 text-muted"
+        >
+          <Lock size={12} aria-hidden className="shrink-0" />
+          {mark.label}
+        </span>
+      )}
       {toggle && (
         <button
           type="button"
@@ -179,6 +193,8 @@ export function DocumentControls(props: {
 // offered where the user is looking.
 export function EngineMayHoldDocumentNotice(props: {
   onRetry: () => void;
+  // What the file is to the person: a Markdown note is a page.
+  noun?: "page" | "document";
   // Is the document's content on screen? When the read failed too, it is
   // not — and "You can still read it" would promise read access to
   // content the user cannot see.
@@ -196,8 +212,8 @@ export function EngineMayHoldDocumentNotice(props: {
       data-testid="engine-may-hold-document-notice"
       className="flex items-center justify-between gap-2 border-b border-line bg-panel-2 px-4 py-1 text-[11px] text-warning"
     >
-      {/* "document", the noun the editing controls beside this already use
-          ("You can edit this document when it finishes opening.").
+      {/* A Markdown note is a "page", the noun the editing controls beside
+          this already use ("You can edit this page when it finishes opening.").
 
           No "in time": this notice answers every refusal `main` maps to
           `engineMayHoldDocument`, and only one of them is a timeout. A session
@@ -214,7 +230,7 @@ export function EngineMayHoldDocumentNotice(props: {
             className="shrink-0 motion-safe:animate-spin"
           />
         ) : null}
-        {props.message ?? "dohc could not open this document for editing."}
+        {props.message ?? `dohc could not open this ${props.noun ?? "document"} for editing.`}
         {!props.message && props.contentShown ? " You can still read it." : ""}
       </span>
       <span className="flex shrink-0 items-center gap-3">
@@ -591,7 +607,7 @@ export const DELETED_FILE_DRAFT_NOTICE =
   "The file was moved or deleted outside dohc. Copy your edits to keep them.";
 // The row for an edit dohc refused to save for good, in either editor.
 export const DOCUMENT_NOT_SAVED_DRAFT_NOTICE =
-  "dohc could not save this document. Copy your edits to keep them.";
+  "dohc could not save this page. Copy your edits to keep them.";
 
 export function OrphanedDraftNotices(props: {
   workspaceId: string;

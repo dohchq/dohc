@@ -42,15 +42,23 @@ describe("a joined workspace", () => {
     expect(screen.getAllByText("You can comment")).toHaveLength(1);
   });
 
-  // Controls the level does not allow are absent, not disabled.
-  it.each(["view", "comment"] as const)("shows a page at %s with no Edit toggle, opening or open", async (access) => {
+  // Controls the level does not allow are absent, not disabled. The level stands in the toggle's place,
+  // in the browser's words, with who set it in the tooltip.
+  it.each([
+    ["view", "View only", "Sam lets members view only"],
+    ["comment", "Can comment", "Sam lets members comment"],
+  ] as const)("shows a page at %s with its level where the Edit toggle would be, opening or open", async (access, label, title) => {
     const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access } }));
     expect(await screen.findByTestId("document-menu-trigger")).toBeTruthy();
+    expect((await screen.findByTestId("level-mark")).textContent).toBe(label);
     await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     expect(screen.queryByTestId("markdown-edit-toggle")).toBeNull();
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    const mark = screen.getByTestId("level-mark");
+    expect(mark.textContent).toBe(label);
+    expect(mark.getAttribute("title")).toBe(title);
   });
 
   // An ended membership edits nothing, so its pages show no Edit, whatever its level was.
@@ -62,6 +70,7 @@ describe("a joined workspace", () => {
     await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     expect(screen.queryByTestId("markdown-edit-toggle")).toBeNull();
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+    expect(screen.getByTestId("level-mark").textContent).toBe("Read-only");
   });
 
   it("keeps the Edit toggle for a member at Edit", async () => {
@@ -71,6 +80,7 @@ describe("a joined workspace", () => {
     const toggle = await screen.findByTestId("markdown-edit-toggle");
     await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     expect(toggle.hasAttribute("disabled") || toggle.getAttribute("aria-disabled") === "true").toBe(false);
+    expect(screen.queryByTestId("level-mark")).toBeNull();
   });
 
   function withGroup(access: "view" | "comment" | "edit", checked: Awaited<ReturnType<ReturnType<typeof makeShareBridge>["checkSharedViewAccess"]>>,
@@ -184,9 +194,11 @@ describe("a joined workspace", () => {
     withGroup("comment", { status: "current", access: "view", role: "member", levelChanged: true, levelChangedBy: "Ana" });
     const toast = await screen.findByTestId("workspace-shell-notice");
     expect(toast.textContent).toContain("Ana now lets members view only.");
-    // Less access is a change of state, not a success.
+    // Less access is a change of state, not a success, and not a failure: it has nothing to report.
     expect(toast.querySelector(".text-warning")).not.toBeNull();
     expect(toast.querySelector(".text-success")).toBeNull();
+    expect(within(toast).queryByRole("button", { name: /Details/ })).toBeNull();
+    expect(within(toast).queryByRole("button", { name: /Copy/ })).toBeNull();
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(await within(screen.getByTestId("notice-center")).findByText("Ana now lets members view only.")).toBeTruthy();
   });
@@ -256,6 +268,8 @@ describe("a joined workspace", () => {
     expect(toast.textContent).toContain("This computer is signed in as lee@dohc.test, not the account the owner invited.");
     expect(within(toast).getByRole("button", { name: "Switch account" })).toBeTruthy();
     expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+    // The title bar's sync mark needs the person too, not a green dot.
+    expect(screen.getByTestId("sync-status").textContent).toBe("Another account signed in");
     await waitFor(() => expect(within(toasts).getAllByTestId("workspace-shell-error")).toHaveLength(1));
     expect(document.body.textContent).not.toContain("This computer is signed in to a different account than the one the owner invited.");
     expect(document.body.textContent).not.toContain("does not record");

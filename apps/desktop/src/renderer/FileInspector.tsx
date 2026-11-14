@@ -34,6 +34,7 @@ import { ImageView } from "./ImageView";
 import { extensionOf } from "./path";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { DraftFlush } from "./useAutosavedTextDraft";
+import type { LevelMark } from "./workbench/membershipWords";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   Suspense,
@@ -311,9 +312,9 @@ type FileInspectorProps = {
   // Read-only shared views: every editable view refuses edits.
   readOnly?: boolean;
   // A joined workspace at View or Comment, or one whose membership ended, which allows no editing:
-  // a page shows no Edit toggle, since controls the level does not allow are
-  // absent, not disabled.
-  levelReadOnly?: boolean;
+  // a page shows this mark in place of its Edit toggle, since controls the level
+  // does not allow are absent, not disabled.
+  levelMark?: LevelMark | null;
   // Live editing is paused for this note: the server refused its edits, or too many wait.
   liveEditingPaused?: "refused" | "full";
   // A share shows this new note, and the server has no file for it yet.
@@ -805,8 +806,9 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
   const closedDocumentControls = (opening: boolean) =>
     kind === "markdown" ? (
       <DocumentControls
+        mark={props.levelMark}
         toggle={
-          props.levelReadOnly
+          props.levelMark
             ? null
             : {
                 label: "Edit",
@@ -886,6 +888,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
           <EngineMayHoldDocumentNotice
             onRetry={retryEngineOpen}
             contentShown={false}
+            noun={kind === "markdown" ? "page" : "document"}
             message={engine.openRefusal ?? engine.sharedWaiting?.message}
           />
         ) : null}
@@ -957,7 +960,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
             pendingUndo={pendingTextUndo}
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             forceReadOnly={props.readOnly}
-            levelReadOnly={props.levelReadOnly}
+            levelMark={props.levelMark}
             liveEditingPaused={props.liveEditingPaused}
             pendingShare={props.pendingShare}
             onOpenLiveDocuments={props.onOpenLiveDocuments}
