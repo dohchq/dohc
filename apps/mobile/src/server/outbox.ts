@@ -35,9 +35,10 @@ import type { ChatMessage } from "./workspaceReads";
 //
 // Sign out, through `signOut`, stops sending and writes a marker. Only then does the account end the sign-in and
 // delete its token; then every file goes, and the marker last. A launch that finds the marker finishes the delete
-// before it reads anything, and a delete that fails keeps the outbox closed until `wake` finishes it. If the marker
-// can't be written, the delete must finish at once, or Sign out fails: the phone stays signed in and the outbox keeps
-// what's left, paused. Either way nothing Sign out said it deleted is ever sent.
+// before it reads anything. If the marker can't be written, the delete must finish at once, or Sign out fails, and a
+// phone still signed in stays signed in. From the moment Sign out starts, the delete is owed: nothing sends and
+// nothing is added, whoever signs in, until a try finishes it. `wake` and each sign-in try again, and `state()` shows
+// a failed try, so Connect can say so after a 401 has already signed the phone out.
 //
 // Every disk change runs in one queue. A change checks the outbox's lifetime, which Sign out moves on, after each
 // wait, so a late answer can neither update another account's record nor bring back a deleted one.
@@ -109,6 +110,12 @@ interface OutboxState {
   readonly records: readonly OutboxRecord[];
   /** Files kept aside: records that can't be read, and anything else in the folder. */
   readonly aside: readonly string[];
+  /**
+   * A Sign out's delete: `none` when none is owed. While one is owed, nothing sends and nothing is added. `failed` once
+   * a try has failed, until one finishes it; `failed-unmarked` when its marker isn't on disk either, so a relaunch
+   * would read the records instead of deleting them.
+   */
+  readonly deletion: "none" | "owed" | "failed" | "failed-unmarked";
 }
 
 /**
@@ -135,6 +142,8 @@ const MESSAGES: Readonly<Record<OutboxError["kind"], string>> = {
 
 export interface Outbox {
   state(): OutboxState;
+  /** Calls `listener` after each change to `state()`. Returns a stop. */
+  subscribe(listener: () => void): () => void;
   /**
    * Adds a write for the signed-in account, and resolves once its record is durable. A reply whose `threadId` is null
    * names, in `dependsOn`, the outbox post or send it replies to. A reaction names its message's `thread`. Rejects with
@@ -161,14 +170,17 @@ export interface Outbox {
   ): void;
   /**
    * Stops sending and deletes every record, calling `leave` once the delete can't be lost: after the marker lands, or
-   * after the folder is empty. Resolves once the delete is done, or has failed after `leave` and waits for `wake`.
-   * Rejects as `not-deleted`, without calling `leave`, when neither happened; the outbox then keeps what's left,
-   * paused, until a later sign-in.
+   * after the folder is empty. Resolves once the delete is done, or has failed after `leave`. Rejects as
+   * `not-deleted`, without calling `leave`, when neither happened. Either way a delete not done stays owed, and the
+   * outbox closed, until `wake` or a sign-in finishes it.
    */
   signOut(leave: () => Promise<void>): Promise<void>;
   /** Tries again what failed: reading, a Sign out's delete, and dependency changes. Cuts every retry wait short. */
   wake(): void;
-  /** Reads the records, then sends with each sign-in. A 401 only pauses. Returns a stop. */
+  /**
+   * Reads the records, then sends with each sign-in, once any delete Sign out owes has finished. A 401 only pauses.
+   * Returns a stop.
+   */
   follow(account: {
     state(): AccountState;
     subscribe(listener: () => void): () => void;
@@ -268,10 +280,20 @@ export function createOutbox(options: {
   /** The outbox's lifetime. Sign out moves it on. */
   let epoch = 0;
   let session: SignIn | null = null;
-  /** A Sign out's delete, with its marker on disk, hasn't finished. */
+  /**
+   * A Sign out's delete hasn't finished, so nothing sends and nothing is added. It's kept in memory, and on disk only
+   * once the marker lands. The limit: if neither the marker nor the delete reached the disk and the app closes, a
+   * relaunch can't tell the records left from ones a 401 kept. It reads them, and a later sign-in to their account
+   * sends them.
+   */
   let owed = false;
-  /** A Sign out failed before its delete was safe: nothing sends until the next sign-in. */
-  let paused = false;
+  /** The owed delete's marker is on disk: its write resolved, or a launch found it. */
+  let marked = false;
+  /** A try at the owed delete failed, and none has finished it since. */
+  let deleteFailed = false;
+  /** The try at the owed delete running now, shared by every call in the same lifetime. */
+  let deleting: { readonly at: number; readonly done: Promise<void> } | null = null;
+  const listeners = new Set<() => void>();
   /** The sender of each record being sent, by sequence. */
   const running = new Map<number, AbortController>();
   /** Records whose dependency change is being written. */
@@ -296,6 +318,7 @@ export function createOutbox(options: {
 
   const changed = () => {
     snapshot = null;
+    for (const listener of listeners) listener();
   };
   const find = (operationId: string | null, scope: string) =>
     [...records.values()].find(
@@ -393,6 +416,8 @@ export function createOutbox(options: {
         const listed = await files.list();
         if (listed.includes(SIGNING_OUT)) {
           owed = true;
+          marked = true;
+          changed();
           return;
         }
         const recovery = await files.recover();
@@ -438,7 +463,7 @@ export function createOutbox(options: {
       reconcile();
       pump();
     }).then(() => {
-      if (owed && epoch === at) return erase();
+      if (owed && epoch === at) return finishDelete();
     });
   }
 
@@ -464,28 +489,74 @@ export function createOutbox(options: {
   }
 
   /**
-   * Finishes a Sign out's delete whose marker is on disk: every other file, then the marker. A failure keeps the outbox
-   * closed until `wake` tries again.
+   * Makes the owed delete safe to finish later: writes the marker, unless it's on disk already. Without it, a kill would
+   * lose the delete, so every file must go now. Runs in the queue.
    */
-  function erase(): Promise<void> {
-    return serial(async () => {
+  async function secure(): Promise<"marked" | "deleted" | "kept"> {
+    if (!marked) {
+      marked = await files.write(SIGNING_OUT, "{}").then(
+        () => true,
+        () => false,
+      );
+      changed();
+    }
+    if (marked) return "marked";
+    return (await clearFolder(null)) ? "deleted" : "kept";
+  }
+
+  /** Deletes every file but the marker, then the marker. Runs in the queue. */
+  async function eraseMarked(): Promise<boolean> {
+    if (!(await clearFolder(SIGNING_OUT))) return false;
+    if (
+      !(await files.remove(SIGNING_OUT).then(
+        () => true,
+        () => false,
+      ))
+    )
+      return false;
+    marked = false;
+    return true;
+  }
+
+  function failDelete() {
+    status = "failed";
+    deleteFailed = true;
+    changed();
+  }
+
+  function deleteDone() {
+    owed = false;
+    marked = false;
+    deleteFailed = false;
+    changed();
+  }
+
+  /**
+   * Tries the owed delete: the marker if it isn't on disk, then every other file, then the marker; or, if the marker
+   * still can't be written, every file at once. Then reads the empty folder. A failure keeps the outbox closed until
+   * the next try. Calls in the same lifetime share one try; a Sign out that starts meanwhile owns the delete from then.
+   */
+  function finishDelete(): Promise<void> {
+    if (deleting?.at === epoch) return deleting.done;
+    const at = epoch;
+    const done: Promise<void> = serial(async () => {
       if (!owed) return false;
-      if (
-        !(await clearFolder(SIGNING_OUT)) ||
-        !(await files.remove(SIGNING_OUT).then(
-          () => true,
-          () => false,
-        ))
-      ) {
-        status = "failed";
-        changed();
+      const outcome = await secure();
+      if (outcome === "kept" || (outcome === "marked" && !(await eraseMarked()))) {
+        failDelete();
         return false;
       }
-      owed = false;
+      if (epoch !== at) return false;
+      deleteDone();
       return true;
-    }).then((done) => {
-      if (done) return load();
-    });
+    })
+      .catch(() => false)
+      .then((finished) => {
+        if (deleting?.done === done) deleting = null;
+        if (finished) return load();
+      });
+    deleting = { at, done };
+    return done;
   }
 
   /** Deletes saved records whose result the latest reads show. */
@@ -516,7 +587,7 @@ export function createOutbox(options: {
    * already belongs to that thread's lane.
    */
   function pump() {
-    if (status !== "ready") return;
+    if (status !== "ready" || owed) return;
     const ordered = [...records.values()].sort((a, b) => a.sequence - b.sequence);
     const heads = new Map<string, OutboxRecord>();
     const busy = new Set<string>();
@@ -558,8 +629,7 @@ export function createOutbox(options: {
       }
       if (running.has(record.sequence) || busy.has(lane) || unreachable.has(scopeOf(record)))
         continue;
-      if (!paused && session?.isCurrent() && ownedBy(record, session))
-        void run(record.sequence, session);
+      if (session?.isCurrent() && ownedBy(record, session)) void run(record.sequence, session);
     }
   }
 
@@ -762,15 +832,23 @@ export function createOutbox(options: {
         status,
         records: [...records.values()].sort((a, b) => a.sequence - b.sequence),
         aside,
+        deletion: !owed ? "none" : !deleteFailed ? "owed" : marked ? "failed" : "failed-unmarked",
       };
       return snapshot;
+    },
+
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
 
     enqueue(input) {
       const write = readChatWrite(input.write);
       const signIn = session;
       const dependsOn = input.dependsOn ?? null;
-      if (status !== "ready" || !signIn || !signIn.isCurrent())
+      if (status !== "ready" || owed || !signIn || !signIn.isCurrent())
         return Promise.reject(new OutboxError("closed"));
       const { workspaceId } = input;
       const target = write ? targetOf(write, input.thread) : undefined;
@@ -791,7 +869,7 @@ export function createOutbox(options: {
       const early = target === null ? withThread(write, find(dependsOn, scope)) : null;
       const at = epoch;
       return serial(async () => {
-        if (epoch !== at || status !== "ready") throw new OutboxError("closed");
+        if (epoch !== at || status !== "ready" || owed) throw new OutboxError("closed");
         let accepted = early?.write ?? write;
         let waitsIn = early?.target ?? target;
         if (waitsIn === null) {
@@ -843,7 +921,7 @@ export function createOutbox(options: {
       const at = epoch;
       return serial(async () => {
         const signIn = session;
-        if (epoch !== at || status !== "ready" || !signIn) throw new OutboxError("closed");
+        if (epoch !== at || status !== "ready" || owed || !signIn) throw new OutboxError("closed");
         const record = [...records.values()].find(
           (entry) => entry.operationId === operationId && entry.withheld && ownedBy(entry, signIn),
         );
@@ -889,36 +967,25 @@ export function createOutbox(options: {
 
     signOut(leave) {
       epoch += 1;
+      const at = epoch;
       stopSending();
       records.clear();
       aside = [];
       observed = null;
       unreachable.clear();
-      paused = false;
+      owed = true;
       status = "loading";
       changed();
       return serial(async () => {
-        // With the marker on disk, a delete a kill interrupts finishes at the next launch.
-        if (
-          await files.write(SIGNING_OUT, "{}").then(
-            () => true,
-            () => false,
-          )
-        ) {
-          owed = true;
-          return "marked";
-        }
-        // Without it, a kill would lose the delete, so it must finish now, or Sign out doesn't happen.
-        if (await clearFolder(null)) return "deleted";
-        paused = true;
-        return "kept";
+        const outcome = await secure();
+        // The records stay on disk, unread, until a later try deletes them.
+        if (outcome === "kept") failDelete();
+        else if (outcome === "deleted" && epoch === at) deleteDone();
+        return outcome;
       }).then(async (outcome) => {
-        if (outcome === "kept") {
-          await load();
-          throw new OutboxError("not-deleted");
-        }
+        if (outcome === "kept") throw new OutboxError("not-deleted");
         await leave();
-        if (outcome === "marked") await erase();
+        if (outcome === "marked") await finishDelete();
         else await load();
       });
     },
@@ -927,7 +994,7 @@ export function createOutbox(options: {
       nudge.abort();
       nudge = new AbortController();
       unreachable.clear();
-      if (owed) void erase();
+      if (owed) void finishDelete();
       else if (status === "locked" || status === "failed") void load();
       else pump();
     },
@@ -939,10 +1006,11 @@ export function createOutbox(options: {
         if (signIn === session) return;
         session = signIn;
         observed = null;
-        paused = false;
         unreachable.clear();
         stopSending();
-        pump();
+        // A delete Sign out owes finishes before anything sends with this sign-in.
+        if (owed) void finishDelete();
+        else pump();
       };
       take();
       void load();

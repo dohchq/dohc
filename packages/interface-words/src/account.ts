@@ -80,6 +80,14 @@ export const accountWords = {
   },
   /** Sign out stopped because the phone couldn't delete its unsent messages safely; it stays signed in. */
   signOutFailed: "dohc could not delete the messages waiting on this phone, so it didn't sign out.",
+  /**
+   * On Connect, with Try again: a Sign out's delete failed on a phone already signed out, as after the server ended its
+   * session. `maySendLater` when nothing on disk records the delete, so a relaunch would keep the messages.
+   */
+  signOutDeleteFailed: (maySendLater: boolean): string =>
+    maySendLater
+      ? "dohc could not delete the messages waiting on this phone. They may send if you close dohc and sign in again."
+      : "dohc could not delete the messages waiting on this phone.",
 
   showOnPhone: "Show on phone",
   showOnPhoneLabel: (workspace: string) => `Show ${workspace} on phone`,

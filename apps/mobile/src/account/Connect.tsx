@@ -45,8 +45,10 @@ const ADDRESS_PROBLEM = {
 export function Connect() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
-  const { account, state } = useAccount();
+  const { account, state, outbox, deletion } = useAccount();
   const last = state.status === "signed-out" ? state : null;
+  // A Sign out's delete failed after the phone signed out. No sign-in starts until a try finishes it.
+  const deleteFailed = deletion === "failed" || deletion === "failed-unmarked";
   const [address, setAddress] = useState(last?.origin ?? "");
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
   const [addressProblem, setAddressProblem] = useState<string | null>(null);
@@ -62,6 +64,7 @@ export function Connect() {
   useEffect(() => () => account.cancelSignIn(), [account]);
 
   async function connect(value = address) {
+    if (deleteFailed) return;
     const checked = check(value);
     if ("problem" in checked) {
       setAddressProblem(ADDRESS_PROBLEM[checked.problem]);
@@ -80,7 +83,11 @@ export function Connect() {
       });
       if (result === "cancelled") return;
       void closeApproval();
-      if (result === "signed-in") return;
+      if (result === "signed-in") {
+        // Connect stays on screen only while a Sign out's delete is owed, and shows its form until the delete finishes.
+        setPhase({ kind: "form" });
+        return;
+      }
       setOutcome(result === "denied" ? accountWords.denied : accountWords.expired);
       setPhase({ kind: "form" });
     } catch (error) {
@@ -123,6 +130,12 @@ export function Connect() {
         ]}
       >
         <DohcMark size={40} color={theme.ink} />
+        {deleteFailed ? (
+          <ProblemLine
+            text={accountWords.signOutDeleteFailed(deletion === "failed-unmarked")}
+            onRetry={() => outbox.wake()}
+          />
+        ) : null}
         {phase.kind === "code" ? (
           <View style={styles.block}>
             <Text style={[styles.title, { color: theme.ink }]}>
@@ -216,7 +229,7 @@ export function Connect() {
             ) : null}
             <Button
               label={busy ? accountWords.connecting : accountWords.connectServer}
-              disabled={busy}
+              disabled={busy || deleteFailed}
               onPress={() => void connect()}
             />
           </View>

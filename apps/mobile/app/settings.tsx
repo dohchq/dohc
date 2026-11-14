@@ -121,7 +121,8 @@ function SettingsScreen() {
   );
 
   // Signing out deletes the outbox, so the sheet counts what it would lose, or warns when it can't count. When the
-  // delete can't be made safe, the phone stays signed in and says so here, with Try again.
+  // delete can't be made safe, the phone stays signed in and says so here, with Try again. If a 401 has signed the phone
+  // out meanwhile, Settings is gone, and Connect shows the failure from the outbox's own state instead.
   const [signOutFailed, setSignOutFailed] = useState(false);
   const leave = useCallback(() => {
     setSignOutFailed(false);
