@@ -684,10 +684,11 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     await revealExplorerPath(mine, "notes/plan.md");
     await explorerRow(mine, "notes/plan.md").click();
     await openAboutPanel(mine);
-    // Access names the membership that reaches the file.
-    await expect(mine.getByTestId("about-access-row")).toContainText("Can comment", {
-      timeout: 30_000,
-    });
+    // Access lists the workspace's people by role, the member as You.
+    await expect(mine.getByTestId("about-access-person").filter({ hasText: "You" })).toContainText(
+      "Member",
+      { timeout: 30_000 },
+    );
     const newComment = mine.getByTestId("linked-chat-new");
     await expect(newComment).toBeVisible({ timeout: 30_000 });
     // The keyboard reaches the comment control.
