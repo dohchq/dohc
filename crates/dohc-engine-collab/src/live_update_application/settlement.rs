@@ -1146,9 +1146,13 @@ impl IntervalDigest {
     }
 }
 
-/// Distinct native sequences, one bit each for those in `(floor, head]`.
+/// Distinct native sequences, one bit each for those in `(floor, head]`. The
+/// bits grow only as far as the sequences seen, never past a word per
+/// sequence plus a margin, so a corrupt head or sequence cannot force a huge
+/// allocation; the rest go to `outside`.
 struct Sequences {
     floor: i64,
+    words: usize,
     bits: Vec<u64>,
     outside: BTreeSet<i64>,
     len: usize,
@@ -1156,10 +1160,14 @@ struct Sequences {
 
 impl Sequences {
     fn new(floor: i64, head: i64) -> Self {
-        let span = usize::try_from(head.saturating_sub(floor)).unwrap_or(0);
+        let span = head
+            .checked_sub(floor)
+            .and_then(|span| usize::try_from(span).ok())
+            .unwrap_or(0);
         Self {
             floor,
-            bits: vec![0; span.div_ceil(64)],
+            words: span.div_ceil(64),
+            bits: Vec::new(),
             outside: BTreeSet::new(),
             len: 0,
         }
@@ -1170,15 +1178,20 @@ impl Sequences {
         if sequence <= self.floor {
             return;
         }
-        let index = (sequence - self.floor - 1) as usize;
-        let fresh = match self.bits.get_mut(index / 64) {
-            Some(word) => {
+        let fresh = match usize::try_from(sequence.abs_diff(self.floor) - 1) {
+            Ok(index) if index / 64 < self.words && index / 64 <= self.len + 1024 => {
+                if self.bits.len() <= index / 64 {
+                    self.bits.resize(index / 64 + 1, 0);
+                }
+                let word = &mut self.bits[index / 64];
                 let bit = 1 << (index % 64);
-                let fresh = *word & bit == 0;
+                // A sequence first seen before the bits reached it is in
+                // `outside`.
+                let fresh = *word & bit == 0 && !self.outside.contains(&sequence);
                 *word |= bit;
                 fresh
             }
-            None => self.outside.insert(sequence),
+            _ => self.outside.insert(sequence),
         };
         if fresh {
             self.len += 1;
@@ -1324,6 +1337,21 @@ mod publication_state_tests {
                 Ok::<_, StorageError>(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn sequences_count_each_distinct_sequence_once() {
+        let mut sequences = Sequences::new(10, i64::MAX);
+        sequences.extend([5, 10, 11, 11, 75, 1_000_000, 1_000_000, i64::MAX]);
+        assert_eq!(sequences.len(), 4);
+        assert!(sequences.bits.len() <= 1026);
+        let mut sequences = Sequences::new(0, 200_000);
+        sequences.extend([150_000, 1, 150_000]);
+        sequences.extend(2..=200_000);
+        assert_eq!(sequences.len(), 200_000);
+        let mut sequences = Sequences::new(i64::MIN, i64::MAX);
+        sequences.extend([i64::MIN, i64::MIN + 1, 0, i64::MAX, 0]);
+        assert_eq!(sequences.len(), 3);
     }
 
     // Stored settlements keep the digest of the whole list. A replay
