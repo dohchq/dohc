@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
@@ -54,6 +54,29 @@ const base64 = (bytes: Uint8Array) =>
   Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
 const KEPT_FOLDER = "live-recovery";
 
+/** A path Save recovery copy writes to, validated like any path dohc writes to disk. */
+function validatedPath(path: string, platform: NodeJS.Platform): string {
+  const validated = validateUserMaterializePath(path, { platform });
+  if (!validated.ok) throw new Error(`Invalid file path (${validated.reason}): ${path}`);
+  return validated.normalized;
+}
+
+/** Whether something is already at a copy's path in the workspace. */
+export function existsInWorkspace(
+  workspace: { rootPath: string },
+  operations: { lstat?: typeof lstat; platform?: NodeJS.Platform } = {},
+): LiveRecoveryWrites["exists"] {
+  const { lstat: stat = lstat, platform = process.platform } = operations;
+  return async (path) =>
+    stat(join(workspace.rootPath, validatedPath(path, platform))).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      },
+    );
+}
+
 /**
  * Keeps a package in `.dohc/local/live-recovery` on this computer, in the
  * folders of the copy it goes with, so it never syncs.
@@ -64,10 +87,7 @@ export function keepOnThisComputer(
 ): LiveRecoveryWrites["keep"] {
   const { open: openFolder = open, platform = process.platform } = operations;
   return async (path, text) => {
-    // Validated like any path dohc writes to disk.
-    const validated = validateUserMaterializePath(path, { platform });
-    if (!validated.ok) throw new Error(`Invalid file path (${validated.reason}): ${path}`);
-    const relativePath = validated.normalized;
+    const relativePath = validatedPath(path, platform);
     const slash = relativePath.lastIndexOf("/");
     const name = slash < 0 ? KEPT_FOLDER : `${KEPT_FOLDER}/${relativePath.slice(0, slash)}`;
     const folder = await localStateFolder(workspace, name, {
