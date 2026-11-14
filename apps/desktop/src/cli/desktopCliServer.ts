@@ -598,7 +598,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
         : {}),
       ...(dependencies.workspaceMembers
         ? {
-            members: (request: import("@dohc/cli/members").OwnerMembersRequest) =>
+            members: (request: import("@dohc/cli/members").AgentMembersRequest) =>
               withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) => {
                 if (operation.signal !== publicationAttachment || publicationAttachment.aborted)
                   throw new Error("This workspace changed while this ran. Try again.");

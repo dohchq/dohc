@@ -110,7 +110,7 @@ The owner and admins can delete any message in a Group and remove a member. Anyo
 
 A person's agent acts with at most that person's access. Today an agent's reach covers only workspaces its owner owns. A member can also give their agent reach in a workspace where they are a member. At each item the agent gets the lower of its own level and its person's level there, judged where the relay judges its person's access. An admin's agent reaches the same files and Groups as the admin, including folders hidden from members. dohc gives it no tool to manage members or change access rules. That is not a boundary: an agent that runs as the admin can do what the admin can.
 
-The owner's own dohc tools, the CLI and MCP on the owner's computer, do what the Members page does: list, invite, and remove members, set the member level, and change access rules. Today those tools list share grants, read a grant's details, and list or disconnect a link's agents. Admins use the app.
+The dohc CLI and MCP do what the Members page does, in a workspace the person owns or joined. They act with the person's own account, and the relay decides each action by role: a member's agent lists names and roles; an admin's agent also invites and removes members; only the owner's tools change roles or end membership.
 
 ## Not in this version
 

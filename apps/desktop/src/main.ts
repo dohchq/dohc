@@ -6896,9 +6896,23 @@ const shareLinkAgentsForCli = createShareLinkAgentActions<RegistryEntry>({
   relayJson: relayShareJsonWithCredentials,
   relayShareErrorCopy,
 });
-// The Members page, and the owner's CLI and MCP, through one set of actions.
+// The Members page, and agents through the CLI and MCP, through one set of actions.
 const workspaceMembers = createWorkspaceMembersActions<RegistryEntry, CloudSessionCredentials>({
   remoteForWorkspace,
+  remoteForJoinedWorkspace: async (workspace) => {
+    await warmCredentialCache();
+    const credentials = cachedCredentials;
+    const view = workspace.shareView;
+    if (
+      !credentials?.relayUrl ||
+      !view?.relayUrl ||
+      !relayUrlsMatch(credentials.relayUrl, view.relayUrl) ||
+      view.recipientUserId !== credentials.userId
+    ) {
+      throw new Error("Sign in to the account that joined this workspace.");
+    }
+    return { credentials, credentialGeneration: credentialCacheGeneration };
+  },
   currentCredentialGeneration: () => credentialCacheGeneration,
   relayResponse: (credentials, path, init) =>
     relayShareResponseWithCredentials(credentials, path, init),

@@ -491,7 +491,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
     >;
   };
   members?(
-    request: import("@dohc/cli/members").OwnerMembersRequest,
+    request: import("@dohc/cli/members").AgentMembersRequest,
   ): Promise<import("@dohc/cli/members").MembersResult>;
   access?: {
     refresh(): Promise<import("@dohc/workspace-contracts/access").AccessRefreshResult>;
@@ -3143,10 +3143,10 @@ async function dispatchWorkspace(
         connectionId: request.args.connectionId,
       });
     case "members":
-      if (context.readOnly || !context.members)
-        throw new CliCommandError(
-          "Members requires the original workspace and its signed-in owner account.",
-        );
+      // A joined workspace reaches the owner's Members with the person's own
+      // account. Any other share view has none.
+      if ((context.readOnly && !context.joined) || !context.members)
+        throw new CliCommandError("Open the original workspace to manage its members.");
       return context.members(request.args.request);
     case "accessRefresh":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
@@ -4989,12 +4989,22 @@ async function workspaceContextForRequest(
 // post or reply in a Group, a reaction, a page at Edit, and a Group for an
 // admin. Each verb's own path and the relay decide the level and the role.
 // Every other write refuses here with its reason.
-function joinedWorkspaceWriteRefusal(verb: CliVerb, fileRequest: boolean, collectionWriteRequest: boolean): string | null {
+function joinedWorkspaceWriteRefusal(
+  verb: CliVerb,
+  fileRequest: boolean,
+  collectionWriteRequest: boolean,
+): string | null {
   if (fileRequest) return "In a joined workspace agents add pages with dohc document create.";
-  if (collectionWriteRequest) return "Agents can't change Collection records in a joined workspace yet. Change them in the app.";
+  if (collectionWriteRequest)
+    return "Agents can't change Collection records in a joined workspace yet. Change them in the app.";
   switch (verb) {
-    case "post": case "reply": case "react": case "show":
-    case "documentCreate": case "groupCreate": case "fileChatStart":
+    case "post":
+    case "reply":
+    case "react":
+    case "show":
+    case "documentCreate":
+    case "groupCreate":
+    case "fileChatStart":
       return null;
     case "documentEdit":
       return "Agents can't edit pages in a joined workspace yet. Edit them in the app.";

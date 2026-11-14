@@ -8,8 +8,9 @@ import {
 } from "@dohc/security-contract/workspace-members";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 
-// One request shape for the Members page, the owner's CLI, and MCP. The
-// desktop names the workspace; the relay decides every action.
+// One request shape for the Members page and for agents through the CLI and
+// MCP, in a workspace the person owns or joined. The desktop names the
+// workspace and the account; the relay decides every action.
 
 const level = z.enum(["view", "comment", "edit"]);
 /** A member id from `list`, or the email of an invite or a person. */
@@ -25,7 +26,7 @@ const linkChange = z.enum(["turn-on", "turn-off", "reset"] satisfies [
   ...InviteLinkAction[],
 ]);
 
-const ownerActions = [
+const agentActions = [
   z.object({ action: z.literal("list") }).strict(),
   z.object({ action: z.literal("invite"), email }).strict(),
   z.object({ action: z.literal("level"), level }).strict(),
@@ -36,13 +37,13 @@ const ownerActions = [
   z.object({ action: z.literal("end") }).strict(),
 ] as const;
 
-/** What the owner's CLI and MCP send. The owner cannot leave. */
-export const OwnerMembersRequest = z.discriminatedUnion("action", [...ownerActions]);
-export type OwnerMembersRequest = z.infer<typeof OwnerMembersRequest>;
+/** What agents send through the CLI and MCP. Leaving stays in the app. */
+export const AgentMembersRequest = z.discriminatedUnion("action", [...agentActions]);
+export type AgentMembersRequest = z.infer<typeof AgentMembersRequest>;
 
 /** What the Members page sends. Admins and members can also leave. */
 export const MembersRequest = z.discriminatedUnion("action", [
-  ...ownerActions,
+  ...agentActions,
   z.object({ action: z.literal("leave") }).strict(),
 ]);
 export type MembersRequest = z.infer<typeof MembersRequest>;

@@ -83,9 +83,7 @@ Returns the requested action's result, listed under [`dohc app`](#dohc-app). Onl
 
 ### `dohc_members`
 
-Do what the Members page does, as the workspace owner: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the owner before you remove anyone or end membership. Requires the original workspace and its signed-in owner account.
-
-Members belong to the original workspace and its owner. Shared profiles do not offer this tool.
+Do what the Members page does, in a workspace you own or joined: list people, invites, and removed accounts; invite by email (dohc sends no email: tell them to sign in to dohc with that address); remove someone; let a removed account back in; make someone an admin or a member; set what members can do (view, comment, or edit); turn the invite link on or off or reset it; or end membership for everyone. The server decides what your role allows: members see names and roles; admins also invite, remove members, let them back in, set the level, and manage the invite link; only the owner changes roles or ends membership. A person is a memberId from list, or an email. Removing someone or ending membership ends their access; copies already on their computers stay. Ask the person you work for before you remove anyone or end membership.
 
 - `request`: `{ action: "list" } | { action: "invite", email: string } | { action: "level", level: "view" | "comment" | "edit" } | { action: "role", person: string, role: "admin" | "member" } | { action: "remove", person: string } | { action: "letBackIn", person: string } | { action: "link", change: "turn-on" | "turn-off" | "reset" } | { action: "end" }`. Required.
 
@@ -1085,7 +1083,7 @@ With `--json`, prints `{ schemaVersion, connectionId }`.
 
 List, invite, and remove the workspace's members, set what they can do, and manage the invite link.
 
-Requires the original workspace and its signed-in owner account. Admins use the Members page in the app. A person is a member id from dohc members list, or the email of an invite or a person.
+Works in a workspace you own or joined, signed in with the account that owns or joined it. Your server decides what your role allows. Members see names and roles. Admins also invite people, remove members, let them back in, set the member level, and manage the invite link. Only the owner changes roles or ends membership. A person is a member id from dohc members list, or the email of an invite or a person.
 
 #### `dohc members list`
 

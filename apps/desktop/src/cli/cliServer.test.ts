@@ -2647,6 +2647,21 @@ describe("CLI socket server", () => {
       ).resolves.toMatchObject({ thread: { id: posted.threadId } });
     });
 
+    // Members goes to the owner's workspace with the person's own account;
+    // the relay decides what it lists and allows.
+    it("reaches Members in a joined workspace, and not in a path share", async () => {
+      const members = vi.fn(async () => ({ status: "refused" as const }));
+      joinAs("comment");
+      context = { ...context, members };
+      await expect(invoke("members", { ...args(), request: { action: "list" } })).resolves.toEqual({ status: "refused" });
+      expect(members).toHaveBeenCalledWith({ action: "list" });
+      context = { ...context, joined: false };
+      registryWorkspace = { ...registryWorkspace, joined: false };
+      await expect(invoke("members", { ...args(), request: { action: "list" } }))
+        .rejects.toThrow("Open the original workspace to manage its members.");
+      expect(members).toHaveBeenCalledOnce();
+    });
+
     it("refuses the writes a member cannot make with one reason each", async () => {
       joinAs("edit");
       const refusals: [CliVerb, Record<string, unknown>, string][] = [

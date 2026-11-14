@@ -33,7 +33,7 @@ import {
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
-import { OwnerMembersRequest } from "./members";
+import { AgentMembersRequest } from "./members";
 import { OwnerAppResponsesRequest } from "./appResponses";
 import { DATASET_CAPABILITIES, DatasetRequest, DatasetSchemaChange } from "./dataset";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
@@ -58,7 +58,7 @@ type CliCommandBody =
   | { verb: "shareCopy"; shareId: string; grantId: string }
   | { verb: "shareAgents"; shareId: string; grantId: string; cursor?: string }
   | { verb: "shareDisconnect"; shareId: string; grantId: string; connectionId: string }
-  | { verb: "members"; request: OwnerMembersRequest }
+  | { verb: "members"; request: AgentMembersRequest }
   | { verb: "accountDeletePreview" }
   | { verb: "accountDelete"; server: string; previewToken: string }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
@@ -371,8 +371,8 @@ function noExtraArgs(tokens: readonly string[], verb: string): void {
   if (tokens.length > 0) fail(`${verb} does not accept '${tokens[0]}'`);
 }
 
-function membersRequest(value: unknown): OwnerMembersRequest {
-  const parsed = OwnerMembersRequest.safeParse(value);
+function membersRequest(value: unknown): AgentMembersRequest {
+  const parsed = AgentMembersRequest.safeParse(value);
   if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? "Invalid members request.");
   return parsed.data;
 }
@@ -2191,7 +2191,8 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
     summary:
       "List, invite, and remove the workspace's members, set what they can do, and manage the invite link.",
     notes: [
-      "Requires the original workspace and its signed-in owner account. Admins use the Members page in the app.",
+      "Works in a workspace you own or joined, signed in with the account that owns or joined it. Your server decides what your role allows.",
+      "Members see names and roles. Admins also invite people, remove members, let them back in, set the member level, and manage the invite link. Only the owner changes roles or ends membership.",
       "A person is a member id from dohc members list, or the email of an invite or a person.",
     ],
     verbs: {
