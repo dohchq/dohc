@@ -1,7 +1,6 @@
 use crate::support;
 
 use dohc_engine_collab::live_update_application::*;
-use dohc_engine_collab::owner_outbox::release::{MAX_RELEASE_BYTES, MAX_RELEASE_ENTRIES};
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
 use dohc_engine_domain::{AgentDeclaration, ChangeActorKind, ChangeAttribution};
 use dohc_engine_runtime::{ActorHandle, CancellationToken, WorkspaceSupervisor};
@@ -2298,10 +2297,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
             }
         }
     }
-    for count in [
-        MAX_RELEASE_ENTRIES as usize,
-        MAX_RELEASE_ENTRIES as usize + 1,
-    ] {
+    for count in [1, 40] {
         for point in [
             FaultPoint::StorageBeforePersist,
             FaultPoint::StorageAfterCommitBeforeAck,
@@ -2379,13 +2375,11 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
             .unwrap()
             .unwrap()
             .doc;
-            assert_eq!(
-                doc.project(ContentKind::Richdoc)
-                    .unwrap()
-                    .content
-                    .contains("Atomic pending edit"),
-                count <= MAX_RELEASE_ENTRIES as usize
-            );
+            let text = doc.project(ContentKind::Richdoc).unwrap().content;
+            assert!(text.contains("Atomic pending edit 0"));
+            assert!(text.contains(&format!("Atomic pending edit {}", count - 1)));
+            // One person's edits are one run: one History row.
+            assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 1);
             supervisor.close_all().unwrap();
         }
     }
@@ -2415,11 +2409,7 @@ fn sized_release_updates(f: &mut Fixture, count: usize, total: usize) -> Vec<Vec
 // Seed real, dependent Yjs deltas without timing the unrelated draft append
 // path. The first append creates the actual outbox; the rest copy its schema.
 async fn pending_release_fixture(count: usize) -> (Fixture, WorkspaceSupervisor, ActorHandle) {
-    pending_release_fixture_sized(
-        count,
-        (count == MAX_RELEASE_ENTRIES as usize).then_some(MAX_RELEASE_BYTES as usize),
-    )
-    .await
+    pending_release_fixture_sized(count, None).await
 }
 
 async fn pending_release_fixture_sized(
@@ -2492,90 +2482,90 @@ async fn pending_release_fixture_updates(
 }
 
 #[tokio::test]
-#[ignore = "manual shipped-profile fold and full-cap count timing"]
-async fn measure_stop_fold_limits_and_full_cap_count() {
-    for (count, bytes) in [(8, 1024), (32, 4096), (64, 16384)] {
-        if count > MAX_RELEASE_ENTRIES as usize {
-            continue;
-        }
-        for run in 0..21 {
-            let (f, supervisor, actor) = pending_release_fixture_sized(count, Some(bytes)).await;
-            let started = std::time::Instant::now();
-            let rows = stop_action(&actor, &f, "release").await.unwrap();
-            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-            assert!(rows[0].deferred.is_none());
-            let native_count: i64 = f
-                .store
-                .read_with(|conn| {
-                    conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |r| r.get(0))
-                })
-                .unwrap();
-            assert_eq!(native_count, count as i64);
-            println!("stop_fold entries={count} bytes={bytes} run={run} ms={elapsed:.3}");
-            supervisor.close_all().unwrap();
-        }
-    }
-    let (mut f, supervisor, actor) = pending_release_fixture_sized(1, Some(128)).await;
-    f.store.write_with(&NoFaults, |tx| {
-        // 524,288 metadata rows of 128 bytes exactly fill the 64 MiB profile.
-        tx.execute("WITH RECURSIVE n(i) AS (VALUES(2) UNION ALL SELECT i+1 FROM n WHERE i<524288) INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision,person_edit) SELECT e.outbox_id,n.i,'cap-'||n.i,'cap-'||n.i,e.update_digest,e.update_blob_digest,128,e.created_at_ms,1,n.i*128,e.result_oldest_entry_at_ms,e.result_state,e.draft_binding_revision,e.person_edit FROM n CROSS JOIN owner_ydoc_outbox_entries e WHERE e.sequence=1", []).unwrap();
-        tx.execute("UPDATE owner_ydoc_outbox_entries SET byte_length=128 WHERE sequence=1",[]).unwrap();
-        tx.execute("UPDATE owner_ydoc_outboxes SET pending_bytes=67108864,next_sequence=524289,state='sealed'",[]).unwrap();
-        tx.execute("UPDATE ydoc_owner_bindings SET max_pending_bytes=67108864",[]).unwrap();
-        Ok::<_,dohc_engine_storage::StorageError>(())
-    }).unwrap();
-    let rows = stop_action(&actor, &f, "release").await.unwrap();
-    assert_eq!(rows[0].deferred.as_ref().unwrap().unsent_edits, 524288);
-    for run in 0..21 {
-        let started = std::time::Instant::now();
-        let rows = stop_action(&actor, &f, "list").await.unwrap();
-        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-        assert_eq!(rows[0].deferred.as_ref().unwrap().unsent_edits, 524288);
-        println!("stop_full_cap_list entries=524288 bytes=67108864 run={run} ms={elapsed:.3}");
-    }
+async fn stop_release_with_no_pending_edits_unbinds_without_history() {
+    let (f, supervisor, actor) = pending_release_fixture(0).await;
+    let result = stop_action(&actor, &f, "release").await.unwrap();
+    assert!(result[0].deferred.is_none());
+    assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
+    assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 0);
     supervisor.close_all().unwrap();
 }
 
+// Times the release alone: building each queue happens before the clock starts.
 #[tokio::test]
-async fn stop_release_entry_and_byte_bounds_are_inclusive() {
-    for count in [0, MAX_RELEASE_ENTRIES as usize] {
-        let (f, supervisor, actor) = pending_release_fixture(count).await;
-        let result = stop_action(&actor, &f, "release").await.unwrap();
-        assert!(result[0].deferred.is_none());
-        assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
-        assert_eq!(
-            f.store.table_row_count("ydoc_updates").unwrap(),
-            count as i64
-        );
-        supervisor.close_all().unwrap();
+#[ignore = "manual release timing for many small edits"]
+async fn measure_stop_release_of_many_small_edits() {
+    for count in [1_000, 10_000] {
+        for run in 0..3 {
+            measure_small_edits_release(count, run).await;
+        }
     }
-    for size in [MAX_RELEASE_BYTES as usize, MAX_RELEASE_BYTES as usize + 1] {
-        let (mut f, supervisor, actor) = pending_release_fixture(1).await;
-        f.doc = Ydoc::wire();
-        f.doc.apply(&f.bytes).unwrap();
-        let update = sized_release_updates(&mut f, 1, size).pop().unwrap();
-        let digest = hex_sha256(&update);
-        f.store.write_with(&NoFaults,|tx| {
-            dohc_engine_storage::put_binary_blob_with_sha(tx,&update,&digest)?;
-            tx.execute("UPDATE owner_ydoc_outbox_entries SET update_digest=?1,update_blob_digest=?1,byte_length=?2,result_pending_bytes=?2",rusqlite::params![digest,size as i64]).unwrap();
-            tx.execute("UPDATE owner_ydoc_outboxes SET pending_bytes=?1",[size as i64]).unwrap();
-            Ok::<_,dohc_engine_storage::StorageError>(())
-        }).unwrap();
-        let result = stop_action(&actor, &f, "release").await.unwrap();
-        assert_eq!(
-            result[0].deferred.is_some(),
-            size > MAX_RELEASE_BYTES as usize
-        );
-        assert_eq!(
-            f.store.table_row_count("ydoc_updates").unwrap(),
-            i64::from(size <= MAX_RELEASE_BYTES as usize)
-        );
-        assert_eq!(
-            f.store.table_row_count("ydoc_owner_bindings").unwrap(),
-            i64::from(size > MAX_RELEASE_BYTES as usize)
-        );
-        supervisor.close_all().unwrap();
+}
+
+// Its own test, so the smaller queues' figures survive if this one times out.
+// Making its edits takes minutes, since each paragraph appends to a longer
+// note, so it needs a slow-timeout above nextest's six minutes. The release
+// itself took 19 s when measured; it prints apart from the setup.
+#[tokio::test]
+#[ignore = "manual release timing for 100,000 small edits"]
+async fn measure_stop_release_of_100000_small_edits() {
+    measure_small_edits_release(100_000, 0).await;
+}
+
+async fn measure_small_edits_release(count: usize, run: usize) {
+    let mut f = observed_release_fixture();
+    let started = std::time::Instant::now();
+    let updates: Vec<_> = (0..count)
+        .map(|index| {
+            f.doc
+                .richdoc_append_paragraph(&format!("Pending edit {index}"))
+        })
+        .collect();
+    println!(
+        "edits_made edits={count} ms={:.1}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    measure_release(f, updates, "small-edits", run).await;
+}
+
+// The largest release: a note's full state may not pass MAX_YDOC_UPDATE_BYTES
+// (20 MiB), so about 19 MiB of inserted text, as one edit and as 1,000. A short
+// first edit opens the queue, because this fixture's draft path caps pending
+// bytes far below that; the large edits are queued after it.
+#[tokio::test]
+#[ignore = "manual release timing at the document limit"]
+async fn measure_stop_release_at_the_document_limit() {
+    let total = 19 * 1024 * 1024;
+    for (shape, count) in [("one-edit", 1), ("many-edits", 1_000)] {
+        for run in 0..3 {
+            let mut f = observed_release_fixture();
+            let mut updates = vec![f.doc.richdoc_append_paragraph("Opening edit")];
+            updates.extend(
+                (0..count).map(|_| f.doc.richdoc_append_paragraph(&"x".repeat(total / count))),
+            );
+            measure_release(f, updates, shape, run).await;
+        }
     }
+}
+
+async fn measure_release(f: Fixture, updates: Vec<Vec<u8>>, shape: &str, run: usize) {
+    let (count, bytes) = (updates.len(), updates.iter().map(Vec::len).sum::<usize>());
+    let queued = std::time::Instant::now();
+    let (f, supervisor, actor) = pending_release_fixture_updates(f, updates).await;
+    println!(
+        "queue_built edits={count} ms={:.1}",
+        queued.elapsed().as_secs_f64() * 1000.0
+    );
+    let started = std::time::Instant::now();
+    let rows = stop_action(&actor, &f, "release").await.unwrap();
+    let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+    assert!(rows[0].deferred.is_none());
+    assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
+    let native = f.store.table_row_count("ydoc_updates").unwrap();
+    println!(
+        "stop_release shape={shape} edits={count} bytes={bytes} history_rows={native} run={run} ms={elapsed:.1}"
+    );
+    supervisor.close_all().unwrap();
 }
 
 // Proves: after the server refuses a note's edits for good, Stop releases the
@@ -2890,12 +2880,16 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
     supervisor.close_all().unwrap();
 }
 
+// A relay cursor past what this computer has observed means a receipt may be
+// lost: the Stop defers, whatever the queue's size, and keeps every edit.
 #[tokio::test]
-async fn stop_defers_above_one_turn_without_publishing_or_losing_entries() {
-    let (f, supervisor, actor) = pending_release_fixture(MAX_RELEASE_ENTRIES as usize + 1).await;
+async fn stop_defers_behind_the_relays_cursor_without_publishing_or_losing_entries() {
+    let (f, supervisor, actor) = pending_release_fixture(40).await;
     let before = f.counts();
     let retained = release_snapshot(&f);
-    let result = stop_action(&actor, &f, "release").await.unwrap();
+    let result = stop_action_at_cursor(&actor, &f, "release", 1)
+        .await
+        .unwrap();
     assert_eq!(
         f.counts(),
         before,
@@ -2903,10 +2897,16 @@ async fn stop_defers_above_one_turn_without_publishing_or_losing_entries() {
     );
     assert_eq!(release_snapshot(&f)[1..], retained[1..]);
     let row = serde_json::to_value(&result[0]).unwrap();
-    assert_eq!(row["deferred"]["unsentEdits"], MAX_RELEASE_ENTRIES + 1);
+    assert_eq!(row["deferred"]["unsentEdits"], 40);
     assert_eq!(row["retirementOwed"], false);
     assert_eq!(row["state"], "released");
-    assert_eq!(stop_action(&actor, &f, "release").await.unwrap().len(), 1);
+    assert_eq!(
+        stop_action_at_cursor(&actor, &f, "release", 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(f.counts(), before, "retry must never drain a deferred Stop");
     actor
         .owner_ydoc_append_draft(
@@ -2935,7 +2935,7 @@ async fn stop_defers_above_one_turn_without_publishing_or_losing_entries() {
             .as_ref()
             .unwrap()
             .unsent_edits,
-        MAX_RELEASE_ENTRIES + 2
+        41
     );
     assert_eq!(
         f.counts(),
@@ -2951,7 +2951,7 @@ async fn stop_defers_above_one_turn_without_publishing_or_losing_entries() {
             .as_ref()
             .unwrap()
             .unsent_edits,
-        MAX_RELEASE_ENTRIES + 2
+        41
     );
     assert_eq!(release_snapshot(&f)[1..], after_edit[1..]);
     stop_action(&actor, &f, "clear").await.unwrap();
@@ -2976,11 +2976,8 @@ async fn measure_stop_release_pending_entries() {
             dohc_engine_storage::FaultAction::Continue
         }
     }
-    for count in [
-        0,
-        MAX_RELEASE_ENTRIES as usize,
-        MAX_RELEASE_ENTRIES as usize + 1,
-    ] {
+    // Alternating authors leave no run to merge: one History row per edit.
+    for count in [0, 32, 40] {
         let mut samples = Vec::new();
         for run in 0..21 {
             let (mut f, supervisor, actor) = pending_release_fixture(count).await;
@@ -2998,34 +2995,28 @@ async fn measure_stop_release_pending_entries() {
             let trace = Arc::new(TraceFaults(started, std::sync::Mutex::new(Vec::new())));
             let rows = stop_action(&actor, &f, "release").await.unwrap();
             let fold_ms = started.elapsed().as_secs_f64() * 1000.0;
-            if count <= MAX_RELEASE_ENTRIES as usize {
-                actor
-                    .ydoc_open_state(
-                        "workspace".into(),
-                        40,
-                        false,
-                        Some(DocKey::new("workspace", "main", "object").unwrap()),
-                        "main".into(),
-                        f.binding.current_path.clone(),
-                        Some(ContentKind::Richdoc),
-                        CancellationToken::new(),
-                    )
+            assert!(rows[0].deferred.is_none());
+            actor
+                .ydoc_open_state(
+                    "workspace".into(),
+                    40,
+                    false,
+                    Some(DocKey::new("workspace", "main", "object").unwrap()),
+                    "main".into(),
+                    f.binding.current_path.clone(),
+                    Some(ContentKind::Richdoc),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.ordinary_settle_with_faults(&actor, trace.clone())
                     .await
-                    .unwrap();
-                assert!(
-                    f.ordinary_settle_with_faults(&actor, trace.clone())
-                        .await
-                        .unwrap()
-                        .settled()
-                        .unwrap()
-                        .materialized
-                );
-            } else {
-                assert_eq!(
-                    rows[0].deferred.as_ref().unwrap().unsent_edits,
-                    count as i64
-                );
-            }
+                    .unwrap()
+                    .settled()
+                    .unwrap()
+                    .materialized
+            );
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             samples.push(elapsed_ms);
             for (point, ms) in trace.1.lock().unwrap().iter() {
@@ -3048,14 +3039,7 @@ async fn measure_stop_release_pending_entries() {
                     )
                 })
                 .unwrap();
-            assert_eq!(
-                credits.len(),
-                if count <= MAX_RELEASE_ENTRIES as usize {
-                    count
-                } else {
-                    0
-                }
-            );
+            assert_eq!(credits.len(), count);
             for (index, credit) in credits.iter().enumerate() {
                 assert_eq!(
                     credit,
@@ -3114,7 +3098,7 @@ async fn release_contention_sample() -> (f64, f64, f64) {
             FaultAction::Continue
         }
     }
-    let (mut f, supervisor, actor) = pending_release_fixture(MAX_RELEASE_ENTRIES as usize).await;
+    let (mut f, supervisor, actor) = pending_release_fixture(32).await;
     let key = DocKey::new("workspace", "main", "other").unwrap();
     dohc_engine_domain::VersionedTextStore::new(&mut f.store)
         .write_text(
@@ -3238,8 +3222,10 @@ async fn release_contention_sample() -> (f64, f64, f64) {
     )
 }
 
+// Each author's consecutive edits become one History row with that author's
+// credit, and no row carries another author's edit.
 #[tokio::test]
-async fn stop_keeps_each_pending_entrys_declared_credit() {
+async fn stop_records_each_authors_run_as_one_row_with_its_declared_credit() {
     let mut f = observed_release_fixture();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
@@ -3256,7 +3242,7 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     .iter()
     .enumerate()
     {
-        for repetition in 0..1 {
+        for repetition in 0..3 {
             let update = f
                 .doc
                 .richdoc_append_paragraph(&format!("credit-{index}-{repetition}-{kind}"));
@@ -3309,7 +3295,7 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     // Native-source credit is trusted local journal metadata, separate from
     // declarations on owner draft entries.
     f.store.write_with(&dohc_engine_storage::NoFaults, |tx| {
-        for repetition in 0..1 {
+        for repetition in 0..3 {
         let append_key = format!("credit-5-{repetition}");
         let digest: String = tx.query_row("SELECT update_digest FROM owner_ydoc_outbox_entries WHERE append_key=?1", [&append_key], |r| r.get(0)).unwrap();
         let native = dohc_engine_collab::owner_outbox::OwnerOutboxNativeSource {
@@ -3396,12 +3382,10 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     let replay = Ydoc::wire();
     replay.apply(&f.bytes).unwrap();
     for (entry, update) in grouped.iter().enumerate() {
-        let index = entry;
-        let repetition = 0;
         replay.apply(update).unwrap();
         let text = replay.project(ContentKind::Richdoc).unwrap().content;
-        assert!(text.contains(&format!("credit-{index}-{repetition}-")));
-        assert!(!text.contains(&format!("credit-{}-{}-", entry + 1, 0)));
+        assert!(text.contains(&format!("credit-{entry}-2-")));
+        assert!(!text.contains(&format!("credit-{}-0-", entry + 1)));
     }
     let journaled = f.store.read_with(|conn| {
         let mut stmt = conn.prepare("SELECT payload_json FROM replication_log WHERE op_kind='ydoc.update' ORDER BY origin_seq").unwrap();

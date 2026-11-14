@@ -2680,7 +2680,12 @@ fn delete_binary_blob_if_unreferenced(
     conn: &Connection,
     digest: &str,
 ) -> Result<(), OwnerOutboxError> {
-    match conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [digest]) {
+    // Many tables reference binary_blobs, and SQLite builds their checks into
+    // the statement. A release deletes one blob per edit, so prepare it once.
+    let deleted = conn
+        .prepare_cached("DELETE FROM binary_blobs WHERE sha256=?1")
+        .and_then(|mut statement| statement.execute([digest]));
+    match deleted {
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(error, message))
             if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
