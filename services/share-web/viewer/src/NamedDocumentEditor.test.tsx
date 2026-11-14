@@ -117,6 +117,32 @@ it("says the file could not open, not that the connection failed, when the share
   expect(live.reconnect).toHaveBeenCalledOnce();
 });
 
+it("says live editing stopped on the server and only the owner can start it again", async () => {
+  const live = session("Body");
+  const stopped: NamedLiveBrowserState = {
+    ...live.state(),
+    status: "disconnected",
+    reason: "live-stopped",
+  };
+  await act(async () =>
+    root.render(
+      <NamedDocumentEditor
+        session={{ ...live, state: () => stopped }}
+        path="docs/a.md"
+        link
+        onState={() => {}}
+      />,
+    ),
+  );
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    "Live editing of this file stopped on the server. Only its owner can start it again.",
+  );
+  const button = container.querySelector("button");
+  expect(button?.textContent).toBe("Try again");
+  await act(async () => button?.click());
+  expect(live.reconnect).toHaveBeenCalledOnce();
+});
+
 it("says the server could not open the file, not that the connection failed, while the server is busy", async () => {
   const live = session("Body");
   const busy: NamedLiveBrowserState = {

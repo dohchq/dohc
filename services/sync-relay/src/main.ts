@@ -1123,10 +1123,12 @@ const selfHost = selfHostedLive
     })
   : undefined;
 const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
-// Browsers are told live editing is unavailable while the self-hosted session host cannot continue the document.
+// Browsers are told why live editing stopped while the self-hosted session host cannot continue the document.
 const sessionHostBlocked = selfHost
   ? (document: { workspaceId: string; objectId: string }) =>
-      storage.getLiveHostControl()?.configuredMode === "service" && selfHost.stopped(document)
+      storage.getLiveHostControl()?.configuredMode === "service"
+        ? selfHost.sessionBlock(document)
+        : undefined
   : undefined;
 if (selfHost && deployment)
   serviceEnrollment = createServiceHostEnrollmentRoutes({

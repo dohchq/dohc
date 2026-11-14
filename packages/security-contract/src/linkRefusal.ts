@@ -13,6 +13,11 @@ export const LINK_REFUSALS = {
     error: "This link cannot take more people. Ask the owner for a new link.",
   },
   link_live_unavailable: { status: 503, error: "Live editing is unavailable. Try again later." },
+  // A 503, so a share server or page from before this code treats it as `link_live_unavailable`.
+  link_live_stopped: {
+    status: 503,
+    error: "Live editing of this file stopped on the server. Only its owner can start it again.",
+  },
   link_unavailable: {
     status: 503,
     error: "This link can't be reached right now. Try again in a moment.",

@@ -52,7 +52,7 @@ import type { createLiveMembershipRegistry, LiveMembershipSession } from "./live
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { authorizeLinkShareAction } from "./shareAuthorization";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
-import { linkRefusal } from "./linkRefusal";
+import { linkRefusal, sessionHostRefusal, type SessionHostBlock } from "./linkRefusal";
 import { accountDisplayName } from "./accountDisplayName";
 import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot";
 import { liveEditors } from "./liveEditors.js";
@@ -145,7 +145,10 @@ type BrowserRouteOptions = LiveRouteOptions & {
   tickets: ReturnType<typeof createLiveTickets>;
   membership?: Pick<ReturnType<typeof createLiveMembershipRegistry>, "join">;
   /** Whether the session host cannot continue the document until its owner or operator acts. */
-  sessionHostBlocked?: (document: { workspaceId: string; objectId: string }) => boolean;
+  sessionHostBlocked?: (document: {
+    workspaceId: string;
+    objectId: string;
+  }) => SessionHostBlock | undefined;
 };
 type OwnerRouteOptions = LiveRouteOptions & { kind: "owner"; resolveActor: ResolveActor };
 /**
@@ -162,7 +165,10 @@ type PersonalRouteOptions = LiveRouteOptions & {
   limiter: TokenBucketLimiter;
   /** Whether the self-hosted live host is the configured host, the only one that hosts documents for agents. */
   supported(): boolean;
-  sessionHostBlocked?: (document: { workspaceId: string; objectId: string }) => boolean;
+  sessionHostBlocked?: (document: {
+    workspaceId: string;
+    objectId: string;
+  }) => SessionHostBlock | undefined;
 };
 export function createNamedLiveRoutes(options: BrowserRouteOptions) {
   return createLiveRoutes(options);
@@ -428,10 +434,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
               ? linkRefusal("link_live_unavailable")
               : refusal();
         }
-        if (
-          sessionHostBlocked?.({ workspaceId: context.workspaceId, objectId: objectId as string })
-        )
-          return context.kind === "link" ? linkRefusal("link_live_unavailable") : refusal();
+        const block = sessionHostBlocked?.({
+          workspaceId: context.workspaceId,
+          objectId: objectId as string,
+        });
+        if (block) return context.kind === "link" ? sessionHostRefusal(block) : refusal();
         const minted = await options.tickets.mint({ objectId }, context, signal);
         signal.throwIfAborted();
         check();

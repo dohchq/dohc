@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   LiveAuthorityUnavailableError,
   LiveHostUnavailableError,
+  LiveStoppedError,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
   LINK_REFUSALS,
@@ -73,6 +74,19 @@ it.each(["link_unavailable", "link_live_unavailable"] as const)(
     expect(error).not.toBeInstanceOf(ShareAccessRemovedError);
   },
 );
+
+it("tells a page that live editing stopped until the owner starts it again", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json(linkRefusalBody("link_live_stopped"), { status: 503 })),
+  );
+  const error = await namedRequest("/api/live/link-ticket", new AbortController().signal).catch(
+    (cause: unknown) => cause,
+  );
+  expect(error).toBeInstanceOf(LiveStoppedError);
+  expect(error).toHaveProperty("message", LINK_REFUSALS.link_live_stopped.error);
+  expect(error).not.toBeInstanceOf(LiveHostUnavailableError);
+});
 
 it("shows removal for the verified named recipient", async () => {
   vi.stubGlobal(

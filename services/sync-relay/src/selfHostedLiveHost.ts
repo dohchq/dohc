@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { SyncRelayStorage } from "./storage";
+import type { SessionHostBlock } from "./linkRefusal";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import type {
   ServiceHostEnrollment,
@@ -629,6 +630,14 @@ export async function startSelfHostedLiveHost(options: {
     ),
     { signal },
   );
+  /** Whether this host cannot continue the document: it is blocked, or its workspace's current hosted replica diverged. */
+  const stopped = (document: { workspaceId: string; objectId: string }) => {
+    const identity = storage.getWorkspaceIdentity(document.workspaceId);
+    return (
+      current?.blocked(document) !== undefined ||
+      (!!identity && diverged.has(storeName({ workspaceId: document.workspaceId, ...identity })))
+    );
+  };
   return {
     current: () => current,
     /**
@@ -677,13 +686,13 @@ export async function startSelfHostedLiveHost(options: {
     ) {
       return storeDiverged(row);
     },
-    /** Whether this host cannot continue the document: it is blocked, or its workspace's current hosted replica diverged. */
-    stopped(document: { workspaceId: string; objectId: string }) {
-      const identity = storage.getWorkspaceIdentity(document.workspaceId);
-      return (
-        current?.blocked(document) !== undefined ||
-        (!!identity && diverged.has(storeName({ workspaceId: document.workspaceId, ...identity })))
-      );
+    /** Why browsers can't edit the document live, if this host can't continue it. */
+    sessionBlock(document: {
+      workspaceId: string;
+      objectId: string;
+    }): SessionHostBlock | undefined {
+      if (!stopped(document)) return undefined;
+      return current?.blocked(document) === "live-edit-unadmitted" ? "held" : "stopped";
     },
     /**
      * Lets a blocked document try once more, and a failing one try now. Returns whether it was blocked or its owner saw it

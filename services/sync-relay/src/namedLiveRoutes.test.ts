@@ -45,6 +45,7 @@ import {
 import type { LiveUpdateJournalCut } from "./storage/types.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
+import type { SessionHostBlock } from "./linkRefusal";
 
 const exchangeKey = "test-exchange-key-".repeat(3),
   relayHost = "relay.example.test";
@@ -347,7 +348,10 @@ async function fixture(
       ? { ...native, binding: { ...current, selectorPaths: [current.currentPath] } }
       : native,
   );
-  const sessionHostBlocked = vi.fn((_document: { workspaceId: string; objectId: string }) => false);
+  const sessionHostBlocked = vi.fn(
+    (_document: { workspaceId: string; objectId: string }): SessionHostBlock | undefined =>
+      undefined,
+  );
   const actor = vi.fn(async (request: Request, workspaceId: string) => {
     if (owner || desktop) {
       const bearer = request.headers.get("authorization");
@@ -762,19 +766,25 @@ async function fixture(
   };
 }
 
-it.each([false, true])(
-  "refuses a ticket for a document the session host blocked until the block lifts; link=%s",
-  async (link) => {
+// Only a link holder learns why. A held document waits for its owner, so the page stops asking.
+it.each([
+  [false, "stopped"],
+  [true, "stopped"],
+  [false, "held"],
+  [true, "held"],
+] as const)(
+  "refuses a ticket for a document the session host blocked until the block lifts; link=%s, %s",
+  async (link, block) => {
     const f = await fixture(limits, link);
     const mint = vi.spyOn(f.tickets, "mint");
-    f.sessionHostBlocked.mockReturnValue(true);
+    f.sessionHostBlocked.mockReturnValue(block);
     const refused = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
       discriminator: f.discriminator,
       objectId: binding.objectId,
     });
     expect([refused.status, await refused.json()]).toEqual(
       link
-        ? [503, linkRefusalBody("link_live_unavailable")]
+        ? [503, linkRefusalBody(block === "held" ? "link_live_stopped" : "link_live_unavailable")]
         : [404, { ok: false, error: "not found" }],
     );
     expect(f.sessionHostBlocked).toHaveBeenCalledWith({
@@ -792,7 +802,7 @@ it.each([false, true])(
         '{"ok":false,"error":"not found"}',
       ]);
     }
-    f.sessionHostBlocked.mockReturnValue(false);
+    f.sessionHostBlocked.mockReturnValue(undefined);
     expect(await f.connect((await f.mint()).token).status).toBe(101);
   },
 );

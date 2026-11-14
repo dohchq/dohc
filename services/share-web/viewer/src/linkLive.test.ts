@@ -165,19 +165,23 @@ it("reports a refused link ticket as unavailable, not as a failed connection", a
     session.close();
   }
 });
-it("stops on a link that can take no more people, without trying again", async () => {
+// Neither answer changes until someone else acts: the owner makes a new link, or starts live editing again.
+it.each([
+  ["link_full", "link-full"],
+  ["link_live_stopped", "live-stopped"],
+] as const)("stops on %s without trying again", async (code, reason) => {
   vi.useFakeTimers();
   vi.stubGlobal("location", { origin: "https://share.example.test" });
   const fetch = vi.fn(async (url: RequestInfo | URL) =>
     url === "/api/live/link-document"
       ? Response.json({ objectId: "object-a", limits })
-      : Response.json(linkRefusalBody("link_full"), { status: 403 }),
+      : Response.json(linkRefusalBody(code), { status: LINK_REFUSALS[code].status }),
   );
   vi.stubGlobal("fetch", fetch);
   const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
   try {
     await session.reconnect();
-    expect(session.state()).toMatchObject({ status: "disconnected", reason: "link-full" });
+    expect(session.state()).toMatchObject({ status: "disconnected", reason });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(fetch).toHaveBeenCalledTimes(2);
   } finally {
