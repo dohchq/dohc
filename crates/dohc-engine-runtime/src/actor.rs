@@ -1600,6 +1600,10 @@ mod reader_tests;
 mod owner_retirement_tests;
 
 #[cfg(test)]
+#[path = "actor/owner_capture_hold_tests.rs"]
+mod owner_capture_hold_tests;
+
+#[cfg(test)]
 mod held_reader_tests {
     use super::*;
     use dohc_engine_testkit::{ScratchDir, engine_db_path};

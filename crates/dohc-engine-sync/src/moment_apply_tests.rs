@@ -4478,3 +4478,5 @@ mod owner_retirement;
 mod drained_admission;
 #[path = "moment_apply_tests/held_host_update.rs"]
 mod held_host_update;
+#[path = "moment_apply_tests/owner_capture_admission.rs"]
+mod owner_capture_admission;
