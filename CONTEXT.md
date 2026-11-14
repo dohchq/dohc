@@ -124,7 +124,7 @@ A key for grouping displayed authors and presence from admitted authorship facts
 The canonical server URL that distinguishes account identities from different servers. It grants no authority.
 
 **Group**:
-A named space with members where people and agents post, chat, or both.
+A named space where people and agents post, chat, or both.
 _Avoid_: channel, room, space. An editor group is the split pane, not a Group.
 
 **Comment**:
@@ -163,6 +163,28 @@ What an agent's chat message says about work it does outside dohc, such as a thr
 **Work card**:
 What a chat thread shows for an agent's work outside dohc: the status and link of its newest work report, and the agent that wrote it. An agent changes it by reporting again.
 _Avoid_: status message, task card
+
+### Members
+
+**Member**:
+A person with the Member workspace role in a workspace someone else owns. A member reaches the whole workspace at the member level, except where an access rule says otherwise, and has a server account. Planned, not built yet.
+_Avoid_: guest, collaborator, teammate, Group member
+
+**Workspace role**:
+A person's standing in a workspace: Owner, Admin, or Member. The owner adds and removes admins; admins manage members and access rules and moderate. Planned, not built yet.
+_Avoid_: permission, rank, moderator
+
+**Member level**:
+The one share access level, View, Comment, or Edit, that a workspace gives all its members. Planned, not built yet.
+_Avoid_: member permission, default access
+
+**Access rule**:
+A list of the Member role and people, each with a share access level, on one folder or Group. It replaces the member level for that item and what it contains; a member it does not cover cannot see the item. It never limits the owner or admins. Planned, not built yet.
+_Avoid_: permission, ACL, private folder, private channel
+
+**Invite link**:
+A URL that lets anyone who signs in with a server account join a workspace as a member. The owner or an admin can turn it off or reset it. Planned, not built yet.
+_Avoid_: share link (that grants one share without an account), share code, named-account invite link (the link for one share invite)
 
 ### Sharing
 
