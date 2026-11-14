@@ -98,7 +98,8 @@ pub fn clear_in(tx: &Transaction<'_>, workspace: &str, path: &str) -> Result<boo
 /// A finished write replaced the file's bytes only if they were the bytes it
 /// expected or its own, and only if the store holds them. A hold on those
 /// bytes ends, and nothing is lost. A hold on other bytes is an outside save
-/// the write did not replace, and it stays.
+/// the write did not replace, and it stays. A superseded job completes
+/// without writing, so it can end a hold whose bytes stay on disk.
 pub(crate) fn end_replaced_in(conn: &Connection, job_id: &str) -> Result<(), StorageError> {
     conn.prepare_cached(
         "DELETE FROM held_outside_changes WHERE EXISTS (SELECT 1 FROM materialization_jobs j \
