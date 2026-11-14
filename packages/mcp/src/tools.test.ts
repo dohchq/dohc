@@ -572,6 +572,7 @@ describe("mcp tools operate on allowed paths", () => {
         })),
       ];
       const pendingShare = ["notes/waiting.md"];
+      const pendingShareWhileOpen = ["notes/new.md"];
       // The desktop answers from the engine's pull token: set while a pull is
       // unfinished, cleared by its terminal commit or by abandoning it.
       for (const [pull, waiting] of [
@@ -585,7 +586,8 @@ describe("mcp tools operate on allowed paths", () => {
           request: async (request) => {
             asked.push(request.verb);
             expect(request.args).toEqual({ cwd: ctx.root, actor: "agent" });
-            if (request.verb === "liveKeptEdits") return { ok: true, keptEdits, pendingShare };
+            if (request.verb === "liveKeptEdits")
+              return { ok: true, keptEdits, pendingShare, pendingShareWhileOpen };
             if (request.verb === "sharedFilesHeld") return { ok: true, heldFiles: null };
             if (request.verb === "syncFailure") return { ok: true, syncFailure: null };
             if (request.verb !== "collectionsWaiting")
@@ -598,6 +600,7 @@ describe("mcp tools operate on allowed paths", () => {
           collectionsWaiting: waiting,
           keptEdits,
           pendingShare,
+          pendingShareWhileOpen,
         });
         expect(status).not.toHaveProperty("heldFiles");
         expect(status).not.toHaveProperty("syncFailure");
@@ -617,6 +620,7 @@ describe("mcp tools operate on allowed paths", () => {
       expect(unanswered).not.toHaveProperty("keptEdits");
       expect(unanswered).not.toHaveProperty("syncFailure");
       expect(unanswered).not.toHaveProperty("pendingShare");
+      expect(unanswered).not.toHaveProperty("pendingShareWhileOpen");
       // A share profile holds no kept edits of its own, so it does not ask.
       const asked: string[] = [];
       const shared = await workspaceStatus({

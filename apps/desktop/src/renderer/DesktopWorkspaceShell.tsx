@@ -2620,6 +2620,10 @@ export function DesktopWorkspaceShell(props: {
       ]),
     [livePausedPaths, liveQuarantines],
   );
+  // New notes a share shows that have no file on the server yet. Their editors
+  // say pending share until main lists them no more.
+  const pendingShareList = syncStatus?.pendingShareWhileOpen;
+  const pendingShareWhileOpen = useMemo(() => new Set(pendingShareList), [pendingShareList]);
   // A refused note's chip opens Live documents at its row.
   const openLiveDocumentsAt = useCallback(
     (path: string) => openLiveDocuments(workspaceId, path),
@@ -8398,6 +8402,11 @@ export function DesktopWorkspaceShell(props: {
                                         shareView || isMountedSharePath(path)
                                           ? undefined
                                           : liveEditingPaused.get(path)
+                                      }
+                                      pendingShare={
+                                        !shareView &&
+                                        !isMountedSharePath(path) &&
+                                        pendingShareWhileOpen.has(path)
                                       }
                                       onOpenLiveDocuments={openLiveDocumentsAt}
                                       receivedShare={!!shareView || isMountedSharePath(path)}

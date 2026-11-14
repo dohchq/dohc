@@ -1,3 +1,5 @@
+import type { ListedLink, RosterListing } from "@dohc/automation-executor/roster-listing";
+
 /**
  * Each workspace's new notes whose first file waits for their open editor to
  * be left, as the engine answered after the last sync pass, so a status read
@@ -21,4 +23,25 @@ export function createNotSentWhileOpen() {
     },
     paths: (workspaceId: string): readonly string[] => paths.get(workspaceId) ?? [],
   };
+}
+
+/**
+ * Whether `listing` has a share that shows `path` to someone else: a live link
+ * or a person's share of the note or of a folder holding it. A share of a
+ * version names no new note. A Group's files are not counted.
+ */
+export function sharedByListing(listing: RosterListing | null, path: string): boolean {
+  if (!listing || listing.grants === null) return false;
+  const shows = (grant: ListedLink["grant"]) => {
+    const selector = grant.selector;
+    return (
+      grant.status === "active" &&
+      selector.kind === undefined &&
+      selector.versionId === null &&
+      selector.paths.some((root) => path === root || path.startsWith(`${root}/`))
+    );
+  };
+  return (
+    listing.grants.some(shows) || listing.links.some(({ grant, ended }) => !ended && shows(grant))
+  );
 }
