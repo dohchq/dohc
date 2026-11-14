@@ -23,8 +23,15 @@ import type { ChatMessage } from "./workspaceReads";
 // Enqueue writes the record withheld, then sendable, and resolves only once the record would survive a crash or power
 // loss. A record whose sendable version couldn't be written stays withheld, on disk and in memory, and is sent only
 // after `retryEnqueue` with the same operation ID, so a relaunch never sends a write the person may have given up on.
-// Nothing here deletes a record except a read that shows its result, and Sign out. A record that can't be read, and any
-// other file, is kept aside.
+// Nothing here deletes a record except a read that shows its result, `discard`, and Sign out. A record that can't be
+// read, and any other file, is kept aside. Of those, `discard` deletes only an unreadable record, by the handle
+// `state()` gives for it.
+//
+// `discard` deletes one record from this phone. It can't take back a write the server may already have. It first
+// writes a record that may still send as withheld, and keeps it withheld in memory whatever that write and the delete
+// do, so a late answer or a failed discard doesn't send it again in this run. A relaunch can't send it once either the
+// withheld version or the delete is durable. When neither is, discard rejects as `withheld-in-memory`, because a
+// relaunch may send it. It refuses a write that a waiting reply still needs.
 //
 // Only a sign-in with the record's own server and account sends it. Within each account, workspace, and thread or
 // stream, only the oldest unfinished record runs, and none while another of that lane's records is running. A reaction
@@ -93,7 +100,7 @@ interface OutboxRecord {
   readonly attempted: boolean;
   /**
    * Enqueue writes the record withheld before sendable, and keeps it withheld when the sendable version couldn't be
-   * written. A withheld record isn't sent until `retryEnqueue`.
+   * written. `discard` withholds a record before deleting it. A withheld record isn't sent until `retryEnqueue`.
    */
   readonly withheld: boolean;
   /** When the current run of `pending` answers began. A failed request ends the run. */
@@ -112,6 +119,12 @@ export interface OutboxState {
   /** Files kept aside: records that can't be read, and anything else in the folder. */
   readonly aside: readonly string[];
   /**
+   * A handle for each record kept aside because it can't be read, for `discard`. The handles change each time the
+   * records are read, and Sign out ends them. They say nothing of the record's account or workspace, which can't be
+   * known.
+   */
+  readonly unreadable: readonly string[];
+  /**
    * A Sign out's delete: `none` when none is owed. While one is owed, nothing sends and nothing is added. `failed` once
    * a try has failed, until one finishes it; `failed-unmarked` when its marker isn't on disk either, so a relaunch
    * would read the records instead of deleting them.
@@ -122,11 +135,20 @@ export interface OutboxState {
 /**
  * Why enqueue didn't resolve, when it isn't a disk error: no account signed in or records not read yet, a write the
  * route would refuse, or `indeterminate`: the record may be on disk, withheld under `operationId`, and `retryEnqueue`
- * sends it as that one operation. `not-deleted`: Sign out couldn't make its delete safe.
+ * sends it as that one operation. `not-deleted`: Sign out couldn't make its delete safe. `has-dependents`: a write
+ * still waiting in the outbox needs the one `discard` was asked to delete. `withheld-in-memory`: `discard` made neither
+ * the withheld record nor its delete durable, so the record under `operationId` sends only after `retryEnqueue` until
+ * the app closes, but a relaunch may send it.
  */
 export class OutboxError extends Error {
   constructor(
-    readonly kind: "closed" | "invalid" | "indeterminate" | "not-deleted",
+    readonly kind:
+      | "closed"
+      | "invalid"
+      | "indeterminate"
+      | "not-deleted"
+      | "has-dependents"
+      | "withheld-in-memory",
     readonly operationId: string | null = null,
   ) {
     super(MESSAGES[kind]);
@@ -139,7 +161,14 @@ const MESSAGES: Readonly<Record<OutboxError["kind"], string>> = {
   invalid: "The write isn't valid.",
   indeterminate: "The outbox couldn't confirm it kept the write.",
   "not-deleted": "The outbox couldn't delete its records.",
+  "has-dependents": "A write waiting in the outbox needs this one.",
+  "withheld-in-memory": "The outbox couldn't keep the write from sending after the app restarts.",
 };
+
+/** What `discard` deletes: the signed-in account's record, or an unreadable record by its handle from `state()`. */
+export type DiscardTarget =
+  | { readonly kind: "record"; readonly operationId: string }
+  | { readonly kind: "unreadable"; readonly handle: string };
 
 export interface Outbox {
   state(): OutboxState;
@@ -158,6 +187,17 @@ export interface Outbox {
   }): Promise<OutboxRecord>;
   /** Keeps a withheld record for sending, with its own operation ID and arguments, and resolves once that's durable. */
   retryEnqueue(operationId: string): Promise<OutboxRecord>;
+  /**
+   * Deletes one record from this phone, and resolves once the delete is durable. It doesn't stop a write the server
+   * may already have. A record's sender stops, and a record that may still send is written withheld first. It stays
+   * withheld in memory when that write or the delete fails, so this run sends it only after `retryEnqueue`. Rejects as
+   * `closed` while the records aren't read or a Sign out's delete is owed, and for a record when no account is signed
+   * in; as `invalid` for another account's record, or a handle `state()` no longer gives; as `has-dependents` while a
+   * waiting reply needs the record; as `withheld-in-memory` when neither the withheld record nor the delete is durable,
+   * so a relaunch may send it; and otherwise as the disk error when the delete isn't durable. A failed discard keeps
+   * the record in `state()`.
+   */
+  discard(target: DiscardTarget): Promise<void>;
   /**
    * What Sign out would delete: messages never sent, withheld or refused, and messages that may still send. Null until
    * the records are read, so a sheet never says nothing is lost when it can't know.
@@ -277,6 +317,8 @@ export function createOutbox(options: {
   let status: OutboxState["status"] = "loading";
   const records = new Map<number, OutboxRecord>();
   let aside: readonly string[] = [];
+  /** Each unreadable record's file name, by the handle `state()` gives for it. */
+  let unreadable = new Map<string, string>();
   let next = 1;
   /** The outbox's lifetime. Sign out moves it on. */
   let epoch = 0;
@@ -299,6 +341,11 @@ export function createOutbox(options: {
   const running = new Map<number, AbortController>();
   /** Records whose dependency change is being written. */
   const changing = new Set<number>();
+  /**
+   * Records `discard` is deleting. Each holds its lane, and keeps its stopped sender from starting again, only while its
+   * withheld version is written. Once withheld in memory, it no longer holds its lane, as any withheld record doesn't.
+   */
+  const discarding = new Set<number>();
   /** Workspaces, by scope, whose records wait after repeated 404s. */
   const unreachable = new Set<string>();
   /** The latest messages reads showed, for one account and workspace. */
@@ -332,6 +379,18 @@ export function createOutbox(options: {
         other.dependsOn === record.operationId &&
         scopeOf(other) === scopeOf(record) &&
         needsThread(other),
+    );
+  /**
+   * A write still waiting in the outbox for this one: it waits while this one is unfinished, is refused because this
+   * one was, and a reply waits for the thread this one's saved result names.
+   */
+  const waitedFor = (record: OutboxRecord) =>
+    [...records.values()].some(
+      (other) =>
+        other.dependsOn === record.operationId &&
+        scopeOf(other) === scopeOf(record) &&
+        other.stage === "queued" &&
+        (unfinished(record) || record.stage === "refused" || needsThread(other)),
     );
 
   /** Waits `ms`, or less: `wake` cuts it short, and so does `stop`. */
@@ -458,6 +517,9 @@ export function createOutbox(options: {
       records.clear();
       for (const [sequence, record] of found) records.set(sequence, record);
       aside = kept.sort();
+      unreadable = new Map(
+        aside.filter((name) => RECORD_NAME.test(name)).map((name) => [crypto.randomUUID(), name]),
+      );
       next = counter;
       status = "ready";
       changed();
@@ -617,7 +679,7 @@ export function createOutbox(options: {
           ? `thread:${parentThread}`
           : `after:${record.dependsOn}`;
       const lane = JSON.stringify([scopeOf(record), waitsIn]);
-      if (running.has(record.sequence)) busy.add(lane);
+      if (running.has(record.sequence) || discarding.has(record.sequence)) busy.add(lane);
       if (!heads.has(lane)) heads.set(lane, record);
     }
     for (const [lane, record] of heads) {
@@ -846,6 +908,7 @@ export function createOutbox(options: {
         status,
         records: [...records.values()].sort((a, b) => a.sequence - b.sequence),
         aside,
+        unreadable: [...unreadable.keys()],
         deletion: !owed ? "none" : !deleteFailed ? "owed" : marked ? "failed" : "failed-unmarked",
       };
       return snapshot;
@@ -944,9 +1007,75 @@ export function createOutbox(options: {
       });
     },
 
+    discard(target) {
+      const at = epoch;
+      return serial(async () => {
+        if (epoch !== at || status !== "ready" || owed) throw new OutboxError("closed");
+        if (target.kind === "unreadable") {
+          const name = unreadable.get(target.handle);
+          if (name === undefined) throw new OutboxError("invalid");
+          await files.remove(name);
+          if (epoch !== at) throw new OutboxError("closed");
+          unreadable.delete(target.handle);
+          aside = aside.filter((entry) => entry !== name);
+          changed();
+          return;
+        }
+        const signIn = session;
+        if (!signIn?.isCurrent()) throw new OutboxError("closed");
+        const record = [...records.values()].find(
+          (entry) => entry.operationId === target.operationId && ownedBy(entry, signIn),
+        );
+        if (!record) throw new OutboxError("invalid");
+        if (waitedFor(record)) throw new OutboxError("has-dependents");
+        const { sequence } = record;
+        const file = nameOf(sequence);
+        discarding.add(sequence);
+        // Its sender stops now, so no answer that comes later is written.
+        running.get(sequence)?.abort();
+        // Whether the disk can't hold the record sendable, even after a power loss.
+        let safe = !unfinished(record);
+        try {
+          if (unfinished(record)) {
+            // Written even when withheld in memory: a failed discard leaves it so with the sendable version on disk.
+            const withheld = { ...record, withheld: true };
+            let written: "durable" | "unsynced" | "failed" = "durable";
+            try {
+              await files.write(file, serialize(withheld));
+            } catch (error) {
+              written =
+                error instanceof DurableFileError && error.kind === "unsynced"
+                  ? "unsynced"
+                  : "failed";
+            }
+            if (epoch !== at) throw new OutboxError("closed");
+            records.set(sequence, withheld);
+            changed();
+            // Any failure but `unsynced` left the sendable version.
+            if (written === "failed")
+              throw new OutboxError("withheld-in-memory", record.operationId);
+            safe = written === "durable";
+          }
+          try {
+            await files.remove(file);
+          } catch (error) {
+            if (epoch !== at) throw new OutboxError("closed");
+            // A power loss may bring back the sendable version an unsynced withheld write replaced.
+            throw safe ? error : new OutboxError("withheld-in-memory", record.operationId);
+          }
+          if (epoch !== at) throw new OutboxError("closed");
+          records.delete(sequence);
+          changed();
+        } finally {
+          discarding.delete(sequence);
+          pump();
+        }
+      });
+    },
+
     signOutCounts() {
       if (status !== "ready" || owed) return null;
-      let unsent = aside.filter((name) => RECORD_NAME.test(name)).length;
+      let unsent = unreadable.size;
       let maySend = 0;
       for (const record of records.values()) {
         // An answer refused as already answered still published its reply.
@@ -956,7 +1085,8 @@ export function createOutbox(options: {
               ? 0
               : 1;
         else if (!unfinished(record)) continue;
-        else if (record.attempted && !record.withheld) maySend += 1;
+        // A request may have reached the server, even for a record a failed discard withheld.
+        else if (record.attempted) maySend += 1;
         else unsent += 1;
       }
       return { unsent, maySend };
@@ -985,6 +1115,7 @@ export function createOutbox(options: {
       stopSending();
       records.clear();
       aside = [];
+      unreadable = new Map();
       observed = null;
       unreachable.clear();
       owed = true;
