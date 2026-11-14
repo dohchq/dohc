@@ -1,6 +1,9 @@
 import ExpoModulesCore
 import UIKit
 import WebKit
+import os
+
+private let log = Logger(subsystem: "app.dohc.mobile", category: "page-scroll-top")
 
 public final class PageScrollTopModule: Module {
   public func definition() -> ModuleDefinition {
@@ -26,13 +29,11 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     // iOS may skip a scroll view that is hidden, clear to nothing, empty or already at its top, so the receiver is a
-    // real 1 pt view resting 1 pt down its content. It stays the last subview: React Native mounts and unmounts children
-    // by index from the first.
-    receiver.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+    // real 1 pt tall view resting 1 pt down its content. It spans the host's width (layoutSubviews), because iOS looks
+    // for the status bar's target among the scroll views under the tapped point. It stays the last subview: React
+    // Native mounts and unmounts children by index from the first.
     receiver.backgroundColor = .clear
     receiver.contentInsetAdjustmentBehavior = .never
-    receiver.contentSize = CGSize(width: 1, height: 2)
-    receiver.contentOffset = CGPoint(x: 0, y: 1)
     receiver.showsVerticalScrollIndicator = false
     receiver.showsHorizontalScrollIndicator = false
     receiver.scrollsToTop = false
@@ -67,6 +68,12 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
   // WebKit can add scroll views inside the web view after it's bound, so each layout looks again.
   override func layoutSubviews() {
     super.layoutSubviews()
+    let width = max(bounds.width, 1)
+    if receiver.frame.width != width {
+      receiver.frame = CGRect(x: 0, y: 0, width: width, height: 1)
+      receiver.contentSize = CGSize(width: width, height: 2)
+      receiver.contentOffset = CGPoint(x: 0, y: 1)
+    }
     bind()
   }
 
@@ -85,7 +92,13 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
 
   /// Only the page in front, drawn and in a window, takes the tap.
   private func arm() {
-    receiver.scrollsToTop = active && ready && window != nil && bound
+    let armed = active && ready && window != nil && bound
+    if armed == receiver.scrollsToTop { return }
+    receiver.scrollsToTop = armed
+    // When it arms, the log counts every scroll view in the window that still takes the tap, the receiver included, so
+    // a tap that never arrives can be told apart from one that arrives and doesn't scroll.
+    let takers = armed ? window.map { takersOfTheTap(in: $0) } ?? 0 : 0
+    log.info("armed \(armed, privacy: .public); scroll views in the window taking the tap: \(takers, privacy: .public)")
   }
 
   /// Every scroll view under the host but the receiver: the web view's own, and any WebKit adds for the page's element.
@@ -93,6 +106,12 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
     for subview in view.subviews where subview !== receiver {
       if let scroll = subview as? UIScrollView { scroll.scrollsToTop = false }
       quiet(subview)
+    }
+  }
+
+  private func takersOfTheTap(in view: UIView) -> Int {
+    view.subviews.reduce(0) { count, subview in
+      count + ((subview as? UIScrollView)?.scrollsToTop == true ? 1 : 0) + takersOfTheTap(in: subview)
     }
   }
 
@@ -104,7 +123,11 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
   }
 
   func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
-    guard scrollView === receiver, receiver.scrollsToTop, let webView, bound else { return false }
+    guard scrollView === receiver, receiver.scrollsToTop, let webView, bound else {
+      log.info("status bar tap refused: receiver \(scrollView === self.receiver, privacy: .public)")
+      return false
+    }
+    log.info("status bar tap: scrolling the page to its top")
     webView.evaluateJavaScript("window.__dohcScrollToTop?.(); true;", completionHandler: nil)
     return false
   }
