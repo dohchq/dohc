@@ -3442,6 +3442,53 @@ async fn stop_records_each_authors_run_as_one_row_with_its_declared_credit() {
     supervisor.close_all().unwrap();
 }
 
+// A run's merged update leaves the note as replaying each edit in turn would,
+// including text typed inside a block, a removed block and a changed field.
+#[tokio::test]
+async fn stop_leaves_the_note_as_each_edit_in_turn_would() {
+    let f = observed_release_fixture();
+    let mut updates = vec![
+        f.doc.richdoc_append_paragraph("First"),
+        f.doc.richdoc_append_paragraph("Second"),
+    ];
+    updates.push(f.doc.richdoc_insert_text(1, 0, "Typed ").unwrap());
+    updates.push(f.doc.richdoc_remove_block(0));
+    updates.push(f.doc.frontmatter_set("status", "Done").unwrap());
+    let expected = f.doc.encode_full_state();
+    let (f, supervisor, actor) = pending_release_fixture_updates(f, updates).await;
+    stop_action(&actor, &f, "release").await.unwrap();
+    assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 1);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let doc = dohc_engine_collab::load_persisted(&f.store, &key)
+        .unwrap()
+        .unwrap()
+        .doc;
+    assert_eq!(doc.encode_full_state(), expected);
+    supervisor.close_all().unwrap();
+}
+
+// A Collection record's edits keep one History row each, so its field history
+// records every value the record held, not only the first and the last.
+#[tokio::test]
+async fn stop_records_each_edit_of_a_collection_record_apart() {
+    let record = "rec_00000000000000000000000000";
+    let mut f = observed_release_fixture();
+    f.store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]')",[]).unwrap();
+        tx.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state) VALUES ('workspace','main',?1,'notes','notes/owner.md','object','adopted')",[record]).unwrap();
+        Ok::<_, dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    let before = record_history(&f.store, record);
+    let updates = ["To do", "Doing", "Done"]
+        .map(|status| f.doc.frontmatter_set("status", status).unwrap())
+        .to_vec();
+    let (f, supervisor, actor) = pending_release_fixture_updates(f, updates).await;
+    stop_action(&actor, &f, "release").await.unwrap();
+    assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 3);
+    assert_eq!(record_history(&f.store, record) - before, 3);
+    supervisor.close_all().unwrap();
+}
+
 #[tokio::test]
 async fn a_retiring_activation_settles_through_its_durable_binding() {
     let f = Fixture::new();
