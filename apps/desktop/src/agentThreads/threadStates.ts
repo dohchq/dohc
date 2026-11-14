@@ -364,9 +364,11 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
   return {
     /**
      * The tool took a message. Its line shows from now, in place of an older
-     * one for that agent and chat thread. A message reported again, as when
-     * it could not be marked read and went a second time, keeps its row, so
-     * a reminder already recorded for it is not sent again. Nothing here
+     * one for that agent and chat thread. A message reported again for the
+     * same thread, as when it could not be marked read and went a second
+     * time, keeps its row, so a reminder already recorded for it is not sent
+     * again. The same message taken by another thread, after the agent was
+     * pointed at it, is that thread's work and starts a row of its own. Nothing here
      * waits: the row is taken in, and saved, behind the caller, once the
      * saved rows are read.
      */
@@ -374,7 +376,8 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       void loaded.then(() => {
         if (stopped) return;
         const key = keyOf(row);
-        if (rows.get(key)?.messageId === row.messageId) return;
+        const had = rows.get(key);
+        if (had?.messageId === row.messageId && had.toolThreadId === row.toolThreadId) return;
         const next: ForwardRow = { ...row, reminder: { state: "none" } };
         const shown = lines.delete(key);
         read.delete(key);

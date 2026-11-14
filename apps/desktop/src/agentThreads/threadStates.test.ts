@@ -475,6 +475,29 @@ describe("what an agent thread is doing with a forwarded message", () => {
     states.stop();
   });
 
+  it("follows a message in the thread that took it last, when the agent was pointed at another", async () => {
+    // Saved before dohc stopped: the message went to one thread, and was reminded there.
+    const saved: ForwardRow = {
+      ...forwarded(),
+      reminder: { state: "sent", runId: "run-remind", atMs: 2_000 },
+    };
+    const { states, tool, forward, sent, rows } = setup({}, [saved]);
+    // The agent has another thread now, and that thread takes the same message.
+    states.forwarded(forwarded({ toolThreadId: "t3-2", runId: "run-9", forwardedAtMs: 4_000 }));
+    tool(thread([run("run-9", "working", { requestedAtMs: 4_100, startedAtMs: 4_200 })]));
+    await states.check();
+
+    expect(rows().map((row) => [row.toolThreadId, row.reminder.state])).toEqual([["t3-2", "none"]]);
+    expect(line(states)).toMatchObject({ state: "working", forwardedAtMs: 4_000 });
+
+    // Its work there ends in silence: that thread gets its own reminder.
+    tool(thread([run("run-9", "ended", { requestedAtMs: 4_100 })]));
+    await states.check();
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(sent[0]).toMatchObject({ threadId: "t3-2" });
+    states.stop();
+  });
+
   it("does not take a run the list shows as over for over while the tool continues it after a restart", async () => {
     const { states, tool, forward, runState, askedRuns } = setup();
     states.forwarded(forwarded());
