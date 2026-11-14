@@ -308,7 +308,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_workspace_status",
     {
       description:
-        "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits, and shared notes whose edits wait for the server, as pendingShare, and new notes a share link shows that the server has no file for yet, as pendingShareWhileOpen.",
+        "Report whether this workspace is local-only or cloud-synced. In the owning workspace, also list live documents whose edits the server refused, as keptEdits, and shared notes whose edits wait for the server, as pendingShare, and new notes shared by a link or with a person, which the server has no file for yet, as pendingShareWhileOpen.",
       inputSchema: {},
     },
     async () => text(await workspaceStatus(ctx)),

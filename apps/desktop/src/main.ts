@@ -6882,7 +6882,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
 // New notes whose first file waits for their open editor to be left.
 const notSentWhileOpen = createNotSentWhileOpen();
 // The new notes a share shows that have no file on the server yet. The share
-// roster is this computer's last listing, so a link made on another computer
+// roster is this computer's last listing, so a share made on another computer
 // counts once the next listing sees it.
 function pendingShareWhileOpen(workspaceId: string): string[] {
   const notSent = notSentWhileOpen.paths(workspaceId);

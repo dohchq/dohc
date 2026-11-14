@@ -2620,7 +2620,7 @@ export function DesktopWorkspaceShell(props: {
       ]),
     [livePausedPaths, liveQuarantines],
   );
-  // New notes a link shows that have no file on the server yet. Their editors
+  // New notes a share shows that have no file on the server yet. Their editors
   // say pending share until main lists them no more.
   const pendingShareList = syncStatus?.pendingShareWhileOpen;
   const pendingShareWhileOpen = useMemo(() => new Set(pendingShareList), [pendingShareList]);
