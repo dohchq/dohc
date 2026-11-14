@@ -826,7 +826,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "nextCursor": outcome.next_cursor,
         }),
         RelayOperationOutcome::SharedChannelPushed(outcome) => {
-            json!({ "pushed": outcome.pushed })
+            json!({ "pushed": outcome.pushed, "setAside": outcome.set_aside })
         }
         RelayOperationOutcome::ShareViewIdentity(record) => json!({
             "identity": match record {
@@ -2313,6 +2313,11 @@ impl EngineService {
                 "share.channel.push",
             )
             .await?;
+        // An op the relay refused waits in Notices.
+        if matches!(&outcome, RelayOperationOutcome::SharedChannelPushed(pushed) if pushed.set_aside > 0)
+        {
+            self.events.emit_refusals_changed(&open.workspace_id);
+        }
         relay_outcome_json(outcome)
     }
 
@@ -2340,6 +2345,11 @@ impl EngineService {
                 "share.view.pushChat",
             )
             .await?;
+        // An op the relay refused waits in Notices.
+        if matches!(&outcome, RelayOperationOutcome::SharedChannelPushed(pushed) if pushed.set_aside > 0)
+        {
+            self.events.emit_refusals_changed(&open.workspace_id);
+        }
         relay_outcome_json(outcome)
     }
 

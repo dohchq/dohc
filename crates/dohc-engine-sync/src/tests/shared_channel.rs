@@ -1740,3 +1740,114 @@ fn a_membership_view_pushes_its_comments_on_files_by_path() {
         ]
     );
 }
+
+/// The relay refuses a whole batch for one op it won't take, such as a
+/// comment on a file the owner deleted. The view sets that op aside as a
+/// refusal Notices shows, one per thread, and every later op still goes,
+/// numbered with no gap.
+#[test]
+fn a_membership_view_sets_aside_an_op_the_relay_refuses_and_keeps_pushing() {
+    let (_scratch, _path, mut engine) = open_store();
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []).refusing_threads(["t-deleted"]));
+    seed_identity(&mut engine);
+    let file = format!("share-object:v1:{}", "a".repeat(64));
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO versioned_workspaces (workspace_id,main_version_id) VALUES ('ws','main'); \
+                 INSERT INTO versions (workspace_id,version_id,kind,name,created_at_ms) \
+                 VALUES ('ws','main','main','Main',0);",
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws',?1,1)",
+                params![file],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+                 VALUES ('ws','main','plans/day-1.md',?1)",
+                params![file],
+            )
+            .map_err(SyncError::persist)?;
+            for thread in ["t-deleted", "t-owner"] {
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_at_ms) \
+                     VALUES ('ws',?1,'',1,1,?2,1)",
+                    params![thread, file],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .expect("file comment fixture");
+    let journal = |engine: &mut EngineStore, index: i64, kind: &str, payload: serde_json::Value| {
+        journal_local_replication_op(
+            engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            kind,
+            &payload,
+            1_000 + index,
+            &NoFaults,
+        )
+        .expect("journal a local chat op");
+    };
+    journal(
+        &mut engine,
+        0,
+        "chat.thread.create",
+        json!({"threadId": "t-deleted", "title": "Food", "createdAtMs": 5, "linkedObjectId": file,
+               "linkedAtMs": 5, "linkedPathHint": "plans/day-1.md"}),
+    );
+    journal(
+        &mut engine,
+        1,
+        "chat.message.append",
+        json!({"threadId": "t-deleted", "messageId": "m-1"}),
+    );
+    journal(
+        &mut engine,
+        2,
+        "chat.message.append",
+        json!({"threadId": "t-owner", "messageId": "m-2"}),
+    );
+    let grant = ShareGrant {
+        scope: crate::ShareScope::Workspace,
+        version_id: None,
+        access: ShareAccess::Comment,
+    };
+    let first = client
+        .push_share_view_groups(&mut engine, "ws", "share", &grant, &NoFaults)
+        .expect("a refused op does not stop the push");
+    assert_eq!((first.pushed, first.set_aside), (1, 2));
+    let notices = crate::list_refusal_notices(&engine, "ws").expect("refusal notices");
+    assert_eq!(notices.len(), 1, "one Notice for the comment: {notices:?}");
+    assert_eq!(notices[0].reason, crate::SHARE_CHAT_REFUSED);
+    assert_eq!(notices[0].refusal_coordinates.len(), 2);
+
+    journal(
+        &mut engine,
+        3,
+        "chat.message.append",
+        json!({"threadId": "t-owner", "messageId": "m-3"}),
+    );
+    let second = client
+        .push_share_view_groups(&mut engine, "ws", "share", &grant, &NoFaults)
+        .expect("the next push goes");
+    assert_eq!((second.pushed, second.set_aside), (1, 0));
+    let pushes = client
+        .transport()
+        .shared_pushes
+        .lock()
+        .expect("shared push calls");
+    let sent: Vec<_> = pushes
+        .iter()
+        .flat_map(|push| push.ops.iter())
+        .map(|op| (op.origin_seq, op.payload["messageId"].clone()))
+        .collect();
+    assert_eq!(sent, [(0, json!("m-2")), (1, json!("m-3"))]);
+}

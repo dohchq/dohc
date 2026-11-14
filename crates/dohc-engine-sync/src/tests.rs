@@ -708,6 +708,9 @@ struct PagedShareRelay {
     /// What the relay answers each blob upload, in order. An upload past the
     /// end is stored.
     blob_upload_errors: Mutex<std::collections::VecDeque<RelayError>>,
+    /// Threads the share log refuses. As the relay does, it refuses a whole
+    /// batch that holds an op on one of them and stores nothing of it.
+    refused_threads: std::collections::BTreeSet<String>,
 }
 
 impl PagedShareRelay {
@@ -731,7 +734,13 @@ impl PagedShareRelay {
             collection_writes: Mutex::new(Vec::new()),
             collection_write_answers: Mutex::new(std::collections::VecDeque::new()),
             blob_upload_errors: Mutex::new(std::collections::VecDeque::new()),
+            refused_threads: std::collections::BTreeSet::new(),
         }
+    }
+
+    fn refusing_threads<'a>(mut self, threads: impl IntoIterator<Item = &'a str>) -> Self {
+        self.refused_threads = threads.into_iter().map(str::to_owned).collect();
+        self
     }
 
     fn with_view_blobs(mut self, blobs: impl IntoIterator<Item = (String, Vec<u8>)>) -> Self {
@@ -824,6 +833,13 @@ impl RelayTransport for PagedShareRelay {
     }
 
     fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
+        if req.ops.iter().any(|op| {
+            op.payload["threadId"]
+                .as_str()
+                .is_some_and(|thread| self.refused_threads.contains(thread))
+        }) {
+            return Err(RelayError::ShareOperationRejected);
+        }
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(-1, |op| op.origin_seq);
         self.shared_pushes

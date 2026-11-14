@@ -501,7 +501,14 @@ pub struct SharedChannelPullOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelPushOutcome {
     pub pushed: usize,
+    /// Ops the relay refused, set aside as refusals Notices shows.
+    pub set_aside: usize,
 }
+
+/// Why a pushed chat op is set aside. Keep the desktop's
+/// `SHARE_CHAT_REFUSED` equal to it.
+pub const SHARE_CHAT_REFUSED: &str =
+    "The server refused this chat message. dohc set it aside and kept sending later ones.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareViewChangedPath {
@@ -4862,7 +4869,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }));
         }
         let Some(identity) = read_sync_identity(store, workspace_id).map_err(local)? else {
-            return Ok(SharedChannelPushOutcome { pushed: 0 });
+            return Ok(SharedChannelPushOutcome {
+                pushed: 0,
+                set_aside: 0,
+            });
         };
         self.push_shared_chat(
             store,
@@ -4907,15 +4917,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut pending = Vec::with_capacity(crate::MAX_PUSH_OPS_PER_BATCH);
         let mut last_scanned = scanned;
         let mut pushed = 0_usize;
-        let push_batch = |batch: &[(i64, ShareReplicationEnvelope)]| {
-            let push = self.transport.share_log_push(ShareLogPushRequest {
-                share_id: share_id.to_owned(),
-                origin_id: identity.origin_id.clone(),
-                ops: batch.iter().map(|(_, op)| op.clone()).collect(),
-            })?;
-            validate_share_push_response(&push, batch.len())?;
-            Ok(push.inserted)
-        };
+        let mut set_aside = 0_usize;
         let mut after = scanned;
         loop {
             let page = list_replication_ops(
@@ -4960,34 +4962,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     ));
                 }
                 if pending.len() == crate::MAX_PUSH_OPS_PER_BATCH {
+                    let sent =
+                        self.send_shared_batch(store, workspace_id, share_id, &pending, faults)?;
                     pushed = pushed
-                        .checked_add(push_batch(&pending)?)
+                        .checked_add(sent.pushed)
                         .ok_or(RelayError::InvalidResponse)?;
-                    write_shared_push_state(
-                        store,
-                        workspace_id,
-                        share_id,
-                        pending.last().ok_or(RelayError::InvalidResponse)?.0,
-                        dense_seq,
-                        faults,
-                    )?;
+                    set_aside += sent.set_aside;
+                    dense_seq = sent.dense_seq;
                     pending.clear();
                 }
             }
             after = page_last;
         }
         if !pending.is_empty() {
+            let sent = self.send_shared_batch(store, workspace_id, share_id, &pending, faults)?;
             pushed = pushed
-                .checked_add(push_batch(&pending)?)
+                .checked_add(sent.pushed)
                 .ok_or(RelayError::InvalidResponse)?;
-            write_shared_push_state(
-                store,
-                workspace_id,
-                share_id,
-                pending.last().ok_or(RelayError::InvalidResponse)?.0,
-                dense_seq,
-                faults,
-            )?;
+            set_aside += sent.set_aside;
+            dense_seq = sent.dense_seq;
         }
         write_shared_push_state(
             store,
@@ -4997,7 +4990,96 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             dense_seq,
             faults,
         )?;
-        Ok(SharedChannelPushOutcome { pushed })
+        Ok(SharedChannelPushOutcome { pushed, set_aside })
+    }
+
+    /// Sends one batch of chat ops, each paired with its local sequence, and
+    /// records how far the push got. The relay refuses a whole batch for one
+    /// op it won't take, such as a comment on a file the owner deleted. Then
+    /// the ops go one at a time, and each one the relay refuses is set aside
+    /// as a refusal, so it holds back no later op. A refused op takes no
+    /// relay sequence, so the ops after it stay dense.
+    fn send_shared_batch(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        batch: &[(i64, ShareReplicationEnvelope)],
+        faults: &dyn FaultInjector,
+    ) -> Result<SharedBatchSent, RelayError> {
+        let (Some((_, first)), Some((last_local, last))) = (batch.first(), batch.last()) else {
+            return Err(RelayError::InvalidResponse);
+        };
+        let send = |ops: Vec<ShareReplicationEnvelope>| {
+            let count = ops.len();
+            let push = self.transport.share_log_push(ShareLogPushRequest {
+                share_id: share_id.to_owned(),
+                origin_id: first.origin_id.clone(),
+                ops,
+            })?;
+            validate_share_push_response(&push, count)?;
+            Ok::<_, RelayError>(push.inserted)
+        };
+        match send(batch.iter().map(|(_, op)| op.clone()).collect()) {
+            Ok(pushed) => {
+                write_shared_push_state(
+                    store,
+                    workspace_id,
+                    share_id,
+                    *last_local,
+                    last.origin_seq,
+                    faults,
+                )?;
+                return Ok(SharedBatchSent {
+                    pushed,
+                    set_aside: 0,
+                    dense_seq: last.origin_seq,
+                });
+            }
+            Err(RelayError::ShareOperationRejected) => {}
+            Err(error) => return Err(error),
+        }
+        let mut sent = SharedBatchSent {
+            pushed: 0,
+            set_aside: 0,
+            dense_seq: first.origin_seq - 1,
+        };
+        for (local_seq, op) in batch {
+            let origin_seq = sent
+                .dense_seq
+                .checked_add(1)
+                .ok_or(RelayError::InvalidResponse)?;
+            match send(vec![ShareReplicationEnvelope {
+                origin_seq,
+                ..op.clone()
+            }]) {
+                Ok(pushed) => {
+                    sent.pushed += pushed;
+                    sent.dense_seq = origin_seq;
+                }
+                Err(RelayError::ShareOperationRejected) => {
+                    set_shared_op_aside(
+                        store,
+                        workspace_id,
+                        &op.origin_id,
+                        *local_seq,
+                        &op.op_kind,
+                        faults,
+                    )?;
+                    sent.set_aside += 1;
+                }
+                Err(error) => return Err(error),
+            }
+            write_shared_push_state(
+                store,
+                workspace_id,
+                share_id,
+                *local_seq,
+                sent.dense_seq,
+                faults,
+            )?;
+        }
+        Ok(sent)
     }
 
     /// Offer this replica's own edits to a received file share back to the
@@ -7154,6 +7236,48 @@ fn read_shared_push_state(
             .map_err(SyncError::corrupt)
         })
         .map_err(local)
+}
+
+struct SharedBatchSent {
+    pushed: usize,
+    set_aside: usize,
+    /// The relay sequence of the last op the relay took.
+    dense_seq: i64,
+}
+
+/// Keeps a chat op the relay refused as a pending refusal on its local
+/// coordinate. Notices shows it, and its chat message reads as refused.
+fn set_shared_op_aside(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    op_kind: &str,
+    faults: &dyn FaultInjector,
+) -> Result<(), RelayError> {
+    let outcome = store
+        .write_with(faults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_pending_refusals \
+                 (workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) \
+                 VALUES (?1,?2,?3,?4,'invalid-input',?5) \
+                 ON CONFLICT(workspace_id,origin_id,origin_seq) DO NOTHING",
+                params![
+                    workspace_id,
+                    origin_id,
+                    origin_seq,
+                    op_kind,
+                    SHARE_CHAT_REFUSED
+                ],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<(), SyncError>(())
+        })
+        .map_err(local)?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RelayError::Local("injected-crash".to_owned()));
+    }
+    Ok(())
 }
 
 fn write_shared_push_state(
