@@ -1469,10 +1469,10 @@ function chatsHost(context: CliWorkspaceContext, options: CliServerOptions): Cha
   };
 }
 
-// cliServer.test.ts checks this budget against the CLI's DEFAULT_RESPONSE_TIMEOUT_MS.
-// An unbounded await of the sync pass (up to
+// The CLI client gives up after its DEFAULT_RESPONSE_TIMEOUT_MS; cliServer.test.ts
+// keeps this budget below it. An unbounded await of the sync pass (up to
 // SHARED_CHANNEL_SYNC_PASS_ROWS rows, each up to its own relay timeout) can
-// outlast that budget and kill the read entirely, which is worse than the
+// outlast that timeout and kill the read entirely, which is worse than the
 // stale read a bound leaves behind. A hook failure must never block a read for
 // local data that already exists either — the same offline-degrades-silently
 // contract the sync pass itself keeps.

@@ -665,7 +665,8 @@ export function laterObjectMomentPaths(
 // writers walk the log in relay order (appendLogBatch inserts under the write
 // lock and reads back the row it just took; the seed scans ORDER BY
 // relay_seq), so no upsert here can arrive out of order.
-// currentFiles.test.ts checks out-of-order and repeated coordinates. The guard stays
+// currentFiles.test.ts runs the SQL directly with out-of-order and repeated
+// coordinates. The guard stays
 // because this table decides which chat a share serves, and a path moved
 // backwards by a future out-of-order writer would serve a file's discussion at
 // a path the relay can no longer prove.
