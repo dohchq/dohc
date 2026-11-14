@@ -819,6 +819,49 @@ it("reads a ticketed socket that never opens as the server's, and one that opene
   await vi.advanceTimersByTimeAsync(2000);
   expect(g.value.state()).toMatchObject({ status: "disconnected", reason: "connect-timeout" });
 });
+// A busy live host also holds the ticket until it has woken the file. Only that wait is the server's.
+it("reads a ticket that never answers as the server's, and an earlier request that never answers as the connection's", async () => {
+  vi.useFakeTimers();
+  const stalled = (path: string) => {
+    const f = fixture();
+    f.intercept((requested) => (requested === path ? new Promise<Response>(() => {}) : undefined));
+    return f;
+  };
+  const ticket = stalled("/api/live/named-ticket"),
+    connecting = ticket.value.reconnect();
+  await vi.advanceTimersByTimeAsync(2000);
+  await connecting;
+  expect(ticket.value.state()).toMatchObject({
+    status: "disconnected",
+    reason: "host-unavailable",
+  });
+  const tickets = () => ticket.requests.filter(({ path }) => path === "/api/live/named-ticket");
+  expect(tickets()).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(250);
+  expect(tickets()).toHaveLength(2);
+  // The link page and the desktop ask for their ticket through authorize.
+  const link = fixture(
+      limits(),
+      (_, signal) =>
+        new Promise<never>((_, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason)),
+        ),
+    ),
+    linking = link.value.reconnect();
+  await vi.advanceTimersByTimeAsync(2000);
+  await linking;
+  expect(link.value.state()).toMatchObject({
+    status: "disconnected",
+    reason: "host-unavailable",
+  });
+  for (const path of ["/api/account/session", "/api/live/named-session"]) {
+    const f = stalled(path),
+      opening = f.value.reconnect();
+    await vi.advanceTimersByTimeAsync(2000);
+    await opening;
+    expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "connect-timeout" });
+  }
+});
 it("backs off repeated connection failures and cancels recovery when paused or replaced", async () => {
   const f = await live();
   vi.useFakeTimers();

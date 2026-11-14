@@ -152,6 +152,8 @@ export function createNamedLiveBrowserTransport<
       kept?: boolean;
       /** Set while an attempt with no session left reads the invitation, so its deadline stops retries. */
       spent?: boolean;
+      /** Set once the attempt asks for its ticket, which waits on the live host. */
+      admitting?: boolean;
     };
     let attempt: Attempt | undefined;
     let automatic = false,
@@ -474,8 +476,8 @@ export function createNamedLiveBrowserTransport<
       override = { status: "authorizing", reason: null };
       notify();
       held.timer = setTimeout(
-        // A busy live host holds the socket's upgrade until it has woken the file, so an attempt
-        // whose ticketed socket never opened reads as the server's, not the connection's.
+        // A busy live host holds the ticket and the socket's upgrade until it has woken the file, so an
+        // attempt stalled there reads as the server's, not the connection's.
         () =>
           fail(
             held,
@@ -484,7 +486,7 @@ export function createNamedLiveBrowserTransport<
               ? "authority-unavailable"
               : held.refused
                 ? passingRefusal()
-                : held.socket && !held.route
+                : !held.route && (held.socket || held.admitting)
                   ? "host-unavailable"
                   : "connect-timeout",
           ),
@@ -494,8 +496,10 @@ export function createNamedLiveBrowserTransport<
         await retiring;
         if (!current(held)) return;
         let admitted: { discriminator: string; ticketToken: string; websocketUrl: string };
-        if (options.authorize) admitted = await options.authorize(target, held.controller.signal);
-        else {
+        if (options.authorize) {
+          held.admitting = true;
+          admitted = await options.authorize(target, held.controller.signal);
+        } else {
           if (!("accountId" in target) || !("grantId" in target))
             throw new Error("Named account selection required.");
           const account = await json(held, "/api/account/session");
@@ -531,6 +535,7 @@ export function createNamedLiveBrowserTransport<
             kept = { discriminator: bootstrap.discriminator, expiresAtMs: bootstrap.expiresAtMs };
           }
           const session = kept;
+          held.admitting = true;
           const ticket = await json(held, "/api/live/named-ticket", {
             discriminator: session.discriminator,
             objectId: target.objectId,
