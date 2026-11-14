@@ -1748,9 +1748,19 @@ fn refuse_publication_after(
 // #4093: after the relay refuses a settlement, the next one covers again from
 // the refused one's start. A run of refusals that lasts longer than the
 // application limit must not leave the note unable to settle once the relay
-// accepts again.
+// accepts again, whether each refusal arrives before the next settlement or
+// the settlements queue up before their refusals.
 #[tokio::test]
 async fn refusals_past_the_application_limit_still_let_the_note_settle() {
+    catch_up_after_refusals(false).await;
+}
+
+#[tokio::test]
+async fn queued_refusals_past_the_application_limit_still_let_the_note_settle() {
+    catch_up_after_refusals(true).await;
+}
+
+async fn catch_up_after_refusals(queued: bool) {
     const LIMIT: usize = 4;
     let mut f = Fixture::with_source(0, true);
     let cut = f.edit_accepted_before_handover_with_source(7, false, false);
@@ -1765,6 +1775,7 @@ async fn refusals_past_the_application_limit_still_let_the_note_settle() {
     let handle = f.adopt_cut(&owner, cut).await;
     f.settle_with_limit(&handle, receipt, LIMIT).await;
     let mut echoed = -1;
+    let mut queue = Vec::new();
     for cursor in 8..8 + 2 * LIMIT as i64 {
         f.record(
             &actor,
@@ -1795,12 +1806,19 @@ async fn refusals_past_the_application_limit_still_let_the_note_settle() {
         let settled = match settled {
             Ok(settled) => settled,
             Err(error) => panic!(
-                "edit {cursor} could not settle after {} refusals: {} {error}",
+                "edit {cursor} could not settle after {} settlements: {} {error}",
                 cursor - 8,
                 error.code()
             ),
         };
-        echoed = refuse_publication_after(&mut f.store, &settled, echoed);
+        if queued {
+            queue.push(settled);
+        } else {
+            echoed = refuse_publication_after(&mut f.store, &settled, echoed);
+        }
+    }
+    for settled in &queue {
+        echoed = refuse_publication_after(&mut f.store, settled, echoed);
     }
     // Once the relay accepts, one settlement covers every edit since the
     // first refusal and the file holds them all.
