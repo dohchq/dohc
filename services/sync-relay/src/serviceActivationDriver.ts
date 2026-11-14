@@ -200,6 +200,10 @@ export type RetirementStep =
   | { kind: "pending"; reason: string };
 const RETIREMENT_ROUNDS = 4;
 const retiring = { kind: "pending" as const, reason: "Service activation is retiring." };
+const applying = Object.freeze({
+  kind: "pending" as const,
+  reason: "A submission is applying the document's edits.",
+});
 // The engine's answer for its `status`, with exactly that status's keys.
 function answer(
   value: unknown,
@@ -254,6 +258,8 @@ export class ServiceActivationDriver {
   readonly #refusals = new OwnerKnownRefusals();
   // Targets whose last activation neither finished nor blocked, so a later pass continues it.
   readonly #unfinished = new Set<string>();
+  // Targets whose last pass left their document to a submission's drain.
+  readonly #yielded = new Set<string>();
   // Whether a wait for the validation slot a capture found busy is running. It wakes the pass that captures again.
   #awaitingCapacity = false;
   constructor(
@@ -283,6 +289,8 @@ export class ServiceActivationDriver {
         signal: AbortSignal,
         operation: () => Promise<T>,
       ): Promise<T>;
+      /** Whether a submission's drain holds or waits for the document. */
+      applying?(document: LiveDocumentKey): boolean;
       /** Ends with the host, and ends the wait for a validation slot with it. */
       lifetime: AbortSignal;
       /** Runs another pass soon: validation may have a slot for a capture it found busy. */
@@ -1525,6 +1533,13 @@ export class ServiceActivationDriver {
       this.#owners.set(JSON.stringify(document), owner);
     }
     const held = owner;
+    // A submission's drain applies the document's edits itself. A pass leaves an active document to it once, and waits
+    // for it the next time, so a document someone keeps editing still settles.
+    const yielded = this.#yielded.delete(key);
+    if (held.completed && !yielded && o.applying?.(document!)) {
+      this.#yielded.add(key);
+      return applying;
+    }
     return o.runDocument(document!, signal, async () => {
       // A restore can fence the binding while this pass waits for the document
       // or for the engine. Readiness waits until the exact binding opens again;

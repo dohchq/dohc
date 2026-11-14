@@ -969,7 +969,8 @@ it("rolls back the full activation when its retained-state quota charge fails", 
   }
 });
 
-type RunDocument = ConstructorParameters<typeof ServiceActivationDriver>[0]["runDocument"];
+type Driver = ConstructorParameters<typeof ServiceActivationDriver>[0];
+type RunDocument = Driver["runDocument"];
 function activationDriver(
   f: ReturnType<typeof fixture>,
   captureOwnerActivation: ReturnType<typeof vi.fn>,
@@ -977,6 +978,7 @@ function activationDriver(
   runDocument: RunDocument = (_document, _signal, operation) => operation(),
   native: object = {},
   config: Partial<ServiceActivationConfig> = {},
+  applying?: Driver["applying"],
 ) {
   const pull = vi.fn(async () => ({ hasMore: false })),
     wake = vi.fn(),
@@ -1017,6 +1019,7 @@ function activationDriver(
     assertCurrent() {},
     registered() {},
     runDocument,
+    applying,
     lifetime: new AbortController().signal,
     wake,
   });
@@ -1248,6 +1251,7 @@ function nativeOwner(f: ReturnType<typeof fixture>) {
 async function serializedActivation(
   f: ReturnType<typeof fixture>,
   native?: ReturnType<typeof nativeOwner>["client"],
+  applying?: Driver["applying"],
 ) {
   const work = new LiveDocumentWork(),
     key = JSON.stringify(parseLiveDocumentKey(f.document));
@@ -1259,7 +1263,7 @@ async function serializedActivation(
   const send = native?.sendRequest ?? vi.fn(async () => ({ result: { released: true } })),
     capture = vi.fn(async () => f.capture);
   await completeActivation(f);
-  const d = activationDriver(f, capture, send, runDocument, native),
+  const d = activationDriver(f, capture, send, runDocument, native, {}, applying),
     signal = new AbortController().signal;
   const fence = Number(
     f.raw.prepare("SELECT restore_fence_generation AS fence FROM sync_relay_live_documents").get()!
@@ -1284,6 +1288,33 @@ async function serializedActivation(
   };
   return { d, work, key, send, capture, signal, fence, queueBehind };
 }
+
+// Proves: a pass leaves an active document a submission is draining to that drain once, without waiting for it, and
+// the next pass waits for the document, so a document someone keeps editing still settles.
+it("leaves an active document to a submission's drain once, then waits for it", async () => {
+  const f = fixture();
+  try {
+    let applying = false;
+    const { d, work, key, signal, queueBehind } = await serializedActivation(
+      f,
+      nativeOwner(f).client,
+      () => applying,
+    );
+    expect(await d.driver.activate(d.target, signal)).toMatchObject({ kind: "done" });
+    applying = true;
+    const drain = deferred(),
+      draining = work.run(key, signal, () => drain.promise);
+    expect(await d.driver.activate(d.target, signal)).toEqual({
+      kind: "pending",
+      reason: "A submission is applying the document's edits.",
+    });
+    drain.resolve();
+    await draining;
+    expect(await queueBehind(() => {})).toMatchObject({ kind: "done" });
+  } finally {
+    f.close();
+  }
+});
 
 // Proves: a fence committed while real owner delivery awaits native application
 // is pending, not damaged evidence. Neither the applied reply nor durable ACK

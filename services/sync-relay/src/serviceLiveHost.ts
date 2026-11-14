@@ -930,18 +930,28 @@ export async function startServiceLiveHost(options: {
       waiter,
     );
   };
+  // The drains of submissions that hold or wait for each document.
+  const applications = new Map<string, number>();
   const drain = async (
     value: LiveDocumentKey,
     callerSignal?: AbortSignal,
   ): Promise<CommittedDeliveryOutcome> => {
     check();
-    const document = parseLiveDocumentKey(value);
-    return deliver(
-      document,
-      callerSignal,
-      (consumer, joined) => consumer.drain(document, joined),
-      "application",
-    );
+    const document = parseLiveDocumentKey(value),
+      key = JSON.stringify(document);
+    applications.set(key, (applications.get(key) ?? 0) + 1);
+    try {
+      return await deliver(
+        document,
+        callerSignal,
+        (consumer, joined) => consumer.drain(document, joined),
+        "application",
+      );
+    } finally {
+      const left = applications.get(key)! - 1;
+      if (left) applications.set(key, left);
+      else applications.delete(key);
+    }
   };
   const startup = Effect.runPromise(
     Effect.provideService(
@@ -2954,6 +2964,8 @@ export async function startServiceLiveHost(options: {
             },
             runDocument: (document, signal, operation) =>
               runDocument(document, signal, operation, "pass"),
+            applying: (document) =>
+              applications.has(JSON.stringify(parseLiveDocumentKey(document))),
             lifetime: signal,
             wake: wakePass,
           });
