@@ -68,7 +68,9 @@ fn bound_owner(db: &Path, quarantined: bool) -> String {
         2,
     )
     .unwrap();
-    store.read_with(|conn| conn.execute("UPDATE ydoc_docs SET path=?1", [PATH])).unwrap();
+    store
+        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path=?1", [PATH]))
+        .unwrap();
     let checkpoint = store
         .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
         .unwrap()
@@ -199,7 +201,11 @@ async fn held_then_kept(quarantined: bool) {
     let (moments, held, owner, activations) = observe(&db);
     assert_eq!((held.len(), activations), (0, 0), "the desktop's shape");
     assert_eq!(owner.len(), 1, "one binding: {owner:?}");
-    assert_eq!(owner[0].contains("quarantined"), quarantined, "the draft: {owner:?}");
+    assert_eq!(
+        owner[0].contains("quarantined"),
+        quarantined,
+        "the draft: {owner:?}"
+    );
 
     for now_ms in [10, 11] {
         let error = capture(OUTSIDE, now_ms).await.unwrap_err();
@@ -220,7 +226,9 @@ async fn held_then_kept(quarantined: bool) {
     );
 
     // Keep a copy writes the recorded bytes back over the file.
-    capture(&recorded, 12).await.expect("the file holds the recorded bytes again");
+    capture(&recorded, 12)
+        .await
+        .expect("the file holds the recorded bytes again");
     assert_eq!(
         observe(&db),
         (moments, vec![], owner, 0),

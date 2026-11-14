@@ -50,10 +50,7 @@ pub fn hold_in(
     .map_err(StorageError::corrupt_public)
 }
 
-pub fn list_in(
-    conn: &Connection,
-    workspace: &str,
-) -> Result<Vec<HeldOutsideChange>, StorageError> {
+pub fn list_in(conn: &Connection, workspace: &str) -> Result<Vec<HeldOutsideChange>, StorageError> {
     conn.prepare_cached(&format!(
         "SELECT {COLUMNS} FROM held_outside_changes WHERE workspace_id=?1 ORDER BY path"
     ))

@@ -3671,7 +3671,10 @@ mod tests {
         let again = "Changed outside dohc twice.\n";
         std::fs::write(&file, again).unwrap();
         let error = capture(again, 23).await.unwrap_err();
-        assert!(matches!(error, RuntimeError::CaptureFileHeld { .. }), "{error:?}");
+        assert!(
+            matches!(error, RuntimeError::CaptureFileHeld { .. }),
+            "{error:?}"
+        );
         assert_eq!(observe(), (moments, vec![(path(), sha(again), 21, 23)]));
 
         std::fs::write(&file, &markdown).unwrap();
@@ -3702,7 +3705,11 @@ mod tests {
         capture_at(plain, changed, 27)
             .await
             .expect("capture reads held bytes once their note is not live");
-        assert_eq!(observe(), (moments + 1, vec![]), "the change reaches History");
+        assert_eq!(
+            observe(),
+            (moments + 1, vec![]),
+            "the change reaches History"
+        );
         service.workspace_close(Some(handle)).await.unwrap();
     }
 

@@ -2095,7 +2095,10 @@ fn record_held_outside_change_in(
 
 /// Bytes already held are not read again until they change, while their
 /// note is live. Once live editing ends, capture reads them like any file.
-fn ensure_not_held_outside(tx: &Transaction<'_>, input: &CaptureIngest) -> Result<(), RuntimeError> {
+fn ensure_not_held_outside(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+) -> Result<(), RuntimeError> {
     let Some(hold) = held_outside_changes::hold_in(tx, &input.workspace_id, &input.path)? else {
         return Ok(());
     };

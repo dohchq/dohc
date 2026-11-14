@@ -42,7 +42,9 @@ fn admission(store: &mut EngineStore, text: &str) -> CaptureLineage {
 fn no_activation(store: &EngineStore) {
     let activations: i64 = store
         .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM live_owner_activations", [], |row| row.get(0))
+            conn.query_row("SELECT COUNT(*) FROM live_owner_activations", [], |row| {
+                row.get(0)
+            })
         })
         .unwrap();
     assert_eq!(activations, 0, "the desktop's shape has no activation");
@@ -55,8 +57,14 @@ fn a_bound_note_holds_an_outside_change_and_not_its_own_text() {
     let mut owner = restore_owner();
     no_activation(&owner.store);
     let initial = owner.initial_text.clone();
-    assert_ne!(admission(&mut owner.store, &initial), CaptureLineage::HeldOutside);
-    assert_eq!(admission(&mut owner.store, OUTSIDE), CaptureLineage::HeldOutside);
+    assert_ne!(
+        admission(&mut owner.store, &initial),
+        CaptureLineage::HeldOutside
+    );
+    assert_eq!(
+        admission(&mut owner.store, OUTSIDE),
+        CaptureLineage::HeldOutside
+    );
 }
 
 /// The relay accepted the owner's typing and sync then brought the settled
@@ -71,7 +79,14 @@ fn text_dohc_wrote_from_sync_is_not_held() {
     let text = host.project(YdocContentKind::Richdoc).unwrap().content;
     hydrate_texts(&mut owner.store, &[&text]);
     let id = format!("moment-ydoc-{}", "c".repeat(64));
-    retain_restore_audit(&owner.store, &owner.observed.binding, "relay", &id, &text, 1);
+    retain_restore_audit(
+        &owner.store,
+        &owner.observed.binding,
+        "relay",
+        &id,
+        &text,
+        1,
+    );
     apply_test_owner_frame(&mut owner, frame, 1);
     no_activation(&owner.store);
 
@@ -82,7 +97,10 @@ fn text_dohc_wrote_from_sync_is_not_held() {
         CaptureLineage::KeepTail,
         "a file only behind its accepted note keeps the note as it is"
     );
-    assert_eq!(admission(&mut owner.store, OUTSIDE), CaptureLineage::HeldOutside);
+    assert_eq!(
+        admission(&mut owner.store, OUTSIDE),
+        CaptureLineage::HeldOutside
+    );
 
     let mut settlement = restore_settlement(
         "host",
@@ -113,8 +131,14 @@ fn text_dohc_wrote_from_sync_is_not_held() {
         Some((text_sha(&text), id)),
         "sync recorded the settled text, which the materializer writes"
     );
-    assert_ne!(admission(&mut owner.store, &text), CaptureLineage::HeldOutside);
-    assert_eq!(admission(&mut owner.store, OUTSIDE), CaptureLineage::HeldOutside);
+    assert_ne!(
+        admission(&mut owner.store, &text),
+        CaptureLineage::HeldOutside
+    );
+    assert_eq!(
+        admission(&mut owner.store, OUTSIDE),
+        CaptureLineage::HeldOutside
+    );
 }
 
 /// A quarantined draft keeps its binding, so its note still holds an outside
@@ -154,7 +178,13 @@ fn a_quarantined_draft_still_holds_an_outside_change() {
         "the draft is quarantined: {rows:?}"
     );
     no_activation(&owner.store);
-    assert_eq!(admission(&mut owner.store, OUTSIDE), CaptureLineage::HeldOutside);
+    assert_eq!(
+        admission(&mut owner.store, OUTSIDE),
+        CaptureLineage::HeldOutside
+    );
     let initial = owner.initial_text.clone();
-    assert_ne!(admission(&mut owner.store, &initial), CaptureLineage::HeldOutside);
+    assert_ne!(
+        admission(&mut owner.store, &initial),
+        CaptureLineage::HeldOutside
+    );
 }
