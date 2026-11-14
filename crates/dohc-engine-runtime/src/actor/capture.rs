@@ -2093,11 +2093,17 @@ fn record_held_outside_change_in(
     Ok(())
 }
 
-/// Bytes already held are not read again until they change.
+/// Bytes already held are not read again until they change, while their
+/// note is live. Once live editing ends, capture reads them like any file.
 fn ensure_not_held_outside(tx: &Transaction<'_>, input: &CaptureIngest) -> Result<(), RuntimeError> {
-    if held_outside_changes::hold_in(tx, &input.workspace_id, &input.path)?.is_some_and(|hold| {
-        hold.observed_sha256 == dohc_engine_storage::hex_sha256(input.text.as_bytes())
-    }) {
+    let Some(hold) = held_outside_changes::hold_in(tx, &input.workspace_id, &input.path)? else {
+        return Ok(());
+    };
+    if hold.observed_sha256 != dohc_engine_storage::hex_sha256(input.text.as_bytes()) {
+        return Ok(());
+    }
+    let key = DocKey::new(&hold.workspace_id, &hold.version_id, &hold.object_id)?;
+    if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, &key)? {
         return Err(RuntimeError::CaptureFileHeld {
             path: input.path.clone(),
         });
@@ -3089,6 +3095,7 @@ fn capture_ingest_binary_on_store(
             )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
+        held_outside_changes::clear_in(tx, &input.workspace_id, &input.path)?;
         Ok::<_, RuntimeError>(result)
     });
     let outcome = match outcome {
@@ -3639,6 +3646,7 @@ fn capture_retire_on_store(
             )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
+        held_outside_changes::clear_in(tx, &input.workspace_id, &input.path)?;
         Ok::<_, RuntimeError>((result, asset_jobs))
     })?;
     match outcome {
