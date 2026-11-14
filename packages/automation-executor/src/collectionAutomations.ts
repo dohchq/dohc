@@ -272,7 +272,6 @@ type AutomationScheduleMark = Awaited<
 export interface CollectionAutomationEngine extends CollectionAutomationReads {
   sharedFileUpdateStates(writes: readonly SharedFileUpdate[]): Promise<SharedFileUpdateState[]>;
   listCollections(): Promise<CollectionListResult>;
-  /** Records under a path. */
   subscribeAutomation(input: RecordSubscription): Promise<unknown>;
   unsubscribeAutomation(input: { automationId: string; path: string }): Promise<unknown>;
   /**
@@ -344,7 +343,6 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
 /** An enabled schedule this executor can run. */
 export interface ScheduledAutomation {
   automationId: string;
-  /** Where its Collection is now. */
   collectionPath: string;
   name: string;
   trigger: AutomationScheduleTrigger;
@@ -498,7 +496,6 @@ export interface CollectionAutomationsOptions {
   groupMessagesSkipped(reason: GroupMessagesSkipped, atMs: number): Promise<void>;
   /** A message's whole body, for a claim that carried it truncated. */
   readMessageBody: CollectionAutomationRunDependencies["readMessageBody"];
-  /** Sends one notice from this workspace. */
   postNotice: CollectionAutomationRunDependencies["postNotice"];
   /**
    * A drain ran runs to their end, done or failed, an Undo put records back,
@@ -545,7 +542,6 @@ export interface CollectionAutomationsOptions {
   localPersonId?(): string;
   /** Whether this computer's person may run a failed press again: the person who pressed it, or the workspace's owner. */
   mayRetryPress(pressedBy: string | null): Promise<boolean>;
-  /** The engine took a press's settle. */
   onPressSettled(event: PressSettled): void;
   /** A press's run went back to wait. */
   onPressWaiting(event: { claimId: string; reason: PressWaitReason }): void;
@@ -755,7 +751,6 @@ export interface CollectionAutomationHold {
   seq: number;
   /** The name of the Collection the automation belongs to, and the one the step reaches. */
   collection: string;
-  /** Where the automation's Collection is now. */
   collectionPath: string;
   /** A Collection, a Group, or a direct message. */
   target: string;
@@ -1134,7 +1129,6 @@ function startDeadline(abort: () => void): () => void {
   return () => clearTimeout(timer);
 }
 
-/** Whether any step wakes its person's agent. */
 function wakesAgent(automation: Automation): boolean {
   const walk = (steps: Automation["do"]): boolean =>
     steps.some(
@@ -1267,7 +1261,6 @@ type LedgerClaim = {
   history: HistoryClaim;
 };
 
-/** Which of two claims is newer: by when each was made, then by id. */
 function newerFirst(
   left: Pick<HistoryClaim, "createdAtMs" | "claimId">,
   right: Pick<HistoryClaim, "createdAtMs" | "claimId">,
@@ -1396,7 +1389,6 @@ export class CollectionAutomations {
   >();
   /** The engine subscriptions this computer holds, by engine automation id. */
   private subscribed = new Map<string, StoredSubscription>();
-  /** Each step's last reach verdict. */
   private readonly verdicts = new Map<string, StoredReachVerdict>();
   /** Orders verdicts and confirmations; it only rises. */
   private verdictSeq = 0;
@@ -2078,7 +2070,6 @@ export class CollectionAutomations {
     return parsed === null || collectionPath === null ? null : { collectionPath, id: parsed.id };
   }
 
-  /** The folder of the indexed Collection with this Collection id, or null. */
   private collectionPathOf(collectionId: string): string | null {
     for (const [path, id] of this.collections) if (id === collectionId) return path;
     for (const [path, dataset] of this.datasets)
@@ -2788,7 +2779,6 @@ export class CollectionAutomations {
               : null,
       };
     });
-    // You first, then everyone else by name.
     return {
       status: "listed",
       people: people.sort((a, b) => Number(b.you) - Number(a.you) || a.name.localeCompare(b.name)),

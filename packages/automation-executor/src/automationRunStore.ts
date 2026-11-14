@@ -1147,7 +1147,6 @@ export interface AutomationStoreFolder {
   read<T>(work: (dir: string | null) => Promise<T>): Promise<T>;
 }
 
-// A store read the host refused.
 const REFUSED = Symbol("refused");
 
 /**

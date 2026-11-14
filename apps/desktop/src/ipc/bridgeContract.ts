@@ -2745,7 +2745,6 @@ export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
 // nothing main read after the save.
 export const SavedChatMessage = z.object({
   message: z.object({ id: OPAQUE_ID, threadId: OPAQUE_ID }),
-  // What failed after the save.
   failure: z.string(),
 });
 export type SavedChatMessage = z.infer<typeof SavedChatMessage>;
@@ -2779,7 +2778,6 @@ export const ResolveChatDecisionPayload = z
     threadId: OPAQUE_ID,
     // The question or poll.
     messageId: OPAQUE_ID,
-    // The reply that answers it.
     resolvedByMessageId: OPAQUE_ID,
     chosenOption: z.string().min(1).max(200).optional(),
   })
@@ -6209,11 +6207,9 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
             .strict(),
         ]),
       ),
-      // Runs of the person's automations undone, and those Undo could not undo.
       runsUndone: z.number().int().nonnegative(),
       sharedReversals: SharedReversalsSchema.optional(),
       runsLeft: z.number().int().nonnegative(),
-      // Changes the undone runs made that stay as they are.
       runChangesKept: z.number().int().nonnegative(),
       // They wrote automations: runs another computer holds are not undone here.
       wroteAutomations: z.boolean(),
@@ -6842,14 +6838,12 @@ export const ChatDispatchFailedRun = z
         z.object({ kind: z.literal("turn-on"), name: z.string().min(1).max(1_000) }).strict(),
       ])
       .optional(),
-    // Whether Try again can run its request once more.
     retryable: z.boolean(),
   })
   .strict();
 export type ChatDispatchFailedRun = z.infer<typeof ChatDispatchFailedRun>;
 export type ChatDispatchNextStep = NonNullable<ChatDispatchFailedRun["nextStep"]>;
 
-// What a step in Settings asks the person to do.
 export function nextStepSettingsAction(
   step: Exclude<ChatDispatchNextStep, { kind: "message" }>,
 ): string {
@@ -7217,7 +7211,6 @@ export const WorkspaceUiState = z
       .max(OPEN_EDITORS_MAX_HEIGHT)
       .optional()
       .catch(undefined),
-    // Explorer and quick-open fields remain optional cosmetic state.
     expandedFolders: z.array(PATH_STRING).max(MAX_EXPANDED_FOLDERS).optional(),
     pinned: z.array(PATH_STRING).max(MAX_PINNED_PATHS).optional(),
     // The last ~20 opened files, most recent first.
@@ -7718,7 +7711,6 @@ export const workLinkOperations = {
 // Privacy allow it. Diagnostics stay on this computer unless the person
 // copies them or saves them to a file.
 export const DIAGNOSTICS_MAX_CHARS = 40_000;
-// One flag for each kind of report.
 export const ReportKinds = z.object({ usage: z.boolean(), errors: z.boolean() });
 export type ReportKinds = z.infer<typeof ReportKinds>;
 export const ReadDiagnosticsResult = z.object({
@@ -9036,7 +9028,6 @@ export interface DohcDesktopBridge
   // Opens (or focuses) a window for the workspace and leaves this window as
   // it is. The manager window closes itself after.
   openWorkspaceWindow(payload: WorkspaceIdPayload): Promise<void>;
-  // Opens (or focuses) the workspace manager in its own window.
   openWorkspaceManager(): Promise<void>;
   closeThisWindow(): Promise<void>;
   createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<

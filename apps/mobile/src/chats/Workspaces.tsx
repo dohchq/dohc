@@ -13,9 +13,7 @@ const sampleWorkspaces: readonly PhoneWorkspace[] = __DEV__ || process.env.EXPO_
 
 interface WorkspacesState {
   readonly current: PhoneWorkspace | null;
-  /** The workspaces this phone lists, in order. */
   readonly workspaces: readonly PhoneWorkspace[];
-  /** Opens a workspace from the switcher. */
   choose(workspaceId: string): void;
   /**
    * Sample builds only: drops the workspace from this phone's list and opens the next one; returns how to put it back.

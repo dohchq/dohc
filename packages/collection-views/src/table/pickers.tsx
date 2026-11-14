@@ -132,7 +132,6 @@ interface PickRow {
   /** The row is the cell's value, or one of its values. */
   checked?: boolean;
   pick: () => void;
-  /** The option's color, where the host lets people change it. */
   color?: { option: string; value: OptionColor; change: (color: OptionColor) => void };
 }
 

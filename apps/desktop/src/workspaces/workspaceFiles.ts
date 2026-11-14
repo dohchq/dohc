@@ -119,7 +119,6 @@ export function extractFrontmatterIcon(head: string): string | undefined {
     ) {
       value = value.slice(1, -1);
     } else {
-      // Strip a trailing inline comment on an unquoted scalar.
       const comment = value.indexOf(" #");
       if (comment !== -1) value = value.slice(0, comment).trim();
     }
@@ -959,7 +958,6 @@ export interface DroppedFolderCheck {
   identity: FsEntryIdentity;
 }
 
-// The folder a dropped entry sits in.
 export function droppedEntryParent(source: DroppedSource, entry: DroppedEntry): DroppedFolderCheck {
   const at = entry.path.lastIndexOf("/");
   return {
@@ -1267,7 +1265,6 @@ async function screenDroppedSource(
   }
 }
 
-// A dropped item reached through a link another user owns.
 class ForeignDropLinkError extends Error {
   constructor(source: string) {
     super(

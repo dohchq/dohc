@@ -131,7 +131,6 @@ export function groupChannelIsOrdinary(
   return chat?.channelKind(selector.channelWireId) === "channel";
 }
 
-// The chat half of a group grant, for the code paths that scope chat ops.
 export function chatHalfOfGroup(selector: GroupShareSelector): ChatChannelShareSelector {
   return { kind: "chat", channelWireId: selector.channelWireId, access: selector.access };
 }
@@ -171,8 +170,6 @@ export function chatSideOf(selector: AnyShareSelector): ChatChannelShareSelector
 
 export type ChatShareChannelKind = "channel" | "dm" | "agent";
 
-// Declared where it is read out of the log, and re-exported here for the
-// filter that consumes it.
 import type { ThreadFileBinding } from "./storage";
 export type { ThreadFileBinding };
 

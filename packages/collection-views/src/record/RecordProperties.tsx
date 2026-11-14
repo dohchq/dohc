@@ -179,7 +179,6 @@ interface RowProps extends Omit<
 > {
   field: FieldDefinition;
   label: string;
-  /** What is wrong with the value, if the host says anything is. */
   problem: string | undefined;
   statuses: TableCellStatuses;
   host: TableHostCell | undefined;

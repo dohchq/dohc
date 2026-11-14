@@ -60,7 +60,6 @@ export function goToIndexFixture(fileCount = GO_TO_COUNTS.files) {
   };
 }
 
-// Separate scan workload with deeper folders and longer descriptive file names.
 export function goToLongPathFixture(fileCount = GO_TO_COUNTS.files) {
   const sources = goToIndexFixture(fileCount);
   sources.listing.files = sources.listing.files.map((file, n) => ({

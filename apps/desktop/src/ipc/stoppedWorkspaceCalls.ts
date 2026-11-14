@@ -92,8 +92,6 @@ const READ_CHANNELS: ReadonlySet<string> = new Set([
   CHANNELS.readWorkspaceDatabasePage,
 ]);
 
-// The dataset operation's actions that change nothing. Its other actions
-// change a Collection.
 const DATASET_READS: ReadonlySet<unknown> = new Set([
   "list",
   "describe",

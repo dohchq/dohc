@@ -341,7 +341,6 @@ export class ServiceActivationDriver {
     this.#kept.delete(key);
     return named;
   }
-  /** The documents with a kept block or wait. */
   keptDocuments() {
     return [...this.#kept.keys()].map((key) => {
       const [workspaceId, objectId] = JSON.parse(key) as [string, string];
@@ -437,7 +436,6 @@ export class ServiceActivationDriver {
     }
     return dropped;
   }
-  // Ends the target's readiness and its owner, if it has one. Returns whether it had one.
   #drop(key: string) {
     this.#completedTargets.delete(key);
     let owned = false;
@@ -516,7 +514,6 @@ export class ServiceActivationDriver {
   clearResolvedHold(target: ServiceActivationTarget, digest: string) {
     return this.releasedHold(target) === digest && this.#blocked.delete(targetKey(target));
   }
-  // Keeps the target's hold for released retained work through `clear`.
   #keepReleasedHold(key: string, clear: () => void) {
     const block = this.#blocked.get(key);
     clear();

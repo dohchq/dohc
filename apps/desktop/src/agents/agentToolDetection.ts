@@ -42,7 +42,6 @@ function sameFile(a: FileStamp, b: FileStamp): boolean {
   return a.path === b.path && a.size === b.size && a.mtimeMs === b.mtimeMs;
 }
 
-// The version Claude Code reports, or null when it reports none.
 export async function claudeCodeVersion(
   executable: string,
   resourcesRoot: string,

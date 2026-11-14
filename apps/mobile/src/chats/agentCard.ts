@@ -13,7 +13,6 @@ export interface ReportedAgent {
 export type AgentKind = "connected" | "own" | "unknown";
 
 export interface AgentCardInput {
-  /** The name shown. Ignored when the agent gave none. */
   readonly name: string;
   /** Whether the agent gave that name itself. */
   readonly named: boolean;
@@ -24,7 +23,6 @@ export interface AgentCardInput {
 }
 
 export interface AgentCard {
-  /** Line 1. */
   readonly name: string;
   /** Line 1's muted "(as reported)": a plug card with no reported line, after a name the agent gave. */
   readonly nameAsReported: boolean;

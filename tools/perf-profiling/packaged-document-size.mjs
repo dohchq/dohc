@@ -481,7 +481,6 @@ export async function measurePackagedDocument({
     } finally {
       await page.evaluate((text) => navigator.clipboard.writeText(text), previousClipboard);
     }
-    // Close the live editor through its ordinary tab control before a local restore.
     await page.getByRole("button", { name: "Close " + name, exact: true }).click();
     await page
       .getByRole("button", { name: "Close " + name, exact: true })

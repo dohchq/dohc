@@ -387,7 +387,6 @@ function parseReach(body: Record<string, unknown>): NoticeReach {
   return { shareId };
 }
 
-// What each sender may mark with, and the fields each of its marks takes.
 interface MarkSender {
   marks: readonly NoticeMark[];
   fields: readonly string[];

@@ -97,7 +97,6 @@ export function crashReportEndpoint(value: string | undefined, packaged: boolean
  */
 export function createCrashReportStore(deps: {
   path: string;
-  // Null when this build has no report server.
   endpoint: URL | null;
   facts(): CrashFacts;
   codeFrame(frame: string): string;

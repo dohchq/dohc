@@ -170,7 +170,6 @@ function linkKeyOf(caller: LinkCaller): string {
   return "session" in caller ? caller.session.grantId : (caller.grantId ?? caller.addressKey);
 }
 
-/** Keeps an agent's grant from the relay's share answer, and removes it from the answer. */
 function takeAgentGrant(
   agent: AgentCaller,
   meta: Record<string, unknown> | null,

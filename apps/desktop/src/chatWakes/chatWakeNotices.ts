@@ -10,7 +10,6 @@ const REASONS = {
   unconfirmed: "wake-unconfirmed",
 } as const satisfies Record<ChatWakeProblem, ChatDispatchNotice["reason"]>;
 
-// What happened and the next step. The renderer gives each its title.
 const MESSAGES: Record<ChatWakeProblem, string> = {
   unreadable:
     "Agents here do not start for messages from your phone until it can. Restore or repair the file in Details before you try again.",

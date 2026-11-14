@@ -28,7 +28,6 @@ interface SelectFieldDefinition {
   name: string;
   type: "select" | "multi-select";
   options: string[];
-  /** Colors chosen for some options, keyed by option. Absent when none are chosen. */
   colors?: Record<string, OptionColor>;
 }
 

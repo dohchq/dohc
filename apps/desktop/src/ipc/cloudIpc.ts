@@ -405,7 +405,6 @@ export function registerCloudIpcHandlers<
       );
     }
 
-    // Pre-flight against the relay before creating anything locally.
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
     let probe: RelayWorkspaceBootstrapResult;
     try {

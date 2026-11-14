@@ -116,7 +116,6 @@ export interface NoticeStore {
   /** Sends the waiting marks again at once, and saves them again if a save is owed. */
   retryMarks(): void;
   mark(noticeId: string, mark: NoticeMark): void;
-  /** Marks read every row shown unread. */
   markAllRead(): void;
 }
 
@@ -414,8 +413,6 @@ export function createNoticeStore(options: {
       });
   }
 
-  // Reading.
-
   /** Takes one change into `target`, unless it holds a newer one. A row the list withholds isn't kept. */
   function take(
     target: Map<string, NoticeRecord>,
@@ -521,8 +518,6 @@ export function createNoticeStore(options: {
       }
     }
   }
-
-  // Marking.
 
   function add(noticeIds: readonly string[], next: NoticeMark) {
     if (!live() || noticeIds.length === 0) return;
@@ -667,8 +662,6 @@ export function createNoticeStore(options: {
       sending = false;
     }
   }
-
-  // Following the account's workspace list.
 
   function followList() {
     if (!live()) return;

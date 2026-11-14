@@ -1280,7 +1280,6 @@ export async function startAutomationReplicas(options: {
     get unavailable(): boolean {
       return signal.aborted || !reconciled || !client || client.exited.signal.aborted;
     },
-    /** The open replica of this workspace, or undefined. */
     replica(workspaceId: string): AutomationReplica | undefined {
       return replicas.get(workspaceId);
     },

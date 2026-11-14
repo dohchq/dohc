@@ -81,7 +81,6 @@ export const ChatLinksEnginePage = z
                 authorOwnerDisplayName: z.string().optional(),
                 authorUserId: z.string().optional(),
                 authorActorKey: z.string().optional(),
-                // The agent that wrote the message in one of its runs.
                 authorAgentId: z.string().optional(),
               })
               .strict(),

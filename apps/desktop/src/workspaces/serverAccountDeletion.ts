@@ -261,7 +261,6 @@ export function createServerAccountDeletion(options: ServerAccountDeletionOption
       });
     },
 
-    // Runs each disconnect that failed after a deletion again.
     async retryDisconnect(): Promise<void> {
       for (const credentials of [...undisconnected.values()]) {
         const error = await disconnect(credentials);

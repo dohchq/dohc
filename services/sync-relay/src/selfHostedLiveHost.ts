@@ -108,7 +108,6 @@ export function selectHostedDocuments(
   cursor: ServiceHostEnrollmentCursor | undefined,
   moved: Set<string>,
 ) {
-  // Whether the enrollment names its workspace's current owner and identity.
   const matching = (row: ServiceHostEnrollment) =>
     storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched";
@@ -415,7 +414,6 @@ export async function startSelfHostedLiveHost(options: {
       await rm(temporary, { recursive: true, force: true });
     }
   }
-  // The selection, without diverged stores.
   const selection = () => {
     const selected = select(),
       kept = (row: ServiceHostEnrollment) => !storeDiverged(row);

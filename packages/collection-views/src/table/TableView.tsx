@@ -137,7 +137,6 @@ export interface TableNewRecordStop {
 
 /** What a new row held that the table did not save. */
 export interface TableUnsavedRow {
-  /** The row's values, by field key. */
   values: Readonly<Record<string, CollectionValue>>;
   /** Text an open editor held that its field cannot take, as a word in a number field. */
   text?: { field: string; text: string };
@@ -245,7 +244,6 @@ export interface TableViewProps {
    * function rebuilds every column.
    */
   onOpenLink?: (url: string) => void;
-  /** Receives the row's record when its Open control is clicked. */
   onOpenRecord?: (record: CollectionRecord) => void;
   /**
    * The record the host shows open, as in a panel beside the table. Its row
@@ -696,7 +694,6 @@ function CellContent(props: {
   indexed: CollectionIndexedValue | undefined;
   statuses: TableCellStatuses;
   host: TableHostCell | undefined;
-  /** The cell opens an editor. */
   editable: boolean;
   /** Takes a checkbox's toggle. Absent, the box is disabled. */
   onToggle: ((change: CollectionCellChange) => number) | undefined;
@@ -869,7 +866,6 @@ export function TableView({
   const draft = useSyncExternalStore(newRow.subscribe, newRow.row);
   const hasDraft = draft !== null && newRecord !== undefined;
   const draftNote = hasDraft ? draft.note : null;
-  /** The new row takes typing now. */
   const draftOpen = hasDraft && !editingDisabled;
 
   // Selection stays out of the columns: a click or an arrow key must not
@@ -1149,7 +1145,6 @@ export function TableView({
   const onDiscardKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     const { key } = event;
     if (key === "Tab" && event.shiftKey) {
-      // Back from Discard is the row above.
       event.preventDefault();
       if (!leaveNewRow()) return;
       if (rows.length > 0) return select(rows.length - 1, fields.length - 1);
@@ -1173,11 +1168,9 @@ export function TableView({
         return;
       }
       reveal.current = true;
-      // Enter saves the record.
       if (to === "down") return void commitNewRow(true);
       if (!to || !editingField) return;
       const next = fields.indexOf(editingField) + (to === "previous" ? -1 : 1);
-      // Tab past the row's last cell leaves it.
       if (next >= fields.length) return void leaveNewRow();
       if (next >= 0) select(newRowIndex, next);
       return;
@@ -1204,12 +1197,10 @@ export function TableView({
       left = Math.min(left, Math.max(grid.scrollLeft, room));
     }
     cancelled.current = false;
-    // A character that opened the edit was typed.
     typedInEditor.current = typed !== undefined;
     setEditing({ recordId, field: field.name, typed, left });
   };
 
-  // A picker that opens low in the table scrolls into view, down to its last row.
   const editingKey =
     editing && editingPickerWidth !== null ? `${editing.recordId}:${editing.field}` : null;
   useLayoutEffect(() => {
@@ -1334,13 +1325,11 @@ export function TableView({
         event.preventDefault();
         return select(newRowIndex, next);
       }
-      // Discard stands before the row's first cell.
       if (event.shiftKey && discardControl.current) {
         event.preventDefault();
         return discardControl.current.focus();
       }
       if (!leaveNewRow()) return event.preventDefault();
-      // Back from the first cell is the row above. On from the last, Tab leaves the grid.
       if (event.shiftKey && rows.length > 0) {
         event.preventDefault();
         select(rows.length - 1, fields.length - 1);
@@ -1365,7 +1354,6 @@ export function TableView({
       return select(newRowIndex, clamp(column + arrow[1], fields.length));
     }
     if (key === " ") event.preventDefault();
-    // With no editor open, Enter saves the row, whatever cell it is on.
     if (key === "Enter") {
       event.preventDefault();
       return void commitNewRow(true);
@@ -1431,7 +1419,6 @@ export function TableView({
         return action.focus();
       }
       const to = beside(at.row, at.column, event.shiftKey);
-      // Past the first or last cell, Tab leaves the grid.
       if (!to) return;
       event.preventDefault();
       return select(...to);
@@ -1450,7 +1437,6 @@ export function TableView({
     if (key === " ") event.preventDefault();
     if (!onCellChange || !editsAt(record, field)) return;
     const cell = { recordId: record.id, recordPath: record.path, field: field.name };
-    // The keys act on what the cell shows.
     const status = statuses.get(record.id, field.name);
     const value = status
       ? status.value
@@ -1627,7 +1613,6 @@ export function TableView({
           </div>
         ) : null}
         {records.length > 0 || hasDraft ? (
-          // The records' rows, then the new row. The editor and a cell's words lie over both.
           <div className="relative">
             {records.length > 0 ? (
               <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
@@ -1960,7 +1945,6 @@ export function TableView({
                 }}
                 onKeyDown={(event) => {
                   if (event.key !== "Escape" && event.key !== "Tab") return;
-                  // Tab goes on to the next cell. Shift+Tab and Escape go back to this one.
                   event.preventDefault();
                   event.stopPropagation();
                   // Tab goes through the note's actions before it leaves.

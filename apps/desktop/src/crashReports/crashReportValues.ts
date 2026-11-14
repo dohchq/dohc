@@ -27,7 +27,6 @@ export const ENGINE_METHODS: ReadonlySet<string> = new Set([
 ]);
 
 export const ERROR_NAMES: ReadonlySet<string> = new Set([
-  // JavaScript and the web platform.
   "Error",
   "TypeError",
   "RangeError",
@@ -39,9 +38,7 @@ export const ERROR_NAMES: ReadonlySet<string> = new Set([
   "AbortError",
   "TimeoutError",
   "DOMException",
-  // dohc's app compiler.
   "AppCompilerTimeoutError",
-  // dohc's engine client.
   "EngineDaemonUnavailableError",
   "EngineClientError",
   "EngineRequestError",

@@ -594,8 +594,6 @@ function place(storage: StorageContext, workspaceId: string, installId: string |
     .run(workspaceId, installId);
 }
 
-// Whether the server can run this workspace's automations: it already does,
-// or it runs them for fewer workspaces than its limit.
 function serverHasRoom(storage: StorageContext, workspaceId: string): boolean {
   const others = Number(
     storage.db
@@ -851,7 +849,6 @@ export function chooseAutomationHost(
       if (!known) throw badRequest("installId is not one of this workspace's computers");
     }
     place(storage, workspaceId, null);
-    // The computer that is still running: the one handing over, or else the host.
     const running = host === null ? null : (host.handoverFrom ?? host.installId);
     if (host !== null && running === AUTOMATION_SERVER_INSTALL_ID && !input.server) {
       startWithoutHandover(storage, workspaceId, host, installId, input.nowMs);

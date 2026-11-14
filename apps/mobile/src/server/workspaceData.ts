@@ -211,7 +211,6 @@ export interface ReadCache {
 export const cacheScope = (signIn: Pick<SignIn, "origin" | "userId">, workspaceId: string) =>
   JSON.stringify([signIn.origin, signIn.userId, workspaceId]);
 
-/** The scope of an account's workspace list. */
 const listScope = (signIn: Pick<SignIn, "origin" | "userId">) =>
   JSON.stringify([signIn.origin, signIn.userId]);
 

@@ -787,7 +787,6 @@ export function documentExtensionTarget(item, control) {
   return near ? (item.shape === "formatted-retained" ? 40 : 20) : 0;
 }
 
-// A size can no longer be chosen once one of its cases has a check that is neither passing nor reported.
 export function documentCaseBlocked(comparison, key) {
   return comparison.checks.some(
     (row) => row.key === key && !["pass", "reported"].includes(row.verdict),

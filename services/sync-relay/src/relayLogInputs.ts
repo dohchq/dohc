@@ -56,7 +56,6 @@ export function personalCollectionOrigin(agentId: string): string {
   return `${PERSONAL_COLLECTION_ORIGIN_PREFIX}${agentId}`;
 }
 
-// The IDs of a personal agent's message and new thread, as for link posts.
 export const PERSONAL_MESSAGE_ID_PREFIX = "personal-message:";
 export const PERSONAL_THREAD_ID_PREFIX = "personal-thread:";
 // Every personal agent id starts with this. A settings file can't use it.
@@ -396,7 +395,6 @@ export function assertChatAuthorship(rawOps: unknown[], actorUserId: string): vo
     const op = rawOp as Record<string, unknown>;
     const opKind = op.opKind;
     if (typeof opKind !== "string") continue;
-    // The one field every op is checked for: the owner-private marker.
     assertOwnerPrivateMarker(opKind, op.payload, actorUserId);
     // Only chat.* ops are subject to the authorship gate; everything else is an
     // opaque payload and passes through even if it carries an author-shaped field.

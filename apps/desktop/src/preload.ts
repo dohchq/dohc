@@ -385,7 +385,6 @@ const bridge: DohcDesktopBridge = {
     return () => ipcRenderer.removeListener(CHANNELS.automationHoldsChanged, handler);
   },
   onAutomationRunSettled: (listener) => {
-    // Validated at the boundary: anything that is not a settled run is dropped.
     const handler = (_event: unknown, payload: unknown) => {
       if (typeof payload !== "object" || payload === null) return;
       const { workspaceId, claimId, outcome, error } = payload as Record<string, unknown>;

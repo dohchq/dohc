@@ -283,7 +283,6 @@ export function CalendarView({
           draggableAccessor={() => !!onCellChange}
           onEventDrop={handleEventDrop}
           onSelectEvent={onOpenRecord ? (event) => onOpenRecord(event.record) : undefined}
-          // The open record's entry wears a line around it, clear of the entry's own fill.
           eventPropGetter={(event) =>
             event.record.id === openRecordId
               ? { className: "ring-2 ring-ink ring-offset-1 ring-offset-bg" }

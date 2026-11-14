@@ -328,7 +328,6 @@ export interface DatasetUndoPreview {
   reverses: number;
   /** Actions the rules give no reverse, whose changes stay. */
   actions: number;
-  /** Where the person must choose a delete. */
   choices: DatasetUndoChoice[];
   /**
    * Names exactly this preview: which records it deletes, with which

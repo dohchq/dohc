@@ -2690,7 +2690,6 @@ export function createWorkspaceEngineCapture(
       const after = detachedLockedDebts.get(endpoint);
       if (!after) continue;
       if (after.stoodDown) {
-        // Destination-side: leave it. See beginFileRename.
         if (!isSourceSide(endpoint)) continue;
         // Explorer renders this verbatim (the dohc-interface skill): what
         // happened, why, then one instruction per sentence.

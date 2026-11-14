@@ -69,7 +69,6 @@ function Stream({ groupId, name }: { groupId: string; name: string }) {
   const stream = state.value?.kind === "stream" ? state.value : null;
   const { data } = useAccount();
   const visible = useVisible();
-  // Which posts are unread comes from the chat list's counts.
   const chats = useView(views.chats).state.value;
   const unreadThreadIds = useMemo(
     () => (chats ? new Set(chats.flatMap((group) => group.unreadThreadIds)) : null),
@@ -294,7 +293,6 @@ const subscribeAppState = (listener: () => void) => {
 };
 const appActive = () => AppState.currentState === "active";
 
-/** Whether the person can see this screen: it is in front and the app is active. */
 function useVisible(): boolean {
   const focused = useIsFocused();
   const active = useSyncExternalStore(subscribeAppState, appActive);

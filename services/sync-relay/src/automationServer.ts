@@ -223,7 +223,6 @@ export interface AutomationServerOptions {
   onError(context: string, error: unknown): void;
   nowMs?(): number;
   clock?: SchedulerClock;
-  /** Tests replace the replicas and the executor. */
   startReplicas?: typeof startAutomationReplicas;
   createExecutor?(options: CollectionAutomationsOptions): ServerExecutor;
 }
@@ -357,8 +356,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       });
     },
   });
-
-  // --- The host record, followed in process. ---
 
   const hostOf = (ws: WorkspaceState) => storage.automationHostRecord(ws.replica.workspaceId);
   /** The host generation the server runs the workspace at now, or null: nothing awaited. */
@@ -678,8 +675,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       );
     });
   }
-
-  // --- Each workspace's executor, over its replica. ---
 
   /** Pushes the replica's own writes soon, once at a time. */
   /**

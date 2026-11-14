@@ -83,7 +83,6 @@ const RECORD = "collections.json";
 const STORE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const UNREADABLE = `${DOHC_COLLECTIONS_GUARD.lead} Restore ${DOHC_COLLECTIONS_GUARD.path}, or update dohc. Then retry.`;
 
-/** The words for a refusal, as a person, an agent and the CLI read them. */
 function collectionsRefusalMessage(refusal: CollectionsRefusal): string {
   switch (refusal.kind) {
     case "unclaimed":
@@ -157,7 +156,6 @@ function parseRecord(text: string, workspaceId: string): CollectionsHolder | nul
   return { computer, storeId };
 }
 
-// A guard's own refusal, which says what to remove, or the general words.
 function wordsOf(error: unknown, guard: DohcPathGuard): string {
   return error instanceof Error && error.message.startsWith(guard.lead)
     ? error.message
@@ -430,7 +428,6 @@ export interface KeepSteps {
   storeIdHere(): Promise<string | null>;
   /** The installation that made the workspace, as its sync history records it, or null. */
   madeBy(): Promise<Computer | null>;
-  /** Asks the person; false when they did not confirm. */
   confirm(question: KeepQuestion): Promise<boolean>;
 }
 

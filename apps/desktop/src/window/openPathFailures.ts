@@ -6,7 +6,6 @@ import {
 } from "../ipc/bridgeContract";
 import { ipcWireError } from "../ipc/errorWords";
 
-// One window's renderer, as this store needs it.
 export interface OpenPathFailureRenderer {
   readonly id: number;
   isDestroyed(): boolean;

@@ -62,7 +62,6 @@ export default function RootLayout() {
                 contentStyle: { backgroundColor: "transparent" },
               }}
             />
-            {/* A signed-in build's Settings, from your mark in the Chats header, and its workspace switcher. */}
             <Stack.Screen name="settings" options={{ title: accountWords.settings }} />
             <Stack.Screen
               name="workspaces"

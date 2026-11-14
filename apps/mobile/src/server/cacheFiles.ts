@@ -167,7 +167,6 @@ export function createCacheFiles(
     timer = setTimeout(() => void save(false), Math.max(0, next - now()));
   }
 
-  /** Writes every waiting scope, or only those due. */
   function save(everything: boolean): Promise<void> {
     const at = now();
     const batch: { scope: string; views: () => readonly SavedView[]; expected: string }[] = [];
@@ -346,7 +345,6 @@ export function leastJsonBytes(value: unknown, limit: number): number {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** A file's fields when it is of this format and for `scope`, or null. */
 function parseFile(text: string, scope: string): Record<string, unknown> | null {
   let data: unknown;
   try {

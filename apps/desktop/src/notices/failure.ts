@@ -4,7 +4,6 @@
 
 export type VersionsRead = "last-changes" | "counts" | "conflicts";
 
-// Each failure code and the facts its words take.
 export interface FailureFacts {
   // The Versions page could not finish a read, or more than one.
   "versions-reads": { read: VersionsRead | "several" };

@@ -9,7 +9,6 @@ const UNMATCHED = "unmatched";
 const patterns = new WeakMap<Request, string>();
 
 export interface RequestLog<Pattern extends string = string> {
-  /** Records the route that matched `request`. */
   mark(request: Request, pattern: Pattern): void;
   /** Writes the line for an answer; with no marked request, its route is `unmatched`. */
   write(request: Request | undefined, method: string, status: number, arrivedAtMs: number): void;

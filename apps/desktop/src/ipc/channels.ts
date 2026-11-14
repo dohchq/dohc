@@ -224,7 +224,6 @@ export const CHANNELS = {
   ownerAppResponses: "desktop:owner-app-responses",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
-  // The crash report changed; the renderer reads it again.
   crashReportChanged: "desktop:crash-report-changed",
   // The offline copies an account change left changed; the renderer reads them again.
   collectionCopiesLeftChanged: "desktop:collection-copies-left-changed",
@@ -241,7 +240,6 @@ export const CHANNELS = {
   agentRunState: "desktop:agent-run-state",
   chatDispatchPaused: "desktop:chat-dispatch-paused",
   agentsListening: "desktop:agents-listening",
-  // Main's cached personal agents changed.
   personalAgents: "desktop:personal-agents",
   chatAgentRequestsChanged: "desktop:chat-agent-requests-changed",
   // Collection automations: main parses and writes automations.yaml.

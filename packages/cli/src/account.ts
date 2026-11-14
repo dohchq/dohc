@@ -9,7 +9,6 @@ const count = z.number().int().nonnegative();
 export const ServerAccountDeletionPreview = z
   .object({
     email: z.string().min(1),
-    // The server address this computer connects to.
     server: z.string().min(1),
     // Owned workspaces this computer has, by their local folder name.
     workspaces: z.array(

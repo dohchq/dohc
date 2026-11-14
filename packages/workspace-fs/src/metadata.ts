@@ -50,7 +50,6 @@ export function isSqliteMediaType(mediaType: string, path = "") {
 // stored as binary. The engine's `TEXT_EXTENSIONS` is the same list, and
 // `text-media-cases.json` holds both rules to the same answers.
 const TEXT_EXTENSIONS = new Set([
-  // Data and documents.
   ".json",
   ".geojson",
   ".json5",
@@ -62,7 +61,6 @@ const TEXT_EXTENSIONS = new Set([
   ".md",
   ".markdown",
   ".txt",
-  // Code.
   ".ts",
   ".tsx",
   ".cts",
@@ -121,7 +119,6 @@ const TEXT_EXTENSIONS = new Set([
   ".psm1",
   ".bat",
   ".cmd",
-  // Configuration.
   ".toml",
   ".yaml",
   ".yml",

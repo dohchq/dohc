@@ -156,7 +156,6 @@ export async function cleanCheckout(gitOutput, root) {
   return gitOutput(clean);
 }
 
-/** Adds the owner's write permission throughout `path`, leaving symbolic links and the caches the clean keeps. */
 async function makeWritable(path, caches) {
   const info = await lstat(path).catch(() => null);
   if (!info || info.isSymbolicLink()) return;
@@ -237,7 +236,6 @@ async function holdLegacyLane({ entry, signal, lanes }) {
   });
 }
 
-/** Run the lane's own verifier for one attempt. */
 async function defaultWorker({ lane, request, grant, output, signal }) {
   const args = [
     "scripts/verification/verify.mjs",

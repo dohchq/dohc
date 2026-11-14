@@ -54,7 +54,6 @@ export interface T3CodeSignInStore {
   load(): Promise<T3CodeSignIn | null>;
   /** Keeps the sign-in encrypted. Throws T3CodeSignInNotKept when this computer cannot encrypt. */
   save(signIn: T3CodeSignIn): Promise<void>;
-  /** Drops the kept sign-in. */
   clear(): Promise<void>;
 }
 

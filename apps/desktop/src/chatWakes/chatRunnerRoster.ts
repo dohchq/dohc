@@ -54,7 +54,6 @@ export interface ChatRunnerRosterDeps {
   /** Wall-clock time, which keeps counting while the computer sleeps. */
   nowMs(): number;
   backoffMs(failures: number): number;
-  /** A signal that aborts after `ms`. */
   timeout(ms: number): AbortSignal;
   /** One row in that workspace's Notices: the server can't take this computer's agents as they are. */
   refused(workspaceId: string, refusal: ChatRunnerRefusal): void;
@@ -258,7 +257,6 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
           : withdrawal(session, computerLabel);
       if (wanted.has(workspaceId)) show(workspaceId, declared.ok ? null : declared);
       else show(workspaceId, null);
-      // Nothing declared and nothing to take back.
       if (declaration.runners.length === 0 && !ledgered.has(workspaceId)) continue;
       try {
         if (!(await put(session, client, entry, declaration, abort.signal))) settled = false;

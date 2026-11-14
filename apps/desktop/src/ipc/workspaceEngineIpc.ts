@@ -197,7 +197,6 @@ export function createWorkspaceEngineIpc<
   ): Promise<boolean>;
   /** The owner's server's runs; the relay answers only the workspace's owner. */
   serverRuns: Pick<ServerRuns, "shownTo">;
-  /** The signed-in account now, or null when signed out. */
   signedInAccount(): string | null;
   isOnline?(): boolean;
   notifyRenderer(target: { workspaceId: string }): void;
@@ -284,7 +283,6 @@ export function createWorkspaceEngineIpc<
     engineYDocSessionIpc,
   } = dependencies;
   const timeline = createHistoryTimeline();
-  // This computer's agent by its name now, or by its id once Settings no longer lists it.
   const localAgentName = (agentId: string) =>
     agentId === "dohc-mcp" ? "Agent" : (agentName(agentId) ?? agentId);
   const runLocator = createRunLocator({
@@ -674,7 +672,6 @@ export function createWorkspaceEngineIpc<
           const presentations = await identity.presentations();
           let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
           let pending: Promise<NonNullable<typeof resolved>> | undefined;
-          // No Collection moments, for a History without them.
           const without = (why: Error): Pick<TimelineReads, "scope" | "local" | "remote"> => ({
             scope: operation.scope ?? workspace.workspaceId,
             local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }),

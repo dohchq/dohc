@@ -34,7 +34,6 @@ interface AccountValue {
   readonly workspaces: WorkspaceList;
   /** The workspace open on the phone: the one chosen, or the first that shows. Null when none shows. */
   readonly currentWorkspaceId: string | null;
-  /** What the phone has read of the open workspace. */
   readonly data: WorkspaceData | null;
   /** The account's Notices, whichever workspace is open. */
   readonly notices: NoticeStore | null;

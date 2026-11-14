@@ -470,7 +470,6 @@ export type NoticeKind = keyof typeof NOTICE_KINDS;
 // start with these, so the owner's computers can act on them there.
 export const SERVER_RUN_FAILED_NOTICE_PREFIX = "server-automation-failed:";
 export const SERVER_HOLD_NOTICE_PREFIX = "automation-held:";
-// The kinds a person or agent may post.
 export type PostableNoticeKind = {
   [Kind in NoticeKind]: (typeof NOTICE_KINDS)[Kind]["recipients"] extends "relay" ? never : Kind;
 }[NoticeKind];
@@ -478,12 +477,10 @@ export type PostableNoticeKind = {
 // Lengths count code points, as a person counts characters.
 export const NOTICE_TITLE_MAX_CHARS = 120;
 export const NOTICE_BODY_MAX_CHARS = 500;
-// The relay's display-name limit for a sender.
 export const NOTICE_SENDER_LABEL_MAX_CHARS = 40;
 // The target as JSON, in UTF-8 bytes.
 const NOTICE_TARGET_MAX_BYTES = 2_048;
 export const NOTICE_TARGET_FIELD_MAX_CHARS = 1_024;
-// The id a sender posts.
 export const NOTICE_POSTED_ID_MAX_CHARS = 256;
 // The id the relay stores and serves. A notice from another person is
 // stored as `from:<sender user id, percent-encoded>:<posted id>`, so no
@@ -729,7 +726,6 @@ export interface RelayNoticePage {
 // so dismissing again is never first. Only the owner's phone sends `unread`
 // and `restore`, with `?scope=phone` and its account session.
 export type NoticeMark = "read" | "dismissed" | "unread" | "restore";
-// The marks a computer sends.
 export type ComputerNoticeMark = Extract<NoticeMark, "read" | "dismissed">;
 // A phone's request body is exactly `{ marks: [{ noticeId, mark }] }`, at most
 // this many bytes. A computer's may add `installId` and, on a dismissal,

@@ -146,7 +146,6 @@ export interface WorkspaceActivityOptions {
   onAgentRunState?: (event: AgentRunStateEvent) => void;
 }
 
-// A local agent run is any run holding the slot except the runner self-test.
 function isAgentAtWork(run: ActiveAgentRun | null): boolean {
   return run !== null && run.dispatch !== "self-test";
 }

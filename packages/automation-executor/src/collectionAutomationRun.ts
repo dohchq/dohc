@@ -104,7 +104,6 @@ export interface CollectionAutomationReads {
   queryCollectionRecords(input: CollectionQueryParams): Promise<CollectionQueryResult>;
 }
 
-/** What a field write did. */
 interface RecordFieldsWritten {
   sharedFileUpdates?: Record<string, import("@dohc/workspace-engine-client").SharedFileUpdate>;
   /**
@@ -186,7 +185,6 @@ export interface CollectionAutomationRunDependencies {
   collectionPathOf(collectionId: string): string | null;
   /** Whether the Collection index is still being read, so missing paths can be temporary. */
   isIndexReading?(): boolean;
-  /** A code file a step runs, as text; null when it does not exist. */
   readCode(path: string): Promise<{ text: string; truncated: boolean } | null>;
   /** The name a formula's `person` shows for the person who pressed a button. */
   personName(userId: string): string;
@@ -286,7 +284,6 @@ export type CollectionAutomationRunOutcome =
 export interface CollectionAutomationRunInput {
   claim: AutomationClaim;
   automation: Automation;
-  /** The automation's Collection, where it is now. */
   collection: ReachCollection;
   /** Who can edit what now; the executor waits while it is unknown. */
   roster: Exclude<ReachRoster, { kind: "unknown" }>;
@@ -431,7 +428,6 @@ export async function startRun(
   if (read === null) return { kind: "wait", reason: "engine" };
   if (read === "changed") return failed(KEPT_CHANGING_ERROR);
   const { record } = read;
-  // The record was removed before its automation ran.
   if (record === null && claim.change.kind !== "removed" && hasTriggerRecord(claim))
     return { kind: "skipped" };
   if (!triggerMatches(automation, claim, record)) return { kind: "skipped" };

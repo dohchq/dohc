@@ -29,7 +29,6 @@ export interface ShareViewWriteScope {
   // The level the PINNED grant names, or null when the grant cannot be read
   // or the marker lost its identity.
   access: ShareAccess | null;
-  // The granter ended this share.
   ended: boolean;
 }
 

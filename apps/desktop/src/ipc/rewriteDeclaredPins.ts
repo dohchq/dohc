@@ -30,7 +30,6 @@ const rows: OperationDefinition[] = families.flatMap((key) =>
 const labels = operations.map(({ cli }) => cli.command.join(" "));
 const groups: string[] = [...new Set(operations.map(({ cli }) => cli.command[0]))];
 
-// Keeps pinned labels in place and adds a new one after the last label of its command.
 function withLabel(pinned: readonly string[], label: string): string[] {
   if (pinned.includes(label)) return [...pinned];
   const group = label.split(" ")[0]!;

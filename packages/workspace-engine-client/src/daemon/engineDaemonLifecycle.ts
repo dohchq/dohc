@@ -133,7 +133,6 @@ export interface EngineDaemonLifecycleOptions {
     client: NonNullable<EngineClientSpawnOptions["privateLiveApplication"]>;
   };
   command: string;
-  // Starts the engine in its own process group. See EngineClientSpawnOptions.
   ownProcessGroup?: boolean;
   launch?: (options: EngineClientSpawnOptions) => Promise<EngineDaemonClient>;
   fileExists?: (path: string) => boolean;

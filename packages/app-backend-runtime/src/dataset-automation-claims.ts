@@ -710,7 +710,6 @@ export function createDatasetAutomationClaims(options: {
         });
       return made;
     },
-    /** Add or replace one automation's subscription. */
     subscribe(scope: DatasetScope, raw: DatasetAutomationSubscription): void {
       const workspaceId = text(scope.workspaceId, "workspace"),
         datasetId = text(scope.datasetId, "dataset");

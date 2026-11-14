@@ -10,7 +10,6 @@ import type {
 } from "./registryStore";
 import { relayUrlsMatch } from "./syncCode";
 
-// Reconcile local copies with the authenticated account listing.
 export interface ConfirmedShareRemoval {
   shareId: string;
   // The relay's time for the removal, from its `removed` listing.

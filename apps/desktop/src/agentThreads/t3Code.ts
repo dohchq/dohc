@@ -354,7 +354,6 @@ export async function signInToT3Code(input: {
 }
 
 export interface T3CodeSession {
-  /** Calls one of T3 Code's tools and returns its result. */
   call(tool: string, args: Record<string, unknown>): Promise<unknown>;
   /** Ends the session on T3 Code's side. */
   close(): Promise<void>;
@@ -611,7 +610,6 @@ export async function sendToT3CodeThread(
 
 export interface T3CodeThreadState {
   title: string;
-  /** A run is going now. */
   working: boolean;
   /** Something waits on the person in T3 Code: a question or an approval. */
   waitingOnPerson: boolean;

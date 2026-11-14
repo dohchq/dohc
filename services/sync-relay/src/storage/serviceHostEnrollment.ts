@@ -89,7 +89,6 @@ const V3_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
   FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id)
 ) STRICT`;
-// The v2 layout before host drain tracking.
 const V2_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   workspace_id TEXT NOT NULL,
   object_id TEXT NOT NULL,

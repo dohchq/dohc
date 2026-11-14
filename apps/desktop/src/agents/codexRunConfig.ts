@@ -320,7 +320,6 @@ function writableRootEntries(
   const workspace = attempt(() => input.fileId(input.rootPath));
   if (workspace === null) return [];
   const path = input.platform === "win32" ? win32 : posix;
-  // The ids of a folder and every folder above it.
   const above = (folder: string): string[] => {
     const ids: string[] = [];
     for (let at = folder; ; at = path.dirname(at)) {
@@ -384,7 +383,6 @@ function writableRootEntries(
     const real = attempt(() => input.realPath(written));
     const id = real === null ? null : attempt(() => input.fileId(real));
     const reached = attempt(() => follow(written));
-    // The id of the folder follow reaches, then of each folder it looks in.
     const ids =
       reached === null
         ? []
@@ -556,7 +554,6 @@ export const READ_ONLY_DISABLED_FEATURES = [
   "token_budget",
 ] as const;
 
-// A reply-only run also turns off the shell and view_image.
 export const REPLY_ONLY_DISABLED_FEATURES = ["shell_tool", "unified_exec", "view_image"] as const;
 
 // The MCP servers the person's config names, other than dohc's. A --config

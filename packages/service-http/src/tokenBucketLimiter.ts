@@ -21,7 +21,6 @@ export class TokenBucketLimiter {
     }
   }
 
-  /** Takes `cost` tokens from the bucket for `key`, or refuses when they are not there. */
   allow(key: string, nowMs: number, cost = 1): boolean {
     const bucket = this.bucketFor(key || "unknown", nowMs);
     if (bucket.tokens < cost) return false;

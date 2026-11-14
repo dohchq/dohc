@@ -1205,7 +1205,6 @@ export interface LinkedChatStore {
     title: string;
     linkedFile: { objectId: WorkspaceObjectId; pathHint?: string };
   }): Promise<ChatThread>;
-  // --- Channels -----------------------------------------------------------
   createChannel(input: {
     workspaceId: WorkspaceId;
     name: string;
@@ -1493,7 +1492,6 @@ export interface LinkedChatStore {
     replicationOwnerUserId?: string;
     headCursor: string;
   }): Promise<ChatFeedReadState>;
-  // --- Workspace-backed chat bookmarks -----------------------------------
   saveBookmark(input: {
     workspaceId: WorkspaceId;
     ownerUserId: string;
@@ -1589,7 +1587,6 @@ export interface AgentDispatchRecord {
 export interface AgentRunRecord {
   workspaceId: WorkspaceId;
   runId: string;
-  // The agent that runs.
   agentId: string;
   threadId: ChatThreadId;
   triggerMessageId: ChatMessageId;

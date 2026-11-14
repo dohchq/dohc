@@ -327,7 +327,6 @@ export function compileClosedAppPage(
     used.set(path, inputs.get(path)!.bytes.byteLength);
     return path;
   };
-  /** A remote, data, blob, or fragment image stays as written; a local one becomes a data URL. */
   const image = (value: string): string => {
     if (/^(?:https?:|data:|blob:|#|\/\/)/i.test(value.trim()) || value.trim() === "") return value;
     const path = local(value, "image");
