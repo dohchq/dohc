@@ -2698,6 +2698,18 @@ describe("engine Y.Doc IPC adapter", () => {
       await expect(refused.ipc.editDocument(append)).rejects.toThrow("Your access to this share ended.");
     });
 
+    it("opens a joined workspace's note through its live session on the server for a change from main", async () => {
+      const session = sharedSession();
+      const open = vi.fn(async () => session);
+      const h = harness(providerSession(), { sharedCaptureFor: async () => ({ openYDocSession: open }) });
+      await expect(h.ipc.openSharedDocument("workspace-1", "tasks/a.md")).rejects.toThrow("Only a shared view's notes open here.");
+      h.setReadOnly(true);
+      await expect(h.ipc.openSharedDocument("workspace-1", "tasks/a.md")).resolves.toBe(session);
+      expect(open).toHaveBeenCalledWith(expect.objectContaining({ path: "tasks/a.md", contentKind: "richdoc" }));
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+      await expect(h.ipc.openSharedDocument("workspace-1", "board.excalidraw")).rejects.toThrow("board.excalidraw is not a Markdown document.");
+    });
+
     it("refuses a lossy note before it opens a session or changes the held one", async () => {
       const session = editableSession();
       const h = harness(session);

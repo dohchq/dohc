@@ -79,6 +79,19 @@ describe("received-share record drafts", () => {
     expect(f.host.shareViewEdited).toHaveBeenCalledOnce();
   });
 
+  // A joined workspace's grant is the whole workspace, with no paths.
+  it("creates a record in a joined workspace at Edit, and not below it", async () => {
+    const membership = { paths: [], versionId: null, wholeWorkspace: true as const };
+    const f = fixture();
+    f.host.resolved.grantedSelector = { ...membership, access: "edit" };
+    f.host.checkAuthority.mockResolvedValue({ ...membership, access: "edit" });
+    expect(await createReceivedShareRecord(input, f.host)).toEqual({ path: "trip/Tasks/One.md", recordId: id, delivery: "pending" });
+    const below = fixture();
+    below.host.resolved.grantedSelector = { ...membership, access: "comment" };
+    await expect(createReceivedShareRecord(input, below.host)).rejects.toThrow("This Collection does not have Edit access.");
+    expect(below.host.files.change).not.toHaveBeenCalled();
+  });
+
   it("keeps an offline draft and retries the same journaled file after reopening", async () => {
     const f = fixture();
     f.host.checkAuthority = vi.fn(async () => null) as typeof f.host.checkAuthority;

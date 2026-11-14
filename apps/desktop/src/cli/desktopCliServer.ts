@@ -55,6 +55,9 @@ import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { resolveEngineFileTargets } from "../workspaces/resolveEngineFiles";
 import type { ShareViewWriteScope } from "../workspaces/shareWriteGate";
 import type { JoinedGroupInput } from "../workspaces/joinedGroupCreate";
+import type { ReceivedRecordDraft } from "../workspaces/receivedShareRecordCreation";
+import type { CreateCollectionRecordPayload } from "../ipc/bridgeContract";
+import type { CreationPartial } from "@dohc/cli/creation";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
 import type {
   OwnerLiveDocumentsResult,
@@ -312,6 +315,15 @@ interface DesktopCliServerDependencies<State> {
     // The Explorer's New page in a share view. Returns the created path.
     create(workspace: RegistryEntry, path: string, markdown: string): Promise<string>;
   };
+  // A joined workspace's Collection records, as its Collection page changes
+  // them: New record through the share, and record text from the view.
+  joinedRecords: {
+    create(
+      operation: WorkspaceAuthorityOperation<RegistryEntry, State>,
+      input: CreateCollectionRecordPayload,
+    ): Promise<ReceivedRecordDraft | CreationPartial>;
+    readText(workspaceId: string, path: string): Promise<{ text: string; truncated: boolean }>;
+  };
   // A shared view's projection status, or undefined for any other workspace.
   shareProjection(workspace: RegistryEntry): Promise<SyncStatusResult["shareProjection"]>;
   withPhysicalWorkspaceOperation<Result>(
@@ -455,6 +467,32 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           ),
       );
     };
+    // A joined workspace's record changes through its live session on the
+    // server, the one a member's cell edit opens, and is done once the server
+    // holds it. Its text is read from the view.
+    const joinedRecordContext = (): CollectionRecordEditContext => ({
+      openRecord: async (path) => {
+        const provider = await liveDocuments.openSharedDocument(workspace.workspaceId, path);
+        return {
+          applyDecidedLocalUpdate: (decide, onArmed, options) =>
+            provider.applyDecidedLocalUpdate(decide, onArmed, options),
+          settleNow: async () => {
+            if (!provider.savedToHost) throw new Error(`${path} cannot take an edit from here.`);
+            await provider.savedToHost();
+          },
+          close: async () => {
+            await provider.close();
+          },
+        };
+      },
+      createFile: async () => {
+        throw new Error("A joined workspace adds records through the share.");
+      },
+      readText: (path) => dependencies.joinedRecords.readText(workspace.workspaceId, path),
+      withAdapter: async () => null,
+      onRecordsChanged: () => () => undefined,
+      signal: AbortSignal.timeout(CLI_REQUEST_DEADLINE_MS),
+    });
     const publicationAttachment = await withPhysicalWorkspaceOperation(
       workspace.workspaceId,
       (operation) => {
@@ -756,9 +794,66 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
       // through the desktop's one collection write seam.
       collections: {
         writes: {
-          setFields: (input) =>
-            cliCollectionEdit((context) => setCollectionRecordFields(context, input)),
-          createRecord: (input) => runCollectionRecordCreation(cliCollectionEdit, input),
+          setFields: async (input) => {
+            const view = sharedViewOf(workspace.workspaceId);
+            if (view?.membership !== true)
+              return await cliCollectionEdit((context) =>
+                setCollectionRecordFields(context, input),
+              );
+            if (view.access !== "edit")
+              throw new Error(
+                `Changing a Collection record needs Edit. You can ${view.access ?? "view"} here.`,
+              );
+            return await setCollectionRecordFields(joinedRecordContext(), input);
+          },
+          createRecord: async (input) => {
+            const view = sharedViewOf(workspace.workspaceId);
+            if (view?.membership !== true)
+              return await runCollectionRecordCreation(cliCollectionEdit, input);
+            if (view.access !== "edit")
+              throw new Error(
+                `Adding a Collection record needs Edit. You can ${view.access ?? "view"} here.`,
+              );
+            const created = await withPhysicalWorkspaceOperation(
+              workspace.workspaceId,
+              async (operation) => {
+                operation.assertCurrent();
+                return await dependencies.joinedRecords.create(operation, {
+                  workspaceId: workspace.workspaceId,
+                  collectionPath: input.collectionPath,
+                  name: input.name,
+                  ...(input.recordId ? { recordId: input.recordId } : {}),
+                });
+              },
+            );
+            if ("kind" in created) return created;
+            if (created.delivery === "refused")
+              throw new Error(created.reason ?? "The sync relay did not accept this record.");
+            if (Object.keys(input.fields ?? {}).length === 0)
+              return { path: created.path, recordId: created.recordId };
+            try {
+              const { kept } = await setCollectionRecordFields(joinedRecordContext(), {
+                recordPath: created.path,
+                fields: input.fields!,
+                author: input.author,
+              });
+              return { path: created.path, recordId: created.recordId, kept };
+            } catch (error) {
+              // The record exists. Sent again with its id, the create finds it and sets what still differs.
+              return {
+                kind: "partial" as const,
+                created: [created.path],
+                failedStage: "fields" as const,
+                reason: error instanceof Error ? error.message : String(error),
+                retry: {
+                  mode: "resume" as const,
+                  recordId: created.recordId,
+                  instruction:
+                    "Try again with the same record ID and fields once the record reaches the server.",
+                },
+              };
+            }
+          },
         },
         query: async (params) => {
           const result = await withEngineAdapter(

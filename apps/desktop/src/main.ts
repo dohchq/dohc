@@ -5063,6 +5063,105 @@ async function requireEngineCaptureForOperation(operation: DesktopWorkspaceOpera
   return { workspace, capture };
 }
 
+// New record in a share view's Collection: the Collection page's New record,
+// and an agent's in a joined workspace. Null when the Collection is this
+// workspace's own.
+async function createShareViewRecord(
+  operation: DesktopWorkspaceOperation,
+  input: CreateCollectionRecordPayload,
+) {
+  const files = createShareViewFilesForOperation(operation);
+  const found = await createOwnedWorkspaceFileReader({
+    workspace: operation.workspace,
+    files,
+  }).resolveShare(`${input.collectionPath}/collection.yaml`);
+  operation.assertCurrent();
+  if (found) {
+    const resolved = resolveRegisteredShareViewFilesTarget(operation.workspace, found.target);
+    if (!resolved || resolved.kind !== "standalone")
+      throw new Error("Open this share as a workspace to create a record.");
+    return await createReceivedShareRecord(input, {
+      target: found.target,
+      resolved,
+      files,
+      collectionPath: found.path.slice(0, -"/collection.yaml".length),
+      assertCurrent: () => {
+        operation.assertCurrent();
+        if (
+          JSON.stringify(
+            resolveRegisteredShareViewFilesTarget(operation.workspace, found.target),
+          ) !== JSON.stringify(resolved)
+        ) {
+          throw new Error("The shared file session changed. Open the Collection again.");
+        }
+      },
+      checkAuthority: async () => {
+        await warmCredentialCache();
+        operation.assertCurrent();
+        const credentials = cachedCredentials;
+        if (
+          !credentials?.relayUrl ||
+          (resolved.relayUrl && !relayUrlsMatch(resolved.relayUrl, credentials.relayUrl))
+        )
+          return null;
+        const generation = credentialCacheGeneration;
+        try {
+          const info = await fetchShareViewInfo({
+            relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+            shareId: resolved.shareId!,
+          });
+          operation.assertCurrent();
+          if (generation !== credentialCacheGeneration)
+            throw new Error("The shared file session changed.");
+          if (!info.selector) throw new Error("This Collection does not have Edit access.");
+          return info.selector;
+        } catch (error) {
+          operation.assertCurrent();
+          if (generation !== credentialCacheGeneration)
+            throw new Error("The shared file session changed.");
+          if (
+            error instanceof TypeError ||
+            (error instanceof DOMException && error.name === "TimeoutError")
+          )
+            return null;
+          throw error;
+        }
+      },
+      withLease: (work) => withStaleSensitiveWorkspaceOperation(operation.workspace.rootPath, work),
+      recordStatus: (path) =>
+        requireEngineSessions().run(
+          {
+            workspaceId: resolved.storeWorkspaceId,
+            rootPath: resolved.rootPath,
+            shareMount: true,
+            ...(resolved.kind === "standalone"
+              ? { attachmentId: operation.workspace.attachmentId }
+              : {}),
+          },
+          async (binding) => {
+            const selector = recordedShareSelector(resolved.grantedSelector);
+            const statuses = await shareRecordStatuses(
+              new WorkspaceDaemonRequester(binding.client),
+              {
+                workspaceId: resolved.storeWorkspaceId,
+                shareId: resolved.shareId!,
+                paths: [path],
+                grantedSelector: selector ? engineGrantedSelector(selector) : null,
+              },
+              { workspace: binding.workspace },
+            );
+            return statuses[path] ?? null;
+          },
+        ),
+      shareViewEdited: () => {
+        shareDirectWrites?.recordCreated(input.workspaceId);
+        notifyRenderer({ workspaceId: input.workspaceId });
+      },
+    });
+  }
+  return null;
+}
+
 // Workspace authority for one collection write: a writable workspace with a
 // running engine capture, plus the local engine adapter and capture
 // announcements the adoption wait reads through. Collection writes land on
@@ -7164,6 +7263,21 @@ const { startDesktopCliServer } = createDesktopCliServer({
     create: (workspace, path, markdown) =>
       workspaceFileMutations.createShareViewPage(workspace, path, markdown),
   },
+  joinedRecords: {
+    create: async (operation, input) => {
+      const created = await createShareViewRecord(operation, input);
+      if (!created) throw new Error("This Collection is not in the joined workspace.");
+      return created;
+    },
+    readText: async (workspaceId, path) => {
+      const read = await shareViewFiles.read(
+        { kind: "standalone", workspaceId },
+        { kind: "text", path },
+      );
+      if (read.kind !== "text") throw new Error(`${path} is not a text file.`);
+      return { text: read.text, truncated: read.truncated };
+    },
+  },
   shareProjection: ownedShareProjection,
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
@@ -7173,6 +7287,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
   liveDocuments: {
     readDocument: (input) => engineYDocSessionIpc.readDocument(input),
     editDocument: (input) => engineYDocSessionIpc.editDocument(input),
+    openSharedDocument: (workspaceId, path) =>
+      engineYDocSessionIpc.openSharedDocument(workspaceId, path),
   },
   trashItem: (path) => shell.trashItem(path),
   markDeletedUnderPath: (attachmentId, path) =>
@@ -9845,96 +9961,8 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Record creation stopped because this window changed workspaces.",
       async (operation) => {
-        const files = createShareViewFilesForOperation(operation);
-        const found = await createOwnedWorkspaceFileReader({
-          workspace: operation.workspace,
-          files,
-        }).resolveShare(`${input.collectionPath}/collection.yaml`);
-        operation.assertCurrent();
-        if (found) {
-          const resolved = resolveRegisteredShareViewFilesTarget(operation.workspace, found.target);
-          if (!resolved || resolved.kind !== "standalone")
-            throw new Error("Open this share as a workspace to create a record.");
-          return createReceivedShareRecord(input, {
-            target: found.target,
-            resolved,
-            files,
-            collectionPath: found.path.slice(0, -"/collection.yaml".length),
-            assertCurrent: () => {
-              operation.assertCurrent();
-              if (
-                JSON.stringify(
-                  resolveRegisteredShareViewFilesTarget(operation.workspace, found.target),
-                ) !== JSON.stringify(resolved)
-              ) {
-                throw new Error("The shared file session changed. Open the Collection again.");
-              }
-            },
-            checkAuthority: async () => {
-              await warmCredentialCache();
-              operation.assertCurrent();
-              const credentials = cachedCredentials;
-              if (
-                !credentials?.relayUrl ||
-                (resolved.relayUrl && !relayUrlsMatch(resolved.relayUrl, credentials.relayUrl))
-              )
-                return null;
-              const generation = credentialCacheGeneration;
-              try {
-                const info = await fetchShareViewInfo({
-                  relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-                  shareId: resolved.shareId!,
-                });
-                operation.assertCurrent();
-                if (generation !== credentialCacheGeneration)
-                  throw new Error("The shared file session changed.");
-                if (!info.selector) throw new Error("This Collection does not have Edit access.");
-                return info.selector;
-              } catch (error) {
-                operation.assertCurrent();
-                if (generation !== credentialCacheGeneration)
-                  throw new Error("The shared file session changed.");
-                if (
-                  error instanceof TypeError ||
-                  (error instanceof DOMException && error.name === "TimeoutError")
-                )
-                  return null;
-                throw error;
-              }
-            },
-            withLease: (work) =>
-              withStaleSensitiveWorkspaceOperation(operation.workspace.rootPath, work),
-            recordStatus: (path) =>
-              requireEngineSessions().run(
-                {
-                  workspaceId: resolved.storeWorkspaceId,
-                  rootPath: resolved.rootPath,
-                  shareMount: true,
-                  ...(resolved.kind === "standalone"
-                    ? { attachmentId: operation.workspace.attachmentId }
-                    : {}),
-                },
-                async (binding) => {
-                  const selector = recordedShareSelector(resolved.grantedSelector);
-                  const statuses = await shareRecordStatuses(
-                    new WorkspaceDaemonRequester(binding.client),
-                    {
-                      workspaceId: resolved.storeWorkspaceId,
-                      shareId: resolved.shareId!,
-                      paths: [path],
-                      grantedSelector: selector ? engineGrantedSelector(selector) : null,
-                    },
-                    { workspace: binding.workspace },
-                  );
-                  return statuses[path] ?? null;
-                },
-              ),
-            shareViewEdited: () => {
-              shareDirectWrites?.recordCreated(input.workspaceId);
-              notifyRenderer({ workspaceId: input.workspaceId });
-            },
-          });
-        }
+        const shared = await createShareViewRecord(operation, input);
+        if (shared) return shared;
         return createRecordByHand(input, {
           author: createLocalChangeAuthor(localUserDisplayName()),
           localPerson,

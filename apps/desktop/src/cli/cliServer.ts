@@ -4964,7 +4964,7 @@ async function workspaceContextForRequest(
     request.verb === "watch" ||
     (request.verb === "show" && !request.args.peek);
   if (workspace.readOnly && writeRequest && workspace.joined) {
-    const refusal = joinedWorkspaceWriteRefusal(request.verb, fileRequest, collectionWriteRequest);
+    const refusal = joinedWorkspaceWriteRefusal(request.verb, fileRequest);
     if (refusal) throw new CliCommandError(refusal);
   } else if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
@@ -4986,17 +4986,12 @@ async function workspaceContextForRequest(
 }
 
 // What an agent may write in a joined workspace is what the person may: a
-// post or reply in a Group, a comment on a file, a reaction, a new page or an
-// edit at Edit, and a Group for an admin. Each verb's own path and the relay decide the level and the role.
+// post or reply in a Group, a comment on a file, a reaction, a new page, a
+// page edit or a Collection record at Edit, and a Group for an admin. Each
+// verb's own path and the relay decide the level and the role.
 // Every other write refuses here with its reason.
-function joinedWorkspaceWriteRefusal(
-  verb: CliVerb,
-  fileRequest: boolean,
-  collectionWriteRequest: boolean,
-): string | null {
+function joinedWorkspaceWriteRefusal(verb: CliVerb, fileRequest: boolean): string | null {
   if (fileRequest) return "In a joined workspace agents add pages with dohc document create.";
-  if (collectionWriteRequest)
-    return "Agents can't change Collection records in a joined workspace yet. Change them in the app.";
   switch (verb) {
     case "post":
     case "reply":
@@ -5004,6 +4999,8 @@ function joinedWorkspaceWriteRefusal(
     case "show":
     case "documentCreate":
     case "documentEdit":
+    case "collectionSetFields":
+    case "collectionCreateRecord":
     case "groupCreate":
     case "fileChatStart":
       return null;

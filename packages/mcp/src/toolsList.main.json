@@ -7160,6 +7160,47 @@
       }
     },
     {
+      "name": "dohc_create_record",
+      "description": "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. The kept map reports current values of seed fields preserved after someone edited them. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "recordId": {
+            "type": "string",
+            "pattern": "^rec_[a-z2-7]{26}$"
+          },
+          "fields": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "collectionPath",
+          "name"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
       "name": "dohc_detect_apps",
       "description": "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       "inputSchema": {
@@ -8179,6 +8220,38 @@
         },
         "required": [
           "query"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "dohc_set_record_fields",
+      "description": "Set fields on a collection record as the agent, e.g. fields: {\"status\": \"done\"}. The change lands in the record's live frontmatter, open desktop views update, and record history attributes it to the agent.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "recordPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "fields": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "recordPath",
+          "fields"
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"

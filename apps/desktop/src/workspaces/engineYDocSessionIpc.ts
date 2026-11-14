@@ -378,6 +378,8 @@ export interface LiveDocumentSessions {
     path: string;
   }): Promise<{ path: string; state: Uint8Array | null }>;
   editDocument(input: LiveDocumentEdit): Promise<LiveDocumentEditOutcome>;
+  /** A shared view's note, opened through its live session on the server. The caller closes it. */
+  openSharedDocument(workspaceId: string, path: string): Promise<EngineYDocSessionProvider>;
 }
 
 type EngineYDocIpcSessionOwner = EngineYDocSessionOwner<
@@ -1199,6 +1201,28 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       } finally {
         if (this.#documentEdits.get(key) === turn) this.#documentEdits.delete(key);
       }
+    } finally {
+      authority.release();
+    }
+  }
+
+  /**
+   * Opens a shared view's note through its live session on the server, for a
+   * change made from main such as an agent's record fields. It is a session
+   * of its own beside any editor's, and the server merges the two. It
+   * refuses with the reason the editor's open gives.
+   */
+  async openSharedDocument(workspaceId: string, requested: string): Promise<EngineYDocSessionProvider> {
+    const authority = this.#acquireWorkspace(workspaceId);
+    try {
+      authority.assertCurrent();
+      const workspace = authority.workspace;
+      if (!this.#isSharedView(workspace) || !this.#sharedCaptureFor) throw new Error("Only a shared view's notes open here.");
+      const path = await this.#markdownDocumentPath(workspace, requested);
+      const capture = await this.#sharedCaptureFor(workspace);
+      authority.assertCurrent();
+      if (!capture) throw new Error("dohc could not open this page for editing.");
+      return await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
     } finally {
       authority.release();
     }

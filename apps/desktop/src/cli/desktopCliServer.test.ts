@@ -312,6 +312,14 @@ function fixture(
       folderHoldsFile: vi.fn(async () => true),
       create: vi.fn(async (_workspace, path) => path),
     },
+    joinedRecords: {
+      create: vi.fn(async () => {
+        throw new Error("No joined record creation configured");
+      }),
+      readText: vi.fn(async () => {
+        throw new Error("No joined record text configured");
+      }),
+    },
     shareProjection: vi.fn(async () => undefined),
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work),
     collectionEditContextFor: vi.fn(async () => {
@@ -328,6 +336,9 @@ function fixture(
         path,
         changed: false,
       })),
+      openSharedDocument: vi.fn<Dependencies["liveDocuments"]["openSharedDocument"]>(async () => {
+        throw new Error("No shared session configured");
+      }),
     },
     trashItem: vi.fn(async () => {
       throw new Error("No system trash in tests");
@@ -2855,16 +2866,195 @@ describe("a joined workspace through the CLI", () => {
   it("edits a page at Edit through its live session, and names the level below Edit", async () => {
     const f = joinedFixture("edit");
     const context = await f.create().openCliWorkspace(f.joined);
-    await expect(context.documents!.edit({ path: "notes/plan.md", edit: { find: "Old", replacement: "New" }, origin: AGENT_ORIGIN }))
-      .resolves.toEqual({ path: "notes/plan.md", changed: false });
-    expect(f.dependencies.liveDocuments.editDocument).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace", path: "notes/plan.md", origin: AGENT_ORIGIN }));
+    await expect(
+      context.documents!.edit({
+        path: "notes/plan.md",
+        edit: { find: "Old", replacement: "New" },
+        origin: AGENT_ORIGIN,
+      }),
+    ).resolves.toEqual({ path: "notes/plan.md", changed: false });
+    expect(f.dependencies.liveDocuments.editDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "workspace",
+        path: "notes/plan.md",
+        origin: AGENT_ORIGIN,
+      }),
+    );
     for (const access of ["view", "comment"] as const) {
       const below = joinedFixture(access);
       const reached = await below.create().openCliWorkspace(below.joined);
-      await expect(reached.documents!.edit({ path: "notes/plan.md", edit: { find: "Old", replacement: "New" }, origin: AGENT_ORIGIN }))
-        .rejects.toThrow(`Editing a page needs Edit. You can ${access} here.`);
+      await expect(
+        reached.documents!.edit({
+          path: "notes/plan.md",
+          edit: { find: "Old", replacement: "New" },
+          origin: AGENT_ORIGIN,
+        }),
+      ).rejects.toThrow(`Editing a page needs Edit. You can ${access} here.`);
       expect(below.dependencies.liveDocuments.editDocument).not.toHaveBeenCalled();
     }
+  });
+
+  // A record's fields change through its live session on the server, as a
+  // member's cell edit does; a new record goes through the share, as New
+  // record does.
+  const RECORD_ID = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const AGENT_AUTHOR = {
+    kind: "agent" as const,
+    agentId: "claude-code",
+    onBehalfOf: "person-local",
+    depth: 0,
+  };
+  function recordSession(text = `---\nid: ${RECORD_ID}\n---\n`) {
+    const doc = markdownToYDoc(text);
+    return {
+      doc,
+      text,
+      applyDecidedLocalUpdate: vi.fn(
+        async (decide: (doc: Y.Doc) => Uint8Array | null, onArmed?: () => void) => {
+          const update = decide(doc);
+          if (update === null) return false;
+          Y.applyUpdate(doc, update);
+          onArmed?.();
+          return true;
+        },
+      ),
+      savedToHost: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    };
+  }
+
+  it("sets a record's fields at Edit through its live session, and names the level below Edit", async () => {
+    const f = joinedFixture("edit");
+    const session = recordSession();
+    vi.mocked(f.dependencies.joinedRecords.readText).mockResolvedValue({
+      text: session.text,
+      truncated: false,
+    });
+    vi.mocked(f.dependencies.liveDocuments.openSharedDocument).mockResolvedValue(session as never);
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(
+      context.collections!.writes.setFields({
+        recordPath: "tasks/a.md",
+        fields: { status: "done" },
+        author: AGENT_AUTHOR,
+      }),
+    ).resolves.toEqual({ path: "tasks/a.md", replaced: { status: null }, kept: {} });
+    expect(session.doc.getMap("frontmatter").get("status")).toBe("done");
+    expect(f.dependencies.liveDocuments.openSharedDocument).toHaveBeenCalledWith(
+      "workspace",
+      "tasks/a.md",
+    );
+    expect(session.savedToHost).toHaveBeenCalledOnce();
+    expect(session.close).toHaveBeenCalled();
+    expect(f.dependencies.collectionEditContextFor).not.toHaveBeenCalled();
+    for (const access of ["view", "comment"] as const) {
+      const below = joinedFixture(access);
+      const reached = await below.create().openCliWorkspace(below.joined);
+      await expect(
+        reached.collections!.writes.setFields({
+          recordPath: "tasks/a.md",
+          fields: { status: "done" },
+          author: AGENT_AUTHOR,
+        }),
+      ).rejects.toThrow(`Changing a Collection record needs Edit. You can ${access} here.`);
+      await expect(
+        reached.collections!.writes.createRecord({
+          collectionPath: "tasks",
+          name: "b",
+          author: AGENT_AUTHOR,
+        }),
+      ).rejects.toThrow(`Adding a Collection record needs Edit. You can ${access} here.`);
+      expect(below.dependencies.liveDocuments.openSharedDocument).not.toHaveBeenCalled();
+      expect(below.dependencies.joinedRecords.create).not.toHaveBeenCalled();
+    }
+  });
+
+  it("adds a record at Edit through the share, then sets its fields", async () => {
+    const f = joinedFixture("edit");
+    const session = recordSession();
+    const created: unknown[] = [];
+    vi.mocked(f.dependencies.joinedRecords.create).mockImplementation(async (operation, input) => {
+      created.push([operation.workspace, input]);
+      return { path: "tasks/b.md", recordId: RECORD_ID, delivery: "pending" };
+    });
+    vi.mocked(f.dependencies.joinedRecords.readText).mockResolvedValue({
+      text: session.text,
+      truncated: false,
+    });
+    vi.mocked(f.dependencies.liveDocuments.openSharedDocument).mockResolvedValue(session as never);
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(
+      context.collections!.writes.createRecord({
+        collectionPath: "tasks",
+        name: "b",
+        recordId: RECORD_ID,
+        fields: { status: "todo" },
+        author: AGENT_AUTHOR,
+      }),
+    ).resolves.toEqual({ path: "tasks/b.md", recordId: RECORD_ID, kept: {} });
+    expect(created).toEqual([
+      [
+        expect.objectContaining({ workspaceId: "workspace", shareView: f.shareView }),
+        { workspaceId: "workspace", collectionPath: "tasks", name: "b", recordId: RECORD_ID },
+      ],
+    ]);
+    expect(session.doc.getMap("frontmatter").get("status")).toBe("todo");
+    // A record the server has not taken yet keeps its fields for a retry with the same id.
+    const waiting = joinedFixture("edit");
+    vi.mocked(waiting.dependencies.joinedRecords.create).mockResolvedValue({
+      path: "tasks/c.md",
+      recordId: RECORD_ID,
+      delivery: "pending",
+    });
+    vi.mocked(waiting.dependencies.joinedRecords.readText).mockResolvedValue({
+      text: session.text,
+      truncated: false,
+    });
+    vi.mocked(waiting.dependencies.liveDocuments.openSharedDocument).mockRejectedValue(
+      new Error("Record saved on this device. Waiting to send."),
+    );
+    const reached = await waiting.create().openCliWorkspace(waiting.joined);
+    await expect(
+      reached.collections!.writes.createRecord({
+        collectionPath: "tasks",
+        name: "c",
+        recordId: RECORD_ID,
+        fields: { status: "todo" },
+        author: AGENT_AUTHOR,
+      }),
+    ).resolves.toMatchObject({
+      kind: "partial",
+      created: ["tasks/c.md"],
+      failedStage: "fields",
+      reason: "Record saved on this device. Waiting to send.",
+      retry: { mode: "resume", recordId: RECORD_ID },
+    });
+    // Without fields the record is done once the share takes it.
+    vi.mocked(waiting.dependencies.joinedRecords.create).mockResolvedValue({
+      path: "tasks/d.md",
+      recordId: RECORD_ID,
+      delivery: "pending",
+    });
+    await expect(
+      reached.collections!.writes.createRecord({
+        collectionPath: "tasks",
+        name: "d",
+        author: AGENT_AUTHOR,
+      }),
+    ).resolves.toEqual({ path: "tasks/d.md", recordId: RECORD_ID });
+    vi.mocked(waiting.dependencies.joinedRecords.create).mockResolvedValue({
+      path: "tasks/e.md",
+      recordId: RECORD_ID,
+      delivery: "refused",
+      reason: "The sync relay did not accept this record.",
+    });
+    await expect(
+      reached.collections!.writes.createRecord({
+        collectionPath: "tasks",
+        name: "e",
+        author: AGENT_AUTHOR,
+      }),
+    ).rejects.toThrow("The sync relay did not accept this record.");
   });
 
   // The relay creates the Group in the owner's workspace and decides the

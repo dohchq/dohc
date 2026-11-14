@@ -2731,6 +2731,44 @@ describe("CLI socket server", () => {
       );
     });
 
+    it("takes record writes to the workspace's Collections", async () => {
+      joinAs("edit");
+      const setFields = vi.fn(async ({ recordPath }: { recordPath: string }) => ({
+        path: recordPath,
+        replaced: {},
+        kept: {},
+      }));
+      const createRecord = vi.fn(async () => ({
+        path: "tasks/b.md",
+        recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }));
+      context = {
+        ...context,
+        collections: {
+          query: vi.fn(),
+          getRecord: vi.fn(),
+          writes: { setFields, createRecord },
+        } as never,
+      };
+      await expect(
+        invoke("collectionSetFields", {
+          ...args(),
+          recordPath: "tasks/a.md",
+          fields: { status: "done" },
+        }),
+      ).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
+      await expect(
+        invoke("collectionCreateRecord", {
+          ...args(),
+          collectionPath: "tasks",
+          name: "b",
+          fields: {},
+        }),
+      ).resolves.toMatchObject({ ok: true, recordPath: "tasks/b.md" });
+      expect(setFields).toHaveBeenCalledOnce();
+      expect(createRecord).toHaveBeenCalledOnce();
+    });
+
     it("refuses the writes a member cannot make with one reason each", async () => {
       joinAs("edit");
       const refusals: [CliVerb, Record<string, unknown>, string][] = [
@@ -2738,11 +2776,6 @@ describe("CLI socket server", () => {
           "fileWrite",
           { requestId: "joined", files: [{ path: "notes/a.md", contentBase64: "eA==" }] },
           "In a joined workspace agents add pages with dohc document create.",
-        ],
-        [
-          "collectionSetFields",
-          { recordPath: "tasks/a.md", fields: { status: "done" } },
-          "Agents can't change Collection records in a joined workspace yet. Change them in the app.",
         ],
         [
           "export",

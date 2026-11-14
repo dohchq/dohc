@@ -963,15 +963,15 @@ const LISTED_CAPABILITIES = {
   }),
   "collection.record.edit": capability("Edit fields on a Collection record.", {
     ipcReason: "CLI and MCP action with no IPC channel.",
-    mcp: { owner: ["dohc_set_record_fields"] },
+    mcp: { owner: ["dohc_set_record_fields"], edit: ["dohc_set_record_fields"] },
     mcpReason:
-      "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+      "Edit profiles offer it for a joined workspace, through the record's live session on the server. Other profiles omit it; the socket refuses other share views.",
   }),
   "collection.record.create": capability("Create a Collection record.", {
     ipcReason: "Hand-registered IPC channel createCollectionRecord has no operation-table row.",
-    mcp: { owner: ["dohc_create_record"] },
+    mcp: { owner: ["dohc_create_record"], edit: ["dohc_create_record"] },
     mcpReason:
-      "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+      "Edit profiles offer it for a joined workspace, through the Collection's New record. Other profiles omit it; the socket refuses other share views.",
   }),
   "file.write": capability("Write ordinary workspace files.", {
     ipcReason: "No IPC channel carries this capability.",
