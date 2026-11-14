@@ -1,17 +1,18 @@
 import {lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent} from "react";
 import type {Ended} from "./ChatChannel";
-import {DohcMark} from "./icons";
+import {DohcMark, Icon} from "./icons";
 import {MemberChats, MemberComments, useMemberListing} from "./MemberChats";
 import {Toast} from "./Toast";
 import {memberSession} from "./memberWorkspace";
 import {filesFromAccumulator, isMarkdown, type FileAccumulator, type SharedFile, type ViewMeta} from "./model";
 import {accountUser, namedRequest} from "./namedRecipient";
-import {NamedSignIn, signInErrorMessage} from "./NamedSignIn";
+import {SignInForm, signInErrorMessage} from "./NamedSignIn";
 import {RETRY_INITIAL_MS, RETRY_MAX_MS} from "./retry";
 import {
   EpochFloorChangedError, FileTree, FileView, fileTitle, fileTree, loadCurrentState, loadLog, loadMeta, MAX_LOG_PAGES, Opening, StatePage,
   useNarrow, VersionMismatchError, VIEW_LOG_HOLD_MS, ViewResponseError, waitForRetry,
 } from "./viewFiles";
+import "./join.css";
 import "./workspace.css";
 
 // The live editor loads only once a page opens for editing.
@@ -30,7 +31,7 @@ const TABS: {id: Tab; label: string; panel: string}[] = [
 const SIDES = TABS.filter((item): item is typeof item & {id: Side} => item.id === "comments" || item.id === "chats");
 const BADGE = {view: "View only", comment: "Can comment", edit: "Can edit"} as const;
 const SESSION_ENDED = "Your session ended. Sign in again to keep reading.";
-const CHECK_FAILED = "dohc could not open this workspace. Check your connection, then try again.";
+const CHECK_FAILED = "dohc could not open this workspace. Check your connection.";
 const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
 const LISTING_FAILED = "dohc could not load Groups and comments", CHECK_CONNECTION = "Check your connection.";
 const refusedStatus = (error: unknown) => error instanceof ViewResponseError && [401, 403, 404].includes(error.status);
@@ -71,11 +72,18 @@ export default function WorkspaceApp({grantId}: {grantId: string | null}) {
     <p>Open the workspace again from your invitation.</p>
   </StatePage>;
   if (account === undefined) return <Opening/>;
-  if (!account) return <div className="viewer named-recipient workspace-sign-in">
-    <header><div><p className="eyebrow">dohc</p><h1>Shared workspace</h1></div></header>
-    <NamedSignIn title="Sign in to open this workspace" busy={pending !== null} error={error} onSignIn={signIn}>
-      {error === CHECK_FAILED && <button className="handoff-button secondary" onClick={() => check()}>Try again</button>}
-    </NamedSignIn>
+  if (!account) return <div className="state-page join-page">
+    <span className="bar-mark"><DohcMark/></span>
+    <main className="state">
+      <div className="state-message">
+        <span className="tile"><Icon name="users" size={20}/></span>
+        <h1>Sign in to open this workspace</h1>
+        <p>{error === SESSION_ENDED ? SESSION_ENDED : "Use the account the owner invited."}</p>
+        <SignInForm busy={pending !== null} error={error === SESSION_ENDED || error === CHECK_FAILED ? null : error} onSignIn={signIn}/>
+        {error === CHECK_FAILED && <p className="join-error" role="alert">{CHECK_FAILED}{" "}
+          <button className="join-link" type="button" disabled={pending !== null} onClick={() => check()}>Try again</button></p>}
+      </div>
+    </main>
   </div>;
   return <MemberWorkspace key={`${account.id}\n${grantId}`} grantId={grantId} account={account} signingOut={pending === "sign-out"}
     signOutError={error === SIGN_OUT_FAILED ? error : null} onSignOut={signOut} onSessionEnded={sessionEnded}/>;

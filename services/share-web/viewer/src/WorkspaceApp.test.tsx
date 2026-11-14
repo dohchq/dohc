@@ -114,7 +114,8 @@ const commentsPanel = () => container.querySelector<HTMLElement>("#workspace-com
 it("asks a signed-out browser to sign in with the invited account, then opens the workspace", async () => {
   server({signedIn: false}); await render();
   await settle(() => Boolean(container.querySelector('input[name="email"]')));
-  expect(text()).toContain("Sign in to open this workspace");
+  expect(container.querySelector(".state-page > .bar-mark")).not.toBeNull();
+  expect(container.querySelector(".state-message h1")?.textContent).toBe("Sign in to open this workspace");
   await act(async () => {setControlValue(container.querySelector('input[name="email"]')!, "sam@dohc.test");
     setControlValue(container.querySelector('input[name="password"]')!, "secret");});
   await click("Sign in"); await opened();

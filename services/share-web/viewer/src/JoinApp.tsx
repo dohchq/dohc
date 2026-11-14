@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   MAX_WORKSPACE_MEMBERS,
   parseWorkspaceJoinPreview,
@@ -9,7 +9,7 @@ import { fetchShareWeb } from "./apiVersion";
 import { DohcMark, Icon, type IconName } from "./icons";
 import { isJoinToken, JOIN_API, type JoinRefusal } from "./joinWire";
 import { accountUser, namedRequest } from "./namedRecipient";
-import { signInErrorMessage } from "./NamedSignIn";
+import { SignInForm, signInErrorMessage } from "./NamedSignIn";
 import { RETRY_BUDGET_MS } from "./retry";
 
 const TOKEN_KEY = "dohc.join.token";
@@ -460,57 +460,5 @@ function ErrorLine(props: { failure: Failure; busy: boolean }) {
         </button>
       ) : null}
     </p>
-  );
-}
-
-function SignInForm(props: {
-  busy: boolean;
-  error: string | null;
-  onSignIn(credentials: { email: string; password: string }): void;
-}) {
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const values = new FormData(event.currentTarget);
-    props.onSignIn({
-      email: String(values.get("email") ?? ""),
-      password: String(values.get("password") ?? ""),
-    });
-  };
-  return (
-    <form
-      className="join-form"
-      onSubmit={submit}
-      aria-describedby={props.error ? "join-sign-in-error" : undefined}
-    >
-      <label>
-        Email
-        <input name="email" type="email" autoComplete="username" required disabled={props.busy} />
-      </label>
-      <label>
-        Password
-        <input
-          name="password"
-          type="password"
-          autoComplete="current-password"
-          required
-          disabled={props.busy}
-        />
-      </label>
-      <button
-        className="handoff-button primary join-primary"
-        disabled={props.busy}
-        aria-busy={props.busy || undefined}
-      >
-        {props.busy ? "Signing in…" : "Sign in"}
-      </button>
-      {props.error ? (
-        <p id="join-sign-in-error" className="join-error" role="alert">
-          {props.error}
-        </p>
-      ) : null}
-      <a className="join-forgot" href="/account/forgot-password">
-        Forgot your password?
-      </a>
-    </form>
   );
 }
