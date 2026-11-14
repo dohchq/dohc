@@ -57,6 +57,9 @@ const POLL_MS = 4_000;
 // After a look that failed, such as the tool not running, dohc waits longer.
 const POLL_MS_AFTER_FAILURE = 30_000;
 const PAGE = 200;
+// The tool lists new work at once. Work it does not list yet counts as in
+// line for this long, then as over.
+const UNLISTED_MS = 10 * 60_000;
 
 const keyOf = (row: Pick<ForwardRow, "workspaceId" | "agentId" | "chatThreadId">) =>
   [row.workspaceId, row.agentId, row.chatThreadId].join("\n");
@@ -127,11 +130,24 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     };
     // A reminder recorded and never confirmed may have gone, so none follows it.
     if (row.reminder.state === "recorded") return line("silent", nowMs());
-    const runId = row.reminder.state === "sent" ? row.reminder.runId : row.runId;
+    const reminded = row.reminder.state === "sent" ? row.reminder : null;
+    const runId = reminded ? reminded.runId : row.runId;
+    const sentAtMs = reminded ? reminded.atMs : row.forwardedAtMs;
     const run = runId === null ? undefined : thread.runs.find((entry) => entry.id === runId);
-    // Work the tool no longer lists is over. Work it gave no id for is over
-    // when the thread is doing nothing.
-    const phase = run ? run.state : runId === null && thread.working ? "working" : "ended";
+    // Work the tool gave no id for is over when the thread is doing nothing.
+    // Work it does not list is not listed yet when nothing listed is newer,
+    // and is over when newer work pushed it off the list.
+    const unlisted =
+      runId !== null &&
+      nowMs() - sentAtMs < UNLISTED_MS &&
+      !thread.runs.some((entry) => entry.requestedAtMs >= sentAtMs);
+    const phase = run
+      ? run.state
+      : unlisted
+        ? "in-line"
+        : runId === null && thread.working
+          ? "working"
+          : "ended";
     if (phase === "in-line") return line("in-line", run?.requestedAtMs ?? row.forwardedAtMs);
     if (phase === "working")
       return thread.waitingOnPerson
@@ -153,7 +169,10 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       how: "line",
       forwardId: `remind-${forwardIdOf(row.workspaceId, row.agentId, row.messageId)}`,
     });
-    await save({ ...recorded, reminder: { state: "sent", runId: sent?.runId ?? null } });
+    await save({
+      ...recorded,
+      reminder: { state: "sent", runId: sent?.runId ?? null, atMs: nowMs() },
+    });
     return line("in-line", nowMs());
   }
 

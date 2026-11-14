@@ -265,6 +265,36 @@ describe("T3 Code's thread tools", () => {
       delivery: "started",
     });
     t3.tools.t3_thread_read = () => ({
+      recentRuns: [
+        {
+          runId: "run-9",
+          status: "running",
+          requestedAt: "2026-11-13T00:00:01.000Z",
+          startedAt: "2026-11-13T00:00:02.000Z",
+          completedAt: null,
+        },
+        {
+          runId: "run-8",
+          status: "queued",
+          requestedAt: "2026-11-13T00:00:03.000Z",
+          startedAt: null,
+          completedAt: null,
+        },
+        {
+          runId: "run-7",
+          status: "interrupted",
+          requestedAt: "2026-11-12T00:00:00.000Z",
+          startedAt: "2026-11-12T00:00:01.000Z",
+          completedAt: "2026-11-12T00:00:09.000Z",
+        },
+        {
+          runId: "run-6",
+          status: "a status dohc does not know",
+          requestedAt: "2026-11-11T00:00:00.000Z",
+          startedAt: null,
+          completedAt: null,
+        },
+      ],
       thread: {
         title: "Chief of Staff",
         activeRunId: "run-9",
@@ -313,7 +343,40 @@ describe("T3 Code's thread tools", () => {
       working: true,
       waitingOnPerson: true,
       closed: false,
+      // Each run is in line, going, or over. One with a status dohc does not
+      // know is going until T3 Code gives it an end.
+      runs: [
+        {
+          id: "run-9",
+          state: "working",
+          requestedAtMs: Date.parse("2026-11-13T00:00:01.000Z"),
+          startedAtMs: Date.parse("2026-11-13T00:00:02.000Z"),
+          endedAtMs: null,
+        },
+        {
+          id: "run-8",
+          state: "in-line",
+          requestedAtMs: Date.parse("2026-11-13T00:00:03.000Z"),
+          startedAtMs: null,
+          endedAtMs: null,
+        },
+        {
+          id: "run-7",
+          state: "ended",
+          requestedAtMs: Date.parse("2026-11-12T00:00:00.000Z"),
+          startedAtMs: Date.parse("2026-11-12T00:00:01.000Z"),
+          endedAtMs: Date.parse("2026-11-12T00:00:09.000Z"),
+        },
+        {
+          id: "run-6",
+          state: "working",
+          requestedAtMs: Date.parse("2026-11-11T00:00:00.000Z"),
+          startedAtMs: null,
+          endedAtMs: null,
+        },
+      ],
     });
+    expect(t3.calls.findLast((call) => call.tool === "t3_thread_read")?.args.runLimit).toBe(50);
 
     expect(t3.calls.filter((call) => call.tool === "t3_thread_list")).toEqual([
       {
@@ -354,6 +417,7 @@ describe("T3 Code's thread tools", () => {
     const t3 = await fakeT3Code();
     t3.eventStream = true;
     t3.tools.t3_thread_read = () => ({
+      recentRuns: [],
       thread: {
         title: "Quiet",
         activeRunId: null,
@@ -368,6 +432,7 @@ describe("T3 Code's thread tools", () => {
       working: false,
       waitingOnPerson: false,
       closed: true,
+      runs: [],
     });
   });
 

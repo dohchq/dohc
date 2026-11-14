@@ -28,7 +28,11 @@ const ForwardRow = z.strictObject({
   reminder: z.discriminatedUnion("state", [
     z.strictObject({ state: z.literal("none") }),
     z.strictObject({ state: z.literal("recorded") }),
-    z.strictObject({ state: z.literal("sent"), runId: z.string().min(1).max(512).nullable() }),
+    z.strictObject({
+      state: z.literal("sent"),
+      runId: z.string().min(1).max(512).nullable(),
+      atMs: z.number().int().nonnegative(),
+    }),
   ]),
 });
 export type ForwardRow = z.infer<typeof ForwardRow>;

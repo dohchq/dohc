@@ -213,6 +213,19 @@ describe("dohc's connection to T3 Code", () => {
     expect((await store.load())?.token).toBe("token-1");
   });
 
+  it("says a thread is gone from T3 Code, and gives back the work a message started", async () => {
+    const { t3, store, connection, forward } = await setup();
+    await store.save({ origin: t3.origin, token: "token-1", expiresAtMs: Date.now() + 60_000 });
+
+    expect(await forward("f1")).toEqual({ runId: "run-1" });
+
+    t3.refusals.t3_thread_read = "thread_not_found: Thread t1 is no longer available.";
+    const gone = await connection.thread("t1").catch((error: unknown) => error);
+    expect(gone).toBeInstanceOf(T3CodeError);
+    expect((gone as T3CodeError).problem).toBe("thread-gone");
+    expect((gone as T3CodeError).message).toBe("This thread is no longer in T3 Code.");
+  });
+
   it("forgets the sign-in on request", async () => {
     const { connection, forward } = await setup();
     await connection.signIn({ open: browser });
