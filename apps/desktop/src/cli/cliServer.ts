@@ -2187,23 +2187,35 @@ function refusePathColon(path: string): void {
   if (segments.includes(":")) throw new CliCommandError(`path rejected (colon): ${path}`);
 }
 
+const REQUEST_PATH_FIELDS = [
+  "fromPath",
+  "toPath",
+  "path",
+  "recordPath",
+  "collectionPath",
+  "datasetPath",
+  "descriptorPath",
+  "migrationPath",
+  "sourcePath",
+  "savePath",
+  "appRoot",
+  "outDir",
+  "schemaPath",
+  "operationsPath",
+];
+// The socket rebases a path from the caller's folder, and checks it, in a
+// hand-written case for each verb. A declared write has no such case, so its
+// input cannot name a path.
+for (const { socket } of Object.values<DeclaredWrite>(DECLARED_WRITES)) {
+  const field = REQUEST_PATH_FIELDS.find((path) => Object.hasOwn(socket.input.shape, path));
+  if (field)
+    throw new Error(
+      `${socket.verb} input names ${field}. The socket rebases no path of a declared write.`,
+    );
+}
+
 function validateRequestPathSpellings(request: CliRequest): void {
-  const fields = [
-    "fromPath",
-    "toPath",
-    "path",
-    "recordPath",
-    "collectionPath",
-    "datasetPath",
-    "descriptorPath",
-    "migrationPath",
-    "sourcePath",
-    "savePath",
-    "appRoot",
-    "outDir",
-    "schemaPath",
-    "operationsPath",
-  ];
+  const fields = REQUEST_PATH_FIELDS;
   const check = (value: object) => {
     for (const [key, path] of Object.entries(value)) {
       if (fields.includes(key) && typeof path === "string") refusePathColon(path);
@@ -2426,12 +2438,13 @@ const DECLARED_WRITE_SHARE_RULES = mapNamed(
       ? DECLARED_OWN_ANSWERS[verb as OwnAnswerVerb]
       : admission.receivedShare,
 );
-const RECEIVED_SHARE_RULES: {
-  [Verb in CliVerb]:
+// The type refuses a declared write's verb here, so a rule left behind cannot
+// replace the declared one.
+const HAND_WRITTEN_SHARE_RULES: {
+  [Verb in Exclude<CliVerb, DeclaredWriteVerb>]:
     | ReceivedShareRule
     | ((request: Extract<CliRequest, { verb: Verb }>) => ReceivedShareRule);
 } = {
-  ...DECLARED_WRITE_SHARE_RULES,
   // Reads. Account deletion is the account's, not a workspace's.
   chatLinks: "anywhere",
   chatFileMentions: "anywhere",
@@ -2527,6 +2540,11 @@ const RECEIVED_SHARE_RULES: {
   versionMerge: versionsInOwner,
   versionResolve: versionsInOwner,
 };
+const RECEIVED_SHARE_RULES: {
+  [Verb in CliVerb]:
+    | ReceivedShareRule
+    | ((request: Extract<CliRequest, { verb: Verb }>) => ReceivedShareRule);
+} = { ...HAND_WRITTEN_SHARE_RULES, ...DECLARED_WRITE_SHARE_RULES };
 
 // The answer a command gives instead of running from a received share's
 // folder, or undefined when it runs.

@@ -21,11 +21,14 @@ for (const family of Object.values<WriteFamily>(WRITE_DECLARATION_FAMILIES)) {
       if (!allowed.includes(socket.admission[rule]))
         throw new Error(`${name} has no listed ${rule} rule.`);
     }
-    const inputs = [socket.input];
-    if (!("none" in ipc)) inputs.push(ipc.input);
-    if (!("none" in mcp) && mcp.input) inputs.push(mcp.input);
+    // An input that reaches the socket cannot name a run id either: only the run rule adds one.
+    const socketInputs = [socket.input];
+    if (!("none" in mcp) && mcp.input) socketInputs.push(mcp.input);
+    const inputs = "none" in ipc ? socketInputs : [...socketInputs, ipc.input];
     for (const input of inputs) {
-      const field = ENVELOPE_FIELDS.find((envelope) => Object.hasOwn(input.shape, envelope));
+      const field = [...ENVELOPE_FIELDS, ...(socketInputs.includes(input) ? ["runId"] : [])].find(
+        (envelope) => Object.hasOwn(input.shape, envelope),
+      );
       if (field) throw new Error(`${name} input names ${field}, which its doors set.`);
     }
   }

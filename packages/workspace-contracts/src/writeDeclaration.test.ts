@@ -116,6 +116,37 @@ it.each(ENVELOPE_FIELDS)("refuses a declared write's socket input that names %s"
   );
 });
 
+// The run rule alone lets a request name a run.
+it("refuses a run id in a declared write's socket or MCP input, and takes one from the window", async () => {
+  changeRetry((declaration) => ({
+    ...declaration,
+    socket: {
+      ...declaration.socket,
+      admission: { ...declaration.socket.admission, run: "never-a-run" },
+      input: declaration.socket.input.extend({ runId: z.string() }) as z.ZodObject,
+    },
+  }));
+  await expect(import("./capabilities")).rejects.toThrow(
+    "retryStoppedRun input names runId, which its doors set.",
+  );
+  changeRetry((declaration) => ({
+    ...declaration,
+    mcp: {
+      ...declaration.mcp,
+      input: declaration.mcp.input.extend({ runId: z.string() }) as z.ZodObject,
+    },
+  }));
+  await expect(import("./capabilities")).rejects.toThrow(
+    "retryStoppedRun input names runId, which its doors set.",
+  );
+  vi.doUnmock("./stoppedRunWriteDeclarations");
+  vi.resetModules();
+  const { WRITE_DECLARATION_FAMILIES } = await import("./allWriteDeclarations");
+  expect(
+    Object.keys(WRITE_DECLARATION_FAMILIES.stoppedRun.retryStoppedRun.ipc.input.shape),
+  ).toContain("runId");
+});
+
 it("refuses an envelope field in a declared write's IPC or MCP input", async () => {
   changeRetry((declaration) => ({
     ...declaration,

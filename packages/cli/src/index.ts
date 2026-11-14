@@ -108,7 +108,14 @@ function buildCliRequest(
   if (isDeclaredCommand(command)) {
     // A declared verb sends its parsed fields as they are. The cast pairs each
     // verb with its fields, which TypeScript does not do across a union.
-    const { verb, actor: _actor, agentId: _agentId, json: _json, ...fields } = command;
+    const {
+      verb,
+      actor: _actor,
+      agentId: _agentId,
+      workspaceId: _workspaceId,
+      json: _json,
+      ...fields
+    } = command;
     return {
       protocolVersion: common.protocolVersion,
       verb,
@@ -118,7 +125,14 @@ function buildCliRequest(
   if (isDeclaredWriteCommand(command)) {
     // A declared write sends its parsed fields as they are, and the run's id
     // when its declaration lets a request name its run.
-    const { verb, actor: _actor, agentId: _agentId, json: _json, ...fields } = command;
+    const {
+      verb,
+      actor: _actor,
+      agentId: _agentId,
+      workspaceId: _workspaceId,
+      json: _json,
+      ...fields
+    } = command;
     const namesRun = DECLARED_WRITES[verb].socket.admission.run === "may-name-its-run";
     return {
       protocolVersion: common.protocolVersion,

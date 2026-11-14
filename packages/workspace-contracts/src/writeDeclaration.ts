@@ -3,9 +3,14 @@ import type { EnvelopeField, McpAccessLevel } from "./operationDeclaration";
 
 // What a caller sends to one door. The type refuses a shape that names an
 // envelope field, and allWriteDeclarations.ts refuses one at load.
-type Fields = z.ZodObject<
-  Readonly<Record<string, z.core.$ZodType>> & { readonly [Field in EnvelopeField]?: never }
+type Fields<Refused extends string = never> = z.ZodObject<
+  Readonly<Record<string, z.core.$ZodType>> & {
+    readonly [Field in EnvelopeField | Refused]?: never;
+  }
 >;
+// The socket adds a run id only under the run rule, so an input that reaches
+// the socket cannot name one.
+type SocketFields = Fields<"runId">;
 
 // The socket's rule for a request from a folder others share with you: it runs,
 // is refused as an owner or a chat command, or gives the answer cliServer.ts
@@ -68,7 +73,7 @@ export interface WriteDeclaration {
   // The verb the public CLI command and the MCP tool both send.
   readonly socket: {
     readonly verb: string;
-    readonly input: Fields;
+    readonly input: SocketFields;
     readonly result: z.ZodType;
     // Each rule is required and comes from its list above.
     readonly admission: SocketAdmission;
@@ -92,7 +97,7 @@ export interface WriteDeclaration {
         readonly reason: string;
         // What the tool takes, when that is not the socket's input. tools.ts
         // then turns it into the socket's input by hand.
-        readonly input?: Fields;
+        readonly input?: SocketFields;
       }
     | NoDoor;
 }
