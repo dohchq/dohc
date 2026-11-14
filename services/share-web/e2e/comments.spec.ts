@@ -517,7 +517,7 @@ test("keeps a Comment version share pinned through a main-version rename", async
   await expect(
     page
       .getByRole("navigation", { name: "Shared files" })
-      .getByRole("treeitem", { name: "pinned.md", exact: true }),
+      .getByRole("button", { name: "pinned.md", exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Pinned version" })).toBeVisible();
   await openComments(page);
@@ -584,7 +584,7 @@ test("keeps a Comment version share pinned through a main-version rename", async
   await expect(
     page
       .getByRole("navigation", { name: "Shared files" })
-      .getByRole("treeitem", { name: "pinned.md", exact: true }),
+      .getByRole("button", { name: "pinned.md", exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Pinned version" })).toBeVisible();
   await expect(
@@ -594,7 +594,7 @@ test("keeps a Comment version share pinned through a main-version rename", async
   await expect(
     page
       .getByRole("navigation", { name: "Shared files" })
-      .getByRole("treeitem", { name: "live.md", exact: true }),
+      .getByRole("button", { name: "live.md", exact: true }),
   ).toHaveCount(0);
   await expect(
     page.getByText("Snapshot discussion stays writable.", { exact: true }),

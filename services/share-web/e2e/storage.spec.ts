@@ -270,13 +270,13 @@ test("keeps shared content from creating viewer-origin browser storage", async (
 
     await observerPage
       .getByRole("navigation", { name: "Shared files" })
-      .getByRole("treeitem", { name: "observer.md", exact: true })
+      .getByRole("button", { name: "observer.md", exact: true })
       .click();
     await expect(observerPage.locator("article.markdown")).toContainText(ORDINARY_OBSERVER_TEXT);
     expect(observerPage.url()).toBe(observerUrl);
     await hostilePage
       .getByRole("navigation", { name: "Shared files" })
-      .getByRole("treeitem", { name: "storage.md", exact: true })
+      .getByRole("button", { name: "storage.md", exact: true })
       .click();
     await expect(hostilePage.locator("article.markdown")).toContainText(ORDINARY_HOSTILE_TEXT);
     expect(hostilePage.url()).toBe(hostileUrl);

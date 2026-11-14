@@ -70,7 +70,7 @@ test("opens mature shares from current state and then follows forward updates", 
   await expect(
     page
       .getByRole("navigation", { name: "Shared files" })
-      .getByRole("treeitem", { name: "mature.md", exact: true }),
+      .getByRole("button", { name: "mature.md", exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Current projection" })).toBeVisible();
   await expect(page.locator("article.markdown")).toContainText(

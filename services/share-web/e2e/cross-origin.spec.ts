@@ -133,7 +133,7 @@ test("separates cross-site Strict-cookie withholding from same-site CORS protect
     await expect(
       page
         .getByRole("navigation", { name: "Shared files" })
-        .getByRole("treeitem", { name: "cors-target.txt", exact: true }),
+        .getByRole("button", { name: "cors-target.txt", exact: true }),
     ).toBeVisible();
 
     const finalViewerUrl = new URL(page.url());
@@ -184,7 +184,7 @@ test("blocks a cross-origin handoff mint without disturbing the viewer", async (
     await viewer.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
     const fileButton = viewer
       .getByRole("navigation", { name: "Shared files" })
-      .getByRole("treeitem", { name: "handoff-target.md", exact: true });
+      .getByRole("button", { name: "handoff-target.md", exact: true });
     await expect(fileButton).toBeVisible();
     const session = new URL(viewer.url()).pathname.slice("/s/".length);
     expect(session).toMatch(/^[A-Za-z0-9_-]{12}$/u);

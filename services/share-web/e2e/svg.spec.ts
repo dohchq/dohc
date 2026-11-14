@@ -54,7 +54,7 @@ test("keeps a shared SVG inert and downloads it as an attachment", async ({
     await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
 
     const navigation = page.getByRole("navigation", { name: "Shared files" });
-    await navigation.getByRole("treeitem", { name: "attack.svg", exact: true }).click();
+    await navigation.getByRole("button", { name: "attack.svg", exact: true }).click();
     const viewerContent = page.locator("main.content");
     await expect(page.locator(".preview-image")).toHaveCount(0);
     await expect(viewerContent.locator("svg")).toHaveCount(0);

@@ -26,7 +26,7 @@ async function openLink(
   await page.goto(`${shareWebUrl}/s/#${secret}`);
   const fileButton = page
     .getByRole("navigation", { name: "Shared files" })
-    .getByRole("treeitem", { name: fileName, exact: true });
+    .getByRole("button", { name: fileName, exact: true });
   await expect(fileButton).toBeVisible();
   await fileButton.click();
   await expect(page.getByRole("heading", { name: heading })).toBeVisible();
