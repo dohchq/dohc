@@ -634,3 +634,28 @@ it("flushes the entry of every folder a kept package sits in", async () => {
   );
   expect(flushed.toSorted()).toEqual([".dohc/local", KEPT, `${KEPT}/notes`]);
 });
+
+it.each([
+  ['a relative path with ".."', "../../../notes/plan (recovered).dohc-recovery.json"],
+  ["an absolute path", "/notes/plan (recovered).dohc-recovery.json"],
+])(
+  "validates a kept package's path, %s, and writes nothing for an invalid one",
+  async (_case, path) => {
+    const { root, writes } = await workspace();
+    await expect(writes.keep(path, "{}")).rejects.toThrow("Invalid file path");
+    await expect(access(join(root, "notes"))).rejects.toThrow();
+  },
+);
+
+it("validates the note's path before keeping its package", async () => {
+  const { root, writes } = await workspace(),
+    { recovery } = queue(5, 2);
+  await expect(
+    saveLiveRecoveryCopy(
+      liveRecoveryPackage(recovery, { ...source, path: "../../../notes/plan.md" }),
+      writes,
+      directDocumentProjection,
+    ),
+  ).rejects.toThrow("Invalid file path");
+  await expect(access(join(root, "notes"))).rejects.toThrow();
+});

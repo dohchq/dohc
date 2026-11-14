@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { atomicCreateFile, syncAndClose, type DurableFileOperations } from "../atomicReplaceFile";
 import { localStateFolder, type LocalStateWorkspace } from "./workspaceLocalState";
 import {
@@ -62,7 +63,11 @@ export function keepOnThisComputer(
   operations: Pick<DurableFileOperations, "open" | "platform"> = {},
 ): LiveRecoveryWrites["keep"] {
   const { open: openFolder = open, platform = process.platform } = operations;
-  return async (relativePath, text) => {
+  return async (path, text) => {
+    // Validated like any path dohc writes to disk.
+    const validated = validateUserMaterializePath(path, { platform });
+    if (!validated.ok) throw new Error(`Invalid file path (${validated.reason}): ${path}`);
+    const relativePath = validated.normalized;
     const slash = relativePath.lastIndexOf("/");
     const name = slash < 0 ? KEPT_FOLDER : `${KEPT_FOLDER}/${relativePath.slice(0, slash)}`;
     const folder = await localStateFolder(workspace, name, {
