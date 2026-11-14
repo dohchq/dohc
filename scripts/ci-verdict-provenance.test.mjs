@@ -687,6 +687,8 @@ test("the timing rule finds engine gate's archive upload and each Rust test job'
   const steps = jobs.rust.steps,
     built = steps.findIndex((step) => step.name === RUST_ARCHIVE_BUILD_STEP);
   assert.equal(steps.filter((step) => step.name === RUST_ARCHIVE_BUILD_STEP).length, 1);
+  // The job API names an unnamed step "Run actions/upload-artifact@<sha>"; the rule matches that.
+  assert.equal(steps[built + 1].name, undefined);
   assert.match(steps[built + 1].uses, /^actions\/upload-artifact@/u);
   assert.equal(steps[built + 1].with.name, "rust-tests-${{ github.run_attempt }}");
   assert.equal(
