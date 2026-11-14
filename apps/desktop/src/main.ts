@@ -214,7 +214,8 @@ import {
 } from "./ipc/directMessagesIpc";
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
-import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
+import { protectedCopyHandlers, workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
+import { protectedCopyOperations } from "./ipc/writeOperations";
 import { createShareProposalsIpc } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
@@ -10566,6 +10567,18 @@ function registerIpcHandlers(): void {
       onRefusalsChanged: notifyNoticesChanged,
     }),
     rendererUsage.version,
+  );
+  registerOperations(
+    operationBoundary,
+    protectedCopyOperations,
+    protectedCopyHandlers({
+      requireEngineCapture,
+      activity,
+      notifyRenderer: (target) => {
+        notifyRenderer(target);
+        ownerPendingShare.refresh(target.workspaceId);
+      },
+    }),
   );
 
   workspaceEngineIpc.registerHistory();

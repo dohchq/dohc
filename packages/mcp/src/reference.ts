@@ -20,11 +20,13 @@ import {
   CLI_JSON_SCHEMA_VERSION,
   cliResultSchemas,
   DECLARED_VERBS,
+  DECLARED_WRITES,
+  type DeclaredWrite,
   type CliVerb as CliSocketVerb,
 } from "@dohc/cli/protocol";
 import { distinct, mapNamed } from "@dohc/workspace-contracts/operation-declaration";
 import { createDohcMcpServer } from "./server";
-import { DECLARED_TOOLS } from "./tools";
+import { DECLARED_TOOLS, DECLARED_WRITE_TOOLS } from "./tools";
 
 export const REFERENCE_PATH = "docs/reference/cli-mcp-sdk.md";
 
@@ -338,7 +340,10 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = distinct(
-  mapNamed(DECLARED_TOOLS, ({ cli }) => ({ cli: cli.verb })),
+  distinct(
+    mapNamed(DECLARED_TOOLS, ({ cli }) => ({ cli: cli.verb })),
+    mapNamed(DECLARED_WRITE_TOOLS, ({ socket }) => ({ cli: socket.verb })),
+  ),
   {
     dohc_link: { cli: "link" },
     dohc_read_share_copy: { cli: "shareCopy" },
@@ -368,7 +373,6 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = dist
     dohc_list_kept_copies: { cli: "keptCopies" },
     dohc_list_notices: { cli: "notices" },
     dohc_save_kept_copy: { cli: "saveKeptCopy" },
-    dohc_restore_protected_copy: { cli: "restoreProtectedCopy" },
     dohc_discard_protected_copy: { cli: "discardProtectedCopy" },
     dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
     dohc_retry_kept_edits: { cli: "retryKeptEdits" },
@@ -422,7 +426,6 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = dist
     dohc_list_automation_runs: { cli: "automationRuns" },
     dohc_read_automation_run: { cli: "automationRun" },
     dohc_retry_automation_run: { cli: "automationRetry" },
-    dohc_retry_chat_run: { cli: "chatRetry" },
     dohc_press_button: { cli: "automationPress" },
     dohc_inspect_buttons: { cli: "automationButtons" },
   } as const,
@@ -735,7 +738,11 @@ function declaredSocketVerbs(command: string): Record<string, CliSocketVerb> {
 export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
   ...declaredSocketVerbs("chat"),
   "create-group": "groupCreate",
-  retry: "chatRetry",
+  ...Object.fromEntries(
+    Object.values<DeclaredWrite>(DECLARED_WRITES).flatMap(({ cli, socket }) =>
+      "none" in cli || cli.command[0] !== "chat" ? [] : [[cli.command[1], socket.verb]],
+    ),
+  ),
 };
 
 // What a verb returns. Chat, history, Access, automation, and account verbs print their socket verb's

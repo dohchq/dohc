@@ -5,6 +5,7 @@ import type { LINKS_DECLARATIONS } from "@dohc/workspace-contracts/links-declara
 afterEach(() => {
   vi.doUnmock("@dohc/workspace-contracts/links-declarations");
   vi.doUnmock("@dohc/workspace-contracts/all-declarations");
+  vi.doUnmock("@dohc/workspace-contracts/all-write-declarations");
   vi.resetModules();
 });
 
@@ -92,4 +93,69 @@ it("makes IPC rows only for a listed family", async () => {
 it("loads every table with distinct channels", async () => {
   const { OPERATION_TABLES } = await import("./operationTables");
   expect(OPERATION_TABLES.length).toBeGreaterThan(0);
+});
+
+type WriteFamilies = typeof import("@dohc/workspace-contracts/all-write-declarations");
+
+it("refuses a listed write family with no IPC table", async () => {
+  vi.resetModules();
+  vi.doMock("@dohc/workspace-contracts/all-write-declarations", async (importOriginal) => {
+    const { WRITE_DECLARATION_FAMILIES: families } = await importOriginal<WriteFamilies>();
+    const { retryStoppedRun } = families.stoppedRun;
+    return {
+      WRITE_DECLARATION_FAMILIES: {
+        ...families,
+        notes: {
+          forgetRun: {
+            ...retryStoppedRun,
+            ipc: { ...retryStoppedRun.ipc, channel: "desktop:forget-run" },
+          },
+        },
+      },
+    };
+  });
+  await expect(import("./operationTables")).rejects.toThrow("forgetRun has no IPC row.");
+});
+
+it("refuses a declared write's channel that repeats a hand-written row's channel", async () => {
+  vi.resetModules();
+  vi.doMock("@dohc/workspace-contracts/all-write-declarations", async (importOriginal) => {
+    const { WRITE_DECLARATION_FAMILIES: families } = await importOriginal<WriteFamilies>();
+    const { retryStoppedRun } = families.stoppedRun;
+    return {
+      WRITE_DECLARATION_FAMILIES: {
+        ...families,
+        stoppedRun: {
+          retryStoppedRun: {
+            ...retryStoppedRun,
+            ipc: { ...retryStoppedRun.ipc, channel: "desktop:list-chat-messages" },
+          },
+        },
+      },
+    };
+  });
+  await expect(import("./operationTables")).rejects.toThrow(
+    "desktop:list-chat-messages is declared twice.",
+  );
+});
+
+it("makes IPC rows only for a listed write family, and none for a write the app does not offer", async () => {
+  vi.resetModules();
+  vi.doMock("@dohc/workspace-contracts/all-write-declarations", async (importOriginal) => {
+    const { WRITE_DECLARATION_FAMILIES: families } = await importOriginal<WriteFamilies>();
+    const { retryStoppedRun } = families.stoppedRun;
+    return {
+      WRITE_DECLARATION_FAMILIES: {
+        ...families,
+        stoppedRun: {
+          retryStoppedRun,
+          agentOnly: { ...retryStoppedRun, ipc: { none: "The app has no command for it." } },
+        },
+      },
+    };
+  });
+  const { declaredWriteRows } = await import("./operationTable");
+  expect(Object.keys(declaredWriteRows("stoppedRun", z.string()))).toEqual(["retryStoppedRun"]);
+  // @ts-expect-error notes is not a key of WRITE_DECLARATION_FAMILIES.
+  expect(() => declaredWriteRows("notes", z.string())).toThrow("notes is not a listed family.");
 });

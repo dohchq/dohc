@@ -72,10 +72,17 @@ import {
   type CliVerb,
   type CliResultByVerb,
   DECLARED_VERBS,
+  DECLARED_WRITES,
+  isDeclaredWriteVerb,
+  type DeclaredWrite,
+  type DeclaredWriteOf,
+  type DeclaredWriteVerb,
   isDeclaredVerb,
   type DeclaredVerb,
   type VersionResolution,
 } from "@dohc/cli/protocol";
+import { mapNamed } from "@dohc/workspace-contracts/operation-declaration";
+import type { SocketAdmission } from "@dohc/workspace-contracts/write-declaration";
 import { versionNameRefusal } from "../ipc/errorWords";
 import { nextStepWords } from "../ipc/bridgeContract";
 import { renderThreadMarkdown } from "@dohc/cli/thread-markdown";
@@ -2399,11 +2406,32 @@ const syncStatusInOwner = {
 const HISTORY_IN_OWNER = "History operations require the owning workspace. Open it to continue.";
 // A Collection request with one of these names the Collection by its path.
 const DATASET_PATH_FIELDS = ["datasetPath", "descriptorPath", "definition"] as const;
+// A declared write names its rule for a received share's folder. One that
+// gives its own answer keeps it here, and the type requires each.
+type OwnAnswerVerb = {
+  [
+    Verb in DeclaredWriteVerb
+  ]: DeclaredWriteOf<Verb>["socket"]["admission"]["receivedShare"] extends "own-answer"
+    ? Verb
+    : never;
+}[DeclaredWriteVerb];
+const DECLARED_OWN_ANSWERS: { readonly [Verb in OwnAnswerVerb]: { answer: unknown } } = {
+  // Protected copies stay on the computer of the workspace that kept them.
+  restoreProtectedCopy: { answer: keptCopiesUnavailable() },
+};
+const DECLARED_WRITE_SHARE_RULES = mapNamed(
+  DECLARED_WRITES,
+  ({ socket: { verb, admission } }): ReceivedShareRule =>
+    admission.receivedShare === "own-answer"
+      ? DECLARED_OWN_ANSWERS[verb as OwnAnswerVerb]
+      : admission.receivedShare,
+);
 const RECEIVED_SHARE_RULES: {
   [Verb in CliVerb]:
     | ReceivedShareRule
     | ((request: Extract<CliRequest, { verb: Verb }>) => ReceivedShareRule);
 } = {
+  ...DECLARED_WRITE_SHARE_RULES,
   // Reads. Account deletion is the account's, not a workspace's.
   chatLinks: "anywhere",
   chatFileMentions: "anywhere",
@@ -2466,7 +2494,6 @@ const RECEIVED_SHARE_RULES: {
   reply: "chat",
   nothingToReport: "chat",
   react: "chat",
-  chatRetry: "chat",
   fileChatStart: "chat",
   export: "chat",
   watch: "chat",
@@ -2477,7 +2504,6 @@ const RECEIVED_SHARE_RULES: {
   retryKeptEdits: keptEditsInOwner,
   stopAgain: keptEditsInOwner,
   // Protected copies stay on the computer of the workspace that kept them.
-  restoreProtectedCopy: { answer: keptCopiesUnavailable() },
   discardProtectedCopy: { answer: keptCopiesUnavailable() },
   liveDocuments: liveDocumentsInOwner,
   liveStop: liveDocumentsInOwner,
@@ -2567,7 +2593,9 @@ async function dispatch(
     "dataset",
     "keptCopies",
     "saveKeptCopy",
-    "restoreProtectedCopy",
+    ...Object.values<DeclaredWrite>(DECLARED_WRITES)
+      .filter(({ socket }) => socket.admission.paths === "from-callers-folder")
+      .map(({ socket }) => socket.verb),
     "discardProtectedCopy",
     "liveKeptEdits",
     "saveRecoveryCopy",
@@ -2946,6 +2974,74 @@ async function makeLink(
   }
 }
 
+type DeclaredWriteRequest = Extract<CliRequest, { verb: DeclaredWriteVerb }>;
+
+function isDeclaredWriteRequest(request: CliRequest): request is DeclaredWriteRequest {
+  return isDeclaredWriteVerb(request.verb);
+}
+
+// The socket handler of each declared write. The type requires one for each
+// verb. The received-share, read-only, run, and caller-folder rules have
+// already run; a handler keeps the checks only it can make.
+const DECLARED_WRITERS: {
+  readonly [Verb in DeclaredWriteVerb]: (
+    request: Extract<CliRequest, { verb: Verb }>,
+    context: CliWorkspaceContext,
+    options: CliServerOptions,
+  ) => Promise<z.input<DeclaredWriteOf<Verb>["socket"]["result"]>>;
+} = {
+  // Try again, for anyone who may post in the conversation: the same
+  // checks a reply makes, then the same two-attempt limit the chat's button
+  // keeps.
+  chatRetry: async (request, context, options) => {
+    if (!options.chatRuns)
+      return { ok: false as const, reason: "Agent runs are not available here." };
+    const { threadId } = await readReplyThread(
+      context,
+      chatsHost(context, options),
+      request.args.thread,
+    );
+    await options.chatWrites.assertMayPost(context, threadId);
+    const { failedRun } = await options.chatRuns.dispatchStateForThread(
+      context.workspaceId,
+      threadId,
+    );
+    if (!failedRun)
+      return { ok: false as const, reason: "No agent request in this conversation has stopped." };
+    if (!failedRun.retryable) {
+      const nextStep = failedRun.nextStep ? ` ${nextStepWords(failedRun.nextStep, undefined)}` : "";
+      return { ok: false as const, reason: `${failedRun.words} It can't run again.${nextStep}` };
+    }
+    try {
+      if (
+        !(await options.chatRuns.retryStoppedRun(context.workspaceId, threadId, failedRun.runId))
+      ) {
+        return {
+          ok: false as const,
+          reason: "This request can't run again now. Check dohc chat show for its state.",
+        };
+      }
+    } catch (error) {
+      return mcpFailure(error, "dohc could not run this request again.");
+    }
+    await notifyWrite(options, context);
+    return { ok: true as const, status: "queued" as const, threadId: cliThreadId(threadId) };
+  },
+  restoreProtectedCopy: async (request, context, options) => {
+    const keptCopies = context.keptCopies;
+    if (!keptCopies) return keptCopiesUnavailable();
+    try {
+      // Protected History names no author, so the summary says an agent
+      // restored it; every socket edit is an agent's.
+      const restored = await keptCopies.restoreProtected(request.args.id, "agent");
+      await notifyWrite(options, context);
+      return { ok: true as const, ...restored };
+    } catch (error) {
+      return pathFreeFailure(error, "dohc could not restore the kept change.");
+    }
+  },
+};
+
 async function dispatchWorkspace(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -2958,6 +3054,14 @@ async function dispatchWorkspace(
     request.args.resolve === undefined
   ) {
     throw new CliCommandError("--choose needs --resolve <message>");
+  }
+  if (isDeclaredWriteRequest(request)) {
+    const write = DECLARED_WRITERS[request.verb] as (
+      request: DeclaredWriteRequest,
+      context: CliWorkspaceContext,
+      options: CliServerOptions,
+    ) => Promise<unknown>;
+    return write(request, context, options);
   }
   const chats = chatsHost(context, options);
   switch (request.verb) {
@@ -3910,20 +4014,6 @@ async function dispatchWorkspace(
       }
     }
 
-    case "restoreProtectedCopy": {
-      const keptCopies = context.keptCopies;
-      if (!keptCopies) return keptCopiesUnavailable();
-      try {
-        // Protected History names no author, so the summary says an agent
-        // restored it; every socket edit is an agent's.
-        const restored = await keptCopies.restoreProtected(request.args.id, "agent");
-        await notifyWrite(options, context);
-        return { ok: true as const, ...restored };
-      } catch (error) {
-        return pathFreeFailure(error, "dohc could not restore the kept change.");
-      }
-    }
-
     case "discardProtectedCopy": {
       const keptCopies = context.keptCopies;
       if (!keptCopies) return keptCopiesUnavailable();
@@ -4250,41 +4340,6 @@ async function dispatchWorkspace(
       return shown.thread;
     }
 
-    // Try again, for anyone who may post in the conversation: the same
-    // checks a reply makes, then the same two-attempt limit the chat's button
-    // keeps.
-    case "chatRetry": {
-      if (!options.chatRuns)
-        return { ok: false as const, reason: "Agent runs are not available here." };
-      const { threadId } = await readReplyThread(context, chats, request.args.thread);
-      await options.chatWrites.assertMayPost(context, threadId);
-      const { failedRun } = await options.chatRuns.dispatchStateForThread(
-        context.workspaceId,
-        threadId,
-      );
-      if (!failedRun)
-        return { ok: false as const, reason: "No agent request in this conversation has stopped." };
-      if (!failedRun.retryable) {
-        const nextStep = failedRun.nextStep
-          ? ` ${nextStepWords(failedRun.nextStep, undefined)}`
-          : "";
-        return { ok: false as const, reason: `${failedRun.words} It can't run again.${nextStep}` };
-      }
-      try {
-        if (
-          !(await options.chatRuns.retryStoppedRun(context.workspaceId, threadId, failedRun.runId))
-        ) {
-          return {
-            ok: false as const,
-            reason: "This request can't run again now. Check dohc chat show for its state.",
-          };
-        }
-      } catch (error) {
-        return mcpFailure(error, "dohc could not run this request again.");
-      }
-      await notifyWrite(options, context);
-      return { ok: true as const, status: "queued" as const, threadId: cliThreadId(threadId) };
-    }
     default:
       break;
   }
@@ -4802,6 +4857,12 @@ async function dispatchAccount(
   return options.serverAccount.delete({ server, previewToken, password });
 }
 
+function declaredReadOnlyRuleOf(verb: string): SocketAdmission["readOnlyWorkspace"] | undefined {
+  return isDeclaredWriteVerb(verb)
+    ? DECLARED_WRITES[verb].socket.admission.readOnlyWorkspace
+    : undefined;
+}
+
 async function workspaceContextForRequest(
   request: CliRequest,
   options: CliServerOptions,
@@ -4838,14 +4899,20 @@ async function workspaceContextForRequest(
       throw new CliCommandError("Agent runs cannot write in another workspace.");
     else request.args.actor = "agent";
   }
+  // A declared write names what a read-only shared view does with it.
+  const declaredReadOnlyRule = declaredReadOnlyRuleOf(request.verb);
   const collectionWriteRequest =
-    request.verb === "collectionSetFields" || request.verb === "collectionCreateRecord";
+    declaredReadOnlyRule === "refuse-collection" ||
+    request.verb === "collectionSetFields" ||
+    request.verb === "collectionCreateRecord";
   const fileRequest =
+    declaredReadOnlyRule === "refuse-file" ||
     request.verb === "fileWrite" ||
     request.verb === "fileMove" ||
     request.verb === "fileDelete" ||
     request.verb === "fileDuplicate";
   const documentWriteRequest =
+    declaredReadOnlyRule === "refuse-document" ||
     request.verb === "documentEdit" ||
     request.verb === "documentCreate" ||
     request.verb === "heldNoteChange" ||
@@ -4858,7 +4925,7 @@ async function workspaceContextForRequest(
     request.verb === "post" ||
     request.verb === "reply" ||
     request.verb === "nothingToReport" ||
-    request.verb === "chatRetry" ||
+    (declaredReadOnlyRule !== undefined && declaredReadOnlyRule !== "handler-decides") ||
     request.verb === "react" ||
     request.verb === "export" ||
     request.verb === "watch" ||

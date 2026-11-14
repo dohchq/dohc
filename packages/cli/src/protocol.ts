@@ -1,5 +1,6 @@
 import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
 import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
+import { WRITE_DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-write-declarations";
 import {
   byName,
   distinct,
@@ -158,9 +159,6 @@ const streamPageArgs = {
 // A thread or message shows that thread; a group shows its stream.
 const showArgsSchema = z
   .object({ ...argsBase, target: z.string().min(1), peek: z.boolean(), ...streamPageArgs })
-  .strict();
-const chatRetryArgsSchema = z
-  .object({ ...argsBase, runId: z.string().min(1).optional(), thread: z.string().min(1) })
   .strict();
 // One part of what an agent reports about itself: printable text with no
 // surrounding space.
@@ -349,6 +347,50 @@ const declaredRequestSchemas = declaredOperations.map(({ cli: { verb }, input })
     })
     .strict();
 }) as DeclaredRequestSchema[];
+
+// Each declared write, by its socket verb. Its request, capability, and result derive from it.
+type WriteFamilies = typeof WRITE_DECLARATION_FAMILIES;
+export type DeclaredWrite = {
+  [Family in keyof WriteFamilies]: WriteFamilies[Family][keyof WriteFamilies[Family]];
+}[keyof WriteFamilies];
+const declaredWrites = Object.values(WRITE_DECLARATION_FAMILIES).flatMap((family) =>
+  Object.values<DeclaredWrite>(family),
+);
+export type DeclaredWriteVerb = DeclaredWrite["socket"]["verb"];
+export type DeclaredWriteOf<Verb extends DeclaredWriteVerb> = Extract<
+  DeclaredWrite,
+  { readonly socket: { readonly verb: Verb } }
+>;
+export const DECLARED_WRITES = byName(declaredWrites, (write) => write.socket.verb) as {
+  readonly [Verb in DeclaredWriteVerb]: DeclaredWriteOf<Verb>;
+};
+export function isDeclaredWriteVerb(verb: string): verb is DeclaredWriteVerb {
+  return Object.hasOwn(DECLARED_WRITES, verb);
+}
+// A request that may name its run carries the run's id beside its input.
+const runArgs = { runId: z.string().min(1).optional() };
+type DeclaredWriteArgs<Verb extends DeclaredWriteVerb> = z.output<z.ZodObject<typeof argsBase>> &
+  z.output<DeclaredWriteOf<Verb>["socket"]["input"]> &
+  (DeclaredWriteOf<Verb>["socket"]["admission"]["run"] extends "may-name-its-run"
+    ? z.output<z.ZodObject<typeof runArgs>>
+    : unknown);
+type DeclaredWriteRequestSchema = {
+  [Verb in DeclaredWriteVerb]: z.ZodObject<
+    typeof requestBase & { verb: z.ZodLiteral<Verb>; args: z.ZodType<DeclaredWriteArgs<Verb>> },
+    z.core.$strict
+  >;
+}[DeclaredWriteVerb];
+const declaredWriteRequestSchemas = declaredWrites.map(({ socket: { verb, input, admission } }) =>
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal(verb),
+      args: input
+        .extend({ ...argsBase, ...(admission.run === "may-name-its-run" ? runArgs : {}) })
+        .strict(),
+    })
+    .strict(),
+) as unknown as DeclaredWriteRequestSchema[];
 
 const documentPathArg = z.string().min(1).max(4096);
 // Each side of an edit is at most 256 KiB as UTF-8. The socket still refuses a
@@ -581,10 +623,9 @@ const saveKeptCopyArgsSchema = z.object({ ...argsBase, id: z.number().int() }).s
 const protectedCopyIdSchema = z
   .string()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-const restoreProtectedCopyArgsSchema = z
+const discardProtectedCopyArgsSchema = z
   .object({ ...argsBase, id: protectedCopyIdSchema })
   .strict();
-const discardProtectedCopyArgsSchema = restoreProtectedCopyArgsSchema;
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open. A delete takes at most 100 listed copies and must
 // accept that a program still using one may lose what it writes next.
@@ -910,6 +951,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     })
     .strict(),
   ...declaredRequestSchemas,
+  ...declaredWriteRequestSchemas,
   z
     .object({
       ...requestBase,
@@ -1007,7 +1049,6 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z
     .object({ ...requestBase, verb: z.literal("nothingToReport"), args: nothingToReportArgsSchema })
     .strict(),
-  z.object({ ...requestBase, verb: z.literal("chatRetry"), args: chatRetryArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("react"), args: reactArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("grep"), args: grepArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("export"), args: exportArgsSchema }).strict(),
@@ -1121,13 +1162,6 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z
     .object({
       ...requestBase,
-      verb: z.literal("restoreProtectedCopy"),
-      args: restoreProtectedCopyArgsSchema,
-    })
-    .strict(),
-  z
-    .object({
-      ...requestBase,
       verb: z.literal("discardProtectedCopy"),
       args: discardProtectedCopyArgsSchema,
     })
@@ -1228,7 +1262,10 @@ export const APP_RESPONSE_CAPABILITIES = {
 } as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
 
 export const CLI_CAPABILITIES = distinct(
-  mapNamed(DECLARED_VERBS, (operation) => [operation.capabilityId]),
+  distinct(
+    mapNamed(DECLARED_VERBS, (operation) => [operation.capabilityId]),
+    mapNamed(DECLARED_WRITES, (write) => [write.capabilityId]),
+  ),
   {
     stopSync: ["workspace.sync.stop"],
     link: ["work.reference.make"],
@@ -1250,7 +1287,6 @@ export const CLI_CAPABILITIES = distinct(
     post: ["chat.post"],
     reply: ["chat.reply"],
     nothingToReport: ["chat.reply"],
-    chatRetry: ["agent.run.retry"],
     react: ["chat.react"],
     grep: ["chat.search"],
     export: ["chat.export"],
@@ -1283,7 +1319,6 @@ export const CLI_CAPABILITIES = distinct(
     sharedFilesHeld: ["workspace.status"],
     syncFailure: ["workspace.status"],
     saveKeptCopy: ["file.kept.save"],
-    restoreProtectedCopy: ["file.protected.restore"],
     discardProtectedCopy: ["file.protected.discard"],
     retainedCopies: ["file.retained.list"],
     deleteRetainedCopies: ["file.retained.delete"],
@@ -1619,12 +1654,6 @@ const replyResultSchema = z
     warning: z.string().min(1).optional(),
   })
   .strict();
-const chatRetryResultSchema = z.union([
-  z
-    .object({ ok: z.literal(true), status: z.literal("queued"), threadId: z.string().min(1) })
-    .strict(),
-  z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
-]);
 const reactResultSchema = z
   .object({
     threadId: z.string().min(1),
@@ -2252,12 +2281,6 @@ const saveKeptCopyResultSchema = z.union([
   z.object({ ok: z.literal(true), status: z.literal("no-valid-name") }).strict(),
   rawFailureSchema,
 ]);
-const restoreProtectedCopyResultSchema = z.union([
-  z
-    .object({ ok: z.literal(true), status: z.literal("restored"), path: z.string().min(1) })
-    .strict(),
-  rawFailureSchema,
-]);
 const discardProtectedCopyResultSchema = z.union([
   z
     .object({ ok: z.literal(true), status: z.literal("discarded"), path: z.string().min(1) })
@@ -2819,9 +2842,14 @@ const automationPressResultSchema = z.union([
 ]);
 
 export const cliResultSchemas = distinct(
-  mapNamed(DECLARED_VERBS, (operation) => operation.result) as {
-    readonly [Verb in DeclaredVerb]: DeclaredOperationOf<Verb>["result"];
-  },
+  distinct(
+    mapNamed(DECLARED_VERBS, (operation) => operation.result) as {
+      readonly [Verb in DeclaredVerb]: DeclaredOperationOf<Verb>["result"];
+    },
+    mapNamed(DECLARED_WRITES, (write) => write.socket.result) as {
+      readonly [Verb in DeclaredWriteVerb]: DeclaredWriteOf<Verb>["socket"]["result"];
+    },
+  ),
   {
     stopSync: z.union([
       z
@@ -2914,7 +2942,6 @@ export const cliResultSchemas = distinct(
     nothingToReport: z
       .object({ threadId: z.string().min(1), nothingToReport: z.literal(true) })
       .strict(),
-    chatRetry: chatRetryResultSchema,
     react: reactResultSchema,
     grep: grepResultSchema,
     export: exportResultSchema,
@@ -2984,7 +3011,6 @@ export const cliResultSchemas = distinct(
       rawFailureSchema,
     ]),
     saveKeptCopy: saveKeptCopyResultSchema,
-    restoreProtectedCopy: restoreProtectedCopyResultSchema,
     discardProtectedCopy: discardProtectedCopyResultSchema,
     retainedCopies: retainedCopiesResultSchema,
     deleteRetainedCopies: deleteRetainedCopiesResultSchema,

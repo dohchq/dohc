@@ -170,6 +170,7 @@ import type {
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { explorerMenuOperations } from "./explorerMenuOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
+import type { protectedCopyOperations, stoppedRunOperations } from "./writeOperations";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   AgentId,
@@ -3748,10 +3749,6 @@ export const ProtectedCopyPayload = z.object({
   workspaceId: WORKSPACE_ID,
   id: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
 });
-export const RestoreProtectedCopyResult = z.object({
-  status: z.literal("restored"),
-  path: z.string().min(1),
-});
 export const DiscardProtectedCopyResult = z.object({
   status: z.literal("discarded"),
   path: z.string().min(1),
@@ -3929,13 +3926,6 @@ export const workspaceVersionOperations = {
     channel: "desktop:save-kept-copy",
     payload: SaveKeptCopyPayload,
     result: SaveKeptCopyResult,
-    ...versionGuard,
-  },
-  restoreProtectedCopy: {
-    capabilityId: "file.protected.restore",
-    channel: "desktop:restore-protected-copy",
-    payload: ProtectedCopyPayload,
-    result: RestoreProtectedCopyResult,
     ...versionGuard,
   },
   discardProtectedCopy: {
@@ -6914,29 +6904,9 @@ export const ChatDispatchStateForThreadResult = z
   .strict();
 export type ChatDispatchStateForThreadResult = z.infer<typeof ChatDispatchStateForThreadResult>;
 
-export const RetryStoppedRunPayload = z
-  .object({
-    workspaceId: WORKSPACE_ID,
-    threadId: OPAQUE_ID,
-    runId: OPAQUE_ID,
-  })
-  .strict();
-export type RetryStoppedRunPayload = z.infer<typeof RetryStoppedRunPayload>;
-
-// False when the run can't be tried again any more, as after a second press.
-export const RetryStoppedRunResult = z.object({ queued: z.boolean() }).strict();
-export type RetryStoppedRunResult = z.infer<typeof RetryStoppedRunResult>;
-export const stoppedRunOperations = {
-  retryStoppedRun: {
-    capabilityId: "agent.run.retry",
-    scope: "workspace",
-    channel: "desktop:retry-stopped-run",
-    payload: RetryStoppedRunPayload,
-    result: RetryStoppedRunResult,
-    guard: "active-workspace",
-    inactiveMessage: "This window changed workspaces.",
-  },
-} as const satisfies OperationTable;
+export type RetryStoppedRunResult = Awaited<
+  ReturnType<OperationBridge<typeof stoppedRunOperations>["retryStoppedRun"]>
+>;
 
 export const RunnerSelfTestResult = z
   .object({
@@ -9191,6 +9161,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
+    OperationBridge<typeof protectedCopyOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof agentThreadOperations>,
     OperationBridge<typeof agentsListeningOperations>,
