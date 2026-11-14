@@ -200,7 +200,25 @@ it("keeps the original bytes in a package when the edits cannot be read as a doc
   ).toEqual(recovery.entries.map((entry) => Buffer.from(entry.update)));
 });
 
-it("writes the package before the copy is projected, and keeps it when the projection fails", async () => {
+it("makes the copy when the projection fails once and works when run again", async () => {
+  const { root, writes } = await workspace(),
+    { recovery } = queue(3);
+  const run = vi.fn<DocumentProjection["run"]>(directDocumentProjection.run);
+  run.mockRejectedValueOnce(new Error("dohc could not prepare the document in time."));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const saved = await saveLiveRecoveryCopy(liveRecoveryPackage(recovery, source), writes, {
+      run,
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(saved.copyPath).toBe("notes/plan (recovered).md");
+    await expect(access(join(root, saved.copyPath!))).resolves.toBeUndefined();
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
+it("writes the package before the copy is projected, and keeps it when the projection fails twice", async () => {
   const { root, writes } = await workspace(),
     { recovery } = queue(3);
   const packaged = join(root, KEPT, "notes/plan (recovered).dohc-recovery.json");
@@ -223,7 +241,7 @@ it("writes the package before the copy is projected, and keeps it when the proje
       notInNote: 0,
       storedOn: "this-computer",
     });
-    expect(projection.run).toHaveBeenCalledOnce();
+    expect(projection.run).toHaveBeenCalledTimes(2);
     expect(reopen(JSON.parse(await readFile(packaged, "utf8")))).toBeTruthy();
   } finally {
     vi.restoreAllMocks();

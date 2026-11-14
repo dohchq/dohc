@@ -231,12 +231,16 @@ export async function saveLiveRecoveryCopy(
     );
     if (packagePath === null) continue;
     const packageOnly = { copyPath: null, packagePath, notInNote: 0, storedOn: recovery.storedOn };
-    let copy: RecoveredDocument | null;
-    try {
-      copy = await projection.run({ kind: "recover", accepted, kept });
-    } catch (error) {
-      console.error("[desktop] live recovery copy kept only its package:", error);
-      return packageOnly;
+    let copy: RecoveredDocument | null = null;
+    // A second run starts a fresh worker, in case the first exited or ran out of time.
+    for (let run = 1; ; run += 1) {
+      try {
+        copy = await projection.run({ kind: "recover", accepted, kept });
+        break;
+      } catch (error) {
+        console.error("[desktop] live recovery copy could not be projected:", error);
+        if (run === 2) return packageOnly;
+      }
     }
     if (copy === null) return packageOnly;
     // A copy that can't be written is an error, so the caller keeps what it holds for Try again.

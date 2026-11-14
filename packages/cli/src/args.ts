@@ -683,7 +683,7 @@ const DOCUMENT_VERBS = {
       "dohc also keeps a recovery package with every kept edit on this computer, in .dohc/local/live-recovery, which does not sync.",
       "For edits the server keeps, dohc then tells the server the copy is saved, and the recovery becomes copied.",
       "keptEdits is kept when the edits stay where storedOn says, and copied when the server may now release them.",
-      "It is ended for edits a Stop could not write: dohc no longer keeps them, and the copy holds them.",
+      "It is ended for edits a Stop could not write: dohc no longer keeps them, and the copy holds them, or the package when there is no copy.",
       "dohc writes these files itself, not as the agent that asked.",
     ],
     parse: (input) => {
