@@ -396,6 +396,7 @@ function createVerificationFixtures(directory) {
       }
       if(command==='pnpm' && args.includes('vitest.self-host-native.config.ts')) {
         assert.ok(fixture.js,'Unselected native proof');
+        assert.equal(existsSync(join(repoRoot,'.dohc-dev/browser-installed')),true);
         assertPrepared({engineBinary:stagedEnginePath});
         assert.equal(options.env.DOHC_SERVICE_HOST_PROOF_BINARY,stagedEnginePath);
         assert.equal(options.env.DOHC_SERVICE_HOST_PROOF_SHA256,hashFile(stagedEnginePath));

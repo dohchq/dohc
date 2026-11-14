@@ -132,11 +132,23 @@ test("shards cover every task once, including uneven and small workloads", () =>
     }
 });
 
-test("package typechecks stay complete when changed files select no package tests", async () => {
+test("package typechecks and native proofs stay complete when changed files select no package tests", async () => {
   const packages = readWorkspacePackages(process.cwd()).filter(
     (pkg) => pkg.manifest.scripts?.typecheck,
   );
-  const tasks = await javascriptTasks({ changed: ["docs/guide.md"], proofs: false });
+  const tasks = await javascriptTasks({ changed: ["docs/guide.md"], proofs: true });
+  // Each native test runs alone in the cloud, selected by its own file.
+  const native = Map.groupBy(
+    tasks.filter((task) => task.kind === "self-host-native"),
+    (task) => task.file,
+  );
+  for (const file of [
+    "services/share-web/src/selfHostedLiveNative.integration.ts",
+    "services/share-web/src/namedRecipientAuthenticatedNative.integration.ts",
+    "services/share-web/src/remoteMcpNative.integration.ts",
+  ])
+    assert.ok(native.get(file)?.length, file);
+  for (const file of native.keys()) assert.ok(existsSync(resolve(file)), file);
   const typechecks = tasks.filter((task) => task.id.startsWith("typecheck:"));
   assert.deepEqual(
     typechecks.map((task) => task.id).sort(),

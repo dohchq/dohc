@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { assertPrepared, hashFile, prepare, stagedEnginePath } from "./build.mjs";
@@ -189,6 +189,8 @@ export async function runJavascript(
           "run",
           "--config",
           "vitest.self-host-native.config.ts",
+          // Vitest matches a filter against the path from its root.
+          relative(resolve(repoRoot, "services/share-web"), resolve(repoRoot, task.file)),
           "--testNamePattern",
           `^${escaped}$`,
           "--reporter=default",
@@ -348,7 +350,12 @@ export async function cloudJavascript(part, index = 0) {
                 record.build = build;
               }),
             ];
-            if (shard.some((group) => ["desktop", "accounts"].includes(group.kind)))
+            // namedRecipientAuthenticatedNative drives Chromium too.
+            if (
+              shard.some((group) =>
+                ["desktop", "accounts", "self-host-native"].includes(group.kind),
+              )
+            )
               actions.push(
                 step("browser installation", () =>
                   run(...pnpm(["exec", "playwright", "install", "chromium"]), {

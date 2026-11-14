@@ -201,6 +201,8 @@ jobs:
               - 'apps/desktop/scripts/build-workspace-engine.mjs'
               - 'apps/desktop/scripts/dev.mjs'
               - 'apps/desktop/electron-builder.yml'
+              # shards.test.mjs plans the native proofs from this list of files.
+              - 'services/share-web/vitest.self-host-native.config.ts'
               # debug.test.mjs and verification.test.mjs import the shutdown budgets.
               - 'apps/desktop/src/shutdownBudgets.ts'
               # artifact-inputs.test.mjs copies these into its fixtures.

@@ -341,20 +341,23 @@ export async function javascriptTasks({
         const result = await ctx.collectTests(await ctx.globTestSpecifications());
         if (
           result.unhandledErrors.length ||
-          result.testModules.length !== 1 ||
-          result.testModules[0].errors().length
+          !result.testModules.length ||
+          result.testModules.some((module) => module.errors().length)
         )
           throw new Error("Cannot collect the self-host native proofs.");
-        const cases = [...result.testModules[0].children.allTests()];
-        if (!cases.length) throw new Error("No self-host native proofs.");
-        for (const test of cases)
-          tasks.push({
-            id: `self-host-native:${test.fullName}`,
-            kind: "self-host-native",
-            name: test.fullName,
-            native: true,
-            weight: 15,
-          });
+        for (const module of result.testModules) {
+          const cases = [...module.children.allTests()];
+          if (!cases.length) throw new Error(`No self-host native proofs in ${module.moduleId}.`);
+          for (const test of cases)
+            tasks.push({
+              id: `self-host-native:${test.fullName}`,
+              kind: "self-host-native",
+              name: test.fullName,
+              file: fileId(module.moduleId),
+              native: true,
+              weight: 15,
+            });
+        }
       } finally {
         await ctx.close();
       }
