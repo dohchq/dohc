@@ -1165,6 +1165,38 @@ describe("a retrying page keeps its session", () => {
     expect(asked).toBe(1);
   });
 
+  it("stops once the page has used its new session, even when the invitation never answers", async () => {
+    const f = await live();
+    vi.useFakeTimers();
+    let asked = 0,
+      read = 0;
+    f.intercept((path) => {
+      if (path === "/api/live/named-documents") {
+        read++;
+        return new Promise<Response>(() => {});
+      }
+      if (path === "/api/live/named-session") {
+        asked++;
+        return new Promise<Response>(() => {});
+      }
+      return path === "/api/live/named-ticket" ? new Response(null, { status: 404 }) : undefined;
+    });
+    f.socket.close();
+    await vi.waitFor(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+      expect(asked).toBe(1);
+    });
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 30_000);
+    expect(f.value.state()).toMatchObject({
+      status: "disconnected",
+      reason: "authority-unavailable",
+    });
+    const stoppedAt = read;
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(read).toBe(stoppedAt);
+    expect(asked).toBe(1);
+  });
+
   // Try again can start at any point while the attempt it replaces reads the account.
   it.each(Array.from({ length: 12 }, (_, ticks) => ticks))(
     "keeps Try again's new session separate from an attempt it replaced, %i ticks in",

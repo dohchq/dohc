@@ -150,6 +150,8 @@ export function createNamedLiveBrowserTransport<
       refused?: boolean;
       /** Set when the attempt uses the session an earlier attempt received. */
       kept?: boolean;
+      /** Set while an attempt with no session left reads the invitation, so its deadline stops retries. */
+      spent?: boolean;
     };
     let attempt: Attempt | undefined;
     let automatic = false,
@@ -445,6 +447,7 @@ export function createNamedLiveBrowserTransport<
     }
     /** Whether the invitation says the owner removed this account's access. */
     async function accessRemoved(held: Attempt, grantId: string): Promise<boolean> {
+      held.spent = true;
       try {
         await json(held, "/api/live/named-documents", { grantId });
         return false;
@@ -477,11 +480,13 @@ export function createNamedLiveBrowserTransport<
           fail(
             held,
             "disconnected",
-            held.refused
-              ? passingRefusal()
-              : held.socket && !held.route
-                ? "host-unavailable"
-                : "connect-timeout",
+            held.spent
+              ? "authority-unavailable"
+              : held.refused
+                ? passingRefusal()
+                : held.socket && !held.route
+                  ? "host-unavailable"
+                  : "connect-timeout",
           ),
         limits.connectTimeoutMs,
       );
