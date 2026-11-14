@@ -11,6 +11,7 @@ import {
 } from "./serviceActivationDriver";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery";
 import { liveHostSignal, withDeadline, withLiveHostSignal } from "./liveHostSignal.js";
+import { untilAborted } from "./namedLiveFrameHost.js";
 import { observeRelayWrites, type LiveHostChanges } from "./relayWriteChanges.js";
 import { parseNativeLiveSyncConfig } from "./liveSyncConfig.js";
 import { LiveDocumentWork } from "./liveDocumentWork.js";
@@ -647,7 +648,7 @@ export async function startServiceLiveHost(options: {
   let turn: Promise<unknown> = Promise.resolve();
   // A caller that gives up while its turn is still queued, as an editor's open does when the browser goes,
   // leaves at once, so the relay frees what it holds for that open. Its work then never runs. Work that has
-  // started keeps its caller until it ends.
+  // started runs until it ends, and keeps the turn until then.
   const exclusive = <T>(work: () => Promise<T>, callerSignal?: AbortSignal): Promise<T> => {
     let leave: (() => void) | undefined;
     const left =
@@ -3907,8 +3908,13 @@ export async function startServiceLiveHost(options: {
               objectId: binding.objectId,
               lineageClaimId: binding.lineageClaimId,
             });
-            await wake(document, callerSignal);
-            await drain(document, callerSignal);
+            // An open whose caller gives up stops waiting at once, even for a started reload step that can't stop
+            // at once, so the relay frees what it holds for that open. The reload keeps its turn until it ends.
+            const waitFor = <T>(work: Promise<T>) =>
+              callerSignal ? untilAborted(work, callerSignal) : work;
+            await waitFor(wake(document, callerSignal));
+            await waitFor(drain(document, callerSignal));
+            callerSignal?.throwIfAborted();
             check();
             const consumer = consumerFor(document)!;
             const registration = consumer.captureRegistration(binding);

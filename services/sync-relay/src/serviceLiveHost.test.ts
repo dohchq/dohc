@@ -7896,6 +7896,46 @@ it("lets an open given up while it waits behind an unload go at once, without re
   release();
 });
 
+// Proves: an open whose caller gives up while its own reload is in the engine fails at once, before the engine
+// answers. Once that reload ends and a pass reloads the document, a later open opens it, with passes held.
+it("lets an open given up while its reload is in the engine go at once, with passes held", async () => {
+  const polls = heldPolls(),
+    clock = manualClock(),
+    o = await idleHost({ polls, clock });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.hold(true);
+  await vi.waitFor(() => expect(clock.armed()).toContain(600_000));
+  clock.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  o.hold(false);
+  const activate = vi.mocked(ServiceActivationDriver.prototype.activate),
+    before = activate.getMockImplementation()!,
+    entered = deferred<void>(),
+    answer = deferred<void>();
+  // The engine answers the reload only when the test says, whatever its caller does.
+  activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    if (args[0].path !== o.sibling.path) return before.apply(this, args);
+    entered.resolve();
+    return answer.promise.then(() => before.apply(this, args));
+  });
+  const release = o.editors.acquire(o.sibling),
+    gone = new AbortController();
+  let left: unknown;
+  const abandoned = o.host.captureNative(o.binding(), gone.signal).catch((error: unknown) => {
+    left = error;
+  });
+  await entered.promise;
+  gone.abort(new Error("The browser left."));
+  await vi.waitFor(() => expect(left).toEqual(new Error("The browser left.")));
+  activate.mockImplementation(before);
+  answer.resolve();
+  await abandoned;
+  await polls.until(o.f, () => o.host.isDocumentReady(o.document));
+  const native = await o.host.captureNative(o.binding());
+  expect(native.invalidated.aborted).toBe(false);
+  release();
+});
+
 // Proves: an idle unload whose reply was lost goes again at its retry deadline, not before, without settling first,
 // and a reconnect sends it once more before reloading the document, with passes held.
 
