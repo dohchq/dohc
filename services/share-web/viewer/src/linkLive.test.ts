@@ -1,9 +1,16 @@
+// @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { encodeLiveFrameSync } from "@dohc/live-session-contract/live-frame";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { openLinkDocument } from "./linkLive";
+import * as browserTransport from "@dohc/ydoc-projection/named-live-browser-transport";
+import {
+  LINK_REFUSALS,
+  linkRefusalBody,
+  type LinkRefusalCode,
+} from "@dohc/security-contract/link-refusal";
 
 const limits = {
   provider: {
@@ -30,6 +37,257 @@ const limits = {
   sendTimeoutMs: 500,
   drainPollMs: 10,
 };
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+// app_collection_missing comes only from an app's routes, never from a live link.
+const liveLinkRefusals = (Object.keys(LINK_REFUSALS) as LinkRefusalCode[]).filter(
+  (code) => code !== "app_collection_missing",
+);
+it.each(liveLinkRefusals)("shows the scoped refusal %s", async (code) => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json(linkRefusalBody(code), { status: LINK_REFUSALS[code].status })),
+  );
+  await expect(
+    openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal),
+  ).rejects.toThrow(LINK_REFUSALS[code].error);
+});
+it("opens the link socket with a one-use ticket and cookie credentials without account or capability material", async () => {
+  const create = vi.spyOn(browserTransport, "createNamedLiveBrowserTransport");
+  const calls: { url: string; protocols: string[] }[] = [];
+  class Socket extends EventTarget {
+    readyState = 1;
+    bufferedAmount = 0;
+    protocol = "dohc-live-v1";
+    extensions = "";
+    binaryType = "arraybuffer";
+    constructor(url: string, protocols: string[]) {
+      super();
+      calls.push({ url, protocols });
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+    send() {}
+    close() {
+      this.readyState = 3;
+    }
+  }
+  vi.stubGlobal("WebSocket", Socket);
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  const fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    expect(init?.credentials).toBe("same-origin");
+    expect(init?.redirect).toBe("error");
+    if (url === "/api/live/link-document") {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        discriminator: "abcdefghijkl",
+        path: "docs/a.md",
+      });
+      return Response.json({ objectId: "object-a", limits });
+    }
+    if (url === "/api/live/link-document-state") return new Response(null, { status: 204 });
+    expect(url).toBe("/api/live/link-ticket");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      discriminator: "abcdefghijkl",
+      objectId: "object-a",
+    });
+    return Response.json({
+      token: "ab".repeat(32),
+      publicPrincipalId: "public-link-a",
+      expiresAtMs: Date.now() + 60_000,
+    });
+  });
+  vi.stubGlobal("fetch", fetch);
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await session.reconnect();
+    expect(calls).toEqual([
+      {
+        url: "wss://share.example.test/api/live/link?session=abcdefghijkl",
+        protocols: ["dohc-live-v1", `dohc-live-ticket.${"ab".repeat(32)}`],
+      },
+    ]);
+    // The file, its early state, then the ticket.
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(session.state().status).toBe("connecting");
+    expect(create.mock.calls[0]![0].recordingContext!({ objectId: "object-a" })).toEqual({
+      kind: "link",
+      publicPrincipalId: "public-link-a",
+    });
+    fetch.mockImplementationOnce(async () =>
+      Response.json({
+        token: "cd".repeat(32),
+        publicPrincipalId: "public-link-b",
+        expiresAtMs: Date.now() + 60_000,
+      }),
+    );
+    await session.reconnect();
+    expect(calls).toHaveLength(1);
+    expect(create.mock.calls[0]![0].recordingContext!({ objectId: "object-a" })).toEqual({
+      kind: "link",
+      publicPrincipalId: "public-link-a",
+    });
+  } finally {
+    session.close();
+  }
+});
+it("refuses unexpected metadata fields and responses arriving after selection cancellation", async () => {
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json({ objectId: "object-a", limits, capabilityToken: "private" })),
+  );
+  await expect(
+    openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal),
+  ).rejects.toThrow("Invalid file");
+  const controller = new AbortController();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      controller.abort();
+      return Response.json({ objectId: "object-a", limits });
+    }),
+  );
+  await expect(openLinkDocument("abcdefghijkl", "docs/a.md", controller.signal)).rejects.toThrow();
+});
+it("reports a refused link ticket as unavailable, not as a failed connection", async () => {
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: RequestInfo | URL) =>
+      url === "/api/live/link-document"
+        ? Response.json({ objectId: "object-a", limits })
+        : Response.json({ ok: false, error: "not found" }, { status: 404 }),
+    ),
+  );
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await session.reconnect();
+    expect(session.state()).toMatchObject({
+      status: "disconnected",
+      reason: "authority-unavailable",
+    });
+  } finally {
+    session.close();
+  }
+});
+// Neither answer changes until someone else acts: the owner makes a new link, or starts live editing again.
+it.each([
+  ["link_full", "link-full"],
+  ["link_live_stopped", "live-stopped"],
+] as const)("stops on %s without trying again", async (code, reason) => {
+  vi.useFakeTimers();
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  const fetch = vi.fn(async (url: RequestInfo | URL) =>
+    url === "/api/live/link-document"
+      ? Response.json({ objectId: "object-a", limits })
+      : Response.json(linkRefusalBody(code), { status: LINK_REFUSALS[code].status }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await session.reconnect();
+    expect(session.state()).toMatchObject({ status: "disconnected", reason });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  } finally {
+    session.close();
+    vi.useRealTimers();
+  }
+});
+// Try again asks once. It works only after the owner starts live editing again.
+it("asks once on Try again while live editing is stopped, and opens the file once it started again", async () => {
+  vi.useFakeTimers();
+  class Socket extends EventTarget {
+    readyState = 1;
+    bufferedAmount = 0;
+    protocol = "dohc-live-v1";
+    extensions = "";
+    binaryType = "arraybuffer";
+    constructor() {
+      super();
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+    send() {}
+    close() {
+      this.readyState = 3;
+    }
+  }
+  vi.stubGlobal("WebSocket", Socket);
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  let stopped = true;
+  const fetch = vi.fn(async (url: RequestInfo | URL) =>
+    url === "/api/live/link-document"
+      ? Response.json({ objectId: "object-a", limits })
+      : stopped
+        ? Response.json(linkRefusalBody("link_live_stopped"), { status: 503 })
+        : Response.json({
+            token: "ab".repeat(32),
+            publicPrincipalId: "public-link-a",
+            expiresAtMs: Date.now() + 60_000,
+          }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await session.reconnect();
+    expect(session.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+    await session.reconnect();
+    expect(session.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    stopped = false;
+    await session.reconnect();
+    expect(session.state().status).toBe("connecting");
+    expect(fetch).toHaveBeenCalledTimes(5);
+  } finally {
+    session.close();
+    vi.useRealTimers();
+  }
+});
+// After a server restart the share service answers 503 until live editing can start again.
+it("tries a busy link ticket again by itself and opens the file once the server answers", async () => {
+  class Socket extends EventTarget {
+    readyState = 1;
+    bufferedAmount = 0;
+    protocol = "dohc-live-v1";
+    extensions = "";
+    binaryType = "arraybuffer";
+    constructor() {
+      super();
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+    send() {}
+    close() {
+      this.readyState = 3;
+    }
+  }
+  vi.stubGlobal("WebSocket", Socket);
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  let busy = true;
+  const fetch = vi.fn(async (url: RequestInfo | URL) =>
+    url === "/api/live/link-document"
+      ? Response.json({ objectId: "object-a", limits })
+      : busy
+        ? Response.json(linkRefusalBody("link_live_unavailable"), { status: 503 })
+        : Response.json({
+            token: "ab".repeat(32),
+            publicPrincipalId: "public-link-a",
+            expiresAtMs: Date.now() + 60_000,
+          }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await session.reconnect();
+    expect(session.state()).toMatchObject({ status: "disconnected", reason: "host-unavailable" });
+    busy = false;
+    await vi.waitFor(() => expect(session.state().status).toBe("connecting"));
+    expect(fetch).toHaveBeenCalledTimes(4);
+  } finally {
+    session.close();
+  }
+});
 const binding: LiveObjectBinding = {
   workspaceId: "workspace",
   mainVersionId: "main",
@@ -39,10 +297,6 @@ const binding: LiveObjectBinding = {
   selectorPaths: ["docs/a.md"],
   restoreFenceGeneration: 0,
 };
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
 it("takes the host's early state for a link's file before the page asks for a ticket", async () => {
   const host = markdownToYDoc("Shared text");
   const fetch = vi.fn(async (path: string, init: RequestInit) => {
