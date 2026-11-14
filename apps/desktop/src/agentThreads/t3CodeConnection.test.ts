@@ -19,7 +19,13 @@ const cipher = (available: boolean) => ({
     Buffer.from(sealed, "base64").toString("utf8").slice("sealed:".length),
 });
 
-async function setup(options: { canKeep?: boolean } = {}) {
+async function setup(
+  options: {
+    canKeep?: boolean;
+    /** Whether T3 Code's program is there to make dohc's own sign-in code. Left out, dohc has no way to make one. */
+    program?: boolean;
+  } = {},
+) {
   const t3 = await startFakeT3Code();
   cleanups.push(t3.close);
   const home = await mkdtemp(join(tmpdir(), "dohc-t3-connection-"));
@@ -31,10 +37,27 @@ async function setup(options: { canKeep?: boolean } = {}) {
   await names(t3.origin);
   const store = createT3CodeSignInStore({ dir: home, cipher: cipher(options.canKeep ?? true) });
   t3.tools.t3_thread_send = () => ({ threadId: "t1", runId: "run-1" });
-  const connection = createT3CodeConnection({ home, store });
+  const made: string[] = [];
+  const connection = createT3CodeConnection({
+    home,
+    store,
+    ...(options.program === undefined
+      ? {}
+      : {
+          codes: {
+            available: () => options.program === true,
+            make: async (access) => {
+              if (!options.program)
+                throw new T3CodeError("cannot-allow-here", "T3 Code's program is not there.");
+              made.push(access);
+              return t3.issueCode();
+            },
+          },
+        }),
+  });
   const forward = (forwardId: string) =>
     connection.forward({ threadId: "t1", message: "hello", how: "line", forwardId });
-  return { t3, home, store, connection, forward, names };
+  return { t3, home, store, connection, forward, names, made };
 }
 
 const problemOf = (work: Promise<unknown>) =>
@@ -60,6 +83,46 @@ describe("dohc's connection to T3 Code", () => {
     });
   });
 
+  it("allows itself with its own code when the person said yes in dohc, and keeps what they allowed", async () => {
+    const { t3, connection, forward, made } = await setup({ program: true });
+    expect(connection.canAllowHere()).toBe(true);
+    expect(await connection.access()).toBeNull();
+    const opened: string[] = [];
+
+    await connection.signIn({ open: (url) => void opened.push(url), access: "auto" });
+
+    // No page opened: the code was made for that access, and approved the request.
+    expect(opened).toEqual([]);
+    expect(made).toEqual(["auto"]);
+    expect(t3.decisions.map(({ decision }) => decision.access)).toEqual(["auto"]);
+    expect(await connection.access()).toBe("auto");
+    expect(await connection.signedInUntil()).toBeGreaterThan(Date.now());
+    await forward("f1");
+
+    // Allowed again on T3 Code's page: dohc no longer knows what was allowed.
+    await connection.signIn({ open: browser });
+    expect(await connection.access()).toBeNull();
+  });
+
+  it("says it cannot allow dohc here, and keeps what it has, when its own code cannot be made", async () => {
+    const without = await setup();
+    expect(without.connection.canAllowHere()).toBe(false);
+    expect(await problemOf(without.connection.signIn({ open: browser, access: "auto" }))).toBe(
+      "cannot-allow-here",
+    );
+    expect(without.t3.registrations).toEqual([]);
+
+    const missing = await setup({ program: false });
+    expect(missing.connection.canAllowHere()).toBe(false);
+    await missing.connection.signIn({ open: browser });
+    expect(await problemOf(missing.connection.signIn({ open: browser, access: "auto" }))).toBe(
+      "cannot-allow-here",
+    );
+    // The sign-in the person allowed on T3 Code's page is still there.
+    expect(await missing.connection.signedInUntil()).toBeGreaterThan(Date.now());
+    await missing.forward("f1");
+  });
+
   it("uses one session for its calls, and opens another after a call fails", async () => {
     const { t3, connection, forward } = await setup();
     await connection.signIn({ open: browser });
@@ -81,7 +144,12 @@ describe("dohc's connection to T3 Code", () => {
 
   it("drops a sign-in T3 Code no longer takes", async () => {
     const { t3, store, connection, forward } = await setup();
-    await store.save({ origin: t3.origin, token: "revoked", expiresAtMs: Date.now() + 60_000 });
+    await store.save({
+      origin: t3.origin,
+      token: "revoked",
+      expiresAtMs: Date.now() + 60_000,
+      access: null,
+    });
 
     expect(await problemOf(forward("f1"))).toBe("not-allowed");
 
@@ -91,7 +159,12 @@ describe("dohc's connection to T3 Code", () => {
 
   it("drops the sign-in when T3 Code moved to another address", async () => {
     const { t3, store, forward, names } = await setup();
-    await store.save({ origin: t3.origin, token: "token-1", expiresAtMs: Date.now() + 60_000 });
+    await store.save({
+      origin: t3.origin,
+      token: "token-1",
+      expiresAtMs: Date.now() + 60_000,
+      access: null,
+    });
     await names("http://127.0.0.1:1");
 
     expect(await problemOf(forward("f1"))).toBe("not-allowed");
@@ -102,7 +175,12 @@ describe("dohc's connection to T3 Code", () => {
 
   it("says T3 Code is not running when its file is gone, and keeps the sign-in", async () => {
     const { t3, home, store, forward } = await setup();
-    await store.save({ origin: t3.origin, token: "token-1", expiresAtMs: Date.now() + 60_000 });
+    await store.save({
+      origin: t3.origin,
+      token: "token-1",
+      expiresAtMs: Date.now() + 60_000,
+      access: null,
+    });
     await rm(join(home, "userdata"), { recursive: true });
 
     expect(await problemOf(forward("f1"))).toBe("not-running");
@@ -129,7 +207,12 @@ describe("dohc's connection to T3 Code", () => {
 
   it("says a thread needs more access than dohc has, and keeps the sign-in", async () => {
     const { t3, store, forward } = await setup();
-    await store.save({ origin: t3.origin, token: "token-1", expiresAtMs: Date.now() + 60_000 });
+    await store.save({
+      origin: t3.origin,
+      token: "token-1",
+      expiresAtMs: Date.now() + 60_000,
+      access: null,
+    });
     t3.refusals.t3_thread_send =
       "runtime_mode_escalation_denied: Child runtime mode full-access is broader than parent mode approval-required.";
 
@@ -145,7 +228,12 @@ describe("dohc's connection to T3 Code", () => {
 
   it("keeps a new sign-in when a call made with the old one is refused late", async () => {
     const { t3, home, store } = await setup();
-    await store.save({ origin: t3.origin, token: "revoked", expiresAtMs: Date.now() + 60_000 });
+    await store.save({
+      origin: t3.origin,
+      token: "revoked",
+      expiresAtMs: Date.now() + 60_000,
+      access: null,
+    });
     let arrived!: () => void;
     const refusalOnItsWay = new Promise<void>((resolve) => (arrived = resolve));
     let deliver!: () => void;
@@ -177,7 +265,12 @@ describe("dohc's connection to T3 Code", () => {
 
   it("gives a call made while a new sign-in is being saved the new sign-in", async () => {
     const { t3, home, store } = await setup();
-    await store.save({ origin: t3.origin, token: "revoked", expiresAtMs: Date.now() + 60_000 });
+    await store.save({
+      origin: t3.origin,
+      token: "revoked",
+      expiresAtMs: Date.now() + 60_000,
+      access: null,
+    });
     let saving!: () => void;
     const savingStarted = new Promise<void>((resolve) => (saving = resolve));
     let finishSave!: () => void;
@@ -211,7 +304,12 @@ describe("dohc's connection to T3 Code", () => {
 
   it("says a thread is gone from T3 Code, and gives back the work a message started", async () => {
     const { t3, store, connection, forward } = await setup();
-    await store.save({ origin: t3.origin, token: "token-1", expiresAtMs: Date.now() + 60_000 });
+    await store.save({
+      origin: t3.origin,
+      token: "token-1",
+      expiresAtMs: Date.now() + 60_000,
+      access: null,
+    });
 
     expect(await forward("f1")).toEqual({ runId: "run-1" });
 

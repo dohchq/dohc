@@ -79,7 +79,7 @@ export function useT3CodeAccess(
     setWaiting(true);
     setAllowError(null);
     try {
-      const state = await bridge().allowDohcInT3Code({});
+      const state = await bridge().allowDohcInT3Code({ access: null });
       if (!asks.isCurrent(token)) return;
       setAnswered(state);
     } catch (cause) {

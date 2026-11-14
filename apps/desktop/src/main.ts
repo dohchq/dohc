@@ -606,6 +606,7 @@ import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThr
 import { cliForThread } from "./agentThreads/forwardedText";
 import { createForwardLedger } from "./agentThreads/forwardLedger";
 import { T3CodeError } from "./agentThreads/t3Code";
+import { createT3CodeCodeMaker } from "./agentThreads/t3CodeCli";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -1538,10 +1539,13 @@ function chatWakeIntentsFile(): string {
 let cachedAgentThreads: ReturnType<typeof createAgentThreads> | null = null;
 let cachedT3Code: T3CodeConnection | null = null;
 function t3Code(): T3CodeConnection {
+  // The home folder the process was given, as the agent tools are found. A
+  // test run gives the app its own, so it never reaches the person's T3 Code.
+  const home = join(homedir(), ".t3");
   cachedT3Code ??= createT3CodeConnection({
-    // The home folder the process was given, as the agent tools are found. A
-    // test run gives the app its own, so it never reaches the person's T3 Code.
-    home: join(homedir(), ".t3"),
+    home,
+    // T3 Code's own program, which makes dohc's sign-in code after the person says yes in dohc.
+    codes: createT3CodeCodeMaker({ home }),
     store: createT3CodeSignInStore({
       dir: stateDir(),
       cipher: mayUseKeychain({
@@ -10765,6 +10769,8 @@ function registerIpcHandlers(): void {
   const t3CodeConnectionState = async () => ({
     canKeep: t3Code().canKeep(),
     signedInUntilMs: await t3Code().signedInUntil(),
+    access: await t3Code().access(),
+    canAllowHere: t3Code().canAllowHere(),
   });
   // The thread of an agent that serves the workspace a window has open. A
   // window names the agent, and never the thread.
@@ -10803,13 +10809,14 @@ function registerIpcHandlers(): void {
       return { status };
     },
     readT3CodeConnection: t3CodeConnectionState,
-    allowDohcInT3Code: async () => {
+    allowDohcInT3Code: async ({ access }) => {
       allowingT3Code?.abort();
       const allowing = (allowingT3Code = new AbortController());
       try {
         await t3Code().signIn({
           open: (url) => shell.openExternal(url),
           signal: allowing.signal,
+          access,
         });
       } finally {
         if (allowingT3Code === allowing) allowingT3Code = null;

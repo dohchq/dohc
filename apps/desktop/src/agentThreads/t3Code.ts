@@ -28,6 +28,8 @@ export type T3CodeProblem =
   | "thread-gone"
   /** T3 Code has no run with this id in the thread. */
   | "run-gone"
+  /** dohc could not make or use its own sign-in code. T3 Code's page can still allow dohc. */
+  | "cannot-allow-here"
   /** Someone already answered the question, in T3 Code or in dohc. */
   | "question-answered"
   /** The question no longer waits for an answer. */
@@ -151,11 +153,25 @@ const IssuedToken = z.object({
   expires_in: z.number().positive(),
 });
 
+/**
+ * What dohc may do in T3 Code, in T3 Code's own words for a thread's mode.
+ * dohc can message a thread that runs with this mode or less.
+ */
+export const T3_CODE_ACCESS = [
+  "approval-required",
+  "auto-accept-edits",
+  "auto",
+  "full-access",
+] as const;
+export type T3CodeAccess = (typeof T3_CODE_ACCESS)[number];
+
 export interface T3CodeSignIn {
   /** The address T3 Code issued it at. dohc sends the token nowhere else. */
   origin: string;
   token: string;
   expiresAtMs: number;
+  /** What the person allowed in dohc. Null when they chose on T3 Code's page, which does not tell dohc. */
+  access: T3CodeAccess | null;
 }
 
 /** How long the person has to answer in T3 Code before the sign-in gives up. */
@@ -233,15 +249,52 @@ async function listenForRedirect(input: { state: string; issuer: string }): Prom
   };
 }
 
+const Decided = z.object({ redirectTo: z.string() });
+
+// The code T3 Code hands back when dohc approved its own request. T3 Code
+// answers with the address it would send a browser to. Only an address that
+// is this sign-in's own, with its state, is read, and nothing is sent to it.
+function codeFromRedirect(
+  redirectTo: string,
+  expected: { uri: string; state: string; issuer: string },
+): string {
+  let url: URL;
+  try {
+    url = new URL(redirectTo);
+  } catch {
+    throw new T3CodeError("unexpected", "T3 Code sent an answer dohc could not read.");
+  }
+  const issuer = url.searchParams.get("iss");
+  const code = url.searchParams.get("code");
+  if (
+    `${url.origin}${url.pathname}` !== expected.uri ||
+    url.searchParams.get("state") !== expected.state ||
+    (issuer !== null && issuer !== expected.issuer) ||
+    code === null ||
+    code === ""
+  )
+    throw new T3CodeError("cannot-allow-here", "T3 Code did not take dohc's own sign-in code.");
+  return code;
+}
+
 /**
- * Signs dohc in to T3 Code. `open` shows the person T3 Code's own page, where
- * they allow or decline. Resolves with the sign-in T3 Code issued; rejects
- * with "not-allowed" when they decline, cancel, or do not answer in time.
+ * Signs dohc in to T3 Code. Without `approve`, `open` shows the person T3
+ * Code's own page, where they allow or decline. With `approve`, the person
+ * already said yes in dohc: dohc makes a sign-in code and approves its own
+ * request with it, for `approve.access` and no more, and no page opens.
+ * Resolves with the sign-in T3 Code issued. Rejects with "not-allowed" when
+ * the person declines, cancels, or does not answer in time, and with
+ * "cannot-allow-here" when dohc's own code could not be made or was not taken.
  * Cancelling or running out of time stops every step, whichever one is going.
  */
 export async function signInToT3Code(input: {
   origin: string;
   open(url: string): void | Promise<void>;
+  approve?: {
+    access: T3CodeAccess;
+    /** Makes one short-lived code that can approve a sign-in with this access. */
+    code(signal: AbortSignal): Promise<string>;
+  };
   signal?: AbortSignal;
   fetch?: Fetch;
   nowMs?: () => number;
@@ -315,8 +368,7 @@ export async function signInToT3Code(input: {
         new T3CodeError("refused", "T3 Code did not take dohc's sign-in request."),
       );
     const client = shaped(RegisteredClient, await jsonOf(registered));
-    const authorize = new URL(metadata.authorization_endpoint);
-    for (const [name, value] of Object.entries({
+    const authorization = {
       response_type: "code",
       client_id: client.client_id,
       redirect_uri: redirect.uri,
@@ -324,10 +376,42 @@ export async function signInToT3Code(input: {
       code_challenge_method: "S256",
       state,
       resource,
-    }))
-      authorize.searchParams.set(name, value);
-    await Promise.race([Promise.resolve(input.open(authorize.href)), stopped]);
-    const code = await Promise.race([redirect.code, stopped]);
+    };
+    let code: string;
+    if (input.approve) {
+      // The page's own call, made by dohc: this request, approved with a code
+      // that carries what the access needs. T3 Code uses the code up.
+      const made = await Promise.race([input.approve.code(stop.signal), stopped]);
+      const decided = await answerOf(
+        fetcher,
+        new URL("decision", metadata.authorization_endpoint).href,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            authorization,
+            decision: { _tag: "pairing-code", access: input.approve.access, code: made },
+          }),
+          signal: stop.signal,
+        },
+      );
+      if (!decided.ok)
+        await refuse(
+          decided,
+          new T3CodeError("cannot-allow-here", "T3 Code did not take dohc's own sign-in code."),
+        );
+      code = codeFromRedirect(shaped(Decided, await jsonOf(decided)).redirectTo, {
+        uri: redirect.uri,
+        state,
+        issuer: metadata.issuer,
+      });
+    } else {
+      const authorize = new URL(metadata.authorization_endpoint);
+      for (const [name, value] of Object.entries(authorization))
+        authorize.searchParams.set(name, value);
+      await Promise.race([Promise.resolve(input.open(authorize.href)), stopped]);
+      code = await Promise.race([redirect.code, stopped]);
+    }
     const issued = await answerOf(fetcher, metadata.token_endpoint, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -350,6 +434,7 @@ export async function signInToT3Code(input: {
       origin,
       token: token.access_token,
       expiresAtMs: (input.nowMs ?? Date.now)() + token.expires_in * 1000,
+      access: input.approve?.access ?? null,
     };
   } catch (error) {
     // Whatever failed after the person cancelled or time ran out, that is the reason.

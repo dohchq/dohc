@@ -13,6 +13,7 @@ import {
   signInToT3Code,
   t3CodeThreadLink,
   type T3CodeAnswers,
+  type T3CodeAccess,
   type T3CodeProject,
   type T3CodeQuestionBox,
   type T3CodeRun,
@@ -32,12 +33,22 @@ export interface T3CodeConnection extends AgentThreadTool {
   canKeep(): boolean;
   /** When dohc's sign-in runs out, or null when dohc has none. */
   signedInUntil(): Promise<number | null>;
+  /** What the person allowed in dohc. Null when dohc has no sign-in, or they chose on T3 Code's page. */
+  access(): Promise<T3CodeAccess | null>;
+  /** Whether dohc can make its own sign-in code here, so the person need not leave dohc to allow it. */
+  canAllowHere(): boolean;
   /**
-   * Shows the person T3 Code's own page with `open`, and keeps the sign-in
-   * they allow. Rejects when they decline, cancel, or do not answer in time,
-   * and when this computer cannot encrypt the sign-in.
+   * Gets and keeps dohc's sign-in. With `access`, the person already said
+   * yes in dohc: dohc makes its own sign-in code and approves with it. With
+   * none, `open` shows the person T3 Code's own page. Rejects when they
+   * decline, cancel, or do not answer in time, when dohc's own code could not
+   * be made or was not taken, and when this computer cannot encrypt the sign-in.
    */
-  signIn(input: { open(url: string): void | Promise<void>; signal?: AbortSignal }): Promise<void>;
+  signIn(input: {
+    open(url: string): void | Promise<void>;
+    signal?: AbortSignal;
+    access?: T3CodeAccess | null;
+  }): Promise<void>;
   projects(): Promise<T3CodeProject[]>;
   threads(input: {
     projectId: string;
@@ -69,8 +80,13 @@ export function createT3CodeConnection(dependencies: {
   home: string;
   store: T3CodeSignInStore;
   fetch?: typeof fetch;
+  /** Makes dohc's own sign-in code with T3 Code's program. Without it, only T3 Code's page allows dohc. */
+  codes?: {
+    available(): boolean;
+    make(access: T3CodeAccess, signal: AbortSignal): Promise<string>;
+  };
 }): T3CodeConnection {
-  const { store } = dependencies;
+  const { store, codes } = dependencies;
   let opening: Promise<T3CodeSession> | null = null;
   // Each change to the kept sign-in: a new one saved, or the kept one dropped.
   // The count moves when a change starts, so a call made before it cannot
@@ -128,15 +144,26 @@ export function createT3CodeConnection(dependencies: {
     forward: (input) => use((session) => sendToT3CodeThread(session, input)),
     canKeep: () => store.canKeep(),
     signedInUntil: async () => (await store.load())?.expiresAtMs ?? null,
+    access: async () => (await store.load())?.access ?? null,
+    canAllowHere: () => codes?.available() === true,
     async signIn(input) {
       // Asked before the person is sent to T3 Code, not after they allow dohc.
       if (!store.canKeep()) throw new T3CodeSignInNotKept();
+      const access = input.access ?? null;
+      if (access !== null && !codes)
+        throw new T3CodeError(
+          "cannot-allow-here",
+          "dohc could not make its own sign-in code in T3 Code.",
+        );
       const { origin } = await address();
       const signIn = await signInToT3Code({
         origin,
         open: input.open,
         signal: input.signal,
         fetch: dependencies.fetch,
+        ...(access === null
+          ? {}
+          : { approve: { access, code: (signal) => codes!.make(access, signal) } }),
       });
       await change(() => store.save(signIn));
     },

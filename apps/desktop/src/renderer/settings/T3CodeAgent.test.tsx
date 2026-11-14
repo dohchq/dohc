@@ -24,8 +24,15 @@ import { AgentList } from "./AgentList";
 const SIGNED_IN: T3CodeConnectionState = {
   canKeep: true,
   signedInUntilMs: Date.UTC(2099, 11, 13, 12),
+  access: null,
+  canAllowHere: false,
 };
-const SIGNED_OUT: T3CodeConnectionState = { canKeep: true, signedInUntilMs: null };
+const SIGNED_OUT: T3CodeConnectionState = {
+  canKeep: true,
+  signedInUntilMs: null,
+  access: null,
+  canAllowHere: false,
+};
 const thread = (id: string, title: string, status: string | null = null) => ({
   id,
   title,
@@ -161,7 +168,12 @@ const searchFor = (text: string) =>
   userEvent.type(sheet().getByRole("searchbox", { name: "Find a thread by title" }), text);
 
 it("offers no Add when this computer cannot encrypt dohc's sign-in to T3 Code", async () => {
-  bridgeMock.readT3CodeConnection.mockResolvedValueOnce({ canKeep: false, signedInUntilMs: null });
+  bridgeMock.readT3CodeConnection.mockResolvedValueOnce({
+    canKeep: false,
+    signedInUntilMs: null,
+    access: null,
+    canAllowHere: false,
+  });
   renderList();
   await chooseT3Code();
   expect((await sheet().findByTestId("t3-code-cannot-keep")).textContent).toBe(
