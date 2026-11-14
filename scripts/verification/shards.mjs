@@ -45,6 +45,12 @@ export function javascriptGroups(tasks) {
         kind: "vitest",
         pkg: files[0].package,
         native: Boolean(files[0].native),
+        // Measured desktop browser and projection groups cost more when they overlap.
+        cpu:
+          files[0].package === "@dohc/ydoc-projection" ||
+          (files[0].package === "@dohc/desktop" && files[0].project === "desktop")
+            ? 2.5
+            : 1,
         resource: databasePackages.has(files[0].package)
           ? "postgres"
           : files[0].package === "@dohc/mobile"
@@ -67,6 +73,11 @@ export function javascriptGroups(tasks) {
         tasks: [task],
         native: Boolean(task.native),
         resource: task.resource,
+        cpu: ["repository:pnpm lint", "typecheck:@dohc/desktop"].includes(task.id)
+          ? 2.5
+          : ["desktop", "accounts"].includes(task.kind)
+            ? 2
+            : 1,
         ...(["desktop", "accounts"].includes(task.kind)
           ? { slots: 2, weight: task.weight }
           : { weight: task.weight }),
@@ -116,18 +127,27 @@ export function simulateJavascript(
       );
       if (index < 0) break;
       const [group] = pending.splice(index, 1);
-      const step = { id: group.id, startedAt: seconds, finishedAt: seconds + duration(group) };
+      const step = { id: group.id, startedAt: seconds };
       steps.push(step);
-      active.push({ group, finishedAt: step.finishedAt });
+      active.push({ group, step, remaining: duration(group) });
       slots += group.slots ?? 1;
     }
     if (!active.length && !pending.length) break;
-    seconds = Math.min(
+    // Balanced-run group steps put browser work at about 2.5 command units on four CPUs.
+    const slowdown = Math.max(1, active.reduce((sum, work) => sum + (work.group.cpu ?? 1), 0) / 4);
+    for (const work of active) work.finishedAt = seconds + work.remaining * slowdown;
+    const next = Math.min(
       ...active.map((work) => work.finishedAt),
       ...(seconds < nativeReady ? [nativeReady] : []),
     );
-    for (let index = active.length - 1; index >= 0; index--)
-      if (active[index].finishedAt <= seconds) active.splice(index, 1);
+    for (let index = active.length - 1; index >= 0; index--) {
+      const work = active[index];
+      if (work.finishedAt <= next) {
+        work.step.finishedAt = next;
+        active.splice(index, 1);
+      } else work.remaining -= (next - seconds) / slowdown;
+    }
+    seconds = next;
   }
   for (const group of runtime) {
     if (group.native) seconds = Math.max(seconds, nativeReady);

@@ -359,6 +359,56 @@ test("simulation excludes shared resources and accounts for browser slots and th
   );
 });
 
+test("CPU contention slows active groups when native work arrives and releases capacity when they finish", () => {
+  const result = simulateJavascript(
+    [
+      { id: "pure-a", weight: 40, cpu: 2.5 },
+      { id: "pure-b", weight: 40, cpu: 2.5 },
+      { id: "native", weight: 40, cpu: 2.5, native: true },
+    ],
+    { inventory: 0, nativeReady: 10 },
+  );
+  assert.deepEqual(result.steps, [
+    { id: "pure-a", startedAt: 0, finishedAt: 70 },
+    { id: "pure-b", startedAt: 0, finishedAt: 70 },
+    { id: "native", startedAt: 10, finishedAt: 78 },
+  ]);
+  assert.equal(result.seconds, 78);
+});
+
+test("partitioning spreads desktop browser groups, projection tests, lint, and desktop typecheck", () => {
+  const tasks = [
+    ...Array.from({ length: 4 }, (_, index) => ({
+      id: `desktop-${index}`,
+      kind: "vitest",
+      package: "@dohc/desktop",
+      project: "desktop",
+      weight: 60,
+    })),
+    ...Array.from({ length: 2 }, (_, index) => ({
+      id: `projection-${index}`,
+      kind: "vitest",
+      package: "@dohc/ydoc-projection",
+      weight: 60,
+    })),
+    { id: "repository:pnpm lint", kind: "command", weight: 60 },
+    { id: "typecheck:@dohc/desktop", kind: "command", weight: 60 },
+  ];
+  const shards = partitionJavascript(javascriptGroups(tasks), 5);
+  assert.deepEqual(
+    shards.map((shard) => shard.length),
+    [1, 1, 1, 1, 1],
+  );
+  assertTaskCoverage(
+    tasks,
+    shards.map((shard, part) => ({
+      part,
+      verdict: "PASS",
+      completed: shard.flatMap((group) => group.tasks.map((task) => task.id)),
+    })),
+  );
+});
+
 test("partitioning balances finish time when resources serialize work", () => {
   const groups = [10, 20, 50, 50, 20, 10, 20, 50].map((weight, index) => ({
     id: `task-${index}`,
