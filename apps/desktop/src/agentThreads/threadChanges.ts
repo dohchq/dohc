@@ -1,3 +1,4 @@
+import { normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import {
   agentHandle,
   type Agent,
@@ -10,10 +11,12 @@ import {
 // settings file as it is then, so two windows cannot write over each other
 // and a thread is never told about workspaces it will not get.
 
-/** What reaches the tool: telling a thread, with the messages set aside around it. */
+/** What reaches the chats and the tool. */
 export interface AgentThreadSteps {
-  /** Sets aside what the agent has unread in the workspace, tells its thread, then calls `save`. */
-  serve(workspaceId: string, agent: AgentWithThread, save: () => Promise<void>): Promise<void>;
+  /** Marks read, without forwarding, what the agent has unread in the workspace. */
+  setAside(workspaceId: string, agent: AgentWithThread): Promise<void>;
+  /** Tells the agent's thread that it now gets this workspace's messages. */
+  tellOfWorkspace(workspaceId: string, agent: AgentWithThread): Promise<void>;
   /** Introduces dohc to the thread `agent` names. */
   change(workspaceId: string, agent: AgentWithThread): Promise<void>;
 }
@@ -24,8 +27,15 @@ export interface AgentThreadChangesDependencies {
   /**
    * Changes one agent from the settings file as it is then. `change` throws
    * to refuse, and answers the agent it was given when nothing changes.
+   * `before` runs first, in the same turn of the settings queue, with the
+   * agent as it is in effect. Nothing comes into effect between it and the
+   * write.
    */
-  changeAgent(agentId: string, change: (agent: AgentSettings) => AgentSettings): Promise<unknown>;
+  changeAgent(
+    agentId: string,
+    change: (agent: AgentSettings) => AgentSettings,
+    before?: (inEffect: AgentSettings) => Promise<void>,
+  ): Promise<unknown>;
   threads: AgentThreadSteps;
 }
 
@@ -55,6 +65,9 @@ export function createAgentThreadChanges(
   };
   const serves = (agent: AgentSettings, workspaceId: string) =>
     agent.workspaces?.includes(workspaceId) ?? false;
+  // The handle is how dohc finds the messages that wait for an agent. Case
+  // and the form of an accent do not tell two handles apart.
+  const handleOf = (name: string) => normalizeHandle(agentHandle(name));
 
   return {
     setWorkspace: ({ workspaceId, agentId, on, assertCurrent }) =>
@@ -89,27 +102,41 @@ export function createAgentThreadChanges(
             `The settings file changed while dohc turned this workspace on for ${agent.name}. Try again.`,
           );
         }
-        const told = agent.thread.id;
-        // The handle is how dohc finds the messages that wait for the agent.
-        const handle = agentHandle(agent.name);
-        await threads.serve(workspaceId, { ...agent, thread: agent.thread }, async () => {
-          await changeAgent(agentId, (current) => {
+        const told = { ...agent, thread: agent.thread };
+        // What the agent has unread is set aside only while the workspace is
+        // off for it. Once it is on, by this change or by an edit in the
+        // file, a message there is one the agent is to get. The settings
+        // queue holds what is in effect still while dohc reads.
+        const setAside = async (inEffect: AgentSettings) => {
+          assertCurrent();
+          if (!serves(inEffect, workspaceId)) await threads.setAside(workspaceId, told);
+        };
+        await changeAgent(agentId, (current) => current, setAside);
+        await threads.tellOfWorkspace(workspaceId, told);
+        // T3 Code can take seconds to answer. What was written meanwhile came
+        // before the workspace was on, and is set aside in the turn that
+        // saves it. A message written in the moment between that read and the
+        // save is forwarded.
+        await changeAgent(
+          agentId,
+          (current) => {
             assertCurrent();
             // The thread dohc told is the one that gets the workspace, and the
             // messages it set aside are the ones the agent would have got.
-            if (current.thread?.id !== told)
+            if (current.thread?.id !== told.thread.id)
               throw new Error(
                 `${agent.name} was connected to another thread while dohc told its thread about this workspace. Try again.`,
               );
-            if (agentHandle(current.name) !== handle)
+            if (handleOf(current.name) !== handleOf(agent.name))
               throw new Error(
                 `${agent.name} was renamed while dohc told its thread about this workspace. Try again.`,
               );
             return serves(current, workspaceId)
               ? current
               : { ...current, workspaces: [...(current.workspaces ?? []), workspaceId] };
-          });
-        });
+          },
+          setAside,
+        );
       }),
 
     changeThread: ({ workspaceId, agentId, threadId, assertCurrent }) =>

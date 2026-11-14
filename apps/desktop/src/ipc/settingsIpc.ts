@@ -223,20 +223,32 @@ export function createSettingsIpc<
   // The caller acts on whether the agent was saved, and asks again when it
   // was not. So what follows a save, such as the tray, fails without failing
   // the change: the agent is saved and every window already has it.
+  //
+  // `before` runs first, in the same turn of the settings queue, with the
+  // agent as it is in effect. Settings come into effect only in a turn of
+  // that queue, a hand edit to the file included, so what is in effect cannot
+  // change between `before` and the write.
   async function changeAgent(
     agentId: string,
     change: (agent: AgentSettings) => AgentSettings,
+    before?: (inEffect: AgentSettings) => Promise<void>,
   ): Promise<DesktopUserSettingsResult> {
     const saved = await changeUserSettings(
-      () =>
-        updateUserSettingsFile(stateDir(), (current) => {
+      async () => {
+        if (before) {
+          const inEffect = (await readCachedUserSettingsFile(stateDir())).settings.agents[agentId];
+          if (!inEffect) throw new Error("This agent is no longer in Settings.");
+          await before(inEffect);
+        }
+        return updateUserSettingsFile(stateDir(), (current) => {
           const agent = current.agents[agentId];
           if (!agent) throw new Error("This agent is no longer in Settings.");
           const next = change(agent);
           return next === agent
             ? current
             : { ...current, agents: { ...current.agents, [agentId]: next } };
-        }),
+        });
+      },
       (error) => console.error("[desktop] after an agent change:", error),
     );
     if (!saved) throw new Error("dohc did not save settings.");

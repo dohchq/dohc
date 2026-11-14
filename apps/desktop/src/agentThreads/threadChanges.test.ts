@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Agent, AgentSettings } from "../settings/userSettings";
+import type { AgentSettings } from "../settings/userSettings";
 import { createAgentThreadChanges, type AgentThreadSteps } from "./threadChanges";
 
 const thread = (id: string) => ({ tool: "t3-code" as const, id });
@@ -13,28 +13,36 @@ const chief: AgentSettings = {
   workspaces: ["ws-a"],
 };
 
-// The settings file and what dohc last read of it, which can be older.
+// The settings file, and the settings in effect, which follow the file only
+// in a turn of the settings queue: a save, or a reload after an edit in the
+// file. `changeAgent` is such a turn.
 function setup(agents: Record<string, AgentSettings> = { chief }) {
   const file = new Map(Object.entries(agents));
-  let read: Agent[] | null = null;
+  let inEffect = new Map(file);
   const order: string[] = [];
   const steps: AgentThreadSteps = {
-    serve: vi.fn(async (workspaceId, agent, save) => {
+    setAside: vi.fn(async (workspaceId) => void order.push(`set aside ${workspaceId}`)),
+    tellOfWorkspace: vi.fn(async (workspaceId, agent) => {
       order.push(`told ${agent.thread.id} of ${workspaceId}`);
-      await save();
     }),
     change: vi.fn(async (_workspaceId, agent) => {
       order.push(`introduced ${agent.thread.id} for ${(agent.workspaces ?? []).length} workspaces`);
     }),
   };
   const changes = createAgentThreadChanges({
-    agents: async () => read ?? [...file].map(([id, agent]) => ({ id, ...agent })),
-    changeAgent: async (agentId, change) => {
+    agents: async () => [...inEffect].map(([id, agent]) => ({ id, ...agent })),
+    changeAgent: async (agentId, change, before) => {
+      if (before) {
+        const agent = inEffect.get(agentId);
+        if (!agent) throw new Error("This agent is no longer in Settings.");
+        await before(agent);
+      }
       const agent = file.get(agentId);
       if (!agent) throw new Error("This agent is no longer in Settings.");
       const next = change(agent);
       if (next !== agent) order.push("saved");
       file.set(agentId, next);
+      inEffect = new Map(file);
     },
     threads: steps,
   });
@@ -43,10 +51,11 @@ function setup(agents: Record<string, AgentSettings> = { chief }) {
     steps,
     order,
     saved: (id = "chief") => file.get(id)!,
+    /** An edit in the file, which dohc has not read yet. */
     edit: (id: string, agent: AgentSettings) => void file.set(id, agent),
-    // dohc has not read the file since: it still holds these agents.
-    lastRead: (agents: Record<string, AgentSettings>) => {
-      read = Object.entries(agents).map(([id, agent]) => ({ id, ...agent }));
+    /** dohc reads the file after an edit, and what it holds comes into effect. */
+    reload: () => {
+      inEffect = new Map(file);
     },
   };
 }
@@ -54,52 +63,65 @@ const here = { workspaceId: "ws-b", agentId: "chief", assertCurrent: () => {} };
 const moved = () => {
   throw new Error("Nothing was changed because this window changed workspaces.");
 };
+const both = { ...chief, workspaces: ["ws-a", "ws-b"] };
 
 describe("changes to an agent's thread and workspaces", () => {
-  it("turns a workspace on: tells the thread, then adds the workspace to the agent as saved", async () => {
-    const { changes, order, saved, steps } = setup();
+  it("turns a workspace on: sets aside, tells the thread, sets aside again, then saves the agent with it", async () => {
+    const { changes, order, saved } = setup();
 
     await changes.setWorkspace({ ...here, on: true });
 
-    expect(order).toEqual(["told t-1 of ws-b", "saved"]);
+    expect(order).toEqual(["set aside ws-b", "told t-1 of ws-b", "set aside ws-b", "saved"]);
     expect(saved().workspaces).toEqual(["ws-a", "ws-b"]);
-    expect(steps.serve).toHaveBeenCalledOnce();
+  });
+
+  it("sets nothing aside once the workspace is on by an edit in the file", async () => {
+    // The person adds the workspace in the file while the thread is told, and
+    // dohc reads it. A message written from then on is the agent's to get.
+    const { changes, steps, order, saved, edit, reload } = setup();
+    vi.mocked(steps.tellOfWorkspace).mockImplementationOnce(async () => {
+      order.push("told");
+      edit("chief", both);
+      reload();
+    });
+
+    await changes.setWorkspace({ ...here, on: true });
+
+    expect(order).toEqual(["set aside ws-b", "told"]);
+    expect(saved().workspaces).toEqual(["ws-a", "ws-b"]);
   });
 
   it("turns a workspace off from the file as it is, and takes away no other", async () => {
-    const { changes, saved, lastRead, steps } = setup({
-      chief: { ...chief, workspaces: ["ws-a", "ws-b", "ws-c"] },
-    });
-    // dohc last read the agent before another window added ws-c.
-    lastRead({ chief: { ...chief, workspaces: ["ws-a", "ws-b"] } });
+    const { changes, saved, edit, steps } = setup({ chief: both });
+    // Another window added ws-c, and this one has not heard yet.
+    edit("chief", { ...chief, workspaces: ["ws-a", "ws-b", "ws-c"] });
 
     await changes.setWorkspace({ ...here, on: false });
     expect(saved().workspaces).toEqual(["ws-a", "ws-c"]);
-    // Off again changes nothing, and the thread is told nothing either time.
+    // Off again changes nothing, and nothing is set aside or told either time.
     await changes.setWorkspace({ ...here, on: false });
     expect(saved().workspaces).toEqual(["ws-a", "ws-c"]);
-    expect(steps.serve).not.toHaveBeenCalled();
+    expect(steps.setAside).not.toHaveBeenCalled();
+    expect(steps.tellOfWorkspace).not.toHaveBeenCalled();
   });
 
-  it("sets nothing aside a second time for a workspace that is already on in the file", async () => {
-    const on = { ...chief, workspaces: ["ws-a", "ws-b"] };
-    const { changes, steps, order } = setup({ chief: on });
+  it("does nothing for a workspace that is already on", async () => {
+    const { changes, order } = setup({ chief: both });
 
     await changes.setWorkspace({ ...here, on: true });
 
-    expect(steps.serve).not.toHaveBeenCalled();
     expect(order).toEqual([]);
   });
 
   it("does not say a workspace is on when only what dohc last read says so", async () => {
     // An edit in the file took the workspace away, and dohc has not read it yet.
-    const { changes, steps, saved, lastRead } = setup();
-    lastRead({ chief: { ...chief, workspaces: ["ws-a", "ws-b"] } });
+    const { changes, order, saved, edit } = setup({ chief: both });
+    edit("chief", chief);
 
     await expect(changes.setWorkspace({ ...here, on: true })).rejects.toThrow(
       "The settings file changed while dohc turned this workspace on for Chief. Try again.",
     );
-    expect(steps.serve).not.toHaveBeenCalled();
+    expect(order).toEqual([]);
     expect(saved().workspaces).toEqual(["ws-a"]);
   });
 
@@ -111,50 +133,49 @@ describe("changes to an agent's thread and workspaces", () => {
     ];
     for (const [edited, words] of cases) {
       const { changes, steps, saved, edit } = setup();
-      vi.mocked(steps.serve).mockImplementationOnce(async (_workspaceId, _agent, save) => {
-        edit("chief", edited);
-        await save();
-      });
+      vi.mocked(steps.tellOfWorkspace).mockImplementationOnce(async () => edit("chief", edited));
       await expect(changes.setWorkspace({ ...here, on: true })).rejects.toThrow(words);
       expect(saved().workspaces).toEqual(["ws-a"]);
     }
 
-    // A name that keeps its handle finds the same messages, so it is no refusal.
-    const { changes, steps, saved, edit } = setup();
-    vi.mocked(steps.serve).mockImplementationOnce(async (_workspaceId, _agent, save) => {
-      edit("chief", { ...chief, name: "Chief!" });
-      await save();
-    });
-    await changes.setWorkspace({ ...here, on: true });
-    expect(saved()).toMatchObject({ name: "Chief!", workspaces: ["ws-a", "ws-b"] });
+    // A name with the same handle finds the same messages, so it is no refusal.
+    for (const name of ["Chief!", "CHIEF"]) {
+      const { changes, steps, saved, edit } = setup();
+      vi.mocked(steps.tellOfWorkspace).mockImplementationOnce(async () =>
+        edit("chief", { ...chief, name }),
+      );
+      await changes.setWorkspace({ ...here, on: true });
+      expect(saved()).toMatchObject({ name, workspaces: ["ws-a", "ws-b"] });
+    }
   });
 
-  it("saves nothing once the window shows another workspace", async () => {
-    // Before its turn comes, and again before each save.
+  it("saves and sets aside nothing once the window shows another workspace", async () => {
+    // Before its turn comes.
     for (const on of [true, false]) {
-      const { changes, steps, saved } = setup({
-        chief: { ...chief, workspaces: ["ws-a", "ws-b"] },
-      });
-      await expect(
-        changes.setWorkspace({ ...here, workspaceId: "ws-b", on, assertCurrent: moved }),
-      ).rejects.toThrow("this window changed workspaces");
-      expect(steps.serve).not.toHaveBeenCalled();
-      expect(saved().workspaces).toEqual(["ws-a", "ws-b"]);
+      const { changes, order, saved } = setup({ chief: on ? chief : both });
+      await expect(changes.setWorkspace({ ...here, on, assertCurrent: moved })).rejects.toThrow(
+        "this window changed workspaces",
+      );
+      expect(order).toEqual([]);
+      expect(saved().workspaces).toEqual(on ? ["ws-a"] : ["ws-a", "ws-b"]);
     }
-    const { changes, steps, saved } = setup();
+    // While the thread is told: nothing more is set aside, and nothing is saved.
+    const { changes, steps, order, saved } = setup();
     let current = true;
     const assertCurrent = () => {
       if (!current) moved();
     };
-    vi.mocked(steps.serve).mockImplementationOnce(async (_workspaceId, _agent, save) => {
+    vi.mocked(steps.tellOfWorkspace).mockImplementationOnce(async () => {
+      order.push("told");
       current = false;
-      await save();
     });
     await expect(changes.setWorkspace({ ...here, on: true, assertCurrent })).rejects.toThrow(
       "this window changed workspaces",
     );
+    expect(order).toEqual(["set aside ws-b", "told"]);
     expect(saved().workspaces).toEqual(["ws-a"]);
 
+    // While the new thread is introduced.
     const change = setup();
     current = true;
     vi.mocked(change.steps.change).mockImplementationOnce(async () => {
@@ -168,7 +189,7 @@ describe("changes to an agent's thread and workspaces", () => {
 
   it("changes the thread: introduces the new one, then saves the agent with it", async () => {
     const { changes, order, saved } = setup({
-      chief: { ...chief, workspaces: ["ws-a", "ws-b"] },
+      chief: both,
       other: { ...chief, name: "Other", thread: thread("t-9"), workspaces: ["ws-a"] },
     });
     const change = { ...here, workspaceId: "ws-a" };
@@ -206,10 +227,9 @@ describe("changes to an agent's thread and workspaces", () => {
     const { changes, steps, order, saved } = setup();
     let told!: () => void;
     const telling = new Promise<void>((resolve) => (told = resolve));
-    vi.mocked(steps.serve).mockImplementationOnce(async (workspaceId, agent, save) => {
+    vi.mocked(steps.tellOfWorkspace).mockImplementationOnce(async (workspaceId, agent) => {
       order.push(`telling ${agent.thread.id} of ${workspaceId}`);
       await telling;
-      await save();
     });
 
     // A workspace is turned on, and before the thread has answered the person
@@ -218,10 +238,11 @@ describe("changes to an agent's thread and workspaces", () => {
     const change = changes.changeThread({ ...here, workspaceId: "ws-a", threadId: "t-2" });
     const failing = changes.changeThread({ ...here, workspaceId: "ws-a", threadId: "t-2" });
     const off = changes.setWorkspace({ ...here, on: false });
-    await vi.waitFor(() => expect(order).toEqual(["telling t-1 of ws-b"]));
+    const begun = ["set aside ws-b", "telling t-1 of ws-b"];
+    await vi.waitFor(() => expect(order).toEqual(begun));
     // Nothing else starts while the thread is told.
     await new Promise((resolve) => setImmediate(resolve));
-    expect(order).toEqual(["telling t-1 of ws-b"]);
+    expect(order).toEqual(begun);
     told();
     await on;
     await change;
@@ -230,7 +251,8 @@ describe("changes to an agent's thread and workspaces", () => {
 
     // The new thread is introduced for both workspaces, because the first change had landed.
     expect(order).toEqual([
-      "telling t-1 of ws-b",
+      ...begun,
+      "set aside ws-b",
       "saved",
       "introduced t-2 for 2 workspaces",
       "saved",

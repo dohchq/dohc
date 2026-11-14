@@ -10772,7 +10772,8 @@ function registerIpcHandlers(): void {
     agents: async () => listAgents((await readCachedUserSettingsFile(stateDir())).settings),
     changeAgent: settingsIpc.changeAgent,
     threads: {
-      serve: (workspaceId, agent, save) => agentThreads().serve(workspaceId, agent, save),
+      setAside: (workspaceId, agent) => agentThreads().setAside(workspaceId, agent),
+      tellOfWorkspace: (workspaceId, agent) => agentThreads().tellOfWorkspace(workspaceId, agent),
       change: (workspaceId, agent) => agentThreads().change(workspaceId, agent),
     },
   });
