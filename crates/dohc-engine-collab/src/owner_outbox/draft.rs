@@ -41,6 +41,10 @@ impl OwnerLayer {
         })
     }
 
+    pub(super) fn holds_row(&self, binding: &LiveObjectBinding, cursor: i64) -> bool {
+        self.holds(binding) && self.rows.contains_key(&cursor)
+    }
+
     pub(crate) fn drop_through(&mut self, cursor: i64) {
         self.rows.retain(|held, _| *held > cursor);
     }
@@ -784,7 +788,7 @@ pub fn open_draft_in(
 
 /// The accepted checkpoint, then the layer's rows above it, then the owner's
 /// pending entries: what the owner's screen shows.
-fn open_layered_draft_in(
+pub(super) fn open_layered_draft_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
     expected_revision: i64,
@@ -3400,5 +3404,237 @@ mod tests {
                 .unwrap(),
             ["not-accepted", "not-accepted", "pending"]
         );
+    }
+
+    /// A held note: the collaborator's committed row at 5, the owner's own
+    /// paragraph, and the owner's words typed into the collaborator's row.
+    fn held_note(
+        store: &mut EngineStore,
+        cache: &mut crate::WriterDocCache,
+        observed: &ObservedOwnerBinding,
+        checkpoint: &[u8],
+    ) {
+        let collaborator = Ydoc::wire();
+        collaborator.apply(checkpoint).unwrap();
+        let row = collaborator.richdoc_append_paragraph("Committed by a collaborator");
+        put_committed_row(store, cache, &observed.binding, 5, row).unwrap();
+        let shown = open_draft_cached(store, cache, &observed.binding, 1).unwrap();
+        let owner = Ydoc::wire();
+        owner.apply(&shown.initial_update).unwrap();
+        let inside = owner
+            .richdoc_insert_text(COLLABORATOR_BLOCK, 0, "Owner says: ")
+            .unwrap();
+        let standalone = owner.richdoc_append_paragraph("Standalone owner paragraph");
+        for (append_key, update) in [("inside", inside), ("standalone", standalone)] {
+            append_draft_cached(
+                store,
+                cache,
+                "workspace",
+                owner_edit(observed, append_key, update),
+                &NoFaults,
+            )
+            .unwrap();
+        }
+    }
+
+    fn pause_input(observed: &ObservedOwnerBinding) -> super::super::release::OwnerPauseInput {
+        super::super::release::OwnerPauseInput {
+            binding: observed.binding.clone(),
+            applied_cursor: 0,
+            row_cursor: 5,
+            copy_path: "owner (unsaved edits).md".into(),
+            kept_snapshot: None,
+            now_ms: 20,
+        }
+    }
+
+    fn entry_count(store: &EngineStore) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM owner_ydoc_outbox_entries", [], |r| {
+                    r.get(0)
+                })
+                .map_err(read_sql)
+            })
+            .unwrap()
+    }
+
+    fn copy_text(store: &EngineStore) -> Option<String> {
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        store
+            .read_with(|conn| super::super::release::paused_copy_in(conn, &key))
+            .unwrap()
+            .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn owner_unapplied_entries_are_in_copy_not_note() {
+        use super::super::release;
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        held_note(&mut store, &mut cache, &observed, &checkpoint);
+
+        // Accepted is still at 0, so a pause at A=3 waits for the route.
+        let mut early = pause_input(&observed);
+        early.applied_cursor = 3;
+        assert!(matches!(
+            release::pause_cached(&mut store, &mut cache, &early, &NoFaults),
+            Err(OwnerOutboxError::AcceptedStateIncomplete)
+        ));
+        // So does one whose last row the layer does not hold.
+        let mut missing_row = pause_input(&observed);
+        missing_row.row_cursor = 6;
+        assert!(matches!(
+            release::pause_cached(&mut store, &mut cache, &missing_row, &NoFaults),
+            Err(OwnerOutboxError::AcceptedStateIncomplete)
+        ));
+
+        let stop =
+            release::pause_cached(&mut store, &mut cache, &pause_input(&observed), &NoFaults)
+                .unwrap();
+        let paused = stop.paused.clone().unwrap();
+        assert_eq!((paused.applied_cursor, paused.row_cursor), (0, 5));
+        assert!(!paused.copy_written);
+        assert_eq!(
+            (stop.state.as_str(), stop.retirement_owed),
+            ("released", false)
+        );
+        let copy = copy_text(&store).unwrap();
+        assert!(copy.contains("Owner says: Committed by a collaborator"));
+        assert!(copy.contains("Standalone owner paragraph"));
+        let note = stored_text(&store);
+        assert!(!note.contains("Committed by a collaborator"));
+        assert!(!note.contains("Standalone owner paragraph"));
+        assert_eq!(entry_count(&store), 0);
+        assert!(store
+            .read_with(|conn| read_observed_in(conn, &observed.binding))
+            .unwrap()
+            .is_none());
+
+        // The pause, Stop and an ordinary release leave a paused row as it is.
+        assert_eq!(
+            release::pause_cached(&mut store, &mut cache, &pause_input(&observed), &NoFaults)
+                .unwrap()
+                .paused,
+            Some(paused.clone())
+        );
+        let stopped = committed(
+            store
+                .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, 21))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stopped.paused, Some(paused.clone()));
+        let released = committed(
+            store
+                .write_with(&NoFaults, |tx| {
+                    release::release_in_tx(
+                        tx,
+                        &observed.binding,
+                        Some(9),
+                        None,
+                        22,
+                        |_, _, _, _, _| Ok(()),
+                    )
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(released.paused, Some(paused.clone()));
+        assert_eq!(copy_text(&store).unwrap(), copy);
+
+        // The listing shows it until Resume clears it, which frees the copy.
+        let listed = store
+            .read_with(|conn| release::list_requested_in(conn, "workspace"))
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        let written = committed(
+            store
+                .write_with(&NoFaults, |tx| {
+                    release::copy_written_in_tx(tx, &key, "owner (unsaved edits 2).md", 23)
+                })
+                .unwrap(),
+        )
+        .unwrap()
+        .paused
+        .unwrap();
+        assert!(written.copy_written);
+        assert_eq!(written.copy_path, "owner (unsaved edits 2).md");
+        let digest = hex_sha256(copy.as_bytes());
+        committed(
+            store
+                .write_with(&NoFaults, |tx| release::clear_in_tx(tx, &key))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(copy_text(&store).is_none());
+        assert!(!store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM binary_blobs WHERE sha256=?1)",
+                    [&digest],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(read_sql)
+            })
+            .unwrap());
+    }
+
+    #[test]
+    fn paused_road_at_each_kill_point() {
+        use super::super::release;
+        use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+        struct Crash(FaultPoint);
+        impl FaultInjector for Crash {
+            fn poll(&self, point: FaultPoint) -> FaultAction {
+                if point == self.0 {
+                    FaultAction::Crash
+                } else {
+                    FaultAction::Continue
+                }
+            }
+        }
+        for point in [
+            FaultPoint::StorageBeforePersist,
+            FaultPoint::StorageAfterCommitBeforeAck,
+        ] {
+            let (_dir, mut store, observed, checkpoint) = fixture();
+            install(&mut store, &observed, &checkpoint);
+            let mut cache = crate::WriterDocCache::default();
+            held_note(&mut store, &mut cache, &observed, &checkpoint);
+            assert!(release::pause_cached(
+                &mut store,
+                &mut cache,
+                &pause_input(&observed),
+                &Crash(point)
+            )
+            .is_err());
+            if point == FaultPoint::StorageBeforePersist {
+                // Still bound, nothing removed, no copy.
+                assert_eq!(entry_count(&store), 2);
+                assert!(copy_text(&store).is_none());
+                assert!(store
+                    .read_with(|conn| read_observed_in(conn, &observed.binding))
+                    .unwrap()
+                    .is_some());
+            } else {
+                assert_eq!(entry_count(&store), 0);
+                assert!(copy_text(&store)
+                    .unwrap()
+                    .contains("Standalone owner paragraph"));
+            }
+            // Running the road again ends paused with one copy holding the
+            // owner's text, never a note holding a row above A.
+            let stop =
+                release::pause_cached(&mut store, &mut cache, &pause_input(&observed), &NoFaults)
+                    .unwrap();
+            assert!(stop.paused.is_some());
+            let copy = copy_text(&store).unwrap();
+            assert!(copy.contains("Owner says: Committed by a collaborator"));
+            assert!(copy.contains("Standalone owner paragraph"));
+            assert!(!stored_text(&store).contains("Committed by a collaborator"));
+        }
     }
 }
