@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import type { TokenCipher } from "../workspaces/cloudCredentialStore";
-import type { T3CodeSignIn } from "./t3Code";
+import { T3_CODE_ACCESS, type T3CodeSignIn } from "./t3Code";
 
 // dohc's sign-in to T3 Code on this computer. It can drive every thread the
 // person has there, so it is kept only encrypted with the system's credential
@@ -18,10 +18,12 @@ const FILE_NAME = "dohc-t3-code.json";
 
 const Kept = z
   .object({
-    version: z.literal(1),
+    version: z.literal(2),
     origin: z.string().min(1),
     expiresAtMs: z.number(),
     token: z.string().min(1),
+    // What the person allowed in dohc, or null when they chose on T3 Code's page.
+    access: z.enum(T3_CODE_ACCESS).nullable(),
   })
   .strict();
 // What a request header can carry. A decryption that went wrong fails this.
@@ -82,7 +84,7 @@ export function createT3CodeSignInStore(options: {
         if (kept.expiresAtMs <= nowMs()) return null;
         const token = options.cipher!.decrypt(kept.token);
         return VISIBLE_ASCII.test(token)
-          ? { origin: kept.origin, token, expiresAtMs: kept.expiresAtMs }
+          ? { origin: kept.origin, token, expiresAtMs: kept.expiresAtMs, access: kept.access }
           : null;
       } catch {
         return null;
@@ -92,10 +94,11 @@ export function createT3CodeSignInStore(options: {
       inOrder(async () => {
         if (!canKeep()) throw new T3CodeSignInNotKept();
         const kept: z.infer<typeof Kept> = {
-          version: 1,
+          version: 2,
           origin: signIn.origin,
           expiresAtMs: signIn.expiresAtMs,
           token: options.cipher!.encrypt(signIn.token),
+          access: signIn.access,
         };
         await mkdir(options.dir, { recursive: true, mode: 0o700 });
         await atomicReplaceFile(file, (tmp) =>

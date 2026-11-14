@@ -43,6 +43,8 @@ For docs, specs, plans, PR bodies, and code comments, follow the six rules from 
 
 ## Code comments
 
+Comment what the code cannot show: a reason, a constraint, or a warning.
+Let a name, a type, or the next line say the rest.
 Write the current constraint and what breaks without it.
 Leave the reviewer, the review round, the PR or issue number, and the plan label to git and the pull request.
 Keep a link to another project's issue when it explains a workaround.

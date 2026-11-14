@@ -1,14 +1,13 @@
-/** Reads at most maxBytes before decoding JSON; cancellation also stops the stream. */
-export async function readBoundedJson(
+/** Reads at most maxBytes of a body; cancellation also stops the stream. */
+export async function readBoundedBytes(
   message: Request | Response,
   maxBytes: number,
   signal: AbortSignal,
-): Promise<unknown> {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
-    throw new TypeError("Invalid JSON body limit.");
+): Promise<Uint8Array> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new TypeError("Invalid body limit.");
   signal.throwIfAborted();
   const reader = message.body?.getReader();
-  if (!reader) throw new TypeError("Missing JSON body.");
+  if (!reader) throw new TypeError("Missing body.");
   const chunks: Uint8Array[] = [];
   let size = 0;
   const abort = () => {
@@ -20,16 +19,24 @@ export async function readBoundedJson(
       const next = await reader.read();
       signal.throwIfAborted();
       if (next.done) break;
-      if (next.value.byteLength > maxBytes - size) throw new RangeError("JSON body exceeds limit.");
+      if (next.value.byteLength > maxBytes - size) throw new RangeError("Body exceeds limit.");
       size += next.value.byteLength;
       chunks.push(next.value);
     }
-    return JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, size)),
-    ) as unknown;
+    return Buffer.concat(chunks, size);
   } finally {
     signal.removeEventListener("abort", abort);
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
+}
+
+/** Reads at most maxBytes before decoding JSON; cancellation also stops the stream. */
+export async function readBoundedJson(
+  message: Request | Response,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const bytes = await readBoundedBytes(message, maxBytes, signal);
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
 }

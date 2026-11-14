@@ -5,8 +5,8 @@
 
 use std::num::NonZeroUsize;
 
-/// Maximum UTF-8 text payload owned by workspace capture. This equals the
-/// engine-domain `MAX_TEXT_BYTES` admission limit: capture must not reject a
+/// Maximum UTF-8 text payload owned by workspace capture. The engine-domain
+/// `MAX_TEXT_BYTES` const assertion checks equality: capture must not reject a
 /// healthy text artifact that the authoritative store accepts.
 pub const MAX_CAPTURE_TEXT_BYTES: u64 = 10 * 1024 * 1024;
 

@@ -672,6 +672,148 @@ fn already_admitted_remote_authors_never_wedge_coverage_readers() {
         .expect("known authors and readers stay usable");
 }
 
+#[test]
+fn largest_serialized_authors_fit_the_entry_bound() {
+    use dohc_engine_collab::live_update_application::LiveAuthorEntry;
+    use dohc_engine_domain::collections::MAX_AUTOMATION_RUN_NAME_BYTES;
+    use dohc_engine_domain::{
+        moment_author_json, AutomationRunAttribution, SharedChangeAuthor, MAX_AUTHOR_FIELD_BYTES,
+        MAX_CHANGE_ATTRIBUTION_DEPTH,
+    };
+
+    let check = |json: String| {
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&json).expect("author list");
+        assert_eq!(entries.len(), 1);
+        let bytes = entries[0].to_string().len();
+        assert!(
+            bytes <= author_coverage::MAX_AUTHOR_ENTRY_BYTES,
+            "{} author uses {bytes} bytes, exceeding MAX_AUTHOR_ENTRY_BYTES ({})",
+            entries[0]["kind"],
+            author_coverage::MAX_AUTHOR_ENTRY_BYTES,
+        );
+    };
+    for escaped in ['"', '\\'] {
+        let field = escaped.to_string().repeat(MAX_AUTHOR_FIELD_BYTES);
+        for actor_kind in [
+            ChangeActorKind::Human,
+            ChangeActorKind::Agent,
+            ChangeActorKind::Automation,
+        ] {
+            let attribution = ChangeAttribution {
+                actor_kind,
+                on_behalf_of: Some(field.clone()),
+                depth: MAX_CHANGE_ATTRIBUTION_DEPTH,
+                run: (actor_kind == ChangeActorKind::Automation).then(|| {
+                    AutomationRunAttribution {
+                        claim_id: field.clone(),
+                        automation_name: escaped.to_string().repeat(MAX_AUTOMATION_RUN_NAME_BYTES),
+                    }
+                }),
+                agent_run_id: (actor_kind == ChangeActorKind::Agent).then(|| field.clone()),
+            };
+            attribution.validate().expect("bounded native attribution");
+            check(moment_author_json(Some(&field), Some(&attribution)).expect("native author"));
+        }
+        for author in [
+            LiveAuthorEntry::Unattributed {},
+            LiveAuthorEntry::Human {
+                human_id: field.clone(),
+                human_name: field.clone(),
+            },
+            LiveAuthorEntry::Link {
+                public_principal_id: field.clone(),
+                label: field.clone(),
+            },
+            LiveAuthorEntry::Agent {
+                agent_id: field.clone(),
+                agent_name: Some(field.clone()),
+                on_behalf_of: Some(field.clone()),
+                depth: Some(u8::try_from(MAX_CHANGE_ATTRIBUTION_DEPTH).expect("wire depth")),
+            },
+        ] {
+            author.validate().expect("bounded live author");
+            check(serde_json::to_string(&[author]).expect("live author"));
+        }
+        for author in [
+            SharedChangeAuthor::Named {
+                user_id: field.clone(),
+                grant_id: field.clone(),
+                grant_generation: 9_007_199_254_740_991,
+            },
+            SharedChangeAuthor::Link {
+                grant_id: field.clone(),
+                principal_id: field.clone(),
+                grant_generation: 9_007_199_254_740_991,
+            },
+        ] {
+            check(author_coverage::shared_json(&author).expect("bounded shared author"));
+        }
+    }
+
+    // A control character serializes to six bytes, three times what the bound allows for.
+    let control = "\u{1}";
+    assert!(dohc_engine_collab::validate_actor_origin_id(control).is_err());
+    let native = |actor_kind: ChangeActorKind, fields: [&str; 4]| ChangeAttribution {
+        actor_kind,
+        on_behalf_of: Some(fields[0].to_owned()),
+        depth: 0,
+        run: (actor_kind == ChangeActorKind::Automation).then(|| AutomationRunAttribution {
+            claim_id: fields[1].to_owned(),
+            automation_name: fields[2].to_owned(),
+        }),
+        agent_run_id: (actor_kind == ChangeActorKind::Agent).then(|| fields[3].to_owned()),
+    };
+    for (actor_kind, field) in [
+        (ChangeActorKind::Human, 0),
+        (ChangeActorKind::Agent, 0),
+        (ChangeActorKind::Agent, 3),
+        (ChangeActorKind::Automation, 0),
+        (ChangeActorKind::Automation, 1),
+        (ChangeActorKind::Automation, 2),
+    ] {
+        let mut fields = ["a"; 4];
+        assert!(native(actor_kind, fields).validate().is_ok());
+        fields[field] = control;
+        assert!(
+            native(actor_kind, fields).validate().is_err(),
+            "native field {field} admits a control character"
+        );
+    }
+    let live = |kind: &str, fields: [&str; 3]| match kind {
+        "human" => LiveAuthorEntry::Human {
+            human_id: fields[0].to_owned(),
+            human_name: fields[1].to_owned(),
+        },
+        "link" => LiveAuthorEntry::Link {
+            public_principal_id: fields[0].to_owned(),
+            label: fields[1].to_owned(),
+        },
+        _ => LiveAuthorEntry::Agent {
+            agent_id: fields[0].to_owned(),
+            agent_name: Some(fields[1].to_owned()),
+            on_behalf_of: Some(fields[2].to_owned()),
+            depth: Some(0),
+        },
+    };
+    for (kind, field) in [
+        ("human", 0),
+        ("human", 1),
+        ("link", 0),
+        ("link", 1),
+        ("agent", 0),
+        ("agent", 1),
+        ("agent", 2),
+    ] {
+        let mut fields = ["a"; 3];
+        assert!(live(kind, fields).validate().is_ok());
+        fields[field] = control;
+        assert!(
+            live(kind, fields).validate().is_err(),
+            "live {kind} field {field} admits a control character"
+        );
+    }
+}
+
 /// A declared agent is the largest live entry: an id, a name and a principal,
 /// each up to 512 bytes that escape to twice their size, and its depth. The
 /// host admits it at 3,143 bytes, and the interval admits it too. The

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   T3CodeError,
+  type T3CodeSignIn,
   listT3CodeProjects,
   listT3CodeThreads,
   openT3CodeSession,
@@ -31,8 +32,9 @@ async function fakeT3Code() {
   return fake;
 }
 
-const signInAt = (origin: string) => ({
+const signInAt = (origin: string): T3CodeSignIn => ({
   origin,
+  access: null,
   token: "token-1",
   expiresAtMs: Number.MAX_SAFE_INTEGER,
 });
@@ -88,6 +90,8 @@ describe("signing in to T3 Code", () => {
       origin: t3.origin,
       token: "token-1",
       expiresAtMs: 1_000 + 2_592_000_000,
+      // The person chose on T3 Code's page, which does not tell dohc what they chose.
+      access: null,
     });
     // The redirect is on this computer by number, and dohc registers as a client with no secret.
     expect(t3.registrations).toEqual([
@@ -105,6 +109,116 @@ describe("signing in to T3 Code", () => {
       resource: `${t3.origin}/mcp`,
     });
     expect(asked.get("code_challenge")).toMatch(/^[\w-]{43}$/u);
+  });
+
+  it("approves its own request with a code it made, for the access the person chose, and opens no page", async () => {
+    const t3 = await fakeT3Code();
+    const opened: string[] = [];
+    const made: string[] = [];
+    const signIn = await signInToT3Code({
+      origin: t3.origin,
+      open: (url) => void opened.push(url),
+      nowMs: () => 1_000,
+      approve: {
+        access: "auto",
+        code: async () => {
+          made.push(t3.issueCode());
+          return made.at(-1)!;
+        },
+      },
+    });
+
+    expect(signIn).toEqual({
+      origin: t3.origin,
+      token: "token-1",
+      expiresAtMs: 1_000 + 2_592_000_000,
+      access: "auto",
+    });
+    expect(opened).toEqual([]);
+    expect(t3.authorizations).toEqual([]);
+    // T3 Code is sent the request a page would carry, and the choice with the code.
+    expect(t3.decisions).toEqual([
+      {
+        authorization: {
+          response_type: "code",
+          client_id: "client-1",
+          redirect_uri: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/t3-code$/u),
+          code_challenge: expect.stringMatching(/^[\w-]{43}$/u),
+          code_challenge_method: "S256",
+          state: expect.stringMatching(/^[\w-]{22}$/u),
+          resource: `${t3.origin}/mcp`,
+        },
+        decision: { _tag: "pairing-code", access: "auto", code: made[0] },
+      },
+    ]);
+  });
+
+  it("says it cannot allow dohc here when its own code is not made, not taken, or answered with another address", async () => {
+    const t3 = await fakeT3Code();
+    const approve = (code: () => Promise<string>) =>
+      signInToT3Code({
+        origin: t3.origin,
+        open: () => undefined,
+        approve: { access: "full-access", code },
+      });
+    const unavailable = new T3CodeError("cannot-allow-here", "T3 Code's program is not there.");
+
+    await expect(approve(() => Promise.reject(unavailable))).rejects.toBe(unavailable);
+    // A code T3 Code does not know, as one a policy revoked.
+    await expect(approve(async () => "NOTACODE")).rejects.toMatchObject({
+      problem: "cannot-allow-here",
+      message: "T3 Code did not take dohc's own sign-in code.",
+    });
+    // A code approves one sign-in.
+    const once = t3.issueCode();
+    await expect(approve(async () => once)).resolves.toMatchObject({ access: "full-access" });
+    await expect(approve(async () => once)).rejects.toMatchObject({ problem: "cannot-allow-here" });
+    // The answer must be this sign-in's own address and state, from this T3 Code, with a code.
+    // Each answer below is wrong in one way and would sign dohc in if it were read.
+    const changed = (change: (answer: URL) => void) => (own: URL) => {
+      const answer = new URL(own);
+      change(answer);
+      return answer.href;
+    };
+    const elsewhere: Array<[(own: URL) => string, string]> = [
+      [changed((answer) => (answer.hostname = "localhost")), "cannot-allow-here"],
+      [changed((answer) => (answer.port = "1")), "cannot-allow-here"],
+      [changed((answer) => (answer.pathname = "/other")), "cannot-allow-here"],
+      [changed((answer) => answer.searchParams.set("state", "another")), "cannot-allow-here"],
+      [changed((answer) => answer.searchParams.delete("state")), "cannot-allow-here"],
+      [
+        changed((answer) => answer.searchParams.set("iss", "http://127.0.0.1:1")),
+        "cannot-allow-here",
+      ],
+      [changed((answer) => answer.searchParams.delete("code")), "cannot-allow-here"],
+      [() => "not an address", "unexpected"],
+    ];
+    for (const [redirectTo, problem] of elsewhere) {
+      t3.redirectTo = redirectTo;
+      await expect(approve(async () => t3.issueCode())).rejects.toMatchObject({ problem });
+    }
+    t3.redirectTo = null;
+
+    // Cancelling while the code is made stops the sign-in.
+    const cancel = new AbortController();
+    await expect(
+      signInToT3Code({
+        origin: t3.origin,
+        open: () => undefined,
+        signal: cancel.signal,
+        approve: {
+          access: "auto",
+          code: (signal) =>
+            new Promise((_, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason as Error));
+              cancel.abort();
+            }),
+        },
+      }),
+    ).rejects.toMatchObject({
+      problem: "not-allowed",
+      message: "The sign-in to T3 Code was cancelled.",
+    });
   });
 
   it("rejects when the person declines, does not answer in time, or cancels", async () => {
@@ -759,12 +873,19 @@ describe("keeping the sign-in to T3 Code", () => {
     let now = 1_000;
     const store = createT3CodeSignInStore({ dir, cipher: cipher(true), nowMs: () => now });
     await expect(store.load()).resolves.toBeNull();
-    await store.save({ origin: "http://127.0.0.1:3773", token: "token-1", expiresAtMs: 5_000 });
+    await store.save({
+      origin: "http://127.0.0.1:3773",
+      token: "token-1",
+      expiresAtMs: 5_000,
+      access: "auto",
+    });
     expect(await readFile(join(dir, "dohc-t3-code.json"), "utf8")).not.toContain("token-1");
     await expect(store.load()).resolves.toEqual({
       origin: "http://127.0.0.1:3773",
       token: "token-1",
       expiresAtMs: 5_000,
+      // What the person allowed in dohc is kept with the sign-in.
+      access: "auto",
     });
     now = 5_000;
     await expect(store.load()).resolves.toBeNull();
@@ -779,7 +900,12 @@ describe("keeping the sign-in to T3 Code", () => {
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const store = createT3CodeSignInStore({ dir, cipher: cipher(true), nowMs: () => 1_000 });
     await Promise.all([
-      store.save({ origin: "http://127.0.0.1:3773", token: "token-1", expiresAtMs: 5_000 }),
+      store.save({
+        origin: "http://127.0.0.1:3773",
+        token: "token-1",
+        expiresAtMs: 5_000,
+        access: null,
+      }),
       store.clear(),
     ]);
     await expect(store.load()).resolves.toBeNull();
@@ -788,7 +914,12 @@ describe("keeping the sign-in to T3 Code", () => {
       cipher: { ...cipher(true), decrypt: () => "token\u0000one" },
       nowMs: () => 1_000,
     });
-    await garbled.save({ origin: "http://127.0.0.1:3773", token: "token-1", expiresAtMs: 5_000 });
+    await garbled.save({
+      origin: "http://127.0.0.1:3773",
+      token: "token-1",
+      expiresAtMs: 5_000,
+      access: null,
+    });
     await expect(garbled.load()).resolves.toBeNull();
   });
 
@@ -801,7 +932,12 @@ describe("keeping the sign-in to T3 Code", () => {
     ]) {
       expect(store.canKeep()).toBe(false);
       await expect(
-        store.save({ origin: "http://127.0.0.1:3773", token: "token-1", expiresAtMs: 5_000 }),
+        store.save({
+          origin: "http://127.0.0.1:3773",
+          token: "token-1",
+          expiresAtMs: 5_000,
+          access: null,
+        }),
       ).rejects.toBeInstanceOf(T3CodeSignInNotKept);
       await expect(store.load()).resolves.toBeNull();
     }

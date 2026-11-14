@@ -817,6 +817,15 @@ export function needsNewerDohc(error: unknown): boolean {
   return readError(error).words === NEWER_DOHC;
 }
 
+/**
+ * The code of dohc failing to allow itself in T3 Code with its own sign-in
+ * code. T3 Code's page is then the other way. No other failure carries it.
+ */
+export const T3_CODE_CANNOT_ALLOW_HERE = "cannot-allow-here";
+export function isT3CodeCannotAllowHere(error: unknown): boolean {
+  return parse(error).code === T3_CODE_CANNOT_ALLOW_HERE;
+}
+
 /** The code an error carries, read back from the string main's IPC boundary sends. */
 export function refusalCode(error: unknown): string | undefined {
   return parse(error).code;

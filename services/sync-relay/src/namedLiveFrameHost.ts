@@ -103,6 +103,8 @@ interface SubmitTiming {
   committedAt?: number;
   /** The journal admitted it, so the rest is its application and ACK read. */
   admitted?: boolean;
+  /** Waiting for earlier saves of the same note to commit or give up. */
+  queueMs: number;
   /** Waiting for a validation slot, over every attempt. */
   waitMs: number;
   /** Reading a personal agent's access again from Postgres. */
@@ -118,6 +120,7 @@ interface SubmitTiming {
 }
 const newSubmitTiming = (startedAt: number): SubmitTiming => ({
   startedAt,
+  queueMs: 0,
   waitMs: 0,
   freshMs: 0,
   attempts: 0,
@@ -152,6 +155,7 @@ function reportLiveSubmit(
   const held = loopHeldBetween(timing.startedAt, nowMs);
   const figures = {
     checkMs: ms(timing.startedAt, timing.commitAt ?? nowMs),
+    queueMs: round(timing.queueMs),
     waitMs: round(timing.waitMs),
     queryMs: round(timing.cut.queryMs),
     verifyMs: round(timing.cut.verifyMs),
@@ -206,6 +210,47 @@ export function untilAborted<T>(read: Promise<T>, signal: AbortSignal): Promise<
     void read.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
     if (signal.aborted) abort();
   });
+}
+
+/**
+ * One check per note at a time. A save checked beside another save of the same
+ * note reads a cut the other's commit moves, so the journal answers it retry and
+ * it checks the whole note again. Each storage keeps its notes' queues.
+ */
+const checkQueues = new WeakMap<object, Map<string, Promise<void>>>();
+
+/**
+ * Waits until every earlier save of the note has committed or given up, or
+ * until `signal` aborts. The caller runs the returned function when it commits
+ * or gives up, which lets the next save in.
+ */
+async function enterCheckQueue(storage: object, document: LiveDocumentKey, signal: AbortSignal) {
+  let queues = checkQueues.get(storage);
+  if (!queues) checkQueues.set(storage, (queues = new Map()));
+  const key = JSON.stringify([
+    document.workspaceId,
+    document.mainVersionId,
+    document.objectId,
+    document.lineageClaimId,
+  ]);
+  const earlier = queues.get(key) ?? Promise.resolve();
+  let leave!: () => void;
+  const mine = new Promise<void>((resolve) => {
+    leave = resolve;
+  });
+  // A save that gives up while queued lets the next in only after the saves ahead of it.
+  const tail = earlier.then(() => mine);
+  queues.set(key, tail);
+  void tail.then(() => {
+    if (queues.get(key) === tail) queues.delete(key);
+  });
+  try {
+    await untilAborted(earlier, signal);
+  } catch (error) {
+    leave();
+    throw error;
+  }
+  return leave;
 }
 
 /**
@@ -488,10 +533,6 @@ function captureLiveFrameHost(options: {
         return { result: "refused", reason: "capacity-refused" };
       if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest)
         return { result: "refused", reason: "invalid-update" };
-      if (options.validationBudget) {
-        releaseValidation = options.validationBudget.reserve() ?? undefined;
-        if (!releaseValidation) return { result: "retry", reason: "admission-unavailable" };
-      }
       const deadline = new AbortController();
       const timer = setTimeout(
         () => deadline.abort(new Error("Named admission deadline exceeded.")),
@@ -499,7 +540,19 @@ function captureLiveFrameHost(options: {
       );
       const admissionSignal = AbortSignal.any([signal, deadline.signal]);
       let receipt: LiveUpdateReceipt;
+      let leaveQueue: (() => void) | undefined;
       try {
+        const queuedAt = performance.now();
+        try {
+          leaveQueue = await enterCheckQueue(storage, document, admissionSignal);
+        } finally {
+          timing.queueMs = performance.now() - queuedAt;
+        }
+        check(admissionSignal);
+        if (options.validationBudget) {
+          releaseValidation = options.validationBudget.reserve() ?? undefined;
+          if (!releaseValidation) return { result: "retry", reason: "admission-unavailable" };
+        }
         let retryDelayMs = 10;
         let waitForCapacity = validate.waitForCapacity?.bind(validate);
         for (;;) {
@@ -637,6 +690,7 @@ function captureLiveFrameHost(options: {
         }
         throw error;
       } finally {
+        leaveQueue?.();
         clearTimeout(timer);
       }
       timing.admitted = true;

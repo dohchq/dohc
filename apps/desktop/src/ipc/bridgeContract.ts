@@ -5760,11 +5760,11 @@ export const ListChatChannelSharesResult = z.object({
   // surface shows those too and decides for each one whether this workspace
   // has already joined it.
   //
-  // NO row cap, and it must not gain one. These are dohc's own registry rows
-  // and they are the authority for channelIsLocked: a read that refuses them
-  // rejects the whole IPC call, the renderer reads an unknown listing, and
-  // every channel goes read-only. Nothing needs a cap here now — the
-  // caller's view bounds the size.
+  // sharedChannelsIpc.test.ts checks requested local answers beyond the relay cap.
+  // Do not add a cap. These are dohc's own registry rows and they are the
+  // authority for channelIsLocked: a read that refuses them rejects the whole
+  // IPC call, the renderer reads an unknown listing, and every channel goes
+  // read-only. Nothing needs a cap here now — the caller's view bounds the size.
   joined: z.array(JoinedChannelAnswer),
   // The account the relay lanes are scoped to (server + stable user id), or
   // null when no session exists. Cached relay rows are preservable only
@@ -8178,12 +8178,27 @@ export const chatDispatchPauseOperations = {
   },
 } as const satisfies OperationTable;
 
+// What dohc may do in T3 Code, in T3 Code's words for a thread's mode. dohc
+// can message a thread that runs with this mode or less.
+export const T3CodeAccess = z.enum([
+  "approval-required",
+  "auto-accept-edits",
+  "auto",
+  "full-access",
+]);
+export type T3CodeAccess = z.infer<typeof T3CodeAccess>;
 // dohc's sign-in to T3 Code on this computer.
 export const T3CodeConnectionState = z.strictObject({
   // False when this computer cannot encrypt the sign-in, so dohc does not connect.
   canKeep: z.boolean(),
   // When the sign-in runs out, or null when dohc has none.
   signedInUntilMs: z.number().nullable(),
+  // What the person allowed in dohc: the mode of the threads dohc can message.
+  // Null when dohc has no sign-in, or the person chose on T3 Code's own page.
+  access: T3CodeAccess.nullable(),
+  // True when dohc can make its own sign-in code here, so one click in dohc
+  // allows it. False when the person must allow dohc on T3 Code's page.
+  canAllowHere: z.boolean(),
 });
 export type T3CodeConnectionState = z.infer<typeof T3CodeConnectionState>;
 export const T3CodeProjectList = z.strictObject({
@@ -8220,6 +8235,8 @@ export const AgentThreadLine = z.strictObject({
   // The tool's id for the question the thread waits on, when it waits on a
   // question. The question itself travels only when the person asks to answer it.
   questionId: z.string().min(1).max(512).nullable(),
+  // The thread waits on its person: this message's own work, or the work it is in line behind.
+  threadWaiting: z.boolean(),
 });
 export type AgentThreadLine = z.infer<typeof AgentThreadLine>;
 // A question an agent asks the person in its tool's own question box.
@@ -8288,13 +8305,16 @@ export const agentThreadOperations = {
     result: T3CodeConnectionState,
     guard: "trusted-sender",
   },
-  // Opens T3 Code's own page, where the person allows dohc. Settles when they
-  // answer, when the wait is cancelled, or when time runs out.
+  // Gets dohc its sign-in to T3 Code. With an access, the person said yes in
+  // dohc: main makes dohc's own sign-in code and approves with it, for that
+  // access and no more. With null, main opens T3 Code's own page, where the
+  // person allows dohc. Settles when the sign-in is kept, when the wait is
+  // cancelled, or when time runs out.
   allowDohcInT3Code: {
     capabilityId: "agent.thread.t3code.allow",
     scope: "device",
     channel: "desktop:allow-dohc-in-t3-code",
-    payload: z.strictObject({}),
+    payload: z.strictObject({ access: T3CodeAccess.nullable() }),
     result: T3CodeConnectionState,
     guard: "trusted-sender",
   },

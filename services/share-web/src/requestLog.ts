@@ -18,6 +18,7 @@ export const SHARE_WEB_REQUEST_LOG = createRequestLog("share-web", [
   ...MCP_ROUTE_PATTERNS,
   "/api/apps",
   "/api/live/link-document",
+  "/api/live/link-document-state",
   "/api/live/link-ticket",
   "/api/live/named-session",
   "/api/live/named-ticket",

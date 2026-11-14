@@ -287,6 +287,10 @@ export function createDeviceControl(options: {
       if (!currentDelivery) throw new Error("Device delivery is unavailable.");
       return currentDelivery.captureNative(binding, signal);
     },
+    /** What the owner's computer applied of a note it holds, if it is connected and holds it. */
+    async readAwakeState(binding: LiveObjectBinding, maxOutputBytes: number, signal: AbortSignal) {
+      return currentDelivery?.readAwakeState(binding, maxOutputBytes, signal);
+    },
     get restoreConfigured() {
       return options.delivery?.config.restore !== undefined;
     },

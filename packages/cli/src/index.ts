@@ -24,7 +24,7 @@ import {
   normalizeChatMessageBody,
 } from "@dohc/workspace-contracts/chat-message-body";
 
-const DEFAULT_RESPONSE_TIMEOUT_MS = 30_000;
+export const DEFAULT_RESPONSE_TIMEOUT_MS = 30_000;
 
 interface CliExecutionResult {
   exitCode: 0 | 1;

@@ -47,6 +47,7 @@ it("classifies every served link route, including decoded route segments", () =>
     "/sync/live/link-tickets",
     "/sync/live/link-session",
     "/sync/live/link-document",
+    "/sync/live/link-document-state",
     "/sync/%6cink/share",
     "/sync/link%2Dexchange",
     "/sync/link-refresh/",

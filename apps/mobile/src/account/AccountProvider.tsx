@@ -20,7 +20,7 @@ import {
   type NoticeStore,
 } from "../server/noticeStore";
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
-import { createOutbox, type Outbox } from "../server/outbox";
+import { createOutbox, type Outbox, type OutboxState } from "../server/outbox";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import {
   createWorkspaceList,
@@ -36,6 +36,8 @@ interface AccountValue {
   readonly state: AccountState;
   /** Chat writes waiting for the server. Nothing adds to it yet. */
   readonly outbox: Outbox;
+  /** Where a Sign out's delete of the outbox stands. */
+  readonly deletion: OutboxState["deletion"];
   readonly workspaces: WorkspaceList;
   /** The workspace open on the phone: the one chosen, or the first that shows. Null when none shows. */
   readonly currentWorkspaceId: string | null;
@@ -70,7 +72,8 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 //
 // The outbox (src/server/outbox.ts) is the account's too, beside the cache and outside any workspace's store. It sends
 // only with its records' own account, keeps them through a 401, and deletes them at Sign out. A read that shows a saved
-// write's result hands it off. An app-state change tries again whatever failed, and asks again at once.
+// write's result hands it off. An app-state change tries again whatever failed, and asks again at once. Only where its
+// Sign out delete stands reaches the screen, so the rest of its changes render nothing.
 export function AccountProvider({ children }: { children: ReactNode }) {
   // Sign out deletes the outbox: the sign-in ends, and its token goes, once that delete can't be lost.
   const [outbox] = useState(() => createOutbox({ files: createDurableFiles(nativeDurableFile()) }));
@@ -85,6 +88,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   useEffect(() => cache.follow(account), [account, cache]);
 
   useEffect(() => outbox.follow(account), [account, outbox]);
+  const deletion = useSyncExternalStore(outbox.subscribe, () => outbox.state().deletion);
   useEffect(() => {
     const subscription = AppState.addEventListener("change", () => outbox.wake());
     return () => subscription.remove();
@@ -156,6 +160,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       account,
       state,
       outbox,
+      deletion,
       workspaces,
       currentWorkspaceId,
       data,
@@ -164,7 +169,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => open?.setShowOnPhone(workspaceId, showOnPhone),
     }),
-    [account, state, outbox, workspaces, currentWorkspaceId, data, notices, list, open],
+    [account, state, outbox, deletion, workspaces, currentWorkspaceId, data, notices, list, open],
   );
   return <Context value={value}>{children}</Context>;
 }
@@ -184,8 +189,13 @@ export function useSignIn(): SignIn {
 
 export function AccountGate({ children }: { children: ReactNode }) {
   const theme = useTheme();
-  const { state } = useAccount();
+  const { state, deletion } = useAccount();
+  // Once Connect shows, it stays while a Sign out's delete is owed, even if a sign-in finishes meanwhile, so the
+  // delete's failure and Try again stay in sight. A Sign out that fails while signed in stays in Settings.
+  const [onConnect, setOnConnect] = useState(false);
+  const showConnect = state.status === "signed-out" || (onConnect && deletion !== "none");
+  if (showConnect !== onConnect) setOnConnect(showConnect);
   if (state.status === "loading") return <View style={{ flex: 1, backgroundColor: theme.bg }} />;
-  if (state.status === "signed-out") return <Connect />;
+  if (showConnect) return <Connect />;
   return children;
 }

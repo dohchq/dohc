@@ -132,11 +132,28 @@ test("shards cover every task once, including uneven and small workloads", () =>
     }
 });
 
-test("package typechecks stay complete when changed files select no package tests", async () => {
+test("package typechecks and native proofs stay complete when changed files select no package tests", async () => {
   const packages = readWorkspacePackages(process.cwd()).filter(
     (pkg) => pkg.manifest.scripts?.typecheck,
   );
-  const tasks = await javascriptTasks({ changed: ["docs/guide.md"], proofs: false });
+  const tasks = await javascriptTasks({ changed: ["docs/guide.md"], proofs: true });
+  // The long proof runs one task per test. Every other native file runs as one task.
+  const native = Map.groupBy(
+    tasks.filter((task) => task.kind === "self-host-native"),
+    (task) => task.file,
+  );
+  const split = native.get("services/share-web/src/selfHostedLiveNative.integration.ts") ?? [];
+  assert.ok(split.length > 1);
+  for (const task of split) assert.equal(task.id, `self-host-native:${task.name}`);
+  for (const file of [
+    "services/share-web/src/namedRecipientAuthenticatedNative.integration.ts",
+    "services/share-web/src/remoteMcpNative.integration.ts",
+  ])
+    assert.deepEqual(
+      native.get(file)?.map(({ id, name }) => ({ id, name })),
+      [{ id: `self-host-native:${file}`, name: undefined }],
+    );
+  for (const file of native.keys()) assert.ok(existsSync(resolve(file)), file);
   const typechecks = tasks.filter((task) => task.id.startsWith("typecheck:"));
   assert.deepEqual(
     typechecks.map((task) => task.id).sort(),

@@ -7,6 +7,7 @@ import { desktopProofTags } from "./verify.mjs";
 const slash = (path) => path.replaceAll("\\", "/");
 const fileId = (path) => slash(relative(repoRoot, path));
 export const JS_SHARDS = 14;
+const splitNativeFile = "services/share-web/src/selfHostedLiveNative.integration.ts";
 
 const databasePackages = new Set([
   "@dohc/workspace-postgres",
@@ -338,8 +339,13 @@ export async function javascriptTasks({
         run: true,
       });
       try {
-        const result = await ctx.collectTests(await ctx.globTestSpecifications());
+        // Only the long proof splits into one task per test. Every shard plans, so the
+        // other files run whole and are listed without importing them.
+        const specifications = await ctx.globTestSpecifications();
+        const split = specifications.filter((spec) => fileId(spec.moduleId) === splitNativeFile);
+        const result = await ctx.collectTests(split);
         if (
+          split.length !== 1 ||
           result.unhandledErrors.length ||
           result.testModules.length !== 1 ||
           result.testModules[0].errors().length
@@ -352,9 +358,21 @@ export async function javascriptTasks({
             id: `self-host-native:${test.fullName}`,
             kind: "self-host-native",
             name: test.fullName,
+            file: splitNativeFile,
             native: true,
             weight: 15,
           });
+        for (const spec of specifications) {
+          const file = fileId(spec.moduleId);
+          if (file !== splitNativeFile)
+            tasks.push({
+              id: `self-host-native:${file}`,
+              kind: "self-host-native",
+              file,
+              native: true,
+              weight: 15,
+            });
+        }
       } finally {
         await ctx.close();
       }

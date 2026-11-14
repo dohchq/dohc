@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAccount, type Account, type StoredSignIn } from "./account";
+import { createAccount, type Account, type SignIn, type StoredSignIn } from "./account";
 import { listWorkspaces } from "./api";
 import { ServerError } from "./client";
 import { deferred, memoryStore, testServer, type Answer } from "./testServer";
@@ -293,6 +293,78 @@ describe("signing out", () => {
     await leaving.restore();
     await expect(leaving.signOut()).resolves.toBeUndefined();
     expect(seen).toEqual(["signed-in", "signed-out, token gone"]);
+  });
+
+  /** An account whose Sign out hook waits for `cleanup`, then rejects before `leave`, as a failed outbox delete does. */
+  function failingCleanup() {
+    const { server, tokens } = setup();
+    server.on("GET", "/sync/account/sessions", "offline");
+    const cleanup = deferred<void>();
+    const account = createAccount({
+      store: tokens.store,
+      fetch: server.fetch,
+      sleep: async () => {},
+      onSignOut: async () => {
+        await cleanup.promise;
+        throw new Error("couldn't delete");
+      },
+    });
+    const endSession = async (signIn: SignIn) => {
+      server.on("GET", "/sync/account/workspaces", {
+        status: 401,
+        body: { ok: false, code: "unauthorized" },
+      });
+      await expect(listWorkspaces(signIn.client)).rejects.toEqual(
+        new ServerError("signed-out", 401, "unauthorized"),
+      );
+    };
+    return { server, tokens, account, cleanup, endSession };
+  }
+
+  const ENDED = { status: "signed-out", origin: SAVED.origin, ended: true, forgetFailed: false };
+
+  it("leaves a session the server ended signed out when the hook rejects before leave", async () => {
+    const { tokens, account, cleanup, endSession } = failingCleanup();
+    await account.restore();
+    const earlier = signedIn(account);
+    await endSession(earlier);
+    await vi.waitFor(() => expect(tokens.current()).toBeNull());
+    const statuses: string[] = [];
+    account.subscribe(() => statuses.push(account.state().status));
+    cleanup.resolve();
+    await expect(account.signOut()).rejects.toThrow("couldn't delete");
+    expect(account.state()).toEqual(ENDED);
+    expect(statuses).not.toContain("signed-in");
+    expect(earlier.isCurrent()).toBe(false);
+  });
+
+  it("stays signed out when a 401 lands while the hook runs, and the hook then rejects", async () => {
+    const { tokens, account, cleanup, endSession } = failingCleanup();
+    await account.restore();
+    const earlier = signedIn(account);
+    const ending = account.signOut();
+    await endSession(earlier);
+    cleanup.resolve();
+    await expect(ending).rejects.toThrow("couldn't delete");
+    expect(account.state()).toEqual(ENDED);
+    expect(earlier.isCurrent()).toBe(false);
+    await vi.waitFor(() => expect(tokens.current()).toBeNull());
+  });
+
+  it("keeps a newer sign-in and its token when an earlier Sign out's hook rejects", async () => {
+    const { server, tokens, account, cleanup, endSession } = failingCleanup();
+    await account.restore();
+    const earlier = signedIn(account);
+    const ending = account.signOut();
+    await endSession(earlier);
+    serveSignIn(server);
+    expect(await account.signIn(server.origin, () => {})).toBe("signed-in");
+    const newer = signedIn(account);
+    cleanup.resolve();
+    await expect(ending).rejects.toThrow("couldn't delete");
+    expect(signedIn(account)).toBe(newer);
+    expect(newer.isCurrent()).toBe(true);
+    expect(tokens.current()?.token).toBe("tok-2");
   });
 
   it("shares one cleanup between overlapping sign-outs of the same sign-in", async () => {

@@ -889,6 +889,12 @@ export async function verify(args) {
           save();
         };
         if (mode === "pr") {
+          // namedRecipientAuthenticatedNative drives Chromium in the native step.
+          await proofStep(
+            "browser-install",
+            ...pnpm(["exec", "playwright", "install", "chromium"]),
+            env,
+          );
           const nativeOutput = join(output, "self-host-native");
           const nativeHash = hashFile(stagedEnginePath);
           const nativeProof = (name) => {
@@ -943,11 +949,6 @@ export async function verify(args) {
             nativeHash,
           );
           save();
-          await proofStep(
-            "browser-install",
-            ...pnpm(["exec", "playwright", "install", "chromium"]),
-            env,
-          );
           const accountReport = join(output, "accounts-playwright.json");
           try {
             await proofStep(

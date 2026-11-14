@@ -8,6 +8,7 @@ const line = (state: AgentThreadLine["state"], chatThreadId = "thread-1"): Agent
   agentId: "nova",
   chatThreadId,
   questionId: null,
+  threadWaiting: false,
   forwardedAtMs: 0,
   state,
   sinceMs: 1_000,

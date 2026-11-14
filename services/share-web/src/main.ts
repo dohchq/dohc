@@ -61,7 +61,9 @@ const server = serveFetchHandler({
   requestLog: SHARE_WEB_REQUEST_LOG,
   maxBodyBytes: (url) =>
     signInBodyLimit(url.pathname) ??
-    (["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive
+    (["/api/live/link-document", "/api/live/link-document-state", "/api/live/link-ticket"].includes(
+      url.pathname,
+    ) && config.linkLive
       ? config.linkLive.requests.maxRequestBytes
       : [
             "/api/live/named-session",

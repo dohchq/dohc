@@ -2342,7 +2342,8 @@ fn require_ordinary_local_write(tx: &Transaction<'_>, key: &DocKey) -> Result<()
 pub(crate) type CreditedUpdate = ((Option<String>, Option<ChangeAttribution>), Vec<u8>);
 
 /// Append a release burst with one log reconstruction and a resident replay
-/// gate. Each original entry retains its own bytes, credit and journal row.
+/// gate. Each update keeps its own bytes, credit and journal row; a release
+/// passes one update per run of same-credit edits.
 pub(crate) fn record_credited_updates_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,

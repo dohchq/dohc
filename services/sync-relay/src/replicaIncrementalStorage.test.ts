@@ -12,6 +12,7 @@ import type { StorageContext } from "./storage/context";
 import { replicaHistoryReplacement } from "./storage/replicaHistoryPositions";
 import { createReplicaSupervisor } from "./replicaSupervisor";
 import { tempRoot } from "./testing";
+import { DatabaseSync } from "./liveTickets.test-helper.js";
 import { initializeReplicaHistoryWorkSchema } from "./storage/replicaHistoryWorkSchema";
 import { ReplicaCurrentViewRefused } from "./storage/replicaCurrentViews";
 import {
@@ -154,7 +155,8 @@ it("R2: a refused History timer save reports once and does not sample or rearm",
 });
 it("R2: a rename at 20,000 files writes only that file and its History reference", async () => {
   const f = await fixture(20_000, true);
-  const prototype = Object.getPrototypeOf(f.db.prepare("SELECT 1"));
+  // The storage shares compiled statements, so count on the database's own statements.
+  const prototype = Object.getPrototypeOf(new DatabaseSync(":memory:").prepare("SELECT 1"));
   let selected = 0;
   for (const method of ["get", "all"] as const) {
     const original = prototype[method];

@@ -1,5 +1,5 @@
 import { documentWords } from "@dohc/interface-words/documents";
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
 import { AlertTriangle } from "lucide-react-native";
 import { useEffect, useMemo, useRef, useState, type ComponentRef } from "react";
 import { PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
@@ -7,6 +7,7 @@ import { useReducedMotion } from "react-native-reanimated";
 import { Directory, File, Paths } from "expo-file-system";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { WebView } from "react-native-webview";
+import { PageScrollTop } from "../../modules/page-scroll-top";
 import { confirm } from "../confirm";
 import { copyText } from "../copy";
 import { demoMode } from "../demo";
@@ -128,6 +129,7 @@ export function SamplePage() {
   // When the page's Inter faces had loaded, just before it drew: the part of the first text that waits for the font.
   const fontsAt = useRef<number | null>(null);
   const reduceMotion = useReducedMotion();
+  const focused = useIsFocused();
 
   const markKey: MarkKey | null = demo.deleted
     ? "deleted"
@@ -376,26 +378,32 @@ export function SamplePage() {
             />
           ))}
           {!uri ? null : (
-            <WebView
+            <PageScrollTop
               key={`${attempt}:${reload}`}
-              ref={web}
-              originWhitelist={["file://*"]}
-              source={{ uri }}
-              // Read access to the editor's folder only: the page never reads the rest of the app's files.
-              allowingReadAccessToURL={editorFolderUri}
-              allowFileAccess
-              injectedJavaScriptBeforeContentLoaded={injected}
-              onMessage={(event) => handleMessage(event.nativeEvent.data)}
-              onError={() => setLostPage("failed")}
-              onContentProcessDidTerminate={() => setLostPage("failed")}
-              keyboardDisplayRequiresUserAction={false}
-              // WebKit's own bar above the keyboard repeats Done; the header's system Done is the one way out.
-              hideKeyboardAccessoryView
-              removeIosKeyboardObserver
-              // The page scrolls inside its own container; the web view itself never scrolls.
-              scrollEnabled={false}
-              style={[styles.web, { backgroundColor: theme.bg }]}
-            />
+              active={focused}
+              ready={painted}
+              style={styles.web}
+            >
+              <WebView
+                ref={web}
+                originWhitelist={["file://*"]}
+                source={{ uri }}
+                // Read access to the editor's folder only: the page never reads the rest of the app's files.
+                allowingReadAccessToURL={editorFolderUri}
+                allowFileAccess
+                injectedJavaScriptBeforeContentLoaded={injected}
+                onMessage={(event) => handleMessage(event.nativeEvent.data)}
+                onError={() => setLostPage("failed")}
+                onContentProcessDidTerminate={() => setLostPage("failed")}
+                keyboardDisplayRequiresUserAction={false}
+                // WebKit's own bar above the keyboard repeats Done; the header's system Done is the one way out.
+                hideKeyboardAccessoryView
+                removeIosKeyboardObserver
+                // The page scrolls inside its own container; the web view itself never scrolls.
+                scrollEnabled={false}
+                style={[styles.web, { backgroundColor: theme.bg }]}
+              />
+            </PageScrollTop>
           )}
           {painted ? null : <LoadingLines theme={theme} reduceMotion={reduceMotion} />}
         </>

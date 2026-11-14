@@ -156,6 +156,33 @@ describe("share roster", () => {
     access: "edit" as const,
   });
 
+  it("keeps the hydrated share roster out of registry writes after reopening", async () => {
+    store.register({
+      ...personal,
+      remote: { serverUrl: "https://server.test", ownerUserId: "owner" },
+    });
+    store.setShareRoster(
+      "ws-1",
+      { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] },
+      true,
+    );
+    for (const [index, current] of [store, createRegistryStore(registryPath)].entries()) {
+      expect(current.find("ws-1")?.shareRoster?.grants).toEqual([grant("g-1")]);
+      current.markOpened("ws-1", index + 1);
+      const saved = JSON.parse(await readFile(registryPath, "utf8"));
+      expect(saved.workspaces).toEqual([
+        {
+          ...personal,
+          remote: { serverUrl: "https://server.test", ownerUserId: "owner" },
+          lastOpenedAt: index + 1,
+        },
+      ]);
+    }
+    expect(createRegistryStore(registryPath).find("ws-1")?.shareRoster?.grants).toEqual([
+      grant("g-1"),
+    ]);
+  });
+
   it("retains grants and their roster while paused and after resuming the same owner", () => {
     const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
     store.register({ ...personal, remote });

@@ -4,8 +4,9 @@ use super::*;
 use crate::{AppendOutcome, CollabError, DocKey};
 use dohc_engine_domain::ChangeAttribution;
 
-pub const MAX_RELEASE_ENTRIES: i64 = 32;
-pub const MAX_RELEASE_BYTES: i64 = 4 * 1024;
+/// How many updates one merge takes. A yrs merge slows faster than its input
+/// grows, so a long run merges in pieces of this size, then merges the pieces.
+const MERGE_FAN_IN: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -236,8 +237,8 @@ pub fn list_requested_in(
         .collect()
 }
 
-/// The relay has retired exactly this binding's generation. The hook journals
-/// each original entry in the same transaction, as recovery replay does.
+/// The relay has retired exactly this binding's generation. The recorder
+/// journals each run of credited edits in the same transaction.
 ///
 /// `kept_snapshot` names the refused edits the desktop recorded before this
 /// release; a released Stop answers again only for the same one. Without
@@ -315,24 +316,8 @@ pub fn release_in_tx(
             current.push(id);
         }
     }
-    // Check metadata before reading any update blob or changing native state.
     // Deferred Stops are final for this build; retry never publishes a prefix.
-    let mut entries = 0_i64;
-    let mut bytes = 0_i64;
-    for id in &current {
-        let (count, size): (i64, i64) = tx.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(byte_length),0) FROM (SELECT byte_length FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 LIMIT ?2)",
-            params![id,MAX_RELEASE_ENTRIES+1], |r| Ok((r.get(0)?,r.get(1)?)),
-        ).map_err(read_sql)?;
-        entries = entries
-            .checked_add(count)
-            .ok_or(OwnerOutboxError::Corrupt)?;
-        bytes = bytes.checked_add(size).ok_or(OwnerOutboxError::Corrupt)?;
-    }
-    if observed.accepted_cursor < accepted_cursor
-        || entries > MAX_RELEASE_ENTRIES
-        || bytes > MAX_RELEASE_BYTES
-    {
+    if observed.accepted_cursor < accepted_cursor {
         stop.state = "released".into();
         stop.retirement_owed = false;
         stop.deferred = Some(deferred_in(tx, binding)?);
@@ -380,13 +365,13 @@ pub fn release_in_tx(
                 )
                 .transpose()?;
             let credit = super::entry_credit(source.as_ref(), agent, run, automation, person)?;
-            credited.push((credit, bytes));
+            credited.push((credit, digest, bytes));
         }
     }
     if contains_pending_in(
         tx,
         &observed.checkpoint_digest,
-        credited.iter().map(|(_, bytes)| bytes.as_slice()),
+        credited.iter().map(|(_, _, bytes)| bytes.as_slice()),
     )? {
         stop.state = "released".into();
         stop.retirement_owed = false;
@@ -402,6 +387,7 @@ pub fn release_in_tx(
     }
     tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
+    let credited = credited_runs(tx, &key, credited)?;
     stop.record_facts = crate::durable::record_credited_updates_in_tx(
         tx,
         &key,
@@ -427,7 +413,8 @@ pub fn release_in_tx(
         tx.execute("DELETE FROM owner_ydoc_outboxes WHERE outbox_id=?1", [&id])
             .map_err(write_sql)?;
     }
-    // Every original blob now belongs to a native row and journal append.
+    // Each recorded update stored its own blob; a merged run's edits no longer
+    // need theirs.
     let retained: BTreeSet<_> = credited
         .iter()
         .map(|(_, bytes)| hex_sha256(bytes))
@@ -439,6 +426,82 @@ pub fn release_in_tx(
     stop.retirement_owed = false;
     save_in_tx(tx, &key, &stop, now_ms)?;
     Ok(stop)
+}
+
+/// One update and History row for each run of consecutive edits with the same
+/// credit, so a release replays and stores each run once rather than each edit.
+/// An edit already in the note's log stays alone, so the recorder still skips it
+/// instead of recording it again inside a run. A Collection record's edits all
+/// stay alone: its field history and record events need every value it held.
+fn credited_runs(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    credited: Vec<(EntryCredit, String, Vec<u8>)>,
+) -> Result<Vec<crate::durable::CreditedUpdate>, OwnerOutboxError> {
+    let record = dohc_engine_domain::is_collection_record_bound_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+    )
+    .map_err(|error| {
+        collab(CollabError::Corrupt {
+            reason: error.to_string(),
+        })
+    })?;
+    let mut runs: Vec<(EntryCredit, Vec<Vec<u8>>, usize, bool)> = Vec::new();
+    for (credit, digest, bytes) in credited {
+        let alone = record
+            || crate::durable::blob_seq_in_log(tx, key, &digest, &bytes)
+                .map_err(collab)?
+                .is_some();
+        match runs.last_mut() {
+            Some((last, run, size, false))
+                if !alone
+                    && *last == credit
+                    && *size + bytes.len() <= crate::limits::MAX_YDOC_UPDATE_BYTES =>
+            {
+                *size += bytes.len();
+                run.push(bytes);
+            }
+            _ => {
+                let size = bytes.len();
+                runs.push((credit, vec![bytes], size, alone));
+            }
+        }
+    }
+    let mut updates = Vec::with_capacity(runs.len());
+    for (credit, run, _, _) in runs {
+        if run.len() == 1 {
+            updates.extend(run.into_iter().map(|bytes| (credit.clone(), bytes)));
+            continue;
+        }
+        let merged = merge_run(&run)?;
+        // A merge is normally smaller than its parts. If one is not, its edits
+        // keep their own rows rather than store an update over the limit.
+        if merged.len() <= crate::limits::MAX_YDOC_UPDATE_BYTES {
+            updates.push((credit, merged));
+        } else {
+            updates.extend(run.into_iter().map(|bytes| (credit.clone(), bytes)));
+        }
+    }
+    Ok(updates)
+}
+
+fn merge_run(run: &[Vec<u8>]) -> Result<Vec<u8>, OwnerOutboxError> {
+    let mut level = run
+        .chunks(MERGE_FAN_IN)
+        .map(crate::merge_updates)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(collab)?;
+    while level.len() > 1 {
+        level = level
+            .chunks(MERGE_FAN_IN)
+            .map(crate::merge_updates)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(collab)?;
+    }
+    level.pop().ok_or(OwnerOutboxError::Corrupt)
 }
 
 // A host-cut diff can contain an entry without retaining its original bytes.

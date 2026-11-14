@@ -72,6 +72,92 @@ const pendingPress: RelayAutomationPress = {
 };
 
 describe("relay polling lifetime", () => {
+  it("accepts no press when the host cannot obtain a hold", async () => {
+    const polls = channel<(presses: RelayAutomationPress[]) => void>();
+    const hold = vi.fn(() => null);
+    const accept = vi.fn(async () => [pendingPress.hostPressId]);
+    const host = hostWith(
+      {
+        list: () => new Promise<RelayAutomationPress[]>((resolve) => polls.send(resolve)),
+        accept,
+        settle: async () => undefined,
+      },
+      { host: { runsHere: async () => true, stillRuns: () => true, generation: () => 7, hold } },
+    );
+    host.start();
+    const answer = await polls.next();
+    answer([pendingPress]);
+    await polls.next();
+    host.stop();
+    expect(hold).toHaveBeenCalledOnce();
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it.each(["returns", "rejects"] as const)(
+    "holds before acceptance until the press %s",
+    async (outcome) => {
+      const events: string[] = [];
+      const accepting = Promise.withResolvers<string[]>();
+      const pressing = Promise.withResolvers<{ pressed: { busy: true }; field: null }>();
+      const accepted = channel<void>();
+      const started = channel<void>();
+      const released = channel<void>();
+      let held = false;
+      let listed = false;
+      const host = hostWith(
+        {
+          list: async () => {
+            if (listed) return [];
+            listed = true;
+            return [pendingPress];
+          },
+          accept: () => {
+            events.push(`accept:${held}`);
+            accepted.send();
+            return accepting.promise;
+          },
+          settle: async () => undefined,
+        },
+        {
+          host: {
+            runsHere: async () => true,
+            stillRuns: () => true,
+            generation: () => 7,
+            hold: () => {
+              held = true;
+              events.push("hold");
+              return () => {
+                held = false;
+                events.push("release");
+                released.send();
+              };
+            },
+          },
+          press: () => {
+            events.push(`press:${held}`);
+            started.send();
+            return pressing.promise;
+          },
+        },
+      );
+      host.start();
+      await accepted.next();
+      expect(events).toEqual(["hold", "accept:true"]);
+      expect(held).toBe(true);
+      accepting.resolve([pendingPress.hostPressId]);
+      await started.next();
+      expect(events).toEqual(["hold", "accept:true", "press:true"]);
+      expect(held).toBe(true);
+      // Stop polling while the admitted press still owns its hold.
+      host.stop();
+      if (outcome === "returns") pressing.resolve({ pressed: { busy: true }, field: null });
+      else pressing.reject(new Error("press failed"));
+      await released.next();
+      expect(held).toBe(false);
+      expect(events).toEqual(["hold", "accept:true", "press:true", "release"]);
+    },
+  );
+
   it("keeps one lifetime when its eligibility check starts it again", async () => {
     const runsHere = vi.fn(async () => {
       if (runsHere.mock.calls.length === 1) host.start();
