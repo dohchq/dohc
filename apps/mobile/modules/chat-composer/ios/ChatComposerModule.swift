@@ -75,11 +75,15 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     placeholder.textColor = color
   }
 
-  /// Clears the field only if its text has not changed since it was sent, so text typed meanwhile stays.
+  /// Clears the field only if its text has not changed since it was sent, so text typed meanwhile stays. A request it
+  /// refuses, for that text or for text still being composed, it reports without changing anything.
   func clear(if request: ClearRequest) {
     guard request.token != clearToken else { return }
     clearToken = request.token
-    guard textView.markedTextRange == nil, revision == request.revision else { return }
+    guard textView.markedTextRange == nil, revision == request.revision else {
+      onChangeText(["text": textView.text ?? "", "revision": revision, "cleared": 0, "refused": request.token])
+      return
+    }
     textView.text = ""
     changed(cleared: request.token)
   }
@@ -107,7 +111,7 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
   private func changed(cleared: Int = 0) {
     revision += 1
     placeholder.isHidden = !textView.text.isEmpty
-    onChangeText(["text": textView.text ?? "", "revision": revision, "cleared": cleared])
+    onChangeText(["text": textView.text ?? "", "revision": revision, "cleared": cleared, "refused": 0])
     reportHeight()
   }
 

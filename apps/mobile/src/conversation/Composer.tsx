@@ -13,10 +13,10 @@ import { ProblemLine } from "../account/ProblemLine";
 import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
 import {
-  clearOutstanding,
   clearSent,
-  closePost,
+  clearStatus,
   EMPTY_DRAFT,
+  fieldChanged,
   type Blocked,
   type Draft,
   type Lanes,
@@ -90,10 +90,13 @@ export function Composer({
     request: { revision: 0, token: 0 },
     sent: EMPTY_DRAFT,
   });
+  // The token of the last clear the field refused, keeping the body sent.
+  const [refused, setRefused] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [notKept, setNotKept] = useState(false);
-  const busy = submitting || clearOutstanding(clear.request, draft.textRevision);
-  const ready = text.trim().length > 0 && blocked === null && !busy;
+  const status = clearStatus(clear.request, draft.textRevision, refused);
+  const busy = submitting || status === "waiting";
+  const ready = text.trim().length > 0 && blocked === null && !submitting && status === "settled";
 
   async function submit() {
     if (!ready) return;
@@ -183,14 +186,10 @@ export function Composer({
             textColor={theme.ink}
             placeholderColor={theme.subtle}
             clearIf={clear.request}
-            onChangeText={({ nativeEvent: change }) =>
-              setDraft((current) => {
-                const typed = { ...current, text: change.text, textRevision: change.revision };
-                return change.cleared !== 0 && change.cleared === clear.request.token
-                  ? closePost(typed, clear.sent)
-                  : typed;
-              })
-            }
+            onChangeText={({ nativeEvent: change }) => {
+              if (change.refused !== 0) setRefused(change.refused);
+              setDraft((current) => fieldChanged(current, change, clear.request, clear.sent));
+            }}
             onContentHeight={(event) => setHeight(event.nativeEvent.height)}
             style={{ height: Math.min(Math.max(height, FIELD_MIN), FIELD_MAX) }}
           />

@@ -10,11 +10,12 @@ import { deferred, testServer, type Answer } from "../server/testServer";
 import {
   blockedBy,
   chatWrite,
-  clearOutstanding,
   clearSent,
+  clearStatus,
   closePost,
   createConversationWrites,
   createWriteScope,
+  fieldChanged,
   lanesOf,
   type Draft,
   type WriteActivation,
@@ -421,24 +422,61 @@ describe("a sent draft", () => {
 describe("a clear asked of the field", () => {
   const request = { revision: 5, token: 1 };
 
-  it("is outstanding until the field answers, so a second Send can't replace it", () => {
-    expect(clearOutstanding(request, 5)).toBe(true);
+  it("waits until the field answers, so a second Send can't replace it", () => {
+    expect(clearStatus(request, 5, 0)).toBe("waiting");
   });
 
   it("settles when the field clears for it", () => {
-    expect(clearOutstanding(request, 6)).toBe(false);
+    expect(clearStatus(request, 6, 0)).toBe("settled");
   });
 
   it("settles when a newer edit made the field refuse it", () => {
-    expect(clearOutstanding(request, 9)).toBe(false);
+    expect(clearStatus(request, 9, 0)).toBe("settled");
   });
 
-  it("stays outstanding through an older change", () => {
-    expect(clearOutstanding(request, 4)).toBe(true);
+  it("keeps waiting through an older change, or another request's refusal", () => {
+    expect(clearStatus(request, 4, 0)).toBe("waiting");
+    expect(clearStatus({ revision: 5, token: 2 }, 5, 1)).toBe("waiting");
   });
 
   it("asks nothing before the first send", () => {
-    expect(clearOutstanding({ revision: 0, token: 0 }, 0)).toBe(false);
+    expect(clearStatus({ revision: 0, token: 0 }, 0, 0)).toBe("settled");
+  });
+
+  it("stops waiting when the field refuses it at the same revision, and keeps Send off for that body", () => {
+    expect(clearStatus(request, 5, 1)).toBe("refused");
+  });
+
+  it("lets Send again once the body refused is edited", () => {
+    expect(clearStatus(request, 6, 1)).toBe("settled");
+  });
+});
+
+describe("a field change", () => {
+  const sent: Draft = {
+    text: "A",
+    textRevision: 5,
+    title: "",
+    titleRevision: 2,
+    chosen: "post",
+    chosenRevision: 1,
+  };
+  const request = { revision: 5, token: 1 };
+
+  it("keeps New post open when the field refuses the clear", () => {
+    const refusal = { text: "A", revision: 5, cleared: 0, refused: 1 };
+    expect(fieldChanged(sent, refusal, request, sent)).toEqual(sent);
+  });
+
+  it("closes New post only once the field clears for the request", () => {
+    const edit = { text: "", revision: 6, cleared: 0, refused: 0 };
+    expect(fieldChanged(sent, edit, request, sent)).toMatchObject({ chosen: "post" });
+    const accepted = { text: "", revision: 6, cleared: 1, refused: 0 };
+    expect(fieldChanged(sent, accepted, request, sent)).toMatchObject({
+      text: "",
+      textRevision: 6,
+      chosen: "send",
+    });
   });
 });
 

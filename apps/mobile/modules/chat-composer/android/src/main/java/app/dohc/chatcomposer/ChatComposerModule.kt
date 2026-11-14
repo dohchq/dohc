@@ -88,7 +88,7 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
       override fun afterTextChanged(text: Editable?) {
         revision += 1
         onChangeText(
-          mapOf("text" to (text?.toString() ?: ""), "revision" to revision, "cleared" to clearing),
+          mapOf("text" to (text?.toString() ?: ""), "revision" to revision, "cleared" to clearing, "refused" to 0),
         )
         field.post { reportHeight() }
       }
@@ -100,11 +100,15 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
     field.isEnabled = editable
   }
 
-  /** Clears the field only if its text has not changed since it was sent, at `sent`, so text typed meanwhile stays. */
+  /** Clears the field only if its text has not changed since it was sent, at `sent`, so text typed meanwhile stays. A
+   * request it refuses it reports without changing anything. */
   fun clearIf(sent: Int, token: Int) {
     if (token == clearToken) return
     clearToken = token
-    if (sent != revision) return
+    if (sent != revision) {
+      onChangeText(mapOf("text" to field.text.toString(), "revision" to revision, "cleared" to 0, "refused" to token))
+      return
+    }
     // setText reports the change through the watcher before it returns.
     clearing = token
     field.setText("")

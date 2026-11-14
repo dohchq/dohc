@@ -15,6 +15,8 @@ export interface FieldChange {
   readonly revision: number;
   /** The `token` of the request whose clear made this change, or 0 for an edit. */
   readonly cleared: number;
+  /** The `token` of a request the field refused, reported without a change to its text or revision, or 0. */
+  readonly refused: number;
 }
 
 type ChatComposerFieldProps = {

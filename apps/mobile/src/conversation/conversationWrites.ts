@@ -1,4 +1,4 @@
-import type { ClearRequest } from "../../modules/chat-composer";
+import type { ClearRequest, FieldChange } from "../../modules/chat-composer";
 import type { ChatWrite } from "../server/chatWrites";
 import { OutboxError, type DiscardTarget, type Outbox, type OutboxState } from "../server/outbox";
 
@@ -101,11 +101,29 @@ export function closePost(current: Draft, sent: Draft): Draft {
 }
 
 /**
- * Whether the native field still owes an answer to `request`: it answers with its next revision, its own clear or an
- * edit, so a body sent again can't replace the request whose clear closes New post. Token 0 asks nothing.
+ * Where the native field is with `request`, for the body at `textRevision`, given the token it last `refused`. `waiting`:
+ * it owes an answer, so a body sent again can't replace the request whose clear closes New post. `refused`: it kept the
+ * body the outbox kept, unchanged, as with text still being composed, so Send stays off for that body until an edit.
+ * `settled`: it cleared, or the body changed since. Token 0 asks nothing.
  */
-export function clearOutstanding(request: ClearRequest, textRevision: number): boolean {
-  return request.token !== 0 && textRevision <= request.revision;
+export function clearStatus(
+  request: ClearRequest,
+  textRevision: number,
+  refused: number,
+): "waiting" | "refused" | "settled" {
+  if (request.token === 0 || textRevision > request.revision) return "settled";
+  return refused === request.token ? "refused" : "waiting";
+}
+
+/** The draft once the field reports `change`. Only its clear for `request` closes New post, by `closePost`. */
+export function fieldChanged(
+  current: Draft,
+  change: FieldChange,
+  request: ClearRequest,
+  sent: Draft,
+): Draft {
+  const typed = { ...current, text: change.text, textRevision: change.revision };
+  return change.cleared !== 0 && change.cleared === request.token ? closePost(typed, sent) : typed;
 }
 
 /** One showing of a workspace store and chat. Showing the same ones again is another activation. */
