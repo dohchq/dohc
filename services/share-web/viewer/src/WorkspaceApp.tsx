@@ -85,6 +85,43 @@ function UnsentEdits({unsent, onDiscard, onUndo, onForget}: {unsent: readonly Un
   })}</>;
 }
 
+const COMPOSERS = ".chat-composer, .chat-read-only, .comment-composer";
+
+/**
+ * On a phone, toasts and kept edits sit above the tab bar, and a warning stays until it is dismissed.
+ * While a Group or Comments tab shows its composer, the corner rises above it, so it never covers what
+ * the person writes or a kept draft's Copy and Discard.
+ */
+function useCornerAboveComposer(sidePanel: HTMLElement | null, corner: HTMLElement | null) {
+  useEffect(() => {
+    if (!sidePanel || !corner) return;
+    let frame = 0, watched: Element | null = null;
+    const sizes = new ResizeObserver(() => place());
+    const measure = () => {
+      frame = 0;
+      // A tab out of view keeps its composer, hidden by `data-shown="false"` on it or an ancestor.
+      const composer = [...sidePanel.querySelectorAll(COMPOSERS)].find(node => !node.closest('[data-shown="false"]')) ?? null;
+      if (composer !== watched) {
+        if (watched) sizes.unobserve(watched);
+        if (composer) sizes.observe(composer);
+        watched = composer;
+      }
+      if (composer) corner.style.bottom = `${document.documentElement.clientHeight - composer.getBoundingClientRect().top + 8}px`;
+      else corner.style.removeProperty("bottom");
+    };
+    const place = () => {if (!frame) frame = requestAnimationFrame(measure);};
+    // A Group that opens or closes adds or removes its composer, and a tab change moves `data-shown`.
+    const changes = new MutationObserver(place);
+    changes.observe(sidePanel, {subtree: true, childList: true, attributes: true, attributeFilter: ["data-shown"]});
+    window.addEventListener("resize", place);
+    place();
+    return () => {
+      cancelAnimationFrame(frame); changes.disconnect(); sizes.disconnect(); window.removeEventListener("resize", place);
+      corner.style.removeProperty("bottom");
+    };
+  }, [sidePanel, corner]);
+}
+
 /** A workspace member's page: its files, a page, and its Groups, at the member's level. */
 export default function WorkspaceApp({grantId}: {grantId: string | null}) {
   const [unsent, setUnsent] = useState<Unsent[]>(readUnsent);
@@ -241,6 +278,8 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   const [bandSlot, setBandSlot] = useState<HTMLElement | null>(null);
   const leave = useRef<((action: () => void) => void) | null>(null), tabs = useRef(new Map<Tab, HTMLButtonElement>());
   const narrow = useNarrow();
+  const [sideNode, setSideNode] = useState<HTMLDivElement | null>(null);
+  useCornerAboveComposer(narrow ? sideNode : null, toastSlot?.parentElement ?? null);
   const files = view.status === "ready" ? view.files : null;
   const name = files?.meta.subjectName ?? "Shared workspace";
   // An ended membership reads nothing more, so its page names the workspace as it was last read.
@@ -363,7 +402,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
         </div>
       </div>
     </div>
-    <div className="side-panel workspace-side" {...(narrow ? {inert: showing === null, "data-shown": showing !== null} : {})}>
+    <div className="side-panel workspace-side" ref={setSideNode} {...(narrow ? {inert: showing === null, "data-shown": showing !== null} : {})}>
       {!narrow && <div className="side-tabs" role="tablist" aria-label="Beside the page" onKeyDown={moveTab(SIDES, side, setSide)}>
         {SIDES.map(item => <button key={item.id} ref={node => {if (node) tabs.current.set(item.id, node);}} id={`side-tab-${item.id}`} role="tab" type="button"
           aria-selected={side === item.id} aria-controls={item.panel} tabIndex={side === item.id ? 0 : -1} onClick={() => setSide(item.id)}>{tabLabel(item)}</button>)}

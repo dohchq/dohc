@@ -40,6 +40,8 @@ beforeEach(() => {
   Object.defineProperty(document, "visibilityState", {configurable: true, get: () => "visible"});
   vi.stubGlobal("matchMedia", (query: string) => ({matches: query.includes("max-width") ? narrow : false, media: query,
     addEventListener() {}, removeEventListener() {}}));
+  // jsdom has no layout, so nothing resizes.
+  vi.stubGlobal("ResizeObserver", class {observe() {} unobserve() {} disconnect() {}});
   Object.defineProperties(HTMLDialogElement.prototype, {
     showModal: {configurable: true, value: function (this: HTMLDialogElement) {this.open = true;}},
     close: {configurable: true, value: function (this: HTMLDialogElement) {this.open = false;}},
