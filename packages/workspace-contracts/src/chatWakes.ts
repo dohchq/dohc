@@ -136,7 +136,7 @@ export const PHONE_CONTEXT_MESSAGES_MAX = 100;
 /** The wakes one context read answers at most. One message's targets name at most 64 computers' agents together. */
 export const PHONE_CONTEXT_WAKES_MAX = PHONE_CONTEXT_MESSAGES_MAX * 64;
 /** The thread IDs one wake-changes answer lists at most. */
-export const PHONE_WAKE_CHANGES_MAX = 1_000;
+const PHONE_WAKE_CHANGES_MAX = 1_000;
 const NAME_MAX_CHARS = 256;
 // A handle as handleForName makes one: at most 200 bytes once normalized.
 const Handle = z.string().min(1).max(200);
