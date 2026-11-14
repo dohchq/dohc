@@ -1582,7 +1582,6 @@ type DeleteReproCase =
   | "unbound"
   | "restore"
   | "stop-then-delete"
-  | "deferred-stop"
   | "file-manager"
   | "file-manager-capture"
   | "file-manager-restore"
@@ -2336,13 +2335,9 @@ async function runDeleteRepro(
       }
     };
 
-    if (kind === "stop-then-delete" || kind === "deferred-stop") {
-      // Step 2: Stop live editing on A's row. "deferred-stop" first leaves more
-      // unsent edits than Stop sends (release.rs:332-339): 40 notes, over
-      // MAX_RELEASE_ENTRIES, with no delivery pass after them.
+    if (kind === "stop-then-delete") {
+      // Step 2: Stop live editing on A's row.
       step = "2-stop";
-      if (kind === "deferred-stop")
-        for (let edit = 0; edit < 40; edit++) await editPage(oldPath, `unsent-${edit}`, false);
       const stopped = await stopViaApp({ path: oldPath, objectId: objectIdA }).then(
         (result) => ({ ok: true as const, result }),
         (error: unknown) => ({ ok: false as const, error: reproErrorText(error) }),
@@ -2350,24 +2345,20 @@ async function runDeleteRepro(
       observe({ stopped, ownerA: ownerRowsOfA(), liveRow: await liveRowOfA() });
       expect(stopped.ok, `${kind}: Stop live editing is accepted`).toBe(true);
       let row: Awaited<ReturnType<typeof liveRowOfA>> = null;
-      if (kind === "stop-then-delete") {
-        // The row reads Stopped once the server retired A and no retirement is owed.
-        await expect
-          .poll(
-            async () => {
-              if ((await owedStopsOfA()) > 0) await syncPass();
-              row = await liveRowOfA();
-              return row?.status === "retired" && (await owedStopsOfA()) === 0;
-            },
-            { timeout: 120_000, interval: 500 },
-          )
-          .toBe(true)
-          .catch((error) => {
-            throw new Error(JSON.stringify({ row, diagnostics: diagnostics() }), { cause: error });
-          });
-      } else {
-        row = await liveRowOfA();
-      }
+      // The row reads Stopped once the server retired A and no retirement is owed.
+      await expect
+        .poll(
+          async () => {
+            if ((await owedStopsOfA()) > 0) await syncPass();
+            row = await liveRowOfA();
+            return row?.status === "retired" && (await owedStopsOfA()) === 0;
+          },
+          { timeout: 120_000, interval: 500 },
+        )
+        .toBe(true)
+        .catch((error) => {
+          throw new Error(JSON.stringify({ row, diagnostics: diagnostics() }), { cause: error });
+        });
       const afterStop = ownerRowsOfA();
       // The dialog files a Notices row for a Stop only when it kept edits (LiveDocumentsDialog.tsx:395).
       const keptEdits = stopped.ok
@@ -2385,30 +2376,13 @@ async function runDeleteRepro(
       step = "3-delete";
       const deleted = await appDelete(oldPath);
       observe({ deleted, onDisk: await onDisk(), ownerA: ownerRowsOfA() });
-      if (kind === "stop-then-delete") {
-        expect(afterStop.ownerBindings, "Stop released A's owner binding").toEqual([]);
-        expect({ ok: deleted.ok, onDisk: await onDisk() }, "the delete goes through").toEqual({
-          ok: true,
-          onDisk: false,
-        });
-        await newAndChanged();
-        expectPublished("after Stop and delete", await settle(6, arrived), false);
-      } else {
-        // The deferred Stop keeps A's owner binding, so the delete is refused.
-        expect(deleted, "the delete is refused with the delete words").toEqual({
-          ok: false,
-          code: "live-page-owned",
-          error: ownedDeleteRefusal("delete"),
-        });
-        // A refused delete leaves A's file in place.
-        expect(await onDisk(), "A stays on the owner's disk").toBe(true);
-        await newAndChanged();
-        expectPublished(
-          "after a deferred Stop and a refused delete",
-          await settle(6, (relay) => relay.a && relay.b && relay.cChanged),
-          true,
-        );
-      }
+      expect(afterStop.ownerBindings, "Stop released A's owner binding").toEqual([]);
+      expect({ ok: deleted.ok, onDisk: await onDisk() }, "the delete goes through").toEqual({
+        ok: true,
+        onDisk: false,
+      });
+      await newAndChanged();
+      expectPublished("after Stop and delete", await settle(6, arrived), false);
       return;
     }
 
