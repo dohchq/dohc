@@ -3023,7 +3023,7 @@ function impliedDeletes(
  * Whether Yjs's merge deleted every struct in `ranges` with no update naming
  * it. Every replica does the same in any order when:
  * - its parent was deleted. Deleting a type deletes its children, including
- *   any that arrive later.
+ *   any that arrive after it.
  * - it is a value of a key that another entry of the same key follows. Yjs
  *   keeps the last entry of a key's chain and deletes those before it, so when
  *   two people set a key at once, one of the two is kept, the same for

@@ -500,7 +500,7 @@ describe("the same key set at once: one of the two is kept, the same for everyon
     }
   });
 
-  it("accepts a later row that sets the key from the value before one already admitted", () => {
+  it("accepts a row arriving second that sets the key from the value before one already admitted", () => {
     // Client 3's value is admitted first. Client 2 set the key without seeing it, so its value is placed before
     // client 3's and deleted as it arrives: the row is admitted and the note does not change.
     const { baseline, rows, open } = session("---\nstatus: draft\n---\n\nNotes\n");
