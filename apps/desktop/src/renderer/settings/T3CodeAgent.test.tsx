@@ -985,6 +985,37 @@ it("names the mode dohc has on the agent's page, and allows again with another o
   expect(onError).not.toHaveBeenCalled();
 });
 
+it("names on the agent's page the mode the person allowed again in the Change thread dialog", async () => {
+  // The page itself allowed dohc with Auto, so it holds that answer.
+  bridgeMock.readT3CodeConnection.mockResolvedValue(HERE_SIGNED_OUT);
+  bridgeMock.allowDohcInT3Code.mockResolvedValueOnce(allowedHere("auto"));
+  const { page } = await openChiefPage();
+  const access = within(page.getByTestId("agent-thread-access"));
+  await userEvent.click(await page.findByRole("radio", { name: "Auto" }));
+  await userEvent.click(page.getByRole("button", { name: "Allow with Auto" }));
+  await access.findByText(/^Allowed with Auto until /);
+  bridgeMock.readT3CodeConnection.mockResolvedValue(allowedHere("auto"));
+  await userEvent.click(page.getByRole("button", { name: "Change thread" }));
+  const box = changeDialog();
+  await userEvent.click(await box.findByRole("button", { name: "Allow again" }));
+  // Allowing again says the sign-in dohc has stays in T3 Code, and what Full access adds.
+  expect(box.getByTestId("t3-code-allow-earlier").textContent).toMatch(/revoke it there/);
+  expect(box.queryByTestId("t3-code-allow-full-access")).toBeNull();
+  await userEvent.click(box.getByRole("radio", { name: "Full access" }));
+  expect(box.getByTestId("t3-code-allow-full-access").textContent).toMatch(
+    /settings and write to source control/,
+  );
+
+  bridgeMock.allowDohcInT3Code.mockResolvedValueOnce(allowedHere("full-access"));
+  bridgeMock.readT3CodeConnection.mockResolvedValue(allowedHere("full-access"));
+  await userEvent.click(box.getByRole("button", { name: "Allow with Full access" }));
+  expect(await box.findByRole("button", { name: "Allow again" })).toBeTruthy();
+  // The page, which read what dohc had before the dialog opened, reads it again.
+  expect(access.getByText(/^Allowed with Auto until /)).toBeTruthy();
+  await userEvent.click(box.getByRole("button", { name: "Cancel" }));
+  expect(await access.findByText(/^Allowed with Full access until /)).toBeTruthy();
+});
+
 it("says only until when, for a sign-in the person allowed on T3 Code's page", async () => {
   bridgeMock.readT3CodeConnection.mockResolvedValueOnce(allowedHere(null));
   const { page } = await openChiefPage();

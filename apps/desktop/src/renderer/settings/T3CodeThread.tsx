@@ -1,4 +1,12 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { ExternalLink, LoaderCircle, Search } from "lucide-react";
 import type {
   T3CodeAccess as T3CodeMode,
@@ -150,6 +158,13 @@ export function useT3CodeAccess(
     setAsking(null);
     return allowed;
   };
+  // Reads again what dohc holds, which another surface may have changed
+  // since this one last asked.
+  const readAgain = read.retry;
+  const retryRead = useCallback(async () => {
+    setAnswered(null);
+    await readAgain();
+  }, [readAgain]);
   const cancel = () => {
     if (!open.current) return;
     open.current = false;
@@ -160,7 +175,7 @@ export function useT3CodeAccess(
   return {
     state: answered ?? read.value,
     readError: answered ? null : read.error,
-    retryRead: read.retry,
+    retryRead,
     asking,
     allowError,
     failedHere,
@@ -288,6 +303,13 @@ function T3CodeAllowHere(props: {
   };
   return (
     <div ref={root} data-testid="t3-code-allow-here" className="flex flex-col gap-3">
+      {props.onClose ? (
+        // T3 Code gives dohc no way to end a sign-in, so allowing again leaves the old one there.
+        <p data-testid="t3-code-allow-earlier" className="m-0">
+          The sign-in dohc has now stays in T3 Code's Authorized clients until it runs out. You can
+          revoke it there.
+        </p>
+      ) : null}
       <div className="flex flex-col gap-2">
         <p id={`${id}-label`} className="m-0">
           Pick the mode of the thread you want to connect, or more.
@@ -335,6 +357,12 @@ function T3CodeAllowHere(props: {
             );
           })}
         </div>
+        {picked === "full-access" ? (
+          <p data-testid="t3-code-allow-full-access" className="m-0">
+            With Full access, the sign-in can also change T3 Code's settings and write to source
+            control.
+          </p>
+        ) : null}
         {missing ? (
           <FieldError id={missingId} testId="t3-code-allow-mode-missing">
             Pick a mode.
@@ -405,8 +433,9 @@ export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
         <div className="flex flex-col gap-2">
           <p className="m-0 text-[13px] text-ink">dohc creates its own sign-in in T3 Code.</p>
           <p className="m-0">
-            With it, dohc can message any of your threads there that run with the mode you pick, or
-            less. dohc messages only the threads you connect to agents.
+            With it, dohc can read and message any of your threads there that run with the mode you
+            pick, or less. dohc lists your threads so you can pick one. It reads and messages only
+            the threads you connect to agents.
           </p>
         </div>
         <T3CodeAllowHere access={access} size={props.size} />
@@ -418,9 +447,9 @@ export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
         T3 Code asks in your browser what dohc may do there.
       </p>
       <p className="m-0">
-        dohc can then message any of your threads in T3 Code that run with the mode you pick, or
-        less. A thread with full access needs Full access. dohc messages only the threads you
-        connect to agents.
+        dohc can then read and message any of your threads in T3 Code that run with the mode you
+        pick, or less. A thread with full access needs Full access. dohc lists your threads so you
+        can pick one. It reads and messages only the threads you connect to agents.
       </p>
       <SignInCodeSteps />
       {access.allowError ? (

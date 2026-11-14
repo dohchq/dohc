@@ -441,7 +441,8 @@ function ThreadRow(props: {
           }
           onClose={() => {
             setChanging(false);
-            if (access === "refused") props.onAllowChecked();
+            // The dialog can allow dohc, or allow it again with another mode.
+            props.onAllowChecked();
           }}
         />
       ) : null}
@@ -529,7 +530,7 @@ function ThreadAgentBoxes(props: {
                   title={`${
                     mode === null
                       ? ""
-                      : `dohc can message your threads that run with ${mode}, or less. `
+                      : `dohc can read and message your threads that run with ${mode}, or less. `
                   }The sign-in lasts 30 days. After that, allow dohc again here.`}
                 >
                   {`Allowed ${mode === null ? "" : `with ${mode} `}until ${t3CodeAllowedUntil(state.signedInUntilMs!)}`}
