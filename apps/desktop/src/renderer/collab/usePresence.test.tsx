@@ -167,11 +167,13 @@ describe("usePresence gating + guard", () => {
       });
       await flush();
       expect(t.publishes.length).toBe(before + 1);
+      const laterKeystrokes = 3;
+      const keystrokeIntervalMs = 1_000;
       // (3 keystrokes x 1s keeps the whole timeline inside the 10s heartbeat,
       // so every publish observed here is typing-driven.)
-      for (let i = 0; i < 3; i += 1) {
+      for (let i = 0; i < laterKeystrokes; i += 1) {
         await act(async () => {
-          await vi.advanceTimersByTimeAsync(1_000);
+          await vi.advanceTimersByTimeAsync(keystrokeIntervalMs);
         });
         act(() => {
           screen.getByTestId("start-typing").click();
@@ -180,16 +182,16 @@ describe("usePresence gating + guard", () => {
       }
       expect(t.publishes.length).toBe(before + 1); // still just the one edge
       const idleWindowMs = 5_000;
-      const lastKeystrokeAtMs = 3 * 1_000;
+      const lastKeystrokeAtMs = laterKeystrokes * keystrokeIntervalMs;
       const firstKeystrokeDeadlineMs = idleWindowMs;
       const lastKeystrokeDeadlineMs = lastKeystrokeAtMs + idleWindowMs;
-      const observationAtMs = firstKeystrokeDeadlineMs + 2_000;
+      const betweenTheDeadlinesMs = (firstKeystrokeDeadlineMs + lastKeystrokeDeadlineMs) / 2;
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(observationAtMs - lastKeystrokeAtMs);
+        await vi.advanceTimersByTimeAsync(betweenTheDeadlinesMs - lastKeystrokeAtMs);
       });
       expect(t.publishes.length).toBe(before + 1);
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(lastKeystrokeDeadlineMs - observationAtMs);
+        await vi.advanceTimersByTimeAsync(lastKeystrokeDeadlineMs - betweenTheDeadlinesMs);
       });
       expect(t.publishes.length).toBe(before + 2);
       expect(t.publishes.at(-1)).toMatchObject({ typing: false });
