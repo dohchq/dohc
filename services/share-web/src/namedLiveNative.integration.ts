@@ -585,12 +585,13 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
     ).lastApplied!;
     await peerSawBrowser;
     expect(browserAck.updateDigest).toBe(hash(localBytes));
+    // The read always reports a replay; a save's own answer can say it was not.
     expect(
       await capture.client.readLiveApplicationAck(nativeRequest(), {
         deliveryId: browserAck.deliveryId,
         updateDigest: browserAck.updateDigest,
       }),
-    ).toEqual(browserAck);
+    ).toEqual({ ...browserAck, applicationReplayed: true });
     Y.applyUpdate(ownerDoc, localBytes);
     results.browserAck = browserAck;
     const beforeOwner = Y.encodeStateVector(ownerDoc);

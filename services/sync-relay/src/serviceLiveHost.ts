@@ -15,6 +15,7 @@ import { untilAborted } from "./namedLiveFrameHost.js";
 import { observeRelayWrites, type LiveHostChanges } from "./relayWriteChanges.js";
 import { parseNativeLiveSyncConfig } from "./liveSyncConfig.js";
 import { LiveDocumentWork } from "./liveDocumentWork.js";
+import { createAppliedAcks } from "./appliedAcks.js";
 import { liveEditors } from "./liveEditors.js";
 import {
   HeldReadBusyError,
@@ -759,6 +760,7 @@ export async function startServiceLiveHost(options: {
     sentRequests = 0,
     idleRequests = 0,
     probeCredits = 0;
+  const appliedAcks = createAppliedAcks();
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER)
       throw new Error("Service host request IDs exhausted.");
@@ -928,18 +930,33 @@ export async function startServiceLiveHost(options: {
       waiter,
     );
   };
+  // The drains of submissions that hold or wait for each document, and the documents a pass left to them. The last
+  // drain's end wakes the pass that settles a document left to it.
+  const applications = new Map<string, number>(),
+    leftToDrain = new Set<string>();
   const drain = async (
     value: LiveDocumentKey,
     callerSignal?: AbortSignal,
   ): Promise<CommittedDeliveryOutcome> => {
     check();
-    const document = parseLiveDocumentKey(value);
-    return deliver(
-      document,
-      callerSignal,
-      (consumer, joined) => consumer.drain(document, joined),
-      "application",
-    );
+    const document = parseLiveDocumentKey(value),
+      key = JSON.stringify(document);
+    applications.set(key, (applications.get(key) ?? 0) + 1);
+    try {
+      return await deliver(
+        document,
+        callerSignal,
+        (consumer, joined) => consumer.drain(document, joined),
+        "application",
+      );
+    } finally {
+      const left = applications.get(key)! - 1;
+      if (left) applications.set(key, left);
+      else {
+        applications.delete(key);
+        if (leftToDrain.delete(key)) wakePass();
+      }
+    }
   };
   const startup = Effect.runPromise(
     Effect.provideService(
@@ -1068,9 +1085,16 @@ export async function startServiceLiveHost(options: {
           if (IDLE_PASS_REQUESTS.has(request.method)) idleRequests++;
           return queued.sendRequest(request, ...rest);
         };
+        // Every drain applies through here, so a submission takes the engine's answer for its row.
+        const sendLiveApplication: EngineClient["sendLiveApplication"] = async (...args) => {
+          const response = await queued.sendLiveApplication(...args);
+          appliedAcks.record(response.result);
+          return response;
+        };
         const client = new Proxy(queued, {
           get(target, property) {
             if (property === "sendRequest") return sendRequest;
+            if (property === "sendLiveApplication") return sendLiveApplication;
             const value: unknown = Reflect.get(target, property, target);
             if (typeof value !== "function") return value;
             if (!CONNECTION_READS.has(property)) return value.bind(target);
@@ -2945,6 +2969,12 @@ export async function startServiceLiveHost(options: {
             },
             runDocument: (document, signal, operation) =>
               runDocument(document, signal, operation, "pass"),
+            applying(document) {
+              const key = JSON.stringify(parseLiveDocumentKey(document));
+              if (!applications.has(key)) return false;
+              leftToDrain.add(key);
+              return true;
+            },
             lifetime: signal,
             wake: wakePass,
           });
@@ -3938,6 +3968,7 @@ export async function startServiceLiveHost(options: {
               nextRequestId,
               deadlineMs: config.client.requestDeadlineMs,
               drain,
+              takeAppliedAck: appliedAcks.take,
             });
           },
           /**

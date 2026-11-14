@@ -3003,6 +3003,20 @@ it("records a departed application only as the next accepted row, for its adopti
   expect(() => store.departedOwnerDelivery(input)).toThrow("Committed delivery stale-session.");
 });
 
+it("hands a submission the engine's answer to the drain that applied its row, once", async () => {
+  const o = await enrolledServiceHost({ frameChanges: true });
+  const native = await o.host.captureNative(o.binding);
+  const edit = o.acceptEdit("applied");
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+  const identity = { deliveryId: edit.deliveryId, updateDigest: edit.updateDigest };
+  expect(native.takeAppliedAck!(identity)).toEqual({
+    ...edit,
+    localYDocSequence: edit.journalCursor + 1,
+    applicationReplayed: false,
+  });
+  expect(native.takeAppliedAck!(identity)).toBeUndefined();
+});
+
 // Proves: deleting the last Edit share cuts off admission at once, as Stop
 // does, while the owner's frame session is open and a drain waits in the
 // engine. The session's next frame, an owner edit prepared before the

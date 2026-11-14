@@ -718,12 +718,13 @@ it("authenticates two accounts through the production browser transport and pres
       ).lastApplied!;
       await peerSawBrowser;
       expect(browserAck.updateDigest).toBe(hash(localBytes));
+      // The read always reports a replay; a save's own answer can say it was not.
       expect(
         await capture.client.readLiveApplicationAck(nativeRequest(), {
           deliveryId: browserAck.deliveryId,
           updateDigest: browserAck.updateDigest,
         }),
-      ).toEqual(browserAck);
+      ).toEqual({ ...browserAck, applicationReplayed: true });
       Y.applyUpdate(ownerDoc, localBytes);
       results.browserAck = browserAck;
       const beforeOwner = Y.encodeStateVector(ownerDoc);
@@ -788,12 +789,13 @@ it("authenticates two accounts through the production browser transport and pres
       ).lastApplied!;
       await peerAfterSettlement;
       results.afterSettlementAck = afterAck;
+      // The read always reports a replay; a save's own answer can say it was not.
       expect(
         await capture.client.readLiveApplicationAck(nativeRequest(), {
           deliveryId: afterAck.deliveryId,
           updateDigest: afterAck.updateDigest,
         }),
-      ).toEqual(afterAck);
+      ).toEqual({ ...afterAck, applicationReplayed: true });
       expect(capture.invalidated.aborted).toBe(false);
       expect((await active.captureNative(current.binding)).registrationId).toBe(
         capture.registrationId,
