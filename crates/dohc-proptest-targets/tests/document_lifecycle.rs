@@ -83,8 +83,7 @@ impl Note {
 /// One step a person, a peer, or the host can take.
 #[derive(Clone, Debug)]
 enum Command {
-    /// Open the note, or resync the session that has it open.
-    Open,
+    OpenOrResync,
     /// The person types into the open session.
     LocalEdit,
     /// A peer's edit arrives through sync. It parks behind a live session.
@@ -112,7 +111,7 @@ enum Crash {
 
 fn command() -> impl Strategy<Value = Command> {
     prop_oneof![
-        3 => Just(Command::Open),
+        3 => Just(Command::OpenOrResync),
         3 => Just(Command::LocalEdit),
         3 => Just(Command::RemoteApply),
         2 => Just(Command::Settle),
@@ -833,7 +832,7 @@ impl Run {
     fn step(&mut self, command: &Command) -> Result<(), TestCaseError> {
         self.log.push(format!("{command:?}"));
         match command {
-            Command::Open => self.open()?,
+            Command::OpenOrResync => self.open_or_resync()?,
             Command::LocalEdit => self.local_edit()?,
             Command::RemoteApply => self.remote_apply()?,
             Command::Settle => drop(self.settle()?),
@@ -844,7 +843,7 @@ impl Run {
         self.check_store()
     }
 
-    fn open(&mut self) -> Result<(), TestCaseError> {
+    fn open_or_resync(&mut self) -> Result<(), TestCaseError> {
         if let Some(mut session) = self.model.session.take() {
             let resynced = self.engine.resync(NOTE, &mut session);
             self.model.session = Some(session);
@@ -1149,10 +1148,10 @@ impl Run {
     fn finish(&mut self) -> Result<(), TestCaseError> {
         self.log.push("finish".into());
         if self.model.session.is_none() {
-            self.open()?;
+            self.open_or_resync()?;
         }
         if !self.settle()? {
-            self.open()?;
+            self.open_or_resync()?;
             let settled = self.settle()?;
             self.check(settled, || "a current session could not settle".into())?;
         }
@@ -1247,8 +1246,11 @@ fn replay_both(history: &[Command]) {
 /// newest leaves the file behind the note.
 #[test]
 fn a_settle_after_a_drain_writes_every_owed_edit() {
-    use Command::{Open, RemoteApply, Settle};
-    replay(Replica::Device, &[Open, RemoteApply, Settle, RemoteApply]);
+    use Command::{OpenOrResync, RemoteApply, Settle};
+    replay(
+        Replica::Device,
+        &[OpenOrResync, RemoteApply, Settle, RemoteApply],
+    );
 }
 
 /// A pull that writes the note's file must end its queued writes. Otherwise
@@ -1262,14 +1264,14 @@ fn a_pull_that_writes_the_file_ends_its_queued_writes() {
 /// earlier drains left owed, so the next settle has nothing to replay.
 #[test]
 fn a_pull_with_no_session_ends_the_writes_drains_left_owed() {
-    use Command::{Close, CrashAndReopen, Open, RemoteApply};
+    use Command::{Close, CrashAndReopen, OpenOrResync, RemoteApply};
     let history = [
-        Open,
+        OpenOrResync,
         RemoteApply,
-        Open,
+        OpenOrResync,
         Close,
         RemoteApply,
-        Open,
+        OpenOrResync,
         CrashAndReopen(Crash::AfterSettleCommit),
     ];
     replay_both(&history);
@@ -1278,14 +1280,14 @@ fn a_pull_with_no_session_ends_the_writes_drains_left_owed() {
 /// The same, with a local edit the settle commits before the crash.
 #[test]
 fn a_settle_after_a_pull_with_no_session_commits_its_own_write() {
-    use Command::{Close, CrashAndReopen, LocalEdit, Open, RemoteApply};
+    use Command::{Close, CrashAndReopen, LocalEdit, OpenOrResync, RemoteApply};
     let history = [
-        Open,
+        OpenOrResync,
         RemoteApply,
-        Open,
+        OpenOrResync,
         Close,
         RemoteApply,
-        Open,
+        OpenOrResync,
         LocalEdit,
         CrashAndReopen(Crash::AfterSettleCommit),
     ];
@@ -1296,13 +1298,13 @@ fn a_settle_after_a_pull_with_no_session_commits_its_own_write() {
 /// settle.
 #[test]
 fn a_crash_in_an_earlier_owed_write_stops_the_settle() {
-    use Command::{CrashAndReopen, Open, RemoteApply};
+    use Command::{CrashAndReopen, OpenOrResync, RemoteApply};
     let history = [
-        Open,
+        OpenOrResync,
         RemoteApply,
-        Open,
+        OpenOrResync,
         RemoteApply,
-        Open,
+        OpenOrResync,
         CrashAndReopen(Crash::AfterSettleCommit),
     ];
     replay_both(&history);
@@ -1312,7 +1314,7 @@ fn a_crash_in_an_earlier_owed_write_stops_the_settle() {
 /// Generation seldom reaches this history.
 #[test]
 fn a_draining_close_writes_the_local_edit() {
-    use Command::{Close, LocalEdit, Open, RemoteApply};
-    let history = [Open, LocalEdit, RemoteApply, Close];
+    use Command::{Close, LocalEdit, OpenOrResync, RemoteApply};
+    let history = [OpenOrResync, LocalEdit, RemoteApply, Close];
     replay_both(&history);
 }

@@ -2375,10 +2375,8 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
     .await;
     assert_eq!(bogus.code, ErrorCode::InvalidParams);
 
-    // An omitted claim command is the oracle's EMPTY-string default, and a
-    // whitespace-only command is preserved verbatim. Mutation check: restore
-    // `unwrap_or_else(|| "agent".to_owned())` in the claim arm — the empty
-    // command assertion fails.
+    // Mutation check: restore `unwrap_or_else(|| "agent".to_owned())` in the
+    // claim arm — the empty command assertion fails.
     call(
         &transport,
         &handle,
@@ -2387,6 +2385,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         json!({ "agentId": "default", "triggerMessageId": "message-r11", "threadId": "thread-r11", "nowMs": 20 }),
     )
     .await;
+    let omitted_command_default = "";
     let claimed = call(
         &transport,
         &handle,
@@ -2395,7 +2394,7 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         json!({ "agentId": "default", "runId": "run-r11", "nowMs": 21 }),
     )
     .await;
-    assert_eq!(claimed["run"]["command"], json!(""));
+    assert_eq!(claimed["run"]["command"], json!(omitted_command_default));
     call(
         &transport,
         &handle,
@@ -2412,15 +2411,16 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
         json!({ "agentId": "default", "triggerMessageId": "message-r11b", "threadId": "thread-r11b", "nowMs": 23 }),
     )
     .await;
+    let whitespace_command = "   ";
     let whitespace = call(
         &transport,
         &handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "agentId": "default", "runId": "run-r11b", "command": "   ", "nowMs": 24 }),
+        json!({ "agentId": "default", "runId": "run-r11b", "command": whitespace_command, "nowMs": 24 }),
     )
     .await;
-    assert_eq!(whitespace["run"]["command"], json!("   "));
+    assert_eq!(whitespace["run"]["command"], json!(whitespace_command));
 
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
 }

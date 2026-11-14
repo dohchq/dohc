@@ -232,9 +232,12 @@ fn folding_over_another_note_reads_as_a_fresh_fold() {
     }
 }
 
-/// Compares blocks as JSON. It is the oracle the direct comparison must agree
-/// with, or else treat the block as changed.
-fn json_same<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new: &XmlOut) -> bool {
+fn json_keeps_block<A: ReadTxn, B: ReadTxn>(
+    old_txn: &A,
+    old: &XmlOut,
+    new_txn: &B,
+    new: &XmlOut,
+) -> bool {
     fn plain<T: ReadTxn>(txn: &T, node: &XmlOut) -> bool {
         match node {
             XmlOut::Element(element) => {
@@ -274,7 +277,7 @@ fn agree(old: &Ydoc, new: &Ydoc, tally: &mut [usize; 2]) {
     let (old_txn, new_txn) = (old.doc.transact(), new.doc.transact());
     for old in &old_blocks {
         for new in &new_blocks {
-            let json = json_same(&old_txn, old, &new_txn, new);
+            let json = json_keeps_block(&old_txn, old, &new_txn, new);
             assert_eq!(
                 same_xml(&old_txn, old, &new_txn, new),
                 json,
@@ -402,7 +405,7 @@ fn judged(markdown: &str, old: impl Fn(&Ydoc), new: impl Fn(&Ydoc)) -> (bool, bo
     let (old_block, new_block) = (blocks_of(&old_doc).remove(0), blocks_of(&new_doc).remove(0));
     let (old_txn, new_txn) = (old_doc.doc.transact(), new_doc.doc.transact());
     (
-        json_same(&old_txn, &old_block, &new_txn, &new_block),
+        json_keeps_block(&old_txn, &old_block, &new_txn, &new_block),
         same_xml(&old_txn, &old_block, &new_txn, &new_block),
     )
 }
@@ -559,15 +562,12 @@ fn finding_what_an_outside_save_keeps_reads_each_block_once_and_serializes_nothi
 
 #[test]
 fn the_direct_comparison_never_keeps_a_block_holding_a_shared_type_or_value() {
-    // Each block is compared with itself, so only what it holds can make
-    // either comparison call it changed.
-    // A paragraph with a plain number among its children.
-    let child = folded("Kept.\n");
-    let XmlOut::Element(paragraph) = blocks_of(&child).remove(0) else {
+    let paragraph_with_plain_number_child = folded("Kept.\n");
+    let XmlOut::Element(paragraph) = blocks_of(&paragraph_with_plain_number_child).remove(0) else {
         panic!("not a paragraph")
     };
     {
-        let mut txn = child.doc.transact_mut();
+        let mut txn = paragraph_with_plain_number_child.doc.transact_mut();
         let branch = yrs::branch::BranchPtr::from(AsRef::<yrs::branch::Branch>::as_ref(&paragraph));
         yrs::ArrayRef::from(branch).push_back(&mut txn, 7);
     }
@@ -587,10 +587,10 @@ fn the_direct_comparison_never_keeps_a_block_holding_a_shared_type_or_value() {
         text.remove_range(&mut txn, 0, len);
         text.insert_embed(&mut txn, 0, yrs::ArrayPrelim::from([1, 2]));
     }
-    for doc in [&child, &attribute, &embed] {
-        let block = blocks_of(doc).remove(0);
+    for doc in [&paragraph_with_plain_number_child, &attribute, &embed] {
+        let same_block = blocks_of(doc).remove(0);
         let txn = doc.doc.transact();
-        assert!(!json_same(&txn, &block, &txn, &block));
-        assert!(!same_xml(&txn, &block, &txn, &block));
+        assert!(!json_keeps_block(&txn, &same_block, &txn, &same_block));
+        assert!(!same_xml(&txn, &same_block, &txn, &same_block));
     }
 }

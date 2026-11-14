@@ -926,6 +926,8 @@ struct DrainWindow {
     restored_text: String,
 }
 
+const CAPTURE_RELEASED_AT_MS: i64 = 20;
+
 fn drain_window() -> DrainWindow {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
     let mut owner = restore_owner();
@@ -985,13 +987,14 @@ fn drain_window() -> DrainWindow {
                    source_moment_id,source_digest,source_byte_length,host_coordinate_json,\
                    released_at_ms,released_restore_generation,released_accepted_cursor,\
                    released_boundary_json,carried_manifest_json) \
-                 VALUES ('relay','capture','ws','main','object',?1,?2,?3,?4,?5,'{}',20,1,1,'null','[]')",
+                 VALUES ('relay','capture','ws','main','object',?1,?2,?3,?4,?5,'{}',?6,1,1,'null','[]')",
                 params![
                     next.lineage_claim_id,
                     serde_json::to_string(&next).unwrap(),
                     owner.initial_moment,
                     text_sha(&owner.initial_text),
-                    owner.initial_text.len() as i64
+                    owner.initial_text.len() as i64,
+                    CAPTURE_RELEASED_AT_MS
                 ],
             )
         })
@@ -1185,13 +1188,12 @@ fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
     let mut report = crate::moment_apply::pending::PendingSettlementReport::default();
     let (pending, _) = drain_to_host(&mut store, &tails, &mut report);
     pending.validate().wait().unwrap();
-    // The capture's release record changes: the generation moves past the
-    // one just validated.
+    let capture_release_moved_ms = CAPTURE_RELEASED_AT_MS + 1;
     store
         .read_with(|conn| {
             conn.execute(
-                "UPDATE live_owner_activations SET released_at_ms=21 WHERE activation_id='capture'",
-                [],
+                "UPDATE live_owner_activations SET released_at_ms=?1 WHERE activation_id='capture'",
+                [capture_release_moved_ms],
             )
         })
         .unwrap();

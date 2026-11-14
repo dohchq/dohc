@@ -273,6 +273,7 @@ fn mention_parser_ignores_inline_and_fenced_code() {
 
 #[test]
 fn mention_parser_skips_names_inside_file_links() {
+    let link_with_escaped_closing_bracket = "@[a%5D @l] @m";
     // The expected handles are what chatMentionTokens in workspace-contracts reads.
     let cases: [(&str, &[&str]); 12] = [
         ("see @[trip @Nova notes.md]", &[]),
@@ -287,8 +288,7 @@ fn mention_parser_skips_names_inside_file_links() {
         ("@[a @i\nb]", &["i"]),
         ("`@[` @j]", &["j"]),
         ("`@[a @k]`", &[]),
-        // An escaped `]` stays in the path.
-        ("@[a%5D @l] @m", &["m"]),
+        (link_with_escaped_closing_bracket, &["m"]),
         ("日本 @[ノート @Nova.md] @Ana", &["ana"]),
         ("@[ノート.md#見出し @Nova] @Bo", &["bo"]),
     ];

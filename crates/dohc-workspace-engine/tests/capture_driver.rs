@@ -288,11 +288,12 @@ async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
         .await
         .expect("close");
 
-    // The re-ingest came from a rebuild while open, so it can't claim the
-    // edits were made while dohc was closed.
     let db_path = scratch.path().join(".dohc/engine/engine.db");
-    let (summary, _) = moment_metadata(&db_path, "private/journal.md");
-    assert_eq!(summary.as_deref(), Some("Found changes in the folder"));
+    let (rebuild_while_open_summary, _) = moment_metadata(&db_path, "private/journal.md");
+    assert_eq!(
+        rebuild_while_open_summary.as_deref(),
+        Some("Found changes in the folder")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

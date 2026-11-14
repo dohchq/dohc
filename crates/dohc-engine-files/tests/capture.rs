@@ -1105,12 +1105,16 @@ fn a_requested_path_is_captured_alone_before_the_rest_of_a_new_file_import() {
         Some(&import),
     );
 
+    let expected_batches: &[&[&str]] =
+        &[&["a.md", "b.md"], &["z.md"], &["c.md", "d.md"], &["e.md"]];
     assert_eq!(
         sink.0.calls,
-        ["a.md", "b.md", "z.md", "c.md", "d.md", "e.md"]
+        expected_batches
+            .iter()
+            .flat_map(|batch| batch.iter().copied())
+            .collect::<Vec<_>>()
     );
-    // a+b, z alone, c+d, then e alone once the batch has one op left.
-    assert_eq!(commits.load(Ordering::SeqCst), 4);
+    assert_eq!(commits.load(Ordering::SeqCst), expected_batches.len());
     assert!(result.failed_applies.is_empty());
     let mut applied = result.applied_paths.clone();
     applied.sort();
