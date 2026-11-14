@@ -804,9 +804,9 @@ test("job names match the workflow graph and timeout backstops", () => {
       "javascript-prepare": 30,
       "javascript-workers": 25,
       javascript: 40,
-      "rust-tests": 25,
+      "rust-tests": 35,
       "rust-policy": 25,
-      rust: 40,
+      rust: 55,
       verification: 10,
     },
   );

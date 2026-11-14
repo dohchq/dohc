@@ -472,7 +472,8 @@ jobs:
       always() && !cancelled() && needs.changes.result == 'success' &&
       ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 25
+    # The archive wait is capped at 25 minutes; the download and partition follow it.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -580,7 +581,8 @@ jobs:
     needs: changes
     if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 40
+    # Covers the archive build (formerly its own 25-minute job), partition 0 and the group wait.
+    timeout-minutes: 55
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'

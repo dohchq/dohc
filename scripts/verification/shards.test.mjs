@@ -1495,7 +1495,9 @@ for (const [scope, jobName, artifact] of [
     assert.equal(clock, 22_500);
   });
 
-  test(`${scope} preparation stops after 15 minutes with the last observed build state`, async () => {
+  const capMinutes = scope === "rust" ? 25 : 15,
+    cap = capMinutes * 60_000;
+  test(`${scope} preparation stops after ${capMinutes} minutes with the last observed build state`, async () => {
     for (const state of ["queued", "in_progress", "missing", "completed"]) {
       let clock = 0,
         lastJobRead = -1;
@@ -1528,16 +1530,20 @@ for (const [scope, jobName, artifact] of [
           },
         }),
         new RegExp(
-          `15-minute wait cap.*${state === "missing" ? "build job missing from the job list" : state === "completed" ? "no published artifact" : state === "queued" ? "queued for a runner" : "running"}`,
+          `${capMinutes}-minute wait cap.*${state === "missing" ? "build job missing from the job list" : state === "completed" ? "no published artifact" : state === "queued" ? "queued for a runner" : "running"}`,
           "u",
         ),
       );
-      assert.equal(clock, 900_000);
-      assert.equal(lastJobRead, 900_000, "the cap refreshes the build state");
-      assert.deepEqual(
-        jobReadTimes,
-        [120_000, 240_000, 360_000, 480_000, 600_000, 720_000, 840_000, 900_000],
-      );
+      assert.equal(clock, cap);
+      assert.equal(lastJobRead, cap, "the cap refreshes the build state");
+      // The build job is read every two minutes until the cap, then once more at the cap.
+      assert.deepEqual(jobReadTimes, [
+        ...Array.from(
+          { length: Math.ceil(cap / 120_000) - 1 },
+          (_, index) => (index + 1) * 120_000,
+        ),
+        cap,
+      ]);
     }
     for (const conclusion of ["failure", "cancelled", "skipped", "duplicate"]) {
       let clock = 0;
@@ -2060,6 +2066,41 @@ test("timing warnings name the larger part of a job's scheduling wait", () => {
         `${scope} timing unmeasured: 750s exceeds the ${scope === "js" ? 300 : 600}s target; longest ${cause} ${worker.name}: ${creation + runner}s.`,
       );
     }
+});
+
+test("a Rust test job's runner wait counts only after engine gate compiles the archive", () => {
+  for (const [startAfterBuild, timing] of [
+    [-10, "over budget"],
+    [31, "unmeasured"],
+  ]) {
+    const jobs = withoutWaits(),
+      worker = jobs.find((job) => job.name === "Rust tests 1"),
+      gate = jobs.find((job) => job.name === "engine gate"),
+      ready = dependencyFinishedAt(jobs, worker.name),
+      builtAt = ready + 200_000;
+    gate.steps = [
+      {
+        name: "Compile and inventory every workspace test",
+        started_at: new Date(ready).toISOString(),
+        completed_at: new Date(builtAt).toISOString(),
+      },
+    ];
+    // The worker waits 60 s or more for a runner either way; only a wait past the build delays the gate.
+    worker.created_at = new Date(ready).toISOString();
+    worker.started_at = new Date(builtAt + startAfterBuild * 1000).toISOString();
+    worker.completed_at = new Date(Date.parse(worker.started_at) + 1000).toISOString();
+    gate.completed_at = new Date(Date.parse(jobs[0].started_at) + 750_000).toISOString();
+    if (timing === "over budget")
+      assert.throws(
+        () => completedGateTiming("rust", jobs, jobs[0].head_sha),
+        (error) => error.timing.timing === "over budget",
+      );
+    else
+      assert.match(
+        completedGateTiming("rust", jobs, jobs[0].head_sha).warning,
+        /longest runner wait Rust tests 1: 31s/u,
+      );
+  }
 });
 
 test("Rust scheduling ignores JavaScript matrix metadata in both timing checks", async (t) => {

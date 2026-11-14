@@ -8,9 +8,10 @@ export async function waitForPreparation(
 ) {
   const preparation =
     scope === "js"
-      ? { job: "shared preparation", artifact: "javascript-prepared" }
+      ? { job: "shared preparation", artifact: "javascript-prepared", minutes: 15 }
       : scope === "rust"
-        ? { job: "engine gate", artifact: "rust-tests" }
+        ? // Rust consumers start while engine gate compiles, so the cap covers a cold build.
+          { job: "engine gate", artifact: "rust-tests", minutes: 25 }
         : null;
   if (!preparation) throw new Error("Select js or rust preparation.");
   for (const key of [
@@ -23,7 +24,7 @@ export async function waitForPreparation(
     if (!env[key]) throw new Error(`Missing ${key} for shared preparation.`);
   }
   const startedAt = now(),
-    deadline = startedAt + 15 * 60_000,
+    deadline = startedAt + preparation.minutes * 60_000,
     api = cloudApi({ env, request, pause, now, deadline });
   const name = `${preparation.artifact}-${env.GITHUB_RUN_ATTEMPT}`;
   let build,
@@ -48,7 +49,7 @@ export async function waitForPreparation(
       const queued = build && QUEUED_STATUSES.includes(build.status);
       if (now() >= deadline)
         throw new Error(
-          `Shared ${scope} preparation exceeded its 15-minute wait cap; ${preparation.job} ${!build ? "build job missing from the job list" : queued ? "still queued for a runner" : build.status === "in_progress" ? "still running" : "has no published artifact"}.`,
+          `Shared ${scope} preparation exceeded its ${preparation.minutes}-minute wait cap; ${preparation.job} ${!build ? "build job missing from the job list" : queued ? "still queued for a runner" : build.status === "in_progress" ? "still running" : "has no published artifact"}.`,
         );
       {
         const { artifacts } = await api.read(

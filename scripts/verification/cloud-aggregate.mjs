@@ -172,6 +172,21 @@ function jobReadyAt(job, metadata) {
   return readyAt <= Date.parse(job.started_at) ? readyAt : createdAt;
 }
 
+// Rust test jobs start early and poll for the archive engine gate compiles, so their runner
+// wait counts only after that compile ends: an earlier wait delays nothing.
+function archiveBuiltAt(job, metadata) {
+  if (!CLOUD_JOB_GRAPH["rust-tests"].names.includes(job.name)) return -Infinity;
+  const gates = metadata.filter(
+    (gate) => gate.name === "engine gate" && gate.head_sha === job.head_sha,
+  );
+  const compiled = gates.length === 1 ? (gates[0].steps ?? []) : [];
+  const steps = compiled.filter(
+    (step) => step.name === "Compile and inventory every workspace test",
+  );
+  const builtAt = steps.length === 1 ? Date.parse(steps[0].completed_at) : NaN;
+  return Number.isFinite(builtAt) ? builtAt : -Infinity;
+}
+
 function gateTiming(scope, required, metadata = required, transferSeconds = null) {
   if (
     required.some(
@@ -186,7 +201,12 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   const spanSeconds =
     (Math.max(...required.map((job) => Date.parse(job.completed_at))) - start) / 1000;
   const wait = (job) =>
-    Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata)) / 1000) || 0;
+    Math.max(
+      0,
+      (Date.parse(job.started_at) -
+        Math.max(jobReadyAt(job, metadata), archiveBuiltAt(job, metadata))) /
+        1000,
+    ) || 0;
   const jobs = required.map((job) => ({
     name: job.name,
     createdAt: job.created_at,
