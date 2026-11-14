@@ -268,6 +268,7 @@ import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSur
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
 import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { workspaceName } from "./Titlebar";
+import { membershipRefreshFailure } from "./shell/membershipRefreshWords";
 import { REMOVE_FAILED, RemoveFromListDialog } from "./RemoveFromListDialog";
 import { removalFacts } from "./workspaceRemoval";
 import { PathLine } from "./ui/PathLine";
@@ -2493,6 +2494,40 @@ export function DesktopWorkspaceShell(props: {
   const otherAccount = cloudStatus?.joinedBySignedInAccount === false;
   const otherAccountRef = useRef(otherAccount);
   otherAccountRef.current = otherAccount;
+  // A joined workspace's refresh failure names the workspace, and another
+  // account's gets Switch account. A share keeps its own words.
+  const refreshFailureFacts = useRef({
+    membership: membershipView,
+    name: workspaceName(props.workspace),
+    email: cloudStatus?.email ?? null,
+  });
+  refreshFailureFacts.current = {
+    membership: membershipView,
+    name: workspaceName(props.workspace),
+    email: cloudStatus?.email ?? null,
+  };
+  const reportShareRefreshFailure = useCallback(
+    (error: unknown, retry: (() => void) | null, shareFallback: () => void) => {
+      const facts = refreshFailureFacts.current;
+      if (!facts.membership) return shareFallback();
+      const words = membershipRefreshFailure({
+        workspaceName: facts.name,
+        signedInEmail: facts.email,
+        error,
+      });
+      if ("fallback" in words) return reportShellError(words.fallback, error, retry);
+      reportShellFailure({
+        title: words.title,
+        message: words.message,
+        cause: error,
+        retry,
+        action: { label: "Switch account", run: () => openSettings("cloud") },
+      });
+    },
+    [openSettings, reportShellError, reportShellFailure],
+  );
+  const reportShareRefreshFailureRef = useRef(reportShareRefreshFailure);
+  reportShareRefreshFailureRef.current = reportShareRefreshFailure;
   useEffect(() => {
     if (otherAccount) clearIdentity(COLLECTIONS_READ);
   }, [clearIdentity, otherAccount]);
@@ -3134,10 +3169,14 @@ export function DesktopWorkspaceShell(props: {
       );
       return pulled === "held" || pulled === "level-changed" ? pulled : "other";
     },
-    onPersistentFailure: (error) =>
-      reportShellError("Couldn't refresh the shared view.", error, () => {
+    onPersistentFailure: (error) => {
+      const retry = () => {
         if (!workspaceAdmission.superseded) void refreshShareViewRef.current();
-      }),
+      };
+      reportShareRefreshFailure(error, retry, () =>
+        reportShellError("Couldn't refresh the shared view.", error, retry),
+      );
+    },
     onVerified: (result) => {
       if (!shareView) return;
       if (
@@ -6726,9 +6765,14 @@ export function DesktopWorkspaceShell(props: {
               throw Object.assign(new Error(outcome.errorMessage), {
                 errorKind: outcome.errorKind,
               });
-            reportShellError(
-              "Couldn't refresh the shared view.",
-              new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
+            reportShareRefreshFailureRef.current(
+              Object.assign(new Error(outcome.errorMessage), { errorKind: outcome.errorKind }),
+              null,
+              () =>
+                reportShellError(
+                  "Couldn't refresh the shared view.",
+                  new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
+                ),
             );
             return "stale";
           }
@@ -6780,7 +6824,9 @@ export function DesktopWorkspaceShell(props: {
             return "stale";
           }
           if (background) throw error;
-          reportShellError("Couldn't refresh the shared view.", error);
+          reportShareRefreshFailureRef.current(error, null, () =>
+            reportShellError("Couldn't refresh the shared view.", error),
+          );
           return "stale";
         } finally {
           // After the listing and after a FAILURE, deliberately. Refusals are

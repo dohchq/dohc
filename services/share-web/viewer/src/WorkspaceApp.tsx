@@ -212,8 +212,8 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     <p>Ask the owner to invite you again to keep working in it.</p>
   </StatePage>;
   if (view.status === "refused") return <StatePage icon="unlink" title="dohc could not open this workspace with this account.">
-    <p>Sign in with the account the owner invited.</p>
-    <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>Sign out</button>
+    <p>You're signed in as {account.name}. Sign in with the account the owner invited.</p>
+    <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>Switch account</button>
   </StatePage>;
   if (view.status === "load-failed") return <StatePage icon="alert" failed title="dohc couldn't open this workspace.">
     <p>Check your connection, then choose Try again.</p>

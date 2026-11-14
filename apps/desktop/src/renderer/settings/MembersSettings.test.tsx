@@ -279,13 +279,14 @@ describe("Members page", () => {
       expect(bridge.workspaceMembers).not.toHaveBeenCalled();
     });
 
-    it("sends another account to Sync and sharing, with no Try again, before asking the server", async () => {
+    it("names the signed-in account and offers Switch account, with no Try again, before asking the server", async () => {
       const { props } = renderMembers({ cloud: joined({ joinedBySignedInAccount: false }), joined: true });
       const gate = screen.getByTestId("settings-members-gate");
       expect(gate.dataset.reason).toBe("other-account");
-      expect(gate.textContent).toContain("This computer is signed in to a different account than the one that joined this workspace.");
+      // dohc keeps only the joined account's id, so it names the account signed in now and says it cannot name the other.
+      expect(gate.textContent).toBe("This computer is signed in as bo@test, not the account that joined this workspace. dohc does not record that account's email.Switch account");
       expect(within(gate).queryByRole("button", { name: "Try again" })).toBeNull();
-      await userEvent.click(within(gate).getByRole("button", { name: "Sync and sharing" }));
+      await userEvent.click(within(gate).getByRole("button", { name: "Switch account" }));
       expect(props.onOpenSync).toHaveBeenCalled();
       expect(bridge.workspaceMembers).not.toHaveBeenCalled();
       expect(membersGate(joined({ joinedBySignedInAccount: true }), true).kind).toBe("ready");

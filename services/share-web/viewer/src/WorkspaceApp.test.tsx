@@ -460,10 +460,12 @@ it("says the membership ended and shows none of the workspace once the member is
   expect(text()).not.toContain("Plans start here");
 });
 
-it("refuses an account that is not a member, and offers to sign out", async () => {
+it("refuses an account that is not a member, names it, and offers Switch account", async () => {
   server({member: false}); await render();
   await settle(() => text().includes("dohc could not open this workspace with this account."));
-  expect(button("Sign out")).toBeDefined();
+  expect(container.querySelector(".state-message p")?.textContent).toBe("You're signed in as Sam Rivera. Sign in with the account the owner invited.");
+  await click("Switch account");
+  await settle(() => text().includes("Sign in to open this workspace"));
 });
 
 it("lays the files, the page and Chats or Comments side by side on a wide screen, and as four tabs on a phone", async () => {
