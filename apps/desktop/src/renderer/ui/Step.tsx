@@ -86,14 +86,14 @@ export const FolderChip = forwardRef<
       }`}
     >
       <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
-      {/* A long path gives up its middle folders first, so the folder's own name stays. */}
-      <code
-        className={`min-w-0 flex-1 font-mono text-[13px] leading-snug group-hover:text-ink ${
+      {/* A long path gives up its middle folders first, so the folder's own name stays. A path is in the interface font. */}
+      <span
+        className={`min-w-0 flex-1 text-[13px] leading-snug group-hover:text-ink ${
           props.folder ? "flex text-ink" : "truncate text-subtle"
         }`}
       >
         {props.folder ? <PathLine path={props.folder} /> : props.placeholder}
-      </code>
+      </span>
       <span aria-hidden className="shrink-0 text-[11px] text-subtle group-hover:text-ink">
         {props.folder ? "Change" : "Browse"}
       </span>
