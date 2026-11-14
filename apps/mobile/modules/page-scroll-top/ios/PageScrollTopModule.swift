@@ -29,8 +29,8 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     // iOS may skip a scroll view that is hidden, clear to nothing, empty or already at its top, so the receiver is a
-    // real 1 pt tall view resting 1 pt down its content. It spans the host's width (layoutSubviews), because iOS looks
-    // for the status bar's target among the scroll views under the tapped point. It stays the last subview: React
+    // real 1 pt tall view resting 1 pt down its content. It spans the host's width (layoutSubviews): UIKit scrolls the
+    // flagged scroll view beneath the tap, and the test taps the bar's middle. It stays the last subview: React
     // Native mounts and unmounts children by index from the first.
     receiver.backgroundColor = .clear
     receiver.contentInsetAdjustmentBehavior = .never
@@ -52,6 +52,10 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
   func setReady(_ value: Bool) {
     ready = value
     bind()
+    // One line per readiness change, so a host that never arms shows which input was missing.
+    log.notice(
+      "ready \(value, privacy: .public): active \(self.active, privacy: .public), window \(self.window != nil, privacy: .public), web view \(self.bound, privacy: .public)"
+    )
   }
 
   override func didAddSubview(_ subview: UIView) {
@@ -95,10 +99,10 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
     let armed = active && ready && window != nil && bound
     if armed == receiver.scrollsToTop { return }
     receiver.scrollsToTop = armed
-    // When it arms, the log counts every scroll view in the window that still takes the tap, the receiver included, so
-    // a tap that never arrives can be told apart from one that arrives and doesn't scroll.
-    let takers = armed ? window.map { takersOfTheTap(in: $0) } ?? 0 : 0
-    log.info("armed \(armed, privacy: .public); scroll views in the window taking the tap: \(takers, privacy: .public)")
+    guard armed else { return log.notice("disarmed") }
+    // A snapshot of the flags when it arms, the receiver included: more than one suggests another scroll view competes.
+    let flagged = window.map { flaggedForTheTap(in: $0) } ?? 0
+    log.notice("armed; scroll views in the window flagged for the tap: \(flagged, privacy: .public)")
   }
 
   /// Every scroll view under the host but the receiver: the web view's own, and any WebKit adds for the page's element.
@@ -109,9 +113,9 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
     }
   }
 
-  private func takersOfTheTap(in view: UIView) -> Int {
+  private func flaggedForTheTap(in view: UIView) -> Int {
     view.subviews.reduce(0) { count, subview in
-      count + ((subview as? UIScrollView)?.scrollsToTop == true ? 1 : 0) + takersOfTheTap(in: subview)
+      count + ((subview as? UIScrollView)?.scrollsToTop == true ? 1 : 0) + flaggedForTheTap(in: subview)
     }
   }
 
@@ -124,11 +128,15 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
 
   func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
     guard scrollView === receiver, receiver.scrollsToTop, let webView, bound else {
-      log.info("status bar tap refused: receiver \(scrollView === self.receiver, privacy: .public)")
+      log.notice("status bar tap refused: receiver \(scrollView === self.receiver, privacy: .public)")
       return false
     }
-    log.info("status bar tap: scrolling the page to its top")
-    webView.evaluateJavaScript("window.__dohcScrollToTop?.(); true;", completionHandler: nil)
+    log.notice("status bar tap: scrolling the page to its top")
+    webView.evaluateJavaScript("typeof window.__dohcScrollToTop === 'function' && (window.__dohcScrollToTop(), true)") { result, error in
+      log.notice(
+        "page scroll to top: \(error == nil ? "ran" : "failed", privacy: .public), function present \((result as? Bool) == true, privacy: .public)"
+      )
+    }
     return false
   }
 }
