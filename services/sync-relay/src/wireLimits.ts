@@ -20,8 +20,9 @@ export const MAX_HELD_READ_KNOWN_ROWS = 1024;
 // MAX_YDOC_UPDATE_BYTES is 20 MiB. Under that number a document the engine
 // accepts would be refused 413 here, and the base it needs could never reach
 // a peer. Keep this at or above the engine's MAX_INGEST_BLOB_BYTES
-// (crates/dohc-engine-sync/src/hydration.rs); no test compares the two, so
-// check both when widening either.
+// (crates/dohc-engine-sync/src/hydration.rs). wireLimits.test.ts holds this to
+// the contract constant, and the engine's security_contract.rs test holds the
+// engine's ceiling at or below that constant.
 export const MAX_BLOB_BYTES = APP_PUBLICATION_MAX_BLOB_BYTES;
 export const MAX_ORIGIN_ID_CHARS = 256;
 

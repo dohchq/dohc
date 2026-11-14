@@ -322,5 +322,8 @@
         "valid": false
       }
     ]
+  },
+  "relayBlob": {
+    "maxBytes": 20971520
   }
 }

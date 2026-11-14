@@ -18,9 +18,9 @@
 ///
 /// Widening this moves the whole path: `blob_ceiling(BlobKind::Ydoc)` reads it,
 /// `MAX_INGEST_BLOB_BYTES` derives from that, and the relay's own
-/// `MAX_BLOB_BYTES` (`services/sync-relay/src/server.ts`) must stay at or above
-/// the result. The two are written by hand in different languages and no test
-/// compares them; check both when widening either.
+/// `MAX_BLOB_BYTES` (`services/sync-relay/src/wireLimits.ts`) must stay at or
+/// above the result. `the_relay_carries_the_largest_blob_the_engine_accepts` in
+/// `dohc-engine-sync` compares the two through a generated fixture.
 ///
 /// One number covers deltas and bases on purpose. Nothing measures how big a
 /// single edit may be; a delta never exceeds the full state it is a slice of;

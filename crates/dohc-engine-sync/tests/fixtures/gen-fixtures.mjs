@@ -65,6 +65,11 @@ const {
     join(repoRoot, "packages/security-contract/src/shareSelector.ts"),
   ).href
 );
+const { APP_PUBLICATION_MAX_BLOB_BYTES } = await import(
+  pathToFileURL(
+    join(repoRoot, "packages/security-contract/src/appPublication.ts"),
+  ).href
+);
 await unregisterTsx();
 
 const inputs = [
@@ -199,6 +204,9 @@ const fixture = {
       valid: isShareAccessValue(value),
     })),
   },
+  // The relay's blob transport cap, MAX_BLOB_BYTES in
+  // services/sync-relay/src/wireLimits.ts, is this constant.
+  relayBlob: { maxBytes: APP_PUBLICATION_MAX_BLOB_BYTES },
 };
 writeFileSync(
   join(outputDir, "security-contract.json"),
