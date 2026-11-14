@@ -268,6 +268,8 @@ export function registerChatsIpcHandlers<
   ): Promise<{ channelWireId: string }>;
   // Calls back after each write or pull that changed this workspace's chats.
   subscribeChatWrites(workspaceId: string, listener: () => void): () => void;
+  // One pull of a joined workspace, which brings a Group the relay created.
+  pullJoinedWorkspace(workspaceId: string): Promise<unknown>;
   // Whether the person's message asks an agent that Restricted Mode holds.
   agentWaitsForTrust(workspaceId: string, messageId: string): Promise<boolean>;
 }) {
@@ -296,6 +298,7 @@ export function registerChatsIpcHandlers<
     agentWaitsForTrust,
     createJoinedWorkspaceGroup,
     subscribeChatWrites,
+    pullJoinedWorkspace,
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
@@ -1049,7 +1052,7 @@ export function registerChatsIpcHandlers<
       if (input.folderPath !== undefined)
         throw new Error("A joined workspace's Groups have no folder of their own.");
       const { channel, channelWireId } = await createJoinedGroup(
-        { createJoinedWorkspaceGroup, subscribeChatWrites },
+        { createJoinedWorkspaceGroup, subscribeChatWrites, pullJoinedWorkspace },
         scope,
         {
           name: input.name,

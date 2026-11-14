@@ -7079,6 +7079,11 @@ const createJoinedWorkspaceGroup = createJoinedWorkspaceGroupAction<CloudSession
   relayResponse: (credentials, path, init) =>
     relayShareResponseWithCredentials(credentials, path, init),
 });
+// The pull a New group in a joined workspace starts itself, so the Group arrives with no window open.
+const pullJoinedWorkspace = (workspaceId: string) =>
+  withStaleSensitiveWorkspaceOperation(requireWorkspace(workspaceId).rootPath, (lease) =>
+    shareViewFiles.reconcile(lease, { kind: "standalone", workspaceId }, "refresh"),
+  );
 
 const { startDesktopCliServer } = createDesktopCliServer({
   accountReadOwner: async (workspace, store, threadId) => {
@@ -7253,7 +7258,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   createJoinedGroup: async (workspace, store, input, assertCurrent) =>
     (
       await createJoinedGroup(
-        { createJoinedWorkspaceGroup, subscribeChatWrites },
+        { createJoinedWorkspaceGroup, subscribeChatWrites, pullJoinedWorkspace },
         { workspace, store },
         input,
         assertCurrent,
@@ -10908,6 +10913,7 @@ function registerIpcHandlers(): void {
       chatDispatchService.waitsForTrust(workspaceId, messageId),
     createJoinedWorkspaceGroup,
     subscribeChatWrites,
+    pullJoinedWorkspace,
   });
 
   agentRunsIpc.registerChatRunRecords();

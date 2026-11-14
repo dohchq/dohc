@@ -311,6 +311,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     }),
   );
   const chatWriteListeners = new Set<() => void>();
+  const pullJoinedWorkspace = vi.fn(async (_workspaceId: string) => undefined);
   const subscribeChatWrites = vi.fn((_workspaceId: string, listener: () => void) => {
     chatWriteListeners.add(listener);
     return () => {
@@ -464,6 +465,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     agentWaitsForTrust,
     createJoinedWorkspaceGroup,
     subscribeChatWrites,
+    pullJoinedWorkspace,
   });
   async function invoke(channel: string, payload: unknown, event: Event = { sender }) {
     const handler = handlers.get(channel);

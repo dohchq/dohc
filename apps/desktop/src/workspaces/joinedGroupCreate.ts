@@ -8,14 +8,16 @@ export interface JoinedGroupInput {
 
 /**
  * New group in a joined workspace, for the app and for agents. The relay
- * creates the Group in the owner's workspace and decides the role; the view's
- * next pull brings it here. The relay wakes the held pull as soon as it
- * writes the Group, so this waits for that pull, not for a timer.
+ * creates the Group in the owner's workspace and decides the role; a pull
+ * brings it here. This starts that pull itself, since no window may be
+ * pulling the workspace, then waits for it, not for a timer.
  */
 export async function createJoinedGroup<View>(
   dependencies: {
     createJoinedWorkspaceGroup(view: View, input: JoinedGroupInput): Promise<{ channelWireId: string }>;
     subscribeChatWrites(workspaceId: string, listener: () => void): () => void;
+    // One pull of the joined workspace from main, as the window's refresh runs it.
+    pullJoinedWorkspace(workspaceId: string): Promise<unknown>;
   },
   target: {
     workspace: { workspaceId: string; shareView?: View };
@@ -31,6 +33,8 @@ export async function createJoinedGroup<View>(
     ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
   });
   assertCurrent();
+  // A pull that fails leaves the wait below, which says the Group has not arrived.
+  void dependencies.pullJoinedWorkspace(workspaceId).catch(() => undefined);
   const signal = AbortSignal.timeout(30_000);
   const arrived = async (): Promise<ChatChannelSummary> => {
     let wake = () => {};
