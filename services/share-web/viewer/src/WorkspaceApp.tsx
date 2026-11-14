@@ -4,6 +4,8 @@ import {createPortal} from "react-dom";
 import {DohcMark, Icon} from "./icons";
 import {MemberChats, MemberComments, useMemberListing, LISTING_FAILED} from "./MemberChats";
 import {Toast} from "./Toast";
+import {CopyWork} from "./CopyWork";
+import {readDraft, writeDraft} from "./drafts";
 import {memberSession} from "./memberWorkspace";
 import {filesFromAccumulator, isMarkdown, type FileAccumulator, type SharedFile, type ViewMeta} from "./model";
 import {accountUser, namedRequest} from "./namedRecipient";
@@ -38,22 +40,40 @@ const CHECK_CONNECTION = "Check your connection.";
 const refusedStatus = (error: unknown) => error instanceof ViewResponseError && [401, 403, 404].includes(error.status);
 
 /** Live text that never reached the workspace, from a page that closed while the person could not keep editing it. */
-type Unsent = {id: number; path: string; text: string};
+type Unsent = {id: number; path: string; text: string; discarded?: true};
+const UNSENT_KEY = "unsent-edits";
+
+// The tab's session storage keeps the text through a reload, as it keeps drafts. A discarded item stays only for its Undo.
+function readUnsent(): Unsent[] {
+  try {
+    const stored: unknown = JSON.parse(readDraft(UNSENT_KEY) || "[]");
+    return Array.isArray(stored) ? stored.filter((item): item is Unsent =>
+      typeof item?.id === "number" && typeof item.path === "string" && typeof item.text === "string") : [];
+  } catch {return [];}
+}
+function writeUnsent(list: readonly Unsent[]): void {
+  const kept = list.filter(item => !item.discarded).map(({id, path, text}) => ({id, path, text}));
+  writeDraft(UNSENT_KEY, kept.length ? JSON.stringify(kept) : "");
+}
 
 // Shown over whatever the page shows next, so it outlasts a lower level, an ended membership or an ended session.
-function UnsentEdits({unsent, onDismiss}: {unsent: readonly Unsent[]; onDismiss(id: number): void}) {
+function UnsentEdits({unsent, onDiscard, onUndo, onForget}: {unsent: readonly Unsent[]; onDiscard(id: number): void; onUndo(id: number): void; onForget(id: number): void}) {
   return <>{unsent.map(item => {
     const name = item.path.slice(item.path.lastIndexOf("/") + 1), dot = name.lastIndexOf(".");
     const file = dot > 0 ? `${name.slice(0, dot)} (unsent edits)${name.slice(dot)}` : `${name} (unsent edits)`;
+    if (item.discarded) return <aside key={item.id} className="unsent-discarded" aria-label="Discarded edits">
+      <p>Discarded your unsent edits to "{name}".</p>
+      <button type="button" className="handoff-button secondary" onClick={() => onUndo(item.id)}>Undo</button>
+      <button className="icon-button" type="button" aria-label="Dismiss" title="Dismiss" onClick={() => onForget(item.id)}><Icon name="x"/></button>
+    </aside>;
     return <aside key={item.id} className="unsent-edits" aria-label="Unsent edits">
       <h2>dohc kept your unsent edits to "{name}"</h2>
-      <p>They didn't reach the workspace before editing ended. Copy or download them to keep them.</p>
+      <p>They didn't reach the workspace before editing ended. Only this tab has them, so closing it loses them. Copy or download them to keep them.</p>
       <textarea readOnly value={item.text} aria-label={`Unsent edits to ${name}`}/>
       <div className="unsent-actions">
-        <button type="button" className="handoff-button secondary" aria-label="Copy unsent edits"
-          onClick={() => void navigator.clipboard?.writeText(item.text).catch(() => undefined)}>Copy</button>
+        <CopyWork text={item.text} label="Copy unsent edits" failure="dohc could not copy the edits. Download them instead."/>
         <a className="handoff-button secondary" download={file} href={`data:text/markdown;charset=utf-8,${encodeURIComponent(item.text)}`}>Download</a>
-        <button type="button" className="handoff-button secondary" onClick={() => onDismiss(item.id)}>Dismiss</button>
+        <button type="button" className="handoff-button secondary" onClick={() => onDiscard(item.id)}>Discard</button>
       </div>
     </aside>;
   })}</>;
@@ -61,15 +81,28 @@ function UnsentEdits({unsent, onDismiss}: {unsent: readonly Unsent[]; onDismiss(
 
 /** A workspace member's page: its files, a page, and its Groups, at the member's level. */
 export default function WorkspaceApp({grantId}: {grantId: string | null}) {
-  const [unsent, setUnsent] = useState<Unsent[]>([]), unsentId = useRef(0);
+  const [unsent, setUnsent] = useState<Unsent[]>(readUnsent);
+  const unsentId = useRef(Math.max(0, ...unsent.map(item => item.id)));
   const [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
   const keep = useCallback((path: string, text: string) => setUnsent(list => [...list, {id: ++unsentId.current, path, text}]), []);
+  const discarded = (id: number, value: boolean) =>
+    setUnsent(list => list.map(item => item.id !== id ? item : value ? {...item, discarded: true} : {id: item.id, path: item.path, text: item.text}));
+  useEffect(() => writeUnsent(unsent), [unsent]);
+  // Closing the tab loses the kept text, so the browser asks first while any remains.
+  const holding = unsent.some(item => !item.discarded);
+  useEffect(() => {
+    if (!holding) return;
+    const warn = (event: BeforeUnloadEvent) => {event.preventDefault(); event.returnValue = "";};
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [holding]);
   return <>
     <MemberEntry grantId={grantId} onUnsent={keep} toastSlot={toastSlot}/>
     {/* Toasts and kept edits share the window's bottom-right corner, and the edits outlive the workspace page. */}
     <div className="workspace-corner">
       <div className="toast-slot" ref={setToastSlot}/>
-      <UnsentEdits unsent={unsent} onDismiss={id => setUnsent(list => list.filter(item => item.id !== id))}/>
+      <UnsentEdits unsent={unsent} onDiscard={id => discarded(id, true)} onUndo={id => discarded(id, false)}
+        onForget={id => setUnsent(list => list.filter(item => item.id !== id))}/>
     </div>
   </>;
 }

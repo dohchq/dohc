@@ -9,6 +9,7 @@ import WorkspaceApp from "./WorkspaceApp";
 import {memberDocument, memberPageReady, openMemberPage} from "./memberLive";
 import "./MemberLivePage";
 import {jsonResponse, setControlValue, settle} from "./testing";
+import {writeDraft} from "./drafts";
 
 // A workspace member's page in a browser: the workspace's files, a page, and
 // its Groups, at the member's level, and what it says when that ends.
@@ -46,6 +47,8 @@ beforeEach(() => {
 });
 afterEach(async () => {
   try {sessionStorage.clear();} catch {/* A test blocks storage. */}
+  // A new tab starts with no kept edits, including those the page held in memory.
+  writeDraft("unsent-edits", "");
   await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); vi.resetAllMocks(); vi.unstubAllGlobals();
   Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal"); Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
 });
@@ -418,6 +421,11 @@ it("keeps unsent text to copy once the person can no longer post", async () => {
   expect(groupPanel().querySelector<HTMLTextAreaElement>('textarea[aria-label="Your unsent message"]')?.value).toBe("Not sent yet");
   await act(async () => groupPanel().querySelector<HTMLButtonElement>('button[aria-label="Copy unsent message"]')!.click());
   expect(writeText).toHaveBeenCalledWith("Not sent yet");
+  expect(groupPanel().querySelector<HTMLButtonElement>('button[aria-label="Copy unsent message"]')!.textContent).toBe("Copied");
+  writeText.mockRejectedValueOnce(new Error("denied"));
+  await act(async () => groupPanel().querySelector<HTMLButtonElement>('button[aria-label="Copy unsent message"]')!.click());
+  expect(groupPanel().querySelector('[role="alert"]')?.textContent).toBe("dohc could not copy the message. Select it, then copy it.");
+  expect(groupPanel().querySelector<HTMLTextAreaElement>('textarea[aria-label="Your unsent message"]')?.value).toBe("Not sent yet");
   await click("Discard");
   expect(groupPanel().querySelector('textarea[aria-label="Your unsent message"]')).toBeNull();
 });
@@ -516,13 +524,15 @@ async function editing(options: {level?: Level; member?: boolean}) {
 }
 const recovery = () => container.querySelector<HTMLElement>('[aria-label="Unsent edits"]');
 
-it("stops editing when the person loses Edit, and keeps the unsent text to copy, download or dismiss", async () => {
+it("stops editing when the person loses Edit, and keeps the unsent text to copy, download or discard with Undo", async () => {
   const options: {level: Level} = {level: "edit"};
   await editing(options);
   options.level = "comment";
   await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0}));
   await settle(() => container.querySelector('[role="textbox"]') === null && recovery() !== null);
   expect(recovery()!.textContent).toContain('dohc kept your unsent edits to "plan.md"');
+  // It says where the text lives.
+  expect(recovery()!.textContent).toContain("Only this tab has them, so closing it loses them.");
   // Toasts stack in the same bottom-right corner, so neither covers the other.
   expect(recovery()!.closest(".workspace-corner")?.querySelector(".toast-slot")).toBeInstanceOf(HTMLElement);
   expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
@@ -530,10 +540,50 @@ it("stops editing when the person loses Edit, and keeps the unsent text to copy,
   Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
   await act(async () => recovery()!.querySelector<HTMLButtonElement>('button[aria-label="Copy unsent edits"]')!.click());
   expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Leave at ten."));
+  expect(recovery()!.querySelector<HTMLButtonElement>('button[aria-label="Copy unsent edits"]')!.textContent).toBe("Copied");
   const download = recovery()!.querySelector<HTMLAnchorElement>("a[download]")!;
   expect(download.getAttribute("download")).toBe("plan (unsent edits).md");
-  await act(async () => [...recovery()!.querySelectorAll("button")].find(node => node.textContent === "Dismiss")!.click());
+  // Discard takes the text away, and Undo brings it back.
+  await act(async () => [...recovery()!.querySelectorAll("button")].find(node => node.textContent === "Discard")!.click());
   expect(recovery()).toBeNull();
+  const discarded = container.querySelector<HTMLElement>('[aria-label="Discarded edits"]')!;
+  expect(discarded.textContent).toContain('Discarded your unsent edits to "plan.md".');
+  await act(async () => [...discarded.querySelectorAll("button")].find(node => node.textContent === "Undo")!.click());
+  expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
+  expect(container.querySelector('[aria-label="Discarded edits"]')).toBeNull();
+});
+
+it("keeps unsent edits through a reload of the tab, and warns before the tab closes until they are discarded", async () => {
+  const options: {level: Level} = {level: "edit"};
+  await editing(options);
+  options.level = "comment";
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0}));
+  await settle(() => container.querySelector('[role="textbox"]') === null && recovery() !== null);
+  const unload = () => {const event = new Event("beforeunload", {cancelable: true}); window.dispatchEvent(event); return event.defaultPrevented;};
+  expect(unload()).toBe(true);
+  expect(Object.values(sessionStorage).some(value => value.includes("Leave at ten."))).toBe(true);
+  // The tab reloads: a new page reads what the tab kept.
+  await act(async () => root.unmount()); root = createRoot(container);
+  await render();
+  await settle(() => recovery() !== null);
+  expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
+  expect(unload()).toBe(true);
+  await act(async () => [...recovery()!.querySelectorAll("button")].find(node => node.textContent === "Discard")!.click());
+  expect(unload()).toBe(false);
+  expect(Object.values(sessionStorage).some(value => value.includes("Leave at ten."))).toBe(false);
+});
+
+it("says in place when it could not copy the unsent edits, and keeps them with Download", async () => {
+  const options: {level: Level} = {level: "edit"};
+  await editing(options);
+  options.level = "comment";
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0}));
+  await settle(() => recovery() !== null);
+  Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText: vi.fn(async () => {throw new Error("denied");})}});
+  await act(async () => recovery()!.querySelector<HTMLButtonElement>('button[aria-label="Copy unsent edits"]')!.click());
+  expect(recovery()!.querySelector('[role="alert"]')?.textContent).toBe("dohc could not copy the edits. Download them instead.");
+  expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
+  expect(recovery()!.querySelector("a[download]")).not.toBeNull();
 });
 
 it("keeps the unsent text after the membership ends, with none of the workspace", async () => {

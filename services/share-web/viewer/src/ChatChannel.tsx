@@ -10,6 +10,7 @@ import {
 } from "react";
 import { renderSafeMarkdown } from "./markdown";
 import { readDraft, writeDraft } from "./drafts";
+import { CopyWork } from "./CopyWork";
 import {
   CHAT_FOLLOW_HOLD_MS,
   mergeChatMessages,
@@ -741,14 +742,11 @@ export function ChannelView({
             <>
               <textarea readOnly value={draft} aria-label="Your unsent message" />
               <div className="chat-unsent-actions">
-                <button
-                  type="button"
-                  className="handoff-button secondary"
-                  aria-label="Copy unsent message"
-                  onClick={() => void navigator.clipboard?.writeText(draft).catch(() => undefined)}
-                >
-                  Copy
-                </button>
+                <CopyWork
+                  text={draft}
+                  label="Copy unsent message"
+                  failure="dohc could not copy the message. Select it, then copy it."
+                />
                 <button
                   type="button"
                   className="handoff-button secondary"
