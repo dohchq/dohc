@@ -43,7 +43,7 @@ export function watchLiveAuthorityWrites(db: SqliteDb): void {
     for (const event of ["INSERT", "UPDATE", "DELETE"] as const) {
       if (table === "sync_relay_log" && event === "INSERT") continue;
       db.exec(`CREATE TEMP TRIGGER ${WRITES}_${table}_${event.toLowerCase()} AFTER ${event} ON ${table}
-        BEGIN UPDATE temp.${WRITES} SET count = count + 1; END`);
+        BEGIN UPDATE ${WRITES} SET count = count + 1; END`);
     }
   }
 }

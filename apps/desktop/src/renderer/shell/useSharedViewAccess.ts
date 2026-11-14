@@ -97,7 +97,8 @@ export function useSharedViewAccess(input: {
           // Access verification must not delay the opening pull.
           const completed = await Promise.allSettled([accessCheck(), pullShare()]);
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
-          if (levelChanged && !access) completed.push(...await Promise.allSettled([accessCheck(true)]));
+          // An access check that ran beside the pull may have read the level before it changed.
+          if (levelChanged) completed.push(...await Promise.allSettled([accessCheck(true)]));
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
           if (result.status === "needs-reopen") {
             paused = true;

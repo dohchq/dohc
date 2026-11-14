@@ -1293,6 +1293,19 @@ it("opens a 17th page once the earlier member opens go stale, and retires the st
   expect(release(next, stale)).toMatchObject({ enabled: false, retired: true });
 });
 
+// Proves: ending the membership deletes its row, yet a page a member opened
+// still reads as member-opened, so it stops counting at once and retires.
+it("retires a member-opened page once the owner ends the membership", async () => {
+  const f = await fixture(); addMember(f);
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
+  memberOpen(f);
+  expect(f.storage.endWorkspaceMembership({workspaceId: scope.workspaceId, actorUserId: "owner-1", nowMs: 40})).toEqual({ok: true});
+  expect(f.storage.serviceHostEnrollmentCovered(enrolled(f)!, 40)).toBe(false);
+  expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding, undefined, false, 40)).toBe(false);
+  expect(f.storage.releaseServiceHostEnrollment({workspaceId: scope.workspaceId, objectId: binding.objectId, nowMs: 40}))
+    .toMatchObject({enabled: false, retired: true});
+});
+
 // Proves: a member's open that revives a retired page, or takes over a live
 // page whose path share's Edit grant ended, counts toward the member cap and
 // lapses as a new member open does.

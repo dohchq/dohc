@@ -1644,16 +1644,22 @@ function latestRestore(storage: StorageContext, workspaceId: string, objectId: s
 /** Whether the host keeps a document the owner's restore kept live, from its revocation on. It admits no edit before the restore resumed. */
 export const serviceHostOwnerRetains = (storage: StorageContext, enrollment: CoveredEnrollment) =>
   keptByRestore(storage, enrollment, false);
-/** Whether a member's open brought the document in and its owner never asked for it. */
+/**
+ * Whether a member's open brought the document in and its owner never asked
+ * for it. It reads the share row, which outlives the membership row, so a
+ * page stays member-opened after the membership ends.
+ */
 function memberOpened(
   storage: StorageContext,
   enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "shareId" | "ownerDemand">,
 ): boolean {
-  return (
-    !enrollment.ownerDemand &&
-    enrollment.shareId !== null &&
-    getWorkspaceMembership(storage, enrollment.workspaceId)?.shareId === enrollment.shareId
-  );
+  if (enrollment.ownerDemand || enrollment.shareId === null) return false;
+  const share = storage.db
+    .prepare(`SELECT selector_json FROM sync_relay_shares WHERE share_id=? AND workspace_id=?`)
+    .get(enrollment.shareId, enrollment.workspaceId);
+  const stored = share && parseStoredAnyShareSelectorJson(String(share.selector_json)),
+    selector = stored && effectiveShareSelector(stored, "edit");
+  return !!selector && isWorkspaceSelector(selector);
 }
 const recentMemberDemand = (demandAtMs: number | null, nowMs: number) =>
   demandAtMs !== null && nowMs - demandAtMs < MEMBER_OPEN_DEMAND_MS;
