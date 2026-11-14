@@ -239,7 +239,12 @@ it("waits for the owner's dohc with the page readable, raises a toast after 15 s
   vi.mocked(memberDocument).mockReturnValue({session: session as never, close: vi.fn()});
   await render();
   await settle(() => text().includes("You can read this page.") && text().includes("Leave at nine.") && ready !== undefined);
-  expect(container.querySelector("header .live-ring")).not.toBeNull();
+  // As on the desktop, the state line sits in a band between the header and the page, with Try again.
+  const band = container.querySelector("header + .page-band")!;
+  expect(band.querySelector("[role=status]")?.textContent).toBe("You can read this page.");
+  expect(band.querySelector(".live-ring")).not.toBeNull();
+  expect(band.querySelector("button")?.textContent).toBe("Try again");
+  expect(container.querySelector("header")?.textContent).not.toContain("You can read this page.");
   expect(container.querySelector(".workspace-toast")).toBeNull();
   await act(async () => vi.advanceTimersByTime(15_000));
   const toast = container.querySelector(".workspace-toast")!;

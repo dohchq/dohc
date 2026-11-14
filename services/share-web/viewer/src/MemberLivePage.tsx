@@ -30,13 +30,15 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
 /**
  * A member's page at Edit. The page's settled text shows until the live
  * editor has it. When the host will not take the page, the text stays and a
- * toast says why; a page waiting for its owner's dohc shows a ring, raises
+ * band under the header says so, with Try again, and a toast says why. A
+ * page waiting for its owner's dohc shows a ring in that band, raises
  * its toast after LIVE_HOST_WAIT_REPORT_MS, and opens by itself once ready.
  * `leave` runs an action that would close the page, asking first when an
  * unsynced draft would go with it.
  */
-export default function MemberLivePage({grantId, accountId, path, readView, statusSlot, toastSlot, leave}: {
-  grantId: string; accountId: string; path: string; readView: ReactNode; statusSlot: HTMLElement | null; toastSlot: HTMLElement | null;
+export default function MemberLivePage({grantId, accountId, path, readView, statusSlot, bandSlot, toastSlot, leave}: {
+  grantId: string; accountId: string; path: string; readView: ReactNode; statusSlot: HTMLElement | null; bandSlot: HTMLElement | null;
+  toastSlot: HTMLElement | null;
   leave: MutableRefObject<((action: () => void) => void) | null>;
 }) {
   const [phase, setPhase] = useState<Phase>({kind: "opening"}), [editing, setEditing] = useState<MemberDocument | null>(null);
@@ -111,10 +113,11 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
   const readable = phase.kind === "refused" || phase.kind === "waiting";
   const toastTitle = `dohc could not open "${name}" for editing`, toastBody = reason ? `${reason} You can still read it.` : "You can still read it.";
   return <>
-    {statusSlot && !live && (!editing || readable) && createPortal(phase.kind === "opening"
-      ? <p className="named-document-status" role="status">Opening the file…</p>
-      : readable ? <p className="named-document-status" role="status">{phase.kind === "waiting" && <span className="live-ring" aria-hidden="true"/>}You can read this page.</p>
-      : null, statusSlot)}
+    {statusSlot && !editing && phase.kind === "opening" && createPortal(<p className="named-document-status" role="status">Opening the file…</p>, statusSlot)}
+    {bandSlot && !live && readable && createPortal(<>
+      <p role="status">{phase.kind === "waiting" && <span className="live-ring" aria-hidden="true"/>}You can read this page.</p>
+      <button type="button" onClick={open}>Try again</button>
+    </>, bandSlot)}
     {!live && readView}
     {editing && <NamedDocumentEditor key={editing.session.doc.guid} session={editing.session} path={path} link statusSlot={statusSlot}
       bodyHidden={!live} onState={receive}/>}

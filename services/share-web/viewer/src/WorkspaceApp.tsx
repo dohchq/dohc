@@ -138,6 +138,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   const [selectedPath, setSelectedPath] = useState("");
   const [tab, setTab] = useState<Tab>("page"), [side, setSide] = useState<Side>("chats"), [unread, setUnread] = useState(0);
   const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null), [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
+  const [bandSlot, setBandSlot] = useState<HTMLElement | null>(null);
   const leave = useRef<((action: () => void) => void) | null>(null), tabs = useRef(new Map<Tab, HTMLButtonElement>());
   const narrow = useNarrow();
   const files = view.status === "ready" ? view.files : null;
@@ -229,6 +230,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
           {!live && <span className="badge">{BADGE[access]}</span>}
         </div>
       </header>
+      <div className="page-band" ref={setBandSlot}/>
       <div className="layout">
         <div className="scroller">
           <div className="column">
@@ -237,7 +239,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
               <main className="content">
                 {live ? <Suspense fallback={readView}>
                   <MemberLivePage key={selected.path} grantId={grantId} accountId={account.id} path={selected.path} readView={readView}
-                    statusSlot={statusSlot} toastSlot={toastSlot} leave={leave}/>
+                    statusSlot={statusSlot} bandSlot={bandSlot} toastSlot={toastSlot} leave={leave}/>
                 </Suspense> : readView}
               </main>
             </> : <div className="empty-state"><p>No files in this workspace yet. This page shows them as soon as they arrive.</p></div>}

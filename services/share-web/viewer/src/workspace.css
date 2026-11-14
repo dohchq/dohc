@@ -18,6 +18,13 @@
 /* The ring says the page is waiting for its owner's dohc. */
 .live-ring { width: 10px; height: 10px; flex: none; border: 1.5px solid var(--viewer-line-strong); border-top-color: var(--viewer-muted); border-radius: 50%; animation: workspace-ring 900ms linear infinite; }
 @keyframes workspace-ring { to { transform: rotate(360deg); } }
+/* A page the member can only read says so in a band between the header and the page, where the desktop says it. */
+.page-band { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--viewer-line); padding: 4px 16px; background: var(--viewer-panel-2); color: var(--viewer-warning); font-size: 12px; line-height: 18px; }
+.page-band:empty { display: none; }
+.page-band p { display: flex; min-width: 0; align-items: center; gap: 6px; margin: 0; }
+.page-band .live-ring { border-color: color-mix(in srgb, currentColor 30%, transparent); border-top-color: currentColor; }
+.page-band button { flex: none; border: 0; padding: 0; background: none; color: var(--viewer-subtle); cursor: pointer; font: inherit; white-space: nowrap; }
+.page-band button:hover { color: var(--viewer-ink); }
 
 /* Errors land at the bottom right of the page, over its text. */
 .toast-slot { position: absolute; right: 16px; bottom: 16px; z-index: 25; width: 360px; max-width: calc(100% - 32px); display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
