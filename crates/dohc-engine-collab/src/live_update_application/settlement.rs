@@ -633,7 +633,7 @@ where
             Some((_,end,_,end_sequence,_)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence,None),
             Some((start,end,start_sequence,end_sequence,_)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
             Some((_,end,_,end_sequence,refused_start)) if end < terminal_cursor => {
-                let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,held,start,origin_cursor,max_applications)? } else {end};
+                let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,held,start,origin_cursor)? } else {end};
                 // A successor's adoption verified its captured head, which
                 // holds the rows ordinary sync added after its predecessor's
                 // last settlement. Its first settlement covers from there.
@@ -711,15 +711,12 @@ fn verified_previous_cursor(
     held: &Registration,
     start: i64,
     origin: i64,
-    limit: usize,
 ) -> Result<i64, ApplicationError> {
     let b = &held.binding;
     let mut cursor = start.max(origin);
-    let mut visited = 0;
+    // Each step moves strictly back toward the origin, so the walk ends
+    // however many refused settlements queued up before their refusals.
     while cursor > origin {
-        if visited >= limit {
-            return Err(invalid("settlement application limit exceeded"));
-        }
         let prior: Option<(i64,String)> = conn.query_row(
             "SELECT p.previous_cursor,p.binding_json FROM live_device_settlements s
              JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.moment_id=s.moment_id
@@ -745,7 +742,6 @@ fn verified_previous_cursor(
             return Err(ApplicationError::Corrupt);
         }
         cursor = previous.max(origin);
-        visited += 1;
     }
     Ok(cursor)
 }
