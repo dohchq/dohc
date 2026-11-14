@@ -354,6 +354,27 @@ export function createNamedDesktopLiveCapture(options: {
           provider.applyLocalUpdate(bytes, onArmed, applyOptions);
           return true;
         },
+        // Done once the host holds every edit sent so far. A session that
+        // stops first keeps the edit in its draft, and says why it stopped.
+        savedToHost: () =>
+          new Promise<void>((resolve, reject) => {
+            const check = (state = session.state()) => {
+              if (state.status === "live" && state.pendingUpdates === 0) {
+                stop();
+                resolve();
+              } else if (!["live", "authorizing", "connecting", "syncing"].includes(state.status)) {
+                stop();
+                reject(
+                  new Error(
+                    liveConnectionLimitMessage(state.reason) ??
+                      "The live connection to the server closed.",
+                  ),
+                );
+              }
+            };
+            const stop = session.subscribe(check);
+            check();
+          }),
         async readArtifactAsset() {
           throw new Error("Shared Markdown has no live artifact assets.");
         },

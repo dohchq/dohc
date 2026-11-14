@@ -94,11 +94,13 @@ export interface EngineYDocIpcSender {
   once(event: "destroyed", listener: () => void): this;
 }
 
-// A shared view's named live provider settles on its host and has no
-// settleNow; a local capture's provider does.
+// A shared view's named live provider settles on its host: it has no
+// settleNow, and savedToHost waits until the host holds its edits. A local
+// capture's provider has settleNow.
 export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession, "settleNow"> & {
   liveWritable?(): boolean;
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
+  savedToHost?(): Promise<void>;
 };
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
@@ -1168,7 +1170,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     try {
       authority.assertCurrent();
       const workspace = authority.workspace;
-      if (this.#isSharedView(workspace)) {
+      if (this.#isSharedView(workspace) && !this.#sharedCaptureFor) {
         throw new Error("Documents in a shared view change through the share, not this workspace.");
       }
       const path = await this.#markdownDocumentPath(workspace, input.path);
@@ -1307,12 +1309,15 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     path: string,
     input: LiveDocumentEdit,
   ): Promise<AppliedEdit> {
-    let capture = this.#captureFor(workspace);
-    if (!capture) {
+    // A shared view's page opens through the share's live session on the
+    // server, as its editor does, and refuses with the editor's reason.
+    const shared = this.#isSharedView(workspace);
+    let capture = shared ? await this.#sharedCaptureFor!(workspace) : this.#captureFor(workspace);
+    if (!capture && !shared) {
       await this.#ensureCaptureFor(workspace);
       capture = this.#captureFor(workspace);
     }
-    if (!capture) throw new Error("The workspace engine is not running.");
+    if (!capture) throw new Error(shared ? "dohc could not open this page for editing." : "The workspace engine is not running.");
     const provider = await capture.openYDocSession({
       ...(input.allowLossySourceSha256
         ? { allowLossySourceSha256: input.allowLossySourceSha256 }
@@ -1328,9 +1333,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         throw new Error(`${path} is not a Markdown document.`);
       }
       applied = await applyDocumentEdit(provider, path, input, {
-        // No editor here holds it, but a replicated lineage is shared with
-        // other devices or share recipients, who may be typing in it.
-        keepBlocks: provider.lineageClaimId != null,
+        // No editor here holds it, but a replicated lineage or a shared
+        // view's page is shared with others, who may be typing in it.
+        keepBlocks: shared || provider.lineageClaimId != null,
         assertSame: () => undefined,
         show: () => undefined,
       });
@@ -1761,7 +1766,8 @@ async function applyDocumentEdit(
   input: LiveDocumentEdit,
   session: { keepBlocks: boolean; assertSame(): void; show(update: Uint8Array): void },
 ): Promise<AppliedEdit> {
-  const settleNow = provider.settleNow;
+  const savedToHost = provider.savedToHost;
+  const settleNow = provider.settleNow ?? (savedToHost && (async () => { await savedToHost.call(provider); return undefined; }));
   if (!settleNow) throw new Error(`${path} cannot take an edit from here.`);
   const update = await input.change(Y.encodeStateAsUpdate(provider.doc), {
     keepBlocks: session.keepBlocks,

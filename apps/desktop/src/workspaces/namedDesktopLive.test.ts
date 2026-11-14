@@ -261,6 +261,26 @@ it("reports only host acknowledgement as saved and never settles a local file", 
   expect(f.preserveDraft).not.toHaveBeenCalled();
 });
 
+it("answers an agent's edit once the host holds it, and says so when live editing stops first", async () => {
+  const f = fixture();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
+  await expect(provider.savedToHost!()).resolves.toBeUndefined();
+  const edit = new Y.Doc(); edit.getText("body").insert(0, "pending");
+  provider.applyLocalUpdate(Y.encodeStateAsUpdate(edit)); edit.destroy();
+  let held = false;
+  const saved = provider.savedToHost!().then(() => { held = true; });
+  await Promise.resolve();
+  expect(held).toBe(false);
+  f.ack();
+  await saved;
+  const next = new Y.Doc(); next.getText("body").insert(0, "again");
+  provider.applyLocalUpdate(Y.encodeStateAsUpdate(next)); next.destroy();
+  const stopped = provider.savedToHost!();
+  f.terminal();
+  await expect(stopped).rejects.toThrow("The live connection to the server closed.");
+  await provider.close();
+});
+
 it("reports no file head with the note and each update, so the note check still judges a shared note", async () => {
   const f = fixture();
   const onRemoteUpdate = vi.fn();

@@ -2850,6 +2850,23 @@ describe("a joined workspace through the CLI", () => {
     expect(f.dependencies.liveDocuments.editDocument).not.toHaveBeenCalled();
   });
 
+  // An edit takes the page's live session on the server, the one the app's
+  // editor opens, never a rewrite of the file.
+  it("edits a page at Edit through its live session, and names the level below Edit", async () => {
+    const f = joinedFixture("edit");
+    const context = await f.create().openCliWorkspace(f.joined);
+    await expect(context.documents!.edit({ path: "notes/plan.md", edit: { find: "Old", replacement: "New" }, origin: AGENT_ORIGIN }))
+      .resolves.toEqual({ path: "notes/plan.md", changed: false });
+    expect(f.dependencies.liveDocuments.editDocument).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace", path: "notes/plan.md", origin: AGENT_ORIGIN }));
+    for (const access of ["view", "comment"] as const) {
+      const below = joinedFixture(access);
+      const reached = await below.create().openCliWorkspace(below.joined);
+      await expect(reached.documents!.edit({ path: "notes/plan.md", edit: { find: "Old", replacement: "New" }, origin: AGENT_ORIGIN }))
+        .rejects.toThrow(`Editing a page needs Edit. You can ${access} here.`);
+      expect(below.dependencies.liveDocuments.editDocument).not.toHaveBeenCalled();
+    }
+  });
+
   // The relay creates the Group in the owner's workspace and decides the
   // role; the view's next pull brings it here.
   it("creates a Group through the relay", async () => {

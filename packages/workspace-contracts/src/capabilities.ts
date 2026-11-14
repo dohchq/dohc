@@ -1028,9 +1028,9 @@ const LISTED_CAPABILITIES = {
     "Replace matching text or append Markdown through the live document.",
     {
       ipcReason: "CLI and MCP action with no IPC channel.",
-      mcp: { owner: ["dohc_edit_document"] },
+      mcp: { owner: ["dohc_edit_document"], edit: ["dohc_edit_document"] },
       mcpReason:
-        "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates.",
+        "Edit profiles offer it for a joined workspace, through the page's live session on the server. Other profiles omit it; the socket refuses other share views.",
     },
   ),
   "document.create": capability(

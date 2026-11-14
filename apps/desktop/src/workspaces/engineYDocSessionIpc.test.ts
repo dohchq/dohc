@@ -34,6 +34,7 @@ import {
   LiveDocumentEditAppliedError,
   type EngineYDocIpcSender,
   type EngineYDocSessionCapture,
+  type EngineYDocSessionProvider,
 } from "./engineYDocSessionIpc";
 import { CHANNELS, ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { DOCUMENT_TOO_DENSE_WORDS } from "../ipc/errorWords";
@@ -2656,6 +2657,46 @@ describe("engine Y.Doc IPC adapter", () => {
       },
     });
     const append = edit({ replacement: "After." });
+
+    // A joined workspace's page: the edit goes through the page's live session
+    // on the server, the one a member's editor opens, and is done once the
+    // server holds it.
+    function sharedSession(trace: string[] = []) {
+      const session = editableSession(trace);
+      const shared = Object.assign(session, {
+        savedToHost: vi.fn(async () => { trace.push("saved-to-host"); }),
+      }) as EngineYDocSessionProvider;
+      delete shared.settleNow;
+      return shared;
+    }
+
+    it("edits a page in a joined workspace through its live session on the server", async () => {
+      const trace: string[] = [];
+      const session = sharedSession(trace);
+      const open = vi.fn(async () => session);
+      const h = harness(providerSession(), { sharedCaptureFor: async () => ({ openYDocSession: open }) });
+      h.setReadOnly(true);
+      keepBlocksSeen.length = 0;
+
+      await expect(h.ipc.editDocument(append)).resolves.toEqual({ path: "notes/a.md", changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
+
+      expect(keepBlocksSeen).toEqual([true]);
+      expect(trace).toEqual(["apply", "saved-to-host", "close"]);
+      expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\nBefore.\n\nAfter.\n");
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    });
+
+    it("gives the agent the reason the app gives when a joined workspace's page can't open for editing", async () => {
+      const waiting = { state: "host-refused" as const, awaitsHost: true as const,
+        message: "dohc could not open this page for editing. Editing starts once the owner's dohc is online.",
+        reason: "Editing starts once the owner's dohc is online." };
+      const h = harness(providerSession(), { sharedCaptureFor: async () => ({ openYDocSession: async () => { throw new SharedDocumentWaitingError(waiting); } }) });
+      h.setReadOnly(true);
+      await expect(h.ipc.editDocument(append)).rejects.toThrow(waiting.message);
+      const refused = harness(providerSession(), { sharedCaptureFor: async () => { throw new SharedDocumentWaitingError({ state: "access-ended", message: "Your access to this share ended." }); } });
+      refused.setReadOnly(true);
+      await expect(refused.ipc.editDocument(append)).rejects.toThrow("Your access to this share ended.");
+    });
 
     it("refuses a lossy note before it opens a session or changes the held one", async () => {
       const session = editableSession();

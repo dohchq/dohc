@@ -4986,8 +4986,8 @@ async function workspaceContextForRequest(
 }
 
 // What an agent may write in a joined workspace is what the person may: a
-// post or reply in a Group, a comment on a file, a reaction, a page at Edit,
-// and a Group for an admin. Each verb's own path and the relay decide the level and the role.
+// post or reply in a Group, a comment on a file, a reaction, a new page or an
+// edit at Edit, and a Group for an admin. Each verb's own path and the relay decide the level and the role.
 // Every other write refuses here with its reason.
 function joinedWorkspaceWriteRefusal(
   verb: CliVerb,
@@ -5003,11 +5003,10 @@ function joinedWorkspaceWriteRefusal(
     case "react":
     case "show":
     case "documentCreate":
+    case "documentEdit":
     case "groupCreate":
     case "fileChatStart":
       return null;
-    case "documentEdit":
-      return "Agents can't edit pages in a joined workspace yet. Edit them in the app.";
     case "export":
       return "Export chats from the owner's workspace.";
     case "watch":

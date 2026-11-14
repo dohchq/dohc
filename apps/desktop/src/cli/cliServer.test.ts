@@ -2700,6 +2700,37 @@ describe("CLI socket server", () => {
       expect(members).toHaveBeenCalledOnce();
     });
 
+    it("takes a page edit to the workspace's live documents", async () => {
+      joinAs("edit");
+      const edit = vi.fn(async ({ path }: { path: string }) => ({ path, changed: true }));
+      context = {
+        ...context,
+        documents: {
+          read: async () => {
+            throw new Error("unused");
+          },
+          edit,
+          create: async () => {
+            throw new Error("unused");
+          },
+        },
+      };
+      await expect(
+        invoke("documentEdit", {
+          ...args(),
+          path: "notes/plan.md",
+          find: "Old",
+          replacement: "Done.",
+        }),
+      ).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+      expect(edit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: "notes/plan.md",
+          edit: { find: "Old", replacement: "Done." },
+        }),
+      );
+    });
+
     it("refuses the writes a member cannot make with one reason each", async () => {
       joinAs("edit");
       const refusals: [CliVerb, Record<string, unknown>, string][] = [
@@ -2707,11 +2738,6 @@ describe("CLI socket server", () => {
           "fileWrite",
           { requestId: "joined", files: [{ path: "notes/a.md", contentBase64: "eA==" }] },
           "In a joined workspace agents add pages with dohc document create.",
-        ],
-        [
-          "documentEdit",
-          { path: "notes/plan.md", replacement: "Done." },
-          "Agents can't edit pages in a joined workspace yet. Edit them in the app.",
         ],
         [
           "collectionSetFields",

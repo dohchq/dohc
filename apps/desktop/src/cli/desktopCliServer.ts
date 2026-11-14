@@ -850,8 +850,14 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
               });
           return { path: live.path, markdown };
         },
-        edit: ({ path, edit, origin, allowLossySourceSha256 }) =>
-          liveDocuments.editDocument({
+        edit: async ({ path, edit, origin, allowLossySourceSha256 }) => {
+          // A joined workspace's page changes through its live session on the
+          // server, as its editor does, and the server decides again.
+          const view = sharedViewOf(workspace.workspaceId);
+          if (view?.membership === true && view.access !== "edit") {
+            throw new Error(`Editing a page needs Edit. You can ${view.access ?? "view"} here.`);
+          }
+          return await liveDocuments.editDocument({
             ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
             workspaceId: workspace.workspaceId,
             path,
@@ -874,7 +880,8 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 headSha256,
                 ...(allowLossySourceSha256 ? {} : { refuseLossy: path }),
               }),
-          }),
+          });
+        },
         create: async ({ path, markdown, origin }) => {
           // Frontmatter would land as body blocks, so it is refused before
           // anything exists.

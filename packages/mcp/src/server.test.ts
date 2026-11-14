@@ -62,6 +62,7 @@ const JOINED_TOOLS = {
     "dohc_reply_to_chat",
     "dohc_start_file_chat",
     "dohc_create_document",
+    "dohc_edit_document",
     "dohc_create_group",
     "dohc_switch_automation",
   ],
