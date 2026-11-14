@@ -54,7 +54,32 @@ export const accountWords = {
   account: "Account",
   signOut: "Sign out",
   signOutTitle: (server: string) => `Sign out of ${server}?`,
-  signOutBody: "This phone stops reading your workspaces. Your work stays where it is.",
+  /**
+   * Sign out's body: what it deletes from the phone's outbox, messages not sent and ones that may still send, or, when
+   * the phone can't read its outbox, that it can't count them.
+   */
+  signOutBody: (counts: { readonly unsent: number; readonly maySend: number } | null): string => {
+    if (counts === null)
+      return "dohc could not check this phone for unsent messages. Signing out deletes any it has.";
+    const { unsent, maySend } = counts;
+    const lines = [
+      unsent === 1
+        ? "1 message hasn't been sent. Signing out deletes it."
+        : unsent > 1
+          ? `${unsent} messages haven't been sent. Signing out deletes them.`
+          : null,
+      maySend === 1
+        ? "1 message may still send."
+        : maySend > 1
+          ? `${maySend} messages may still send.`
+          : null,
+    ].filter((line) => line !== null);
+    return lines.length > 0
+      ? lines.join(" ")
+      : "This phone stops reading your workspaces. Your work stays where it is.";
+  },
+  /** Sign out stopped because the phone couldn't delete its unsent messages safely; it stays signed in. */
+  signOutFailed: "dohc could not delete the messages waiting on this phone, so it didn't sign out.",
 
   showOnPhone: "Show on phone",
   showOnPhoneLabel: (workspace: string) => `Show ${workspace} on phone`,

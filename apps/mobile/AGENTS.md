@@ -48,6 +48,8 @@ The server client is in `src/server`. Its files hold how each part works.
 - Raise `CACHE_FORMAT` when a view's value changes shape.
 - The account's Notices live in one store per sign-in, beside the workspace list, not in the open workspace's (`src/server/noticeStore.ts`). It reads the whole list again at each start, return from the background, refresh, and change to which workspaces show on the phone. Its waiting marks are in two alternating slot files in Documents, never moved over each other (`src/server/noticeFiles.ts`). Raise `NOTICE_LIST_FORMAT` or `NOTICE_MARKS_FORMAT` when a file's shape changes.
 - Ending a token deletes it from the keychain first, then revokes its session, so a phone closed between the two keeps no token (`src/server/account.ts`).
+- The outbox keeps the phone's chat writes on disk, outside Caches, through the `durable-file` module, until the server saves them and a read shows them. Nothing adds to it yet. It sends a record only with a sign-in for the record's own server and account, one at a time per thread or stream, in order, and repeats the same operation ID until the write is saved or refused. A 401 keeps every record (`src/server/outbox.ts`).
+- Only Sign out deletes the outbox's records, through `onSignOut`: sending stops, the outbox writes a marker, the account ends the sign-in and deletes its token, then the records go, then the marker. If the marker can't be written, every record must go at once, or Sign out fails and the phone stays signed in with its token (`src/server/outbox.ts`, `src/server/account.ts`).
 
 ## Copy
 
