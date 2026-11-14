@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useRef, useState, type MutableRefObject, type ReactNode} from "react";
 import {createPortal} from "react-dom";
 import type {NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
+import {yDocToMarkdown} from "@dohc/ydoc-projection/browser-editor";
 import {NamedDocumentEditor} from "./NamedDocumentEditor";
 import {DiscardDraft} from "./DiscardDraft";
 import {Toast} from "./Toast";
@@ -34,17 +35,21 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
  * page waiting for its owner's dohc shows a ring in that band, raises
  * its toast after LIVE_HOST_WAIT_REPORT_MS, and opens by itself once ready.
  * `leave` runs an action that would close the page, asking first when an
- * unsynced draft would go with it.
+ * unsynced draft would go with it. When the page closes for any other reason,
+ * such as a lower level, an ended membership or an ended session, `onUnsent`
+ * gets the text that has not reached the workspace.
  */
-export default function MemberLivePage({grantId, accountId, path, readView, statusSlot, bandSlot, toastSlot, leave}: {
+export default function MemberLivePage({grantId, accountId, path, readView, statusSlot, bandSlot, toastSlot, leave, onUnsent}: {
   grantId: string; accountId: string; path: string; readView: ReactNode; statusSlot: HTMLElement | null; bandSlot: HTMLElement | null;
   toastSlot: HTMLElement | null;
   leave: MutableRefObject<((action: () => void) => void) | null>;
+  onUnsent(text: string): void;
 }) {
   const [phase, setPhase] = useState<Phase>({kind: "opening"}), [editing, setEditing] = useState<MemberDocument | null>(null);
   const [live, setLive] = useState(false), [pending, setPending] = useState(false), [leaving, setLeaving] = useState<(() => void) | null>(null);
   const [dismissed, setDismissed] = useState(false);
-  const current = useRef<MemberDocument | null>(null), request = useRef<AbortController | null>(null);
+  const current = useRef<MemberDocument | null>(null), request = useRef<AbortController | null>(null), discarding = useRef(false);
+  const onUnsentRef = useRef(onUnsent); onUnsentRef.current = onUnsent;
   const name = path.slice(path.lastIndexOf("/") + 1);
 
   const refuse = useCallback((code: string) => {
@@ -78,7 +83,12 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
 
   useEffect(() => {
     open();
-    return () => {request.current?.abort(); current.current?.close(); current.current = null;};
+    return () => {
+      // The editor closes at once, so nothing more is sent. Text that had not reached the workspace stays with the person.
+      const closing = current.current, state = closing?.session.state();
+      if (closing && state && (state.pendingUpdates || state.status === "quarantined") && !discarding.current) onUnsentRef.current(yDocToMarkdown(closing.session.doc));
+      request.current?.abort(); closing?.close(); current.current = null;
+    };
   }, [open]);
   // A page that waits for its owner says so only once it has waited a while.
   const waiting = phase.kind === "waiting" && !phase.reported;
@@ -112,11 +122,13 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
   const toast = !dismissed && (phase.kind === "refused" || (phase.kind === "waiting" && phase.reported));
   const readable = phase.kind === "refused" || phase.kind === "waiting";
   const toastTitle = `dohc could not open "${name}" for editing`, toastBody = reason ? `${reason} You can still read it.` : "You can still read it.";
+  // The band says why the page is read-only. While dohc waits for the owner's dohc it is already trying, so only a refusal offers Try again.
+  const band = phase.kind === "waiting" ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]! : reason ? toastBody : `dohc could not open this page for editing. ${toastBody}`;
   return <>
     {statusSlot && !editing && phase.kind === "opening" && createPortal(<p className="named-document-status" role="status">Opening the file…</p>, statusSlot)}
     {bandSlot && !live && readable && createPortal(<>
-      <p role="status">{phase.kind === "waiting" && <span className="live-ring" aria-hidden="true"/>}You can read this page.</p>
-      <button type="button" onClick={open}>Try again</button>
+      <p role="status">{phase.kind === "waiting" && <span className="live-ring" aria-hidden="true"/>}{band}</p>
+      {phase.kind === "refused" && <button type="button" onClick={open}>Try again</button>}
     </>, bandSlot)}
     {!live && readView}
     {editing && <NamedDocumentEditor key={editing.session.doc.guid} session={editing.session} path={path} link statusSlot={statusSlot}
@@ -126,6 +138,6 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
       <p>Copy the changes you want to keep. Open the current file, then paste and review them.</p>
       <button className="handoff-button secondary" onClick={() => leave.current?.(open)}>Open current file</button></aside>}
     {toast && toastSlot && createPortal(<Toast title={toastTitle} body={toastBody} onRetry={open} onDismiss={() => setDismissed(true)}/>, toastSlot)}
-    {leaving && <DiscardDraft cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); action();}}/>}
+    {leaving && <DiscardDraft cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); discarding.current = true; action();}}/>}
   </>;
 }

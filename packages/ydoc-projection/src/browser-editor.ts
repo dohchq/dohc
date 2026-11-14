@@ -7,6 +7,9 @@ import type * as Y from "yjs";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 
 /** An editor on the existing body fragment. Admission remains the session owner's responsibility. */
+/** A live page as Markdown, so a browser can hand back text it could not send. */
+export { yDocToMarkdown } from "./import-export.js";
+
 export function mountLiveBodyEditor(
   element: HTMLElement,
   input: {

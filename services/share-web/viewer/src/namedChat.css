@@ -81,7 +81,7 @@
 /* A Group shows its lanes as the desktop does: posts with their threads, and one chat. */
 .chat-lanes { display: flex; flex: none; gap: 2px; margin: 0 16px 4px; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 2px; background: var(--viewer-panel); align-self: flex-start; }
 .chat-lanes [role="tab"] { border: 0; border-radius: 6px; padding: 3px 10px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 12px; }
-.chat-lanes [role="tab"][aria-selected="true"] { background: var(--viewer-paper); color: var(--viewer-ink); box-shadow: 0 1px 2px rgb(0 0 0 / 8%); }
+.chat-lanes [role="tab"][aria-selected="true"] { background: var(--viewer-paper); color: var(--viewer-ink); box-shadow: 0 0 0 1px var(--viewer-line); }
 .chat-lanes [role="tab"]:focus-visible { outline: 2px solid var(--viewer-accent); outline-offset: 1px; }
 .chat-thread-head { display: flex; flex: none; align-items: center; gap: 4px; padding: 0 12px 4px 8px; }
 .chat-thread-head h3 { margin: 0; font-size: 13px; font-weight: 600; }

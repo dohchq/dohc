@@ -36,8 +36,41 @@ const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
 const LISTING_FAILED = "dohc could not load Groups and comments", CHECK_CONNECTION = "Check your connection.";
 const refusedStatus = (error: unknown) => error instanceof ViewResponseError && [401, 403, 404].includes(error.status);
 
+/** Live text that never reached the workspace, from a page that closed while the person could not keep editing it. */
+type Unsent = {id: number; path: string; text: string};
+
+// Shown over whatever the page shows next, so it outlasts a lower level, an ended membership or an ended session.
+function UnsentEdits({unsent, onDismiss}: {unsent: readonly Unsent[]; onDismiss(id: number): void}) {
+  if (!unsent.length) return null;
+  return <div className="unsent-slot">{unsent.map(item => {
+    const name = item.path.slice(item.path.lastIndexOf("/") + 1), dot = name.lastIndexOf(".");
+    const file = dot > 0 ? `${name.slice(0, dot)} (unsent edits)${name.slice(dot)}` : `${name} (unsent edits)`;
+    return <aside key={item.id} className="unsent-edits" aria-label="Unsent edits">
+      <h2>dohc kept your unsent edits to "{name}"</h2>
+      <p>They didn't reach the workspace before editing ended. Copy or download them to keep them.</p>
+      <textarea readOnly value={item.text} aria-label={`Unsent edits to ${name}`}/>
+      <div className="unsent-actions">
+        <button type="button" className="handoff-button secondary" aria-label="Copy unsent edits"
+          onClick={() => void navigator.clipboard?.writeText(item.text).catch(() => undefined)}>Copy</button>
+        <a className="handoff-button secondary" download={file} href={`data:text/markdown;charset=utf-8,${encodeURIComponent(item.text)}`}>Download</a>
+        <button type="button" className="handoff-button secondary" onClick={() => onDismiss(item.id)}>Dismiss</button>
+      </div>
+    </aside>;
+  })}</div>;
+}
+
 /** A workspace member's page: its files, a page, and its Groups, at the member's level. */
 export default function WorkspaceApp({grantId}: {grantId: string | null}) {
+  const [unsent, setUnsent] = useState<Unsent[]>([]), unsentId = useRef(0);
+  const keep = useCallback((path: string, text: string) => setUnsent(list => [...list, {id: ++unsentId.current, path, text}]), []);
+  return <>
+    <MemberEntry grantId={grantId} onUnsent={keep}/>
+    <UnsentEdits unsent={unsent} onDismiss={id => setUnsent(list => list.filter(item => item.id !== id))}/>
+  </>;
+}
+
+/** Signs the member in, then opens the workspace. */
+function MemberEntry({grantId, onUnsent}: {grantId: string | null; onUnsent(path: string, text: string): void}) {
   const [account, setAccount] = useState<Account | null | undefined>(undefined);
   const [pending, setPending] = useState<"account" | "sign-in" | "sign-out" | null>(grantId ? "account" : null);
   const [error, setError] = useState<string | null>(null);
@@ -86,7 +119,7 @@ export default function WorkspaceApp({grantId}: {grantId: string | null}) {
     </main>
   </div>;
   return <MemberWorkspace key={`${account.id}\n${grantId}`} grantId={grantId} account={account} signingOut={pending === "sign-out"}
-    signOutError={error === SIGN_OUT_FAILED ? error : null} onSignOut={signOut} onSessionEnded={sessionEnded}/>;
+    signOutError={error === SIGN_OUT_FAILED ? error : null} onSignOut={signOut} onSessionEnded={sessionEnded} onUnsent={onUnsent}/>;
 }
 
 /** The workspace's files from the view routes, kept current by one held log read at a time. */
@@ -136,8 +169,9 @@ function useMemberFiles(session: string, attempt: number) {
   return view;
 }
 
-function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut, onSessionEnded}: {
+function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut, onSessionEnded, onUnsent}: {
   grantId: string; account: Account; signingOut: boolean; signOutError: string | null; onSignOut(): void; onSessionEnded(): void;
+  onUnsent(path: string, text: string): void;
 }) {
   const session = memberSession(grantId);
   const [attempt, setAttempt] = useState(0);
@@ -151,6 +185,9 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   const narrow = useNarrow();
   const files = view.status === "ready" ? view.files : null;
   const name = files?.meta.subjectName ?? "Shared workspace";
+  // An ended membership reads nothing more, so its page names the workspace as it was last read.
+  const lastName = useRef<string | null>(null);
+  if (files?.meta.subjectName) lastName.current = files.meta.subjectName;
   useEffect(() => {document.title = files ? `${name} · dohc` : "Shared with dohc";}, [files !== null, name]);
   useEffect(() => {
     if (!files) return;
@@ -170,7 +207,10 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     } catch {return false;}
   }, [session]);
 
-  if (ended || view.status === "ended") return <StatePage icon="unlink" title="Your membership ended."/>;
+  if (ended || view.status === "ended") return <StatePage icon="unlink"
+    title={lastName.current ? `Your membership in ${lastName.current} ended.` : "Your membership ended."}>
+    <p>Ask the owner to invite you again to keep working in it.</p>
+  </StatePage>;
   if (view.status === "refused") return <StatePage icon="unlink" title="dohc could not open this workspace with this account.">
     <p>Sign in with the account the owner invited.</p>
     <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>Sign out</button>
@@ -247,7 +287,8 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
               <main className="content">
                 {live ? <Suspense fallback={readView}>
                   <MemberLivePage key={selected.path} grantId={grantId} accountId={account.id} path={selected.path} readView={readView}
-                    statusSlot={statusSlot} bandSlot={bandSlot} toastSlot={toastSlot} leave={leave}/>
+                    statusSlot={statusSlot} bandSlot={bandSlot} toastSlot={toastSlot} leave={leave}
+                    onUnsent={text => onUnsent(selected.path, text)}/>
                 </Suspense> : readView}
               </main>
             </> : <div className="empty-state"><p>No files in this workspace yet. This page shows them as soon as they arrive.</p></div>}

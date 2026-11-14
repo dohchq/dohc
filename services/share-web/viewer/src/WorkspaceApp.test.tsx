@@ -2,6 +2,7 @@
 import {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
 import {afterEach, beforeEach, expect, it, vi} from "vitest";
+import * as Y from "yjs";
 import {getDohcYDocBodyFragment, markdownToYDoc} from "@dohc/ydoc-projection";
 import type {NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
 import WorkspaceApp from "./WorkspaceApp";
@@ -50,11 +51,13 @@ afterEach(async () => {
 function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wire: string; name: string; type?: "posts" | "chat" | "both"}>; files?: typeof FILES; member?: boolean;
   groupsFail?: number; history?: Record<string, unknown[]>; postFails?: {status: number; code: string}} = {}) {
   let signedIn = options.signedIn ?? true, groupsFail = options.groupsFail ?? 0;
-  const level = options.level ?? "comment", files = options.files ?? FILES;
-  const access = level === "view" ? "read-only" : "read-write";
+  const files = options.files ?? FILES;
+  // A test can change the level while the page is open; the next read of the workspace's meta carries it.
+  const levelNow = () => options.level ?? "comment";
+  const access = levelNow() === "view" ? "read-only" : "read-write";
   const groups = options.groups ?? [{wire: "wire-plans", name: "plans"}, {wire: "wire-food", name: "food"}];
-  const meta = {ok: true, effectiveSelector: {paths: [], versionId: null, access: level, wholeWorkspace: true}, access: level, subjectName: "Trip",
-    lastSettledAtMs: Date.now(), lastSettledKnown: true};
+  const meta = () => ({ok: true, effectiveSelector: {paths: [], versionId: null, access: levelNow(), wholeWorkspace: true}, access: levelNow(),
+    subjectName: "Trip", lastSettledAtMs: Date.now(), lastSettledKnown: true});
   const hold = (path: string, url: URL, signal: AbortSignal) => new Promise<Response>((resolve, reject) => {
     signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {once: true});
     const item: Held = {path, url, signal, answer: (value, status = 200) => {held.splice(held.indexOf(item), 1); resolve(jsonResponse(value, status));}};
@@ -70,8 +73,8 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
     if (options.member === false && (url.pathname.startsWith("/api/view/") || url.pathname.startsWith("/api/named-chat/"))) return jsonResponse({ok: false, error: "not found"}, 404);
     if (url.pathname.startsWith("/api/view/")) {
       expect(headers.get("x-dohc-link-session") ?? url.searchParams.get("session")).toBe(SESSION);
-      if (url.pathname === "/api/view/current") return jsonResponse({...meta, files, nextCursor: 7, epochLogFloor: 0});
-      if (url.pathname === "/api/view/meta") return jsonResponse(meta);
+      if (url.pathname === "/api/view/current") return jsonResponse({...meta(), files, nextCursor: 7, epochLogFloor: 0});
+      if (url.pathname === "/api/view/meta") return jsonResponse(meta());
       if (url.pathname === "/api/view/log") return url.searchParams.has("hold") ? hold("log", url, signal)
         : jsonResponse({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0});
       const sha = url.pathname.slice("/api/view/blob/".length);
@@ -336,6 +339,12 @@ function liveSession() {
   const session = {doc, body: getDohcYDocBodyFragment(doc), state: () => state,
     subscribe(listener: (value: NamedLiveBrowserState) => void) {listeners.add(listener); return () => {listeners.delete(listener);};},
     close: vi.fn(), reconnect: vi.fn(async () => {state = {...state, status: "live"}; notify();}), disconnect: vi.fn(),
+    // An edit that has not reached the workspace yet.
+    type(text: string) {
+      const body = getDohcYDocBodyFragment(doc), paragraph = new Y.XmlElement("paragraph");
+      paragraph.insert(0, [new Y.XmlText(text)]); body.insert(body.length, [paragraph]);
+      state = {...state, pendingUpdates: 1}; notify();
+    },
     edit(change: () => void) {if (state.status !== "live") return false; change(); return true;}};
   return session;
 }
@@ -364,13 +373,13 @@ it("waits for the owner's dohc with the page readable, raises a toast after 15 s
   vi.mocked(memberPageReady).mockImplementation(() => new Promise(resolve => {ready = resolve;}));
   vi.mocked(memberDocument).mockReturnValue({session: session as never, close: vi.fn()});
   await render();
-  await settle(() => text().includes("You can read this page.") && text().includes("Leave at nine.") && ready !== undefined);
-  // As on the desktop, the state line sits in a band between the header and the page, with Try again.
+  await settle(() => text().includes("Editing starts once the owner's dohc is online.") && text().includes("Leave at nine.") && ready !== undefined);
+  // As on the desktop, the state line sits in a band between the header and the page. dohc is already trying, so it has no Try again.
   const band = container.querySelector("header + .page-band")!;
-  expect(band.querySelector("[role=status]")?.textContent).toBe("You can read this page.");
+  expect(band.querySelector("[role=status]")?.textContent).toBe("Editing starts once the owner's dohc is online.");
   expect(band.querySelector(".live-ring")).not.toBeNull();
-  expect(band.querySelector("button")?.textContent).toBe("Try again");
-  expect(container.querySelector("header")?.textContent).not.toContain("You can read this page.");
+  expect(band.querySelector("button")).toBeNull();
+  expect(container.querySelector("header")?.textContent).not.toContain("Editing starts");
   expect(container.querySelector(".workspace-toast")).toBeNull();
   await act(async () => vi.advanceTimersByTime(15_000));
   const toast = container.querySelector(".workspace-toast")!;
@@ -390,17 +399,62 @@ it.each([
   await render();
   await settle(() => container.querySelector(".workspace-toast") !== null && text().includes("Leave at nine."));
   expect(container.querySelector(".workspace-toast")?.textContent).toContain(sentence);
-  expect(text()).toContain("You can read this page.");
-  await click("Try again");
+  const band = container.querySelector("header + .page-band")!;
+  expect(band.querySelector("[role=status]")?.textContent).toBe(sentence);
+  expect(band.querySelector(".live-ring")).toBeNull();
+  await act(async () => band.querySelector<HTMLButtonElement>("button")!.click());
   await settle(() => vi.mocked(openMemberPage).mock.calls.length === 2);
+});
+
+async function editing(options: {level?: Level; member?: boolean}) {
+  server(options);
+  const session = liveSession();
+  vi.mocked(openMemberPage).mockResolvedValue(ADMITTED);
+  vi.mocked(memberDocument).mockReturnValue({session: session as never, close: vi.fn()});
+  await render();
+  await settle(() => container.querySelector('[role="textbox"]') !== null && following("log").length === 1);
+  // The person typed, and the edit has not reached the workspace yet.
+  await act(async () => session.type("Leave at ten."));
+  return session;
+}
+const recovery = () => container.querySelector<HTMLElement>('[aria-label="Unsent edits"]');
+
+it("stops editing when the person loses Edit, and keeps the unsent text to copy, download or dismiss", async () => {
+  const options: {level: Level} = {level: "edit"};
+  await editing(options);
+  options.level = "comment";
+  await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0}));
+  await settle(() => container.querySelector('[role="textbox"]') === null && recovery() !== null);
+  expect(recovery()!.textContent).toContain('dohc kept your unsent edits to "plan.md"');
+  expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
+  const writeText = vi.fn(async () => undefined);
+  Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
+  await act(async () => recovery()!.querySelector<HTMLButtonElement>('button[aria-label="Copy unsent edits"]')!.click());
+  expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Leave at ten."));
+  const download = recovery()!.querySelector<HTMLAnchorElement>("a[download]")!;
+  expect(download.getAttribute("download")).toBe("plan (unsent edits).md");
+  await act(async () => [...recovery()!.querySelectorAll("button")].find(node => node.textContent === "Dismiss")!.click());
+  expect(recovery()).toBeNull();
+});
+
+it("keeps the unsent text after the membership ends, with none of the workspace", async () => {
+  const options: {level: Level; member: boolean} = {level: "edit", member: true};
+  await editing(options);
+  // The owner removed the member: every workspace read now refuses.
+  options.member = false;
+  await act(async () => following("log")[0]!.answer({ok: false, error: "not found"}, 404));
+  await settle(() => text().includes("Your membership in Trip ended.") && recovery() !== null);
+  expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
+  expect(text()).not.toContain("Plans start here");
 });
 
 it("says the membership ended and shows none of the workspace once the member is removed", async () => {
   server({level: "comment"}); await render(); await opened();
   await act(async () => following("log")[0]!.answer({ok: false, error: "not found"}, 404));
-  await settle(() => text().includes("Your membership ended."));
-  // A browser keeps no copy, so the page says only that.
-  expect(container.querySelector(".state-message")?.textContent?.trim()).toBe("Your membership ended.");
+  await settle(() => text().includes("Your membership in Trip ended."));
+  // A browser keeps no copy of the workspace. The next step is one a browser can take.
+  expect(container.querySelector(".state-message h1")?.textContent).toBe("Your membership in Trip ended.");
+  expect(container.querySelector(".state-message p")?.textContent).toBe("Ask the owner to invite you again to keep working in it.");
   expect(container.querySelector('nav[aria-label="Workspace files"]')).toBeNull();
   expect(text()).not.toContain("Leave at nine.");
   expect(text()).not.toContain("Plans start here");

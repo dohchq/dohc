@@ -37,6 +37,14 @@
 .toast-copy { flex: none; min-width: 28px; height: 28px; margin-top: -4px; padding: 0; }
 .toast-close { flex: none; min-width: 28px; height: 28px; margin: -4px -4px 0 0; padding: 0; }
 @keyframes workspace-toast { from { opacity: 0; transform: translateY(8px); } }
+/* Unsent live text stays over whatever shows next until the person copies, downloads or dismisses it. */
+.unsent-slot { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: flex; width: 380px; max-width: calc(100% - 32px); flex-direction: column; gap: 8px; }
+.unsent-edits { border: 1px solid var(--viewer-line); border-radius: 12px; padding: 12px; background: var(--viewer-panel); box-shadow: var(--viewer-shadow); color: var(--viewer-muted); font-size: 12px; text-wrap: pretty; }
+.unsent-edits h2 { margin: 0 0 4px; color: var(--viewer-ink); font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.unsent-edits p { margin: 0 0 8px; }
+.unsent-edits textarea { display: block; width: 100%; height: 96px; box-sizing: border-box; resize: vertical; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 8px; background: var(--viewer-panel-2); color: var(--viewer-ink); font: inherit; }
+.unsent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.unsent-actions .handoff-button { padding: 3px 9px; text-decoration: none; }
 
 .workspace-side { min-width: 0; }
 .side-tabs { display: flex; height: 48px; flex: none; align-items: center; gap: 2px; padding: 0 8px; }
