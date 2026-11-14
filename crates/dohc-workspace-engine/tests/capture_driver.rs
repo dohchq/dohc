@@ -259,7 +259,7 @@ async fn close_workspace(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn policy_rebuild_while_open_reingests_with_folder_changes_metadata() {
+async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     write_file(scratch.path(), "private/journal.md", b"personal");
@@ -289,9 +289,9 @@ async fn policy_rebuild_while_open_reingests_with_folder_changes_metadata() {
         .expect("close");
 
     let db_path = scratch.path().join(".dohc/engine/engine.db");
-    let (reingest_summary, _) = moment_metadata(&db_path, "private/journal.md");
+    let (rebuild_while_open_summary, _) = moment_metadata(&db_path, "private/journal.md");
     assert_eq!(
-        reingest_summary.as_deref(),
+        rebuild_while_open_summary.as_deref(),
         Some("Found changes in the folder")
     );
 }

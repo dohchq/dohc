@@ -2375,9 +2375,8 @@ async fn bookmark_state_filter_claim_command_default_and_path_floor() {
     .await;
     assert_eq!(bogus.code, ErrorCode::InvalidParams);
 
-    // Mutation check: restore
-    // `unwrap_or_else(|| "agent".to_owned())` in the claim arm — the empty
-    // command assertion fails.
+    // Mutation check: restore `unwrap_or_else(|| "agent".to_owned())` in the
+    // claim arm — the empty command assertion fails.
     call(
         &transport,
         &handle,
