@@ -3376,7 +3376,7 @@ export async function startServiceLiveHost(options: {
           // Whether nothing is left for a pass to do until a wake, a nudge or a deadline: no document leaves, parks,
           // recovers, unloads or is kept, none that moved away is still listed, every activation finished, blocked or waits
           // out a backoff, and every workspace is checked and quiet with its relay state read and its recovery probe not
-          // due, ready apart from documents waiting out a backoff, and pushed unless its push waits for one of those.
+          // due, ready apart from documents waiting out a backoff, and fully pushed.
           // A pause ends within idlePollIntervalMs, so a document tries again within that of its wait lapsing.
           const settled = () => {
             if (

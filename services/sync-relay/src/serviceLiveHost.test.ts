@@ -6977,7 +6977,8 @@ it("pushes a live document's settled edit on the next pass while another documen
 // settled edit is pushed while the note waits to retry, so the owner's computer gets it.
 it("pushes a settled sibling while another note's owner activation keeps failing to settle", async () => {
   const o = await enrolledServiceHost(),
-    workspaces = [o.workspace];
+    workspaces = [o.workspace],
+    driver = heldDriver();
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   o.distinctRegistrations();
   const locked = await replacementActivation(o, { name: "locked", path: "docs/c.md" });
@@ -7008,6 +7009,8 @@ it("pushes a settled sibling while another note's owner activation keeps failing
     expect(log).toHaveBeenCalledWith("Service activation pass failed.", expect.anything()),
   );
   expect(o.host.isDocumentReady(documentFor(locked))).toBe(false);
+  // The server holds the locked note's owner, the case a backoff alone (#3829) did not cover.
+  expect(driver()!.ownerDocument(locked)).toEqual(documentFor(locked));
   const requests = () =>
     o.client().sendRequest.mock.calls.map(
       (call) =>
