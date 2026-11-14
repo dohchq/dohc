@@ -4610,6 +4610,8 @@ export function createWorkspaceEngineCapture(
   async function materialize(
     operations: readonly MaterializeOperation[],
     policy: WorkspaceEnginePolicySnapshot,
+    // Keep a copy promises a copy, even of bytes History recorded earlier.
+    copy: "unrecorded" | "always" = "unrecorded",
   ): Promise<void> {
     let context:
       | Promise<{ engine: Awaited<ReturnType<typeof engineStore>>; versionId: string }>
@@ -4761,7 +4763,7 @@ export function createWorkspaceEngineCapture(
                 ? Buffer.from(operation.text)
                 : operation.bytes,
             (path) => assertEngineWritablePath(path, policy),
-            (path, sha256) => isRecorded(operation, path, sha256),
+            async (path, sha256) => copy === "unrecorded" && isRecorded(operation, path, sha256),
           );
         } else {
           const kept = await keepProtectedChange(operation);
@@ -6897,7 +6899,7 @@ export function createWorkspaceEngineCapture(
         const versionId = await activeVersionIdOf(engine);
         const head = await engine.readTextFile({ workspaceId, versionId, path });
         if (!head) throw new Error(`dohc has no saved text for ${path}.`);
-        await materialize([{ kind: "write", path, text: head.text }], policy);
+        await materialize([{ kind: "write", path, text: head.text }], policy, "always");
         await engine.flushCapture?.();
         const status = await engine.watcherStatus?.();
         if (status) options.onOutsideChanges?.(outsideChangesOf(status));

@@ -2729,8 +2729,23 @@ it("lists and keeps a live note's outside change for the CLI and the MCP, only i
     ok: false,
   });
 
+  // From a subfolder, the listed path is the one Keep takes there.
+  const folder = join(f.workspace.rootPath, "drafts");
+  await mkdir(folder);
+  f.dependencies.reads.outsideChanges = vi.fn(async () => ({
+    outsideChanges: [{ path: "drafts/n.md", firstObservedAtMs: 1 }],
+  }));
+  const fromFolder = (...argv: string[]) =>
+    executeCli({ argv, cwd: folder, env: {}, request: send });
+  const nested = await fromFolder("document", "outside-changes", "--json");
+  expect(JSON.parse(nested.stdout)).toMatchObject({
+    outsideChanges: [{ path: "n.md", firstObservedAtMs: 1 }],
+  });
+  expect((await fromFolder("document", "keep-outside-change", "n.md", "--json")).exitCode).toBe(0);
+  expect(f.capture.keepOutsideChange).toHaveBeenLastCalledWith("drafts/n.md");
+
   vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
   const refused = await cli("document", "keep-outside-change", "notes.md");
   expect(refused.exitCode).not.toBe(0);
-  expect(f.capture.keepOutsideChange).toHaveBeenCalledTimes(2);
+  expect(f.capture.keepOutsideChange).toHaveBeenCalledTimes(3);
 });

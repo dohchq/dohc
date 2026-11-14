@@ -443,6 +443,7 @@ describe("createCaptureLiveStores", () => {
                 keptFiles: [],
                 captureRecoveries: [],
                 heldFiles: [],
+                outsideChanges: [],
                 retainedCopies: { count: 0, bytes: 0 },
               }
             : { deferredWrites: [], settled: false, running: true, degraded: true, heldFiles: [] },
@@ -501,6 +502,7 @@ describe("createCaptureLiveStores", () => {
                   keptFiles: [],
                   captureRecoveries: [],
                   heldFiles: [],
+                  outsideChanges: [],
                   retainedCopies: { count: 0, bytes: 0 },
                 }
               : {
@@ -636,6 +638,7 @@ describe("createCaptureLiveStores", () => {
           keptFiles: [],
           captureRecoveries: [],
           heldFiles: [],
+          outsideChanges: [],
           retainedCopies: { count: 0, bytes: 0 },
         },
       };

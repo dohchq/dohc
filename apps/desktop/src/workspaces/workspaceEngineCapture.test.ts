@@ -1330,6 +1330,7 @@ describe("workspaceEngineCapture batch capture", () => {
     let held = [{ path: "note.md", firstObservedAtMs: 1 }];
     // Captures an open editor's session deferred.
     let deferred: string[] = [];
+    let saved = "the note\n";
     const store = new Proxy(liveStore, {
       get(target, property) {
         if (property === "watcherStatus")
@@ -1350,7 +1351,7 @@ describe("workspaceEngineCapture batch capture", () => {
               deferred = [];
               return;
             }
-            if ((await readFile(join(root, "note.md"), "utf8")) !== "the note\n")
+            if ((await readFile(join(root, "note.md"), "utf8")) !== saved)
               throw new Error("Capture has not settled.");
             held = [];
           };
@@ -1381,6 +1382,19 @@ describe("workspaceEngineCapture batch capture", () => {
       expect(await readFile(join(root, "note.md"), "utf8")).toBe("the note\n");
       const kept = (await readdir(root)).filter((name) => name !== "note.md" && name !== ".dohc");
       expect(kept).toHaveLength(2);
+
+      // An outside editor puts back text History recorded earlier. Keep still keeps a copy.
+      saved = "the note, edited\n";
+      await liveStore.writeTextFile({ ...target, text: saved, metadata: { origin: "api" } });
+      await write(root, "note.md", "the note\n");
+      held = [{ path: "note.md", firstObservedAtMs: 3 }];
+      await expect(engine.keepOutsideChange("note.md")).resolves.toBe(true);
+      expect(await readFile(join(root, "note.md"), "utf8")).toBe(saved);
+      const restored = (await readdir(root)).filter(
+        (name) => name !== "note.md" && name !== ".dohc" && !kept.includes(name),
+      );
+      expect(restored).toHaveLength(1);
+      expect(await readFile(join(root, restored[0]!), "utf8")).toBe("the note\n");
     } finally {
       await engine.stop();
       await liveStore.close();

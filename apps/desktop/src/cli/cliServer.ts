@@ -2215,7 +2215,7 @@ function validateRequestPathSpellings(request: CliRequest): void {
 type CliPathMode = "read" | "write" | "materialize";
 
 // Validate the caller spelling before rebasing, then validate workspace authority.
-async function callerPaths(context: CliWorkspaceContext, cwd: string) {
+async function callerPaths(context: Pick<CliWorkspaceContext, "rootPath">, cwd: string) {
   const root = await realpath(context.rootPath);
   // The cwd under the workspace's own spelling, so every rebased path is too.
   const folder = await pathUnderRoot(root, await realpath(cwd));
@@ -4785,7 +4785,10 @@ async function dispatchDeclaredRead(
       ? null
       : read(workspace, { channelWireId, cursor: request.args.cursor });
   }
-  const { cwd: _cwd, actor: _actor, agentId: _agentId, ...input } = request.args;
+  const { cwd, actor: _actor, agentId: _agentId, ...input } = request.args;
+  // Keep takes its path from the caller's folder, so list from there too.
+  if (request.verb === "outsideChanges")
+    return (await callerPaths(workspace, cwd)).result(await read(workspace, input));
   return read(workspace, input);
 }
 
