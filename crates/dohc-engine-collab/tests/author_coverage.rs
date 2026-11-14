@@ -749,6 +749,69 @@ fn largest_serialized_authors_fit_the_entry_bound() {
             check(author_coverage::shared_json(&author).expect("bounded shared author"));
         }
     }
+
+    // A control character serializes to six bytes, three times what the bound allows for.
+    let control = "\u{1}";
+    assert!(dohc_engine_collab::validate_actor_origin_id(control).is_err());
+    let native = |actor_kind: ChangeActorKind, fields: [&str; 4]| ChangeAttribution {
+        actor_kind,
+        on_behalf_of: Some(fields[0].to_owned()),
+        depth: 0,
+        run: (actor_kind == ChangeActorKind::Automation).then(|| AutomationRunAttribution {
+            claim_id: fields[1].to_owned(),
+            automation_name: fields[2].to_owned(),
+        }),
+        agent_run_id: (actor_kind == ChangeActorKind::Agent).then(|| fields[3].to_owned()),
+    };
+    for (actor_kind, field) in [
+        (ChangeActorKind::Human, 0),
+        (ChangeActorKind::Agent, 0),
+        (ChangeActorKind::Agent, 3),
+        (ChangeActorKind::Automation, 0),
+        (ChangeActorKind::Automation, 1),
+        (ChangeActorKind::Automation, 2),
+    ] {
+        let mut fields = ["a"; 4];
+        assert!(native(actor_kind, fields).validate().is_ok());
+        fields[field] = control;
+        assert!(
+            native(actor_kind, fields).validate().is_err(),
+            "native field {field} admits a control character"
+        );
+    }
+    let live = |kind: &str, fields: [&str; 3]| match kind {
+        "human" => LiveAuthorEntry::Human {
+            human_id: fields[0].to_owned(),
+            human_name: fields[1].to_owned(),
+        },
+        "link" => LiveAuthorEntry::Link {
+            public_principal_id: fields[0].to_owned(),
+            label: fields[1].to_owned(),
+        },
+        _ => LiveAuthorEntry::Agent {
+            agent_id: fields[0].to_owned(),
+            agent_name: Some(fields[1].to_owned()),
+            on_behalf_of: Some(fields[2].to_owned()),
+            depth: Some(0),
+        },
+    };
+    for (kind, field) in [
+        ("human", 0),
+        ("human", 1),
+        ("link", 0),
+        ("link", 1),
+        ("agent", 0),
+        ("agent", 1),
+        ("agent", 2),
+    ] {
+        let mut fields = ["a"; 3];
+        assert!(live(kind, fields).validate().is_ok());
+        fields[field] = control;
+        assert!(
+            live(kind, fields).validate().is_err(),
+            "live {kind} field {field} admits a control character"
+        );
+    }
 }
 
 /// A declared agent is the largest live entry: an id, a name and a principal,

@@ -107,7 +107,10 @@ pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 // bytes. A declared agent's name takes one byte less. The largest two-field
 // entries, an 80-byte Edit link at the largest grant generation and a 66-byte
 // automation, take 2,128 and 2,114 bytes.
-// `largest_serialized_authors_fit_the_entry_bound` checks these serialized forms.
+// `largest_serialized_authors_fit_the_entry_bound` checks these serialized forms,
+// and that native and live authors refuse control characters.
+// `SharedChangeAuthor::is_valid` bounds only the length of a shared author's ids.
+// The live update authority refuses control characters before it builds one.
 pub const MAX_AUTHOR_ENTRY_BYTES: usize = larger(
     larger(
         r#"{"agentId":"","agentRunId":"","depth":64,"kind":"agent","onBehalfOf":""}"#.len(),
