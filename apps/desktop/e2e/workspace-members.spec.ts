@@ -729,7 +729,7 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     );
     expect(general).toBeInstanceOf(DohcCliFailure);
     // A joined workspace has no General, as in the member's Chats.
-    expect((general as DohcCliFailure).stderr).toContain("no such group: general");
+    expect((general as DohcCliFailure).stderr).toContain("No Group matches general. Run dohc chat groups to list them.");
     // The agent reads the plan's History, as Sam's History panel lists it.
     expect(
       (await runDohcCli(samCli, ["--json", "history", "list", "notes/plan.md"])).stdout,

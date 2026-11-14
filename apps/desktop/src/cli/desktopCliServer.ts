@@ -110,6 +110,10 @@ import {
 // The engine reads at most this many accounts for one agent you run.
 const MAX_AGENT_REQUESTERS = 64;
 
+// A member's refusal names the command that lists their level and role.
+const needsEdit = (action: string, access: string | null | undefined) =>
+  `${action} needs Edit. You can ${access ?? "view"} here. Run dohc members list to see what you can do.`;
+
 // The accounts this computer's person posts as in a workspace, as its
 // registry entry records them: the owner account sync started with, or the
 // account that opened a received copy, and each joined channel's account. A
@@ -805,9 +809,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 setCollectionRecordFields(context, input),
               );
             if (view.access !== "edit")
-              throw new Error(
-                `Changing a Collection record needs Edit. You can ${view.access ?? "view"} here.`,
-              );
+              throw new Error(needsEdit("Changing a Collection record", view.access));
             return await setCollectionRecordFields(joinedRecordContext(), input);
           },
           createRecord: async (input) => {
@@ -815,9 +817,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             if (view?.membership !== true)
               return await runCollectionRecordCreation(cliCollectionEdit, input);
             if (view.access !== "edit")
-              throw new Error(
-                `Adding a Collection record needs Edit. You can ${view.access ?? "view"} here.`,
-              );
+              throw new Error(needsEdit("Adding a Collection record", view.access));
             const created = await withPhysicalWorkspaceOperation(
               workspace.workspaceId,
               async (operation) => {
@@ -954,7 +954,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           // server, as its editor does, and the server decides again.
           const view = sharedViewOf(workspace.workspaceId);
           if (view?.membership === true && view.access !== "edit") {
-            throw new Error(`Editing a page needs Edit. You can ${view.access ?? "view"} here.`);
+            throw new Error(needsEdit("Editing a page", view.access));
           }
           return await liveDocuments.editDocument({
             ...(allowLossySourceSha256 ? { allowLossySourceSha256 } : {}),
@@ -987,8 +987,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL);
           const view = sharedViewOf(workspace.workspaceId);
           if (view?.membership === true) {
-            if (view.access !== "edit")
-              throw new Error(`Adding a page needs Edit. You can ${view.access ?? "view"} here.`);
+            if (view.access !== "edit") throw new Error(needsEdit("Adding a page", view.access));
             const folder = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
             if (
               folder !== "" &&

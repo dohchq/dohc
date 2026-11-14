@@ -2935,7 +2935,9 @@ describe("a joined workspace through the CLI", () => {
           edit: { find: "Old", replacement: "New" },
           origin: AGENT_ORIGIN,
         }),
-      ).rejects.toThrow(`Editing a page needs Edit. You can ${access} here.`);
+      ).rejects.toThrow(
+        `Editing a page needs Edit. You can ${access} here. Run dohc members list to see what you can do.`,
+      );
       expect(below.dependencies.liveDocuments.editDocument).not.toHaveBeenCalled();
     }
   });
@@ -3002,14 +3004,18 @@ describe("a joined workspace through the CLI", () => {
           fields: { status: "done" },
           author: AGENT_AUTHOR,
         }),
-      ).rejects.toThrow(`Changing a Collection record needs Edit. You can ${access} here.`);
+      ).rejects.toThrow(
+        `Changing a Collection record needs Edit. You can ${access} here. Run dohc members list to see what you can do.`,
+      );
       await expect(
         reached.collections!.writes.createRecord({
           collectionPath: "tasks",
           name: "b",
           author: AGENT_AUTHOR,
         }),
-      ).rejects.toThrow(`Adding a Collection record needs Edit. You can ${access} here.`);
+      ).rejects.toThrow(
+        `Adding a Collection record needs Edit. You can ${access} here. Run dohc members list to see what you can do.`,
+      );
       expect(below.dependencies.liveDocuments.openSharedDocument).not.toHaveBeenCalled();
       expect(below.dependencies.joinedRecords.create).not.toHaveBeenCalled();
     }
@@ -3127,7 +3133,9 @@ describe("a joined workspace through the CLI", () => {
           markdown: "Sam page",
           origin: AGENT_ORIGIN,
         }),
-      ).rejects.toThrow(`Adding a page needs Edit. You can ${access} here.`);
+      ).rejects.toThrow(
+        `Adding a page needs Edit. You can ${access} here. Run dohc members list to see what you can do.`,
+      );
       expect(f.dependencies.joinedPages.create).not.toHaveBeenCalled();
     }
   });

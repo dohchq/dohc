@@ -87,7 +87,7 @@ describe("dohc members", () => {
     expect(() => parseCliArguments(["members", ...operands], {})).toThrow(message);
   });
 
-  it("sends the request with no workspace, and prints people, invites, and removed accounts with their ids", async () => {
+  it("sends the request with no workspace, and prints people, invites, and removed accounts by name, with their ids last", async () => {
     const request = vi.fn(async () => ({ status: "ready", view }));
     const result = await executeCli({
       argv: ["members", "list"],
@@ -107,24 +107,37 @@ describe("dohc members", () => {
         "Community: members can comment.",
         "Invite link: https://share.test/join#token",
         "",
-        "owner · Owner · Ice · ice@test",
-        "m-ana · Admin · Ana · ana@test",
+        "Ice · Owner · ice@test · owner",
+        "Ana · Admin · ana@test · m-ana",
         "",
         "Invites (dohc sends no email; each joins when they sign in with that address)",
-        "m-bo · Invited · bo@test",
+        "bo@test · Invited · m-bo",
         "",
         "Removed (dohc members let-back-in <id>)",
-        "m-cy · Removed · Cy · cy@test",
+        "Cy · Removed · cy@test · m-cy",
         "",
       ].join("\n"),
     );
   });
 
   it("names the command that lists Members where the desktop says Reload Members, and names dohc once", async () => {
-    const request = async () => { throw new Error("dohc could not send the invite because your role in this workspace does not allow it. Reload Members to see what you can do."); };
-    const result = await executeCli({ argv: ["members", "invite", "lee@test"], cwd: "/workspace", env: {}, request });
-    expect(result).toEqual({ exitCode: 1, stdout: "",
-      stderr: "dohc could not send the invite because your role in this workspace does not allow it. Run dohc members list to see what you can do.\n" });
+    const request = async () => {
+      throw new Error(
+        "dohc could not send the invite because your role in this workspace does not allow it. Reload Members to see what you can do.",
+      );
+    };
+    const result = await executeCli({
+      argv: ["members", "invite", "lee@test"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr:
+        "dohc could not send the invite because your role in this workspace does not allow it. Run dohc members list to see what you can do.\n",
+    });
   });
 
   it("exits with the refusal when the server lists no Members page", async () => {
