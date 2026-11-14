@@ -44,7 +44,7 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
 
   func setActive(_ value: Bool) {
     active = value
-    arm()
+    bind()
   }
 
   /// react-native-webview makes its WKWebView only once it's in a window, so the host looks again when the page is ready.
@@ -64,9 +64,10 @@ final class PageScrollTopHost: ExpoView, UIScrollViewDelegate {
     arm()
   }
 
+  // WebKit can add scroll views inside the web view after it's bound, so each layout looks again.
   override func layoutSubviews() {
     super.layoutSubviews()
-    if !bound { bind() }
+    bind()
   }
 
   override func didMoveToWindow() {
