@@ -2,6 +2,8 @@ import "../../testing/legendListMock";
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
 import type {
+  AgentThreadLine,
+  AgentThreadLinesEvent,
   ChannelThreadRecord,
   ChatChannelRecord,
   ChatMessageRecord,
@@ -172,6 +174,9 @@ export const bridgeMock = {
   readChatDispatchPaused: vi.fn(),
   setChatDispatchPaused: vi.fn(),
   onChatDispatchPaused: vi.fn(),
+  readAgentThreadLines: vi.fn(),
+  onAgentThreadLines: vi.fn(),
+  openAgentThread: vi.fn(),
   listChatBookmarks: vi.fn(),
   saveChatBookmark: vi.fn(),
   archiveChatBookmark: vi.fn(),
@@ -233,6 +238,16 @@ export const workspaceActivityCallbacks = new Set<(event: { workspaceId: string 
 // Main pushes each pause or resume of agent dispatch to every window.
 export const chatDispatchPausedCallbacks = new Set<(event: { paused: boolean }) => void>();
 
+// Main pushes what each agent thread is doing with its last forwarded message.
+const agentThreadLinesCallbacks = new Set<(event: AgentThreadLinesEvent) => void>();
+let agentThreadLinesRevision = 0;
+
+export function emitAgentThreadLines(lines: AgentThreadLine[], workspaceId = "workspace-a") {
+  agentThreadLinesRevision += 1;
+  const event = { workspaceId, revision: agentThreadLinesRevision, lines };
+  for (const callback of [...agentThreadLinesCallbacks]) callback(event);
+}
+
 export function emitWorkspaceActivity(workspaceId = "workspace-a") {
   for (const callback of [...workspaceActivityCallbacks]) callback({ workspaceId });
 }
@@ -254,6 +269,7 @@ export function emitCloudSessionChanged(
 beforeEach(() => {
   workspaceActivityCallbacks.clear();
   chatDispatchPausedCallbacks.clear();
+  agentThreadLinesCallbacks.clear();
   cloudSessionCallbacks.clear();
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
   bridgeMock.onWorkspaceActivity.mockImplementation(
@@ -370,6 +386,17 @@ beforeEach(() => {
   bridgeMock.setChatDispatchPaused.mockImplementation(async ({ paused }: { paused: boolean }) => {
     for (const callback of [...chatDispatchPausedCallbacks]) callback({ paused });
   });
+  // No agent thread holds a forwarded message until a test says one does.
+  bridgeMock.readAgentThreadLines.mockImplementation(
+    async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, lines: [] }),
+  );
+  bridgeMock.onAgentThreadLines.mockImplementation(
+    (listener: (event: AgentThreadLinesEvent) => void) => {
+      agentThreadLinesCallbacks.add(listener);
+      return () => agentThreadLinesCallbacks.delete(listener);
+    },
+  );
+  bridgeMock.openAgentThread.mockResolvedValue(undefined);
   bridgeMock.resumeThreadDispatch.mockResolvedValue(undefined);
   bridgeMock.retryStoppedRun.mockResolvedValue({ queued: true });
   bridgeMock.markChatThreadRead.mockResolvedValue({

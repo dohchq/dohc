@@ -58,6 +58,9 @@ export async function startFakeT3Code(): Promise<FakeT3Code & { close(): Promise
         response
           .writeHead(status, { "content-type": "application/json", ...headers })
           .end(JSON.stringify(value));
+      // What T3 Code says of this computer, to anyone on it.
+      if (request.method === "GET" && url.pathname === "/.well-known/t3/environment")
+        return json(200, { environmentId: "env-fake", label: "This computer" });
       if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
         if (fake.noSignIn) return json(404, { error: "not_found" });
         const at = fake.metadataOrigin ?? fake.origin;

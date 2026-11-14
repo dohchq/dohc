@@ -4,7 +4,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatThreadRecord } from "../../ipc/bridgeContract";
+import type { AgentThreadLinesEvent, ChatThreadRecord } from "../../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../../settings/userSettings";
+import { AgentThreadLinesProvider } from "./AgentThreadLines";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { commentTitle, LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
@@ -97,6 +99,8 @@ const bridgeMock = {
   markChatThreadRead: vi.fn(),
   getObjectAccess: vi.fn(),
   requestAccessRefresh: vi.fn(),
+  readAgentThreadLines: vi.fn(),
+  onAgentThreadLines: vi.fn(),
 };
 
 // jsdom doesn't implement scrollIntoView; the thread view nudges the latest
@@ -265,6 +269,77 @@ function RailHarness() {
     </div>
   );
 }
+
+it("shows what an agent's thread is doing over the composer of a file's chat", async () => {
+  let pushLines: (event: AgentThreadLinesEvent) => void = () => undefined;
+  bridgeMock.onAgentThreadLines.mockImplementation((listener: typeof pushLines) => {
+    pushLines = listener;
+    return () => undefined;
+  });
+  bridgeMock.readAgentThreadLines.mockResolvedValue({
+    workspaceId: "workspace-1",
+    revision: 1,
+    lines: [
+      { agentId: "nova", chatThreadId: "thread-1", state: "working", sinceMs: Date.now() },
+      { agentId: "nova", chatThreadId: "thread-9", state: "silent", sinceMs: Date.now() },
+    ],
+  });
+  const settings: DesktopUserSettings = {
+    ...DEFAULT_USER_SETTINGS,
+    agents: {
+      nova: {
+        name: "Nova",
+        hue: "olive",
+        thread: { tool: "t3-code", id: "t3-nova" },
+        workspaces: ["workspace-1"],
+        changesFiles: true,
+        enabled: true,
+        timeoutMinutes: 30,
+      },
+    },
+  };
+  render(
+    <AgentThreadLinesProvider
+      workspaceId="workspace-1"
+      ready
+      settings={settings}
+      report={vi.fn()}
+      clear={vi.fn()}
+    >
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="notes/plan.md"
+        initialThread={searchThread}
+        onError={vi.fn()}
+      />
+    </AgentThreadLinesProvider>,
+  );
+  const chat = await screen.findByTestId("linked-chat-thread");
+  const shown = await within(chat).findByTestId("agent-thread-line");
+  expect(shown.dataset.state).toBe("working");
+  expect(
+    shown.compareDocumentPosition(screen.getByTestId("linked-chat-composer")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+
+  // The agent replied in this chat: its line goes, and another chat's stays out.
+  act(() =>
+    pushLines({
+      workspaceId: "workspace-1",
+      revision: 2,
+      lines: [
+        {
+          agentId: "nova",
+          chatThreadId: "thread-9",
+          state: "silent",
+          sinceMs: 1,
+          forwardedAtMs: 1,
+        },
+      ],
+    }),
+  );
+  expect(screen.queryByTestId("agent-thread-line")).toBeNull();
+});
 
 describe("LinkedChatsPanel initialThread consumption", () => {
   it("clears the parent state on consumption so a History<->Chats remount shows the list, not the stale thread", async () => {

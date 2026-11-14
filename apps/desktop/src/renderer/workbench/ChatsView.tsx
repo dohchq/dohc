@@ -24,6 +24,7 @@ import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
 import { ChatMembersDialog } from "./ChatMembersDialog";
 import { emailKey, isEmail } from "./memberPicker";
 import { agentChatIdentity, orderAgentChats, withListedAgent } from "./agentChat";
+import { AgentThreadLines } from "./AgentThreadLines";
 import { ChatLane } from "./ChatLane";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
@@ -4518,6 +4519,7 @@ export function ChatsView(props: {
   // A post's view shows its thread, so an agent's notice about a run there
   // is skipped while it's on screen.
   const postThreadId = nav.level === "thread" ? nav.thread.id : null;
+  const postChatThreadIds = useMemo(() => [postThreadId], [postThreadId]);
   const showPost = useCallback(
     (node: HTMLDivElement | null) =>
       node && postThreadId ? showChat(postThreadId, node) : undefined,
@@ -5252,6 +5254,11 @@ export function ChatsView(props: {
           <TypingIndicator
             names={presence.typingNames}
             className="mx-auto w-full max-w-[640px] px-3 sm:px-4"
+          />
+          <AgentThreadLines
+            workspaceId={workspaceId}
+            chatThreadIds={postChatThreadIds}
+            className="mx-auto w-full max-w-[640px] px-3 pt-2 sm:px-4"
           />
           {threadLocked ? (
             <ComposerNotice testId="chats-readonly-note">

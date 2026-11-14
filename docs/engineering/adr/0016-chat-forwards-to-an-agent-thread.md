@@ -4,7 +4,7 @@ status: accepted
 
 # dohc forwards a message to the agent's own thread and copies nothing back
 
-This records a planned design. None of it is built yet. Today an agent dohc starts keeps nothing between messages, and a connected agent must ask dohc for its messages. dohc never reaches out to an agent that runs elsewhere, and a message for an agent that is not listening stays unread with no notice.
+This records a design that is built in part. Built, for a T3 Code thread on the computer that runs dohc: forwarding the owner's messages with the note, one line at the foot of the chat that the owner sees, and the one reminder. Planned: the line for other people in a Group, work the person started in the tool, passing a tool's question to the owner, another device, a linked machine, more than one workspace for a thread, and other people's messages. An agent dohc starts still keeps nothing between messages, and any other connected agent must still ask dohc for its messages.
 
 In the plan, every agent a person chats with has an agent thread, its own continuing conversation in its tool. When a person's message wakes the agent, dohc forwards that message to the agent thread. dohc sends the new message, where it came from, and the person's note for that agent. It sends no other chat messages, and the agent reads the chat with dohc's tools when it needs more. A command the person runs as an agent gets only the new message when the person says the agent keeps its own memory. Otherwise it gets the chat's recent messages, as it does today. The agent alone decides what it posts back. dohc never posts the agent's words for it.
 

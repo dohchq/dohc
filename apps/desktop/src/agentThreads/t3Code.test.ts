@@ -8,6 +8,7 @@ import {
   listT3CodeThreads,
   openT3CodeSession,
   readT3CodeAddress,
+  readT3CodeRun,
   readT3CodeThread,
   sendToT3CodeThread,
   signInToT3Code,
@@ -265,6 +266,36 @@ describe("T3 Code's thread tools", () => {
       delivery: "started",
     });
     t3.tools.t3_thread_read = () => ({
+      recentRuns: [
+        {
+          runId: "run-9",
+          status: "running",
+          requestedAt: "2026-11-13T00:00:01.000Z",
+          startedAt: "2026-11-13T00:00:02.000Z",
+          completedAt: null,
+        },
+        {
+          runId: "run-8",
+          status: "queued",
+          requestedAt: "2026-11-13T00:00:03.000Z",
+          startedAt: null,
+          completedAt: null,
+        },
+        {
+          runId: "run-7",
+          status: "interrupted",
+          requestedAt: "2026-11-12T00:00:00.000Z",
+          startedAt: "2026-11-12T00:00:01.000Z",
+          completedAt: "2026-11-12T00:00:09.000Z",
+        },
+        {
+          runId: "run-6",
+          status: "a status dohc does not know",
+          requestedAt: "2026-11-11T00:00:00.000Z",
+          startedAt: null,
+          completedAt: null,
+        },
+      ],
       thread: {
         title: "Chief of Staff",
         activeRunId: "run-9",
@@ -311,9 +342,43 @@ describe("T3 Code's thread tools", () => {
     await expect(readT3CodeThread(session, "t1")).resolves.toEqual({
       title: "Chief of Staff",
       working: true,
+      activeRunId: "run-9",
       waitingOnPerson: true,
       closed: false,
+      // Each run is in line, going, or over. One with a status dohc does not
+      // know is going until T3 Code gives it an end.
+      runs: [
+        {
+          id: "run-9",
+          state: "working",
+          requestedAtMs: Date.parse("2026-11-13T00:00:01.000Z"),
+          startedAtMs: Date.parse("2026-11-13T00:00:02.000Z"),
+          endedAtMs: null,
+        },
+        {
+          id: "run-8",
+          state: "in-line",
+          requestedAtMs: Date.parse("2026-11-13T00:00:03.000Z"),
+          startedAtMs: null,
+          endedAtMs: null,
+        },
+        {
+          id: "run-7",
+          state: "ended",
+          requestedAtMs: Date.parse("2026-11-12T00:00:00.000Z"),
+          startedAtMs: Date.parse("2026-11-12T00:00:01.000Z"),
+          endedAtMs: Date.parse("2026-11-12T00:00:09.000Z"),
+        },
+        {
+          id: "run-6",
+          state: "working",
+          requestedAtMs: Date.parse("2026-11-11T00:00:00.000Z"),
+          startedAtMs: null,
+          endedAtMs: null,
+        },
+      ],
     });
+    expect(t3.calls.findLast((call) => call.tool === "t3_thread_read")?.args.runLimit).toBe(50);
 
     expect(t3.calls.filter((call) => call.tool === "t3_thread_list")).toEqual([
       {
@@ -354,6 +419,7 @@ describe("T3 Code's thread tools", () => {
     const t3 = await fakeT3Code();
     t3.eventStream = true;
     t3.tools.t3_thread_read = () => ({
+      recentRuns: [],
       thread: {
         title: "Quiet",
         activeRunId: null,
@@ -366,9 +432,41 @@ describe("T3 Code's thread tools", () => {
     await expect(readT3CodeThread(session, "t1")).resolves.toEqual({
       title: "Quiet",
       working: false,
+      activeRunId: null,
       waitingOnPerson: false,
       closed: true,
+      runs: [],
     });
+  });
+
+  it("asks T3 Code where one run stands, and takes a run the thread does not have as over", async () => {
+    const t3 = await fakeT3Code();
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
+    const asked = { threadId: "t1", runId: "r1" };
+    const states: string[] = [];
+    for (const status of ["queued", "preparing", "waiting", "running"]) {
+      t3.tools.t3_thread_wait = () => ({ runId: "r1", status, timedOut: true });
+      states.push(await readT3CodeRun(session, asked));
+    }
+    for (const status of ["cancelled", "completed"]) {
+      t3.tools.t3_thread_wait = () => ({ runId: "r1", status, timedOut: false });
+      states.push(await readT3CodeRun(session, asked));
+    }
+    expect(states).toEqual(["in-line", "working", "working", "working", "ended", "ended"]);
+    // T3 Code restarted in the middle of the run and has yet to continue it: the work is not over.
+    t3.tools.t3_thread_wait = () => ({ runId: "r1", status: "interrupted", timedOut: true });
+    await expect(readT3CodeRun(session, asked)).resolves.toBe("working");
+    // No time to wait: T3 Code answers with the status the run has now.
+    expect(t3.calls.findLast((call) => call.tool === "t3_thread_wait")?.args).toEqual({
+      ...asked,
+      timeoutMs: 1,
+    });
+
+    t3.refusals.t3_thread_wait = "run_not_found: Run r1 does not belong to thread t1.";
+    await expect(readT3CodeRun(session, asked)).resolves.toBe("ended");
+    // Any other refusal is not an answer about the run.
+    t3.refusals.t3_thread_wait = "thread_not_found: Thread t1 is no longer available.";
+    await expect(readT3CodeRun(session, asked)).rejects.toMatchObject({ problem: "thread-gone" });
   });
 
   it("tells a sign-in T3 Code no longer takes from a call it refused and an answer it cannot read", async () => {

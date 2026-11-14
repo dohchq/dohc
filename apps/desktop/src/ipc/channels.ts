@@ -239,6 +239,7 @@ export const CHANNELS = {
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   agentRunState: "desktop:agent-run-state",
   chatDispatchPaused: "desktop:chat-dispatch-paused",
+  agentThreadLines: "desktop:agent-thread-lines",
   agentsListening: "desktop:agents-listening",
   personalAgents: "desktop:personal-agents",
   chatAgentRequestsChanged: "desktop:chat-agent-requests-changed",

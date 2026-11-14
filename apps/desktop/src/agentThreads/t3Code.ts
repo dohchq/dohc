@@ -24,7 +24,11 @@ export type T3CodeProblem =
   | "not-allowed"
   /** The thread runs with more access than the person gave dohc on T3 Code's page. */
   | "needs-more-access"
-  /** T3 Code refused the call, such as a thread that is gone. */
+  /** The thread is no longer in T3 Code. */
+  | "thread-gone"
+  /** T3 Code has no run with this id in the thread. */
+  | "run-gone"
+  /** T3 Code refused the call for another reason. */
   | "refused"
   /** T3 Code answered in a shape dohc does not know. */
   | "unexpected";
@@ -488,6 +492,12 @@ export async function openT3CodeSession(input: {
             "needs-more-access",
             "This thread runs with more access than dohc has in T3 Code. Allow dohc again, and pick the thread's mode on T3 Code's page.",
           );
+        // T3 Code's words for a run the thread does not have.
+        if (words && /run_not_found|does not belong to thread/u.test(words))
+          throw new T3CodeError("run-gone", "T3 Code has no such run in this thread.");
+        // T3 Code's words for a thread it no longer has.
+        if (words && /thread_not_found|is no longer available/u.test(words))
+          throw new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
         // T3 Code's own words reach Notices, so they are kept short.
         throw new T3CodeError("refused", words?.slice(0, 300) ?? "T3 Code refused the call.");
       }
@@ -608,15 +618,63 @@ export async function sendToT3CodeThread(
   return { runId: sent.runId ?? null };
 }
 
+const Environment = z.object({ environmentId: z.string() });
+// What an id may hold where dohc writes it into a link the system opens.
+const LINK_PART = /^[A-Za-z0-9._:~-]{1,512}$/u;
+
+/**
+ * The link that opens a thread in T3 Code's own window. T3 Code names this
+ * computer's part of the link at an address anyone on the computer may read.
+ * dohc builds the link from that and the thread's id, and puts in it nothing
+ * a link could act on.
+ */
+export async function t3CodeThreadLink(input: {
+  origin: string;
+  threadId: string;
+  fetch?: Fetch;
+}): Promise<string> {
+  const origin = t3CodeOriginOnThisComputer(input.origin);
+  if (origin === null)
+    throw new T3CodeError("not-this-computer", "T3 Code's server is not on this computer.");
+  const response = await answerOf(input.fetch ?? fetch, `${origin}/.well-known/t3/environment`);
+  if (!response.ok)
+    await refuse(response, new T3CodeError("refused", `T3 Code answered ${response.status}.`));
+  const { environmentId } = shaped(Environment, await jsonOf(response));
+  if (!LINK_PART.test(environmentId) || !LINK_PART.test(input.threadId))
+    throw new T3CodeError("unexpected", "dohc can't write a link to this thread.");
+  return `t3code://threads/${environmentId}/${input.threadId}`;
+}
+
 export interface T3CodeThreadState {
   title: string;
   working: boolean;
+  /** The run that is going now. It may be older than every run in `runs`. */
+  activeRunId: string | null;
   /** Something waits on the person in T3 Code: a question or an approval. */
   waitingOnPerson: boolean;
   /** The thread was archived or settled, so it takes no more work. */
   closed: boolean;
+  /** The thread's newest runs, newest first, as many as T3 Code gives at once. */
+  runs: T3CodeRun[];
 }
 
+/** One piece of work in a thread, such as the work a message started. */
+export interface T3CodeRun {
+  id: string;
+  /** Behind other work, going now, or over, whatever way it ended. */
+  state: "in-line" | "working" | "ended";
+  /** When T3 Code took it, when it started, and when it ended, where it has. */
+  requestedAtMs: number;
+  startedAtMs: number | null;
+  endedAtMs: number | null;
+}
+
+// T3 Code gives at most this many runs with one read.
+const RUNS_READ = 50;
+const time = z
+  .string()
+  .transform((text) => Date.parse(text))
+  .refine((ms) => !Number.isNaN(ms));
 const ThreadRead = z.object({
   thread: z.object({
     title: z.string(),
@@ -625,27 +683,82 @@ const ThreadRead = z.object({
     archived: z.boolean(),
     settled: z.boolean(),
   }),
+  recentRuns: z.array(
+    z.object({
+      runId: z.string(),
+      status: z.string(),
+      requestedAt: time,
+      startedAt: time.nullable(),
+      completedAt: time.nullable(),
+    }),
+  ),
 });
+
+// T3 Code's words for a run that is over, whatever way it ended.
+const ENDED = ["completed", "interrupted", "failed", "cancelled", "rolled_back"];
+const RunStatus = z.object({ status: z.string(), timedOut: z.boolean() });
+
+/**
+ * Where one run stands, asked by its id. T3 Code lists only a thread's newest
+ * runs with the thread, so a run it no longer lists is asked for here. A run
+ * the thread does not have is over.
+ *
+ * When T3 Code restarts in the middle of a run, it ends that run and continues
+ * the work in another. Its answer here follows the run to the one that
+ * continues it, which a thread's list of runs does not.
+ */
+export async function readT3CodeRun(
+  session: T3CodeSession,
+  input: { threadId: string; runId: string },
+): Promise<T3CodeRun["state"]> {
+  try {
+    // T3 Code's wait answers at once with the run's status when given no time to wait.
+    const { status, timedOut } = shaped(
+      RunStatus,
+      await session.call("t3_thread_wait", { ...input, timeoutMs: 1 }),
+    );
+    if (status === "queued") return "in-line";
+    // A run that ended and still timed out waits for T3 Code to continue it after a restart.
+    return ENDED.includes(status) && !timedOut ? "ended" : "working";
+  } catch (error) {
+    if (error instanceof T3CodeError && error.problem === "run-gone") return "ended";
+    throw error;
+  }
+}
 
 /** What a thread is doing now. */
 export async function readT3CodeThread(
   session: T3CodeSession,
   threadId: string,
 ): Promise<T3CodeThreadState> {
-  const { thread } = shaped(
+  const { thread, recentRuns } = shaped(
     ThreadRead,
     await session.call("t3_thread_read", {
       threadId,
       view: "messages",
       limit: 1,
       maxCharsPerItem: 1,
-      runLimit: 1,
+      runLimit: RUNS_READ,
     }),
   );
   return {
     title: thread.title,
     working: thread.activeRunId !== null,
+    activeRunId: thread.activeRunId,
     waitingOnPerson: thread.pendingRequestCount > 0,
     closed: thread.archived || thread.settled,
+    runs: recentRuns.map((run) => ({
+      id: run.runId,
+      // A status dohc does not know is over only once T3 Code gives it an end.
+      state:
+        run.status === "queued"
+          ? "in-line"
+          : run.completedAt === null && !ENDED.includes(run.status)
+            ? "working"
+            : "ended",
+      requestedAtMs: run.requestedAt,
+      startedAtMs: run.startedAt,
+      endedAtMs: run.completedAt,
+    })),
   };
 }

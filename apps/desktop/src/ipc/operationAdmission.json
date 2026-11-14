@@ -129,6 +129,8 @@
   "desktop:list-t3-code-projects": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:list-t3-code-threads": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:ready-agent-thread": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:read-agent-thread-lines": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:open-agent-thread": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-chat-dispatch-paused": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-chat-dispatch-paused": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:read-agents-listening": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },

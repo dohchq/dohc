@@ -313,6 +313,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
   SitePreviewReplacedEvent,
   McpConfigResult,
+  type AgentThreadLinesEvent,
   DesktopUserSettingsResult,
   SyncStatusResult,
   RebuildEngineStoreResult,
@@ -604,6 +605,7 @@ import { agentNotices } from "./notices/agentNotices";
 import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
 import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
 import { cliForThread } from "./agentThreads/forwardedText";
+import { createForwardLedger } from "./agentThreads/forwardLedger";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -799,6 +801,7 @@ import { runLogKeepDays } from "./agents/runLogRetention";
 import {
   agentIdsToWake,
   agentYouRun,
+  forwardingAgents,
   automationAgent,
   listAgents,
   type Agent,
@@ -1594,6 +1597,17 @@ async function reportForwardProblem(
   });
 }
 
+// Each snapshot of a workspace's lines has a later number than the one before.
+let agentThreadLinesRevision = 0;
+function agentThreadLinesOf(workspaceId: string): AgentThreadLinesEvent {
+  agentThreadLinesRevision += 1;
+  return {
+    workspaceId,
+    revision: agentThreadLinesRevision,
+    lines: agentThreads().lines(workspaceId),
+  };
+}
+
 function agentThreads(): ReturnType<typeof createAgentThreads> {
   const chats = <Result>(
     workspaceId: string,
@@ -1618,7 +1632,13 @@ function agentThreads(): ReturnType<typeof createAgentThreads> {
       markThreadReadByAgent: (input) =>
         chats(input.workspaceId, (store) => store.markThreadReadByAgent(input)),
       getThread: (input) => chats(input.workspaceId, (store) => store.getThread(input)),
+      listMessagesPage: (input) =>
+        chats(input.workspaceId, (store) => store.listMessagesPage(input)),
     },
+    ledger: createForwardLedger(join(stateDir(), "agent-thread-forwards.json")),
+    onLines: (workspaceId) =>
+      sendToWorkspaceWindows(CHANNELS.agentThreadLines, agentThreadLinesOf(workspaceId)),
+    onError: (error) => console.error("[desktop] agent threads:", error),
     readSettings: async () => (await readCachedUserSettingsFile(stateDir())).settings,
     workspace: (workspaceId) => {
       const workspace = findWorkspace(workspaceId);
@@ -10726,6 +10746,14 @@ function registerIpcHandlers(): void {
     signedInUntilMs: await t3Code().signedInUntil(),
   });
   registerOperations(operationBoundary, agentThreadOperations, {
+    readAgentThreadLines: ({ workspaceId }) => agentThreadLinesOf(workspaceId),
+    openAgentThread: async ({ workspaceId, agentId }) => {
+      // Only a thread whose agent serves the workspace this window has open.
+      const { settings } = await readCachedUserSettingsFile(stateDir());
+      const agent = forwardingAgents(settings, workspaceId).find(({ id }) => id === agentId);
+      if (!agent) throw new Error("This agent has no thread for this workspace.");
+      await shell.openExternal(await t3Code().threadLink(agent.thread.id));
+    },
     readT3CodeConnection: t3CodeConnectionState,
     allowDohcInT3Code: async () => {
       allowingT3Code?.abort();

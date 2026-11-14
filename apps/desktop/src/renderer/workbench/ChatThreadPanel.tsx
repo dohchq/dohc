@@ -173,7 +173,7 @@ function RepliesLine(props: {
   );
 }
 
-function WorkingDots(props: { presentation: ActorPresentation }) {
+export function WorkingDots(props: { presentation: ActorPresentation }) {
   const ink = useAgentInk(props.presentation);
   return (
     <span aria-hidden className={`dohc-working-dots ${ink}`}>

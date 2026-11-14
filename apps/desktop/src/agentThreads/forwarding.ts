@@ -27,7 +27,19 @@ export interface AgentThreadTool {
     message: string;
     how: "line" | "steer";
     forwardId: string;
-  }): Promise<void>;
+  }): Promise<{ runId: string | null } | void>;
+}
+
+/** A message the tool took, for what follows it: the line in chat and the reminder. */
+export interface ForwardedRequest {
+  workspaceId: string;
+  agent: ServedAgent;
+  chatThreadId: string;
+  messageId: string;
+  /** The chat thread's last message order when the message went. */
+  afterOrder: number;
+  /** The tool's id for the work the message started, when it gave one. */
+  runId: string | null;
 }
 
 /** An agent with a thread, as it serves one workspace. */
@@ -52,6 +64,8 @@ export interface ForwardingDependencies {
    * its thread again. `agentId` is null when dohc could not read the workspace.
    */
   onProblem(workspaceId: string, agentId: string | null, problem: unknown): void;
+  /** The tool took a message. Forwarding does not wait for this, and a failure here does not undo that. */
+  onForwarded?(forwarded: ForwardedRequest): void;
   /** How long to wait before each try after a failure. The last one repeats. */
   retryAfterMs?: readonly number[];
 }
@@ -135,14 +149,14 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     live: () => boolean,
   ): Promise<boolean> {
     if (!live()) return false;
-    const { thread } = await chats.getThread({
+    const { thread, messageCount } = await chats.getThread({
       workspaceId: workspace.id,
       threadId: request.threadId,
     });
     const { channel } = request;
     // The pass ended while it read the thread: nothing new goes out.
     if (!live()) return false;
-    await dependencies.tool.forward({
+    const taken = await dependencies.tool.forward({
       threadId: agent.threadId,
       how: agent.whileBusy,
       forwardId: forwardIdOf(workspace.id, agent.id, request.messageId),
@@ -162,6 +176,16 @@ export function createForwarding(dependencies: ForwardingDependencies) {
         note: agent.note,
       }),
     });
+    try {
+      dependencies.onForwarded?.({
+        workspaceId: workspace.id,
+        agent,
+        chatThreadId: request.threadId,
+        messageId: request.messageId,
+        afterOrder: messageCount - 1,
+        runId: taken?.runId ?? null,
+      });
+    } catch {}
     // The tool took it. A failure from here leaves it unread, and the next
     // try sends it under the same id.
     await markRead(workspace.id, agent, request);

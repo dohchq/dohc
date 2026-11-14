@@ -5,10 +5,13 @@ import {
   listT3CodeThreads,
   openT3CodeSession,
   readT3CodeAddress,
+  readT3CodeRun,
   readT3CodeThread,
   sendToT3CodeThread,
   signInToT3Code,
+  t3CodeThreadLink,
   type T3CodeProject,
+  type T3CodeRun,
   type T3CodeSession,
   type T3CodeThread,
   type T3CodeThreadState,
@@ -38,6 +41,10 @@ export interface T3CodeConnection extends AgentThreadTool {
     cursor?: number;
   }): Promise<{ threads: T3CodeThread[]; nextCursor: number | null }>;
   thread(threadId: string): Promise<T3CodeThreadState>;
+  /** Where one run of a thread stands, asked by its id. */
+  run(threadId: string, runId: string): Promise<T3CodeRun["state"]>;
+  /** The link that opens a thread in T3 Code's own window. It needs no sign-in. */
+  threadLink(threadId: string): Promise<string>;
   /**
    * Drops dohc's sign-in. T3 Code gives a client no way to revoke its own
    * entry, so that entry stays until the person revokes it in T3 Code.
@@ -106,7 +113,7 @@ export function createT3CodeConnection(dependencies: {
   }
 
   return {
-    forward: (input) => use((session) => sendToT3CodeThread(session, input).then(() => undefined)),
+    forward: (input) => use((session) => sendToT3CodeThread(session, input)),
     canKeep: () => store.canKeep(),
     signedInUntil: async () => (await store.load())?.expiresAtMs ?? null,
     async signIn(input) {
@@ -124,6 +131,9 @@ export function createT3CodeConnection(dependencies: {
     projects: () => use(listT3CodeProjects),
     threads: (input) => use((session) => listT3CodeThreads(session, input)),
     thread: (threadId) => use((session) => readT3CodeThread(session, threadId)),
+    run: (threadId, runId) => use((session) => readT3CodeRun(session, { threadId, runId })),
+    threadLink: async (threadId) =>
+      t3CodeThreadLink({ origin: (await address()).origin, threadId, fetch: dependencies.fetch }),
     forget: () => change(() => store.clear()),
   };
 }

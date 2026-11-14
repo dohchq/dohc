@@ -11,6 +11,7 @@ import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import type {
   AgentRunStateEvent,
+  AgentThreadLinesEvent,
   AgentRunStatusResult,
   CaptureRecoveryStatusResult,
   ReadCrashReportResult,
@@ -529,6 +530,18 @@ function makeBaseBridge(
     emitAgentRunState: (event: AgentRunStateEvent) => {
       for (const callback of [...agentRunStateCallbacks]) callback(event);
     },
+    // No agent thread holds a forwarded message until a test says one does.
+    readAgentThreadLines: vi.fn(
+      async ({ workspaceId }: { workspaceId: string }): Promise<AgentThreadLinesEvent> => ({
+        workspaceId,
+        revision: 0,
+        lines: [],
+      }),
+    ),
+    onAgentThreadLines: vi.fn(
+      (_listener: (event: AgentThreadLinesEvent) => void) => () => undefined,
+    ),
+    openAgentThread: vi.fn(async () => undefined),
     // Agent dispatch runs until a test pauses it.
     readChatDispatchPaused: vi.fn(async () => ({ paused: chatDispatchPaused })),
     setChatDispatchPaused: vi.fn(async ({ paused }: { paused: boolean }) => {

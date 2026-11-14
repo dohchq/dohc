@@ -75,6 +75,7 @@ ${threadId}`;
     getThread: async (input: Parameters<Chats["getThread"]>[0]) => {
       await beforeThread();
       return {
+        messageCount: 7,
         thread: {
           id: input.threadId,
           title: `title of ${input.threadId}`,
@@ -102,7 +103,11 @@ function setup(requests: Request[], over: Partial<ForwardingDependencies> = {}) 
   const store = fakeChats(requests);
   const sent: Sent[] = [];
   const problems: Array<[string, string | null, unknown]> = [];
-  const tool = { forward: vi.fn(async (input: Sent) => void sent.push(input)) };
+  const tool = {
+    forward: vi.fn(async (input: Sent): Promise<{ runId: string | null } | void> => {
+      sent.push(input);
+    }),
+  };
   const forwarding = createForwarding({
     cli: { program: "dohc", notes: [] },
     workspace: async () => ({ name: "Launch", agents: [agent] }),
@@ -133,6 +138,57 @@ describe("forwarding", () => {
     expect(sent.every((message) => message.threadId === "t3-thread-1")).toBe(true);
     expect(sent[0]!.how).toBe("line");
     expect(marks).toEqual(["m1", "m2"]);
+  });
+
+  it("tells what follows a forward which work the message started, before it marks the message read", async () => {
+    const order: string[] = [];
+    const seen: unknown[] = [];
+    const { forwarding, tool, marks } = setup([request("m1", 10)], {
+      onForwarded: (forwarded) => {
+        order.push(`forwarded ${marks.length}`);
+        seen.push({ ...forwarded, agent: forwarded.agent.id });
+      },
+    });
+    tool.forward.mockResolvedValueOnce({ runId: "run-7" });
+
+    await forwarding.wake(WORKSPACE);
+
+    expect(seen).toEqual([
+      {
+        workspaceId: WORKSPACE,
+        agent: "chief",
+        chatThreadId: "thread-a",
+        messageId: "m1",
+        afterOrder: 6,
+        runId: "run-7",
+      },
+    ]);
+    expect(order).toEqual(["forwarded 0"]);
+    expect(marks).toEqual(["m1"]);
+  });
+
+  it("does not wait for what follows a forward", async () => {
+    const { forwarding, marks } = setup([request("m1", 10), request("m2", 20)], {
+      // A ledger write that never ends.
+      onForwarded: (() => new Promise<void>(() => {})) as () => void,
+    });
+
+    await forwarding.wake(WORKSPACE);
+
+    expect(marks).toEqual(["m1", "m2"]);
+  });
+
+  it("marks a message read even when what follows a forward fails", async () => {
+    const { forwarding, marks, problems } = setup([request("m1", 10)], {
+      onForwarded: () => {
+        throw new Error("the ledger is damaged");
+      },
+    });
+
+    await forwarding.wake(WORKSPACE);
+
+    expect(marks).toEqual(["m1"]);
+    expect(problems).toEqual([]);
   });
 
   it("says who wrote the message, where, and how to reply there", async () => {

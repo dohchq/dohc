@@ -213,6 +213,51 @@ describe("dohc's connection to T3 Code", () => {
     expect((await store.load())?.token).toBe("token-1");
   });
 
+  it("says a thread is gone from T3 Code, and gives back the work a message started", async () => {
+    const { t3, store, connection, forward } = await setup();
+    await store.save({ origin: t3.origin, token: "token-1", expiresAtMs: Date.now() + 60_000 });
+
+    expect(await forward("f1")).toEqual({ runId: "run-1" });
+
+    t3.refusals.t3_thread_read = "thread_not_found: Thread t1 is no longer available.";
+    const gone = await connection.thread("t1").catch((error: unknown) => error);
+    expect(gone).toBeInstanceOf(T3CodeError);
+    expect((gone as T3CodeError).problem).toBe("thread-gone");
+    expect((gone as T3CodeError).message).toBe("This thread is no longer in T3 Code.");
+  });
+
+  it("writes the link that opens a thread in T3 Code, from what T3 Code says of this computer", async () => {
+    const { t3, home } = await setup();
+    const answers = (environment: unknown) =>
+      createT3CodeConnection({
+        home,
+        store: createT3CodeSignInStore({ dir: home, cipher: cipher(true) }),
+        fetch: async (input, init) =>
+          String(input) === `${t3.origin}/.well-known/t3/environment`
+            ? Response.json(environment)
+            : fetch(input, init),
+      });
+
+    // No sign-in is needed: the address is one anyone on the computer may read.
+    expect(await answers({ environmentId: "env-1", label: "This PC" }).threadLink("t-chief")).toBe(
+      "t3code://threads/env-1/t-chief",
+    );
+    for (const [environmentId, threadId] of [
+      ["env-1/../x", "t-chief"],
+      ["env 1", "t-chief"],
+      ["env-1", "t-chief?prompt=run"],
+      ["env-1", "t/chief"],
+      ["env-1", "t#chief"],
+      ["", "t-chief"],
+    ]) {
+      const refused = await answers({ environmentId })
+        .threadLink(threadId!)
+        .catch((error: unknown) => error);
+      expect(refused, `${environmentId} ${threadId}`).toBeInstanceOf(T3CodeError);
+      expect((refused as T3CodeError).problem).toBe("unexpected");
+    }
+  });
+
   it("forgets the sign-in on request", async () => {
     const { connection, forward } = await setup();
     await connection.signIn({ open: browser });
