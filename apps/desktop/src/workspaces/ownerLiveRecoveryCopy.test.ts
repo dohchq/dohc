@@ -203,14 +203,22 @@ it("keeps the original bytes in a package when the edits cannot be read as a doc
 it("makes the copy when the projection fails once and works when run again", async () => {
   const { root, writes } = await workspace(),
     { recovery } = queue(3);
-  const run = vi.fn<DocumentProjection["run"]>(directDocumentProjection.run);
-  run.mockRejectedValueOnce(new Error("dohc could not prepare the document in time."));
+  let runs = 0;
+  const projection: DocumentProjection = {
+    async run(request) {
+      runs += 1;
+      if (runs === 1) throw new Error("dohc could not prepare the document in time.");
+      return directDocumentProjection.run(request);
+    },
+  };
   vi.spyOn(console, "error").mockImplementation(() => {});
   try {
-    const saved = await saveLiveRecoveryCopy(liveRecoveryPackage(recovery, source), writes, {
-      run,
-    });
-    expect(run).toHaveBeenCalledTimes(2);
+    const saved = await saveLiveRecoveryCopy(
+      liveRecoveryPackage(recovery, source),
+      writes,
+      projection,
+    );
+    expect(runs).toBe(2);
     expect(saved.copyPath).toBe("notes/plan (recovered).md");
     await expect(access(join(root, saved.copyPath!))).resolves.toBeUndefined();
   } finally {
