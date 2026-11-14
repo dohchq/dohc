@@ -55,6 +55,7 @@ import {
   T3CodeAllowAgain,
   t3CodeAllowed,
   t3CodeAllowedUntil,
+  t3CodeModeName,
   useT3CodeAccess,
 } from "./T3CodeThread";
 
@@ -470,6 +471,8 @@ function ThreadAgentBoxes(props: {
       report.current?.(ipcErrorMessage(readError, ACCESS_READ_FAILED), readError, retryRead);
   }, [readError, retryRead]);
   const allowed = state !== undefined && state.canKeep && t3CodeAllowed(state);
+  // dohc knows the mode only when the person allowed it here, not on T3 Code's page.
+  const mode = state?.access ? t3CodeModeName(state.access) : null;
   const whileBusy = agent.whileBusy ?? "line";
   return (
     <>
@@ -522,8 +525,14 @@ function ThreadAgentBoxes(props: {
                   className="animate-spin"
                 />
               ) : allowed ? (
-                <span title="The sign-in lasts 30 days. After that, allow dohc again here.">
-                  {`Allowed until ${t3CodeAllowedUntil(state.signedInUntilMs!)}`}
+                <span
+                  title={`${
+                    mode === null
+                      ? ""
+                      : `dohc can message your threads that run with ${mode}, or less. `
+                  }The sign-in lasts 30 days. After that, allow dohc again here.`}
+                >
+                  {`Allowed ${mode === null ? "" : `with ${mode} `}until ${t3CodeAllowedUntil(state.signedInUntilMs!)}`}
                 </span>
               ) : (
                 // Why not, or the way to allow it, follows under the row.

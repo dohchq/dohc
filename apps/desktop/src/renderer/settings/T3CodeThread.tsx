@@ -1,10 +1,16 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
-import { LoaderCircle, Search } from "lucide-react";
-import type { T3CodeConnectionState, T3CodeThreadPage } from "../../ipc/bridgeContract";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { ExternalLink, LoaderCircle, Search } from "lucide-react";
+import type {
+  T3CodeAccess as T3CodeMode,
+  T3CodeConnectionState,
+  T3CodeThreadPage,
+} from "../../ipc/bridgeContract";
+import { isT3CodeCannotAllowHere } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { cornerTime } from "../relativeTime";
 import { FieldError, GhostButton, PrimaryButton, RetryRow, SecondaryButton } from "../ui/controls";
+import { useRadioGroup } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
@@ -16,6 +22,32 @@ export const T3_CODE_CANNOT_KEEP =
 const ALLOW = "Allow dohc in T3 Code";
 // How long typing rests before dohc asks T3 Code for the threads it names.
 const SEARCH_REST_MS = 250;
+
+// T3 Code's own name and words for each mode a thread runs with, from the one
+// that asks the person most to the one that never asks. A person knows them
+// from choosing a thread's mode in T3 Code, so dohc does not reword them.
+const MODE_WORDS: Record<T3CodeMode, { name: string; line: string }> = {
+  "approval-required": { name: "Supervised", line: "Ask before commands and file changes." },
+  "auto-accept-edits": {
+    name: "Auto-accept edits",
+    line: "Auto-approve edits, ask before other actions.",
+  },
+  auto: {
+    name: "Auto",
+    line: "Supported providers approve routine actions; others still ask.",
+  },
+  "full-access": { name: "Full access", line: "Allow commands and edits without prompts." },
+};
+const MODES = (Object.keys(MODE_WORDS) as T3CodeMode[]).map((value) => ({
+  value,
+  label: MODE_WORDS[value].name,
+  line: MODE_WORDS[value].line,
+}));
+// The one mode the Tab key reaches: the picked one, or the first.
+const TABBABLE_MODE = '[role="radio"][tabindex="0"]';
+
+/** T3 Code's name for a mode, such as "Full access". */
+export const t3CodeModeName = (mode: T3CodeMode) => MODE_WORDS[mode].name;
 
 /** Whether dohc holds a sign-in to T3 Code that has not run out. */
 export const t3CodeAllowed = (state: T3CodeConnectionState) =>
@@ -35,31 +67,41 @@ export type T3CodeAccess = {
   // Why dohc could not read it, or null.
   readError: unknown;
   retryRead: () => Promise<void>;
-  // T3 Code's page is open and has not answered.
-  waiting: boolean;
+  // The ask that has not answered: dohc making its own sign-in here, or T3
+  // Code's page, open in the browser.
+  asking: "here" | "page" | null;
   // Why the last ask ended without a sign-in, when no `onFailure` took it.
   allowError: string | null;
-  allow: () => Promise<void>;
+  // dohc's own sign-in code failed here, so T3 Code's page is the other way.
+  failedHere: boolean;
+  // Asks with a mode, which dohc signs in with here, or with null on T3
+  // Code's page. Resolves true once dohc is allowed.
+  allow: (mode: T3CodeMode | null) => Promise<boolean>;
   cancel: () => void;
 };
 
 /**
- * dohc's sign-in to T3 Code, and the ask that gets one on T3 Code's own page.
- * Leaving while that page waits ends the wait. A failed ask goes to
- * `onFailure` when given, else it stays in `allowError` for a dialog to show.
+ * dohc's sign-in to T3 Code, and the ask that gets one: in dohc, with the mode
+ * the person picked, or on T3 Code's own page. Leaving while an ask waits ends
+ * it. A failed ask in dohc stays in `allowError`, beside the choice it was
+ * made with. A failed ask on T3 Code's page goes to `onFailure` when given,
+ * else it stays in `allowError` for a dialog to show.
  */
 export function useT3CodeAccess(
   onFailure?: (message: string, cause: unknown, retry: () => Promise<void>) => void,
 ): T3CodeAccess {
-  const read = useWorkspaceQuery(useWorkspaceSession(), {
+  const session = useWorkspaceSession();
+  const read = useWorkspaceQuery(session, {
     key: "t3-code-connection",
     load: () => bridge().readT3CodeConnection({}),
   });
   const [answered, setAnswered] = useState<T3CodeConnectionState | null>(null);
-  const [waiting, setWaiting] = useState(false);
+  const [asking, setAsking] = useState<"here" | "page" | null>(null);
   const [allowError, setAllowError] = useState<string | null>(null);
+  const [failedHere, setFailedHere] = useState(false);
   // An answer for a wait the person cancelled, or left, changes nothing.
-  const asks = useRequestSequence();
+  // Leaving is going away or the window showing another workspace.
+  const asks = useRequestSequence([session]);
   const open = useRef(false);
   const failed = useRef(onFailure);
   failed.current = onFailure;
@@ -69,50 +111,307 @@ export function useT3CodeAccess(
       .catch(() => undefined);
   useEffect(
     () => () => {
-      if (open.current) endWait();
+      if (!open.current) return;
+      open.current = false;
+      setAsking(null);
+      endWait();
     },
-    [],
+    [session],
   );
-  const allow = async (): Promise<void> => {
+  const allow = async (mode: T3CodeMode | null): Promise<boolean> => {
+    // One ask at a time: a second press before the first answers asks nothing.
+    if (open.current) return false;
     const token = asks.next();
     open.current = true;
-    setWaiting(true);
+    setAsking(mode === null ? "page" : "here");
     setAllowError(null);
+    let allowed = false;
     try {
-      const state = await bridge().allowDohcInT3Code({ access: null });
-      if (!asks.isCurrent(token)) return;
+      const state = await bridge().allowDohcInT3Code({ access: mode });
+      if (!asks.isCurrent(token)) return false;
       setAnswered(state);
+      setFailedHere(false);
+      allowed = true;
     } catch (cause) {
-      if (!asks.isCurrent(token)) return;
-      const message = ipcErrorMessage(cause, "dohc could not ask T3 Code to allow it.");
-      if (failed.current) failed.current(message, cause, allow);
-      else setAllowError(message);
+      if (!asks.isCurrent(token)) return false;
+      if (mode !== null) {
+        // The page can do what dohc could not only when dohc's own sign-in code
+        // failed. It cannot help while T3 Code is not running.
+        setFailedHere(isT3CodeCannotAllowHere(cause));
+        setAllowError(ipcErrorMessage(cause, "dohc could not create its sign-in in T3 Code."));
+      } else {
+        const message = ipcErrorMessage(cause, "dohc could not ask T3 Code to allow it.");
+        const again = async () => void (await allow(null));
+        if (failed.current) failed.current(message, cause, again);
+        else setAllowError(message);
+      }
     }
     open.current = false;
-    setWaiting(false);
+    setAsking(null);
+    return allowed;
   };
   const cancel = () => {
     if (!open.current) return;
     open.current = false;
     asks.next();
-    setWaiting(false);
+    setAsking(null);
     endWait();
   };
   return {
     state: answered ?? read.value,
     readError: answered ? null : read.error,
     retryRead: read.retry,
-    waiting,
+    asking,
     allowError,
+    failedHere,
     allow,
     cancel,
   };
 }
 
-/** What allowing dohc in T3 Code takes, and the button that opens T3 Code's page. */
+// T3 Code's page is open in the browser and has not answered.
+function WaitingForT3Code(props: { onCancel: () => void; spread?: boolean }) {
+  return (
+    <>
+      <span
+        role="status"
+        className={`${props.spread ? "mr-auto " : ""}inline-flex items-center gap-1.5`}
+      >
+        <LoaderCircle size={12} aria-hidden className="animate-spin" />
+        Waiting for T3 Code
+      </span>
+      <SecondaryButton
+        size="row"
+        data-testid="t3-code-allow-cancel"
+        aria-label="Cancel waiting for T3 Code"
+        onClick={props.onCancel}
+      >
+        Cancel
+      </SecondaryButton>
+    </>
+  );
+}
+
+// What T3 Code's page asks for when it wants a sign-in code, and where the
+// person makes one in T3 Code.
+function SignInCodeSteps() {
+  return (
+    <>
+      <p className="m-0">If the page asks for a sign-in code:</p>
+      <ol data-testid="t3-code-allow-steps" className="m-0 flex list-decimal flex-col gap-1 pl-4">
+        <li>In T3 Code, open Settings, then Sharing &amp; access, then Authorized clients.</li>
+        <li>Choose Create link, then Share, then Copy code only.</li>
+        <li>Paste the code on T3 Code's page.</li>
+      </ol>
+    </>
+  );
+}
+
+/**
+ * Allowing dohc from inside dohc: the mode of the threads dohc may message,
+ * and the one button that signs dohc in with it. Nothing is picked until the
+ * person picks, unless dohc knows what they allowed before. A failure stays
+ * here with the pick, and offers T3 Code's page as the other way.
+ */
+function T3CodeAllowHere(props: {
+  access: T3CodeAccess;
+  size?: "row" | undefined;
+  // Starts keyboard focus on the choice, for a choice the person just opened.
+  focus?: boolean;
+  onAllowed?: () => void;
+  // Leaves without asking, where the choice was opened from a button.
+  onClose?: () => void;
+}) {
+  const { access } = props;
+  const { asking } = access;
+  const [picked, setPicked] = useState<T3CodeMode | null>(access.state?.access ?? null);
+  // Allow was pressed with no mode picked.
+  const [missing, setMissing] = useState(false);
+  // T3 Code's page was opened from here, so what it asks for stays in view.
+  const [usedPage, setUsedPage] = useState(false);
+  const id = useId();
+  const root = useRef<HTMLDivElement>(null);
+  const start = useRef<HTMLButtonElement>(null);
+  const group = useRadioGroup<T3CodeMode | "">({
+    value: picked ?? "",
+    options: MODES,
+    onChange: (mode) => {
+      if (mode === "") return;
+      setPicked(mode);
+      setMissing(false);
+    },
+  });
+  const focusChoice = () => root.current?.querySelector<HTMLElement>(TABBABLE_MODE)?.focus();
+  const focusAtFirst = useRef(props.focus === true);
+  useLayoutEffect(() => {
+    if (focusAtFirst.current) root.current?.querySelector<HTMLElement>(TABBABLE_MODE)?.focus();
+  }, []);
+  // A failure leaves focus on the button that asks again, unless the person
+  // moved it elsewhere while dohc asked.
+  const shownError = useRef(access.allowError);
+  useLayoutEffect(() => {
+    if (access.allowError === shownError.current) return;
+    shownError.current = access.allowError;
+    if (access.allowError === null) return;
+    const active = document.activeElement;
+    if (active === null || active === document.body || root.current?.contains(active))
+      start.current?.focus();
+  }, [access.allowError]);
+
+  const allowHere = async () => {
+    if (picked === null) {
+      setMissing(true);
+      focusChoice();
+      return;
+    }
+    if (await access.allow(picked)) props.onAllowed?.();
+  };
+  const allowOnPage = async () => {
+    setUsedPage(true);
+    if (await access.allow(null)) props.onAllowed?.();
+  };
+
+  const errorId = `${id}-error`;
+  const missingId = `${id}-missing`;
+  const startProps = {
+    ref: start,
+    "data-testid": "t3-code-allow-start",
+    "aria-describedby": access.allowError ? errorId : undefined,
+    disabled: asking !== null,
+    onClick: () => void allowHere(),
+    children:
+      asking === "here"
+        ? "Allowing…"
+        : picked === null
+          ? ALLOW
+          : `Allow with ${t3CodeModeName(picked)}`,
+  };
+  return (
+    <div ref={root} data-testid="t3-code-allow-here" className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2">
+        <p id={`${id}-label`} className="m-0">
+          Pick the mode of the thread you want to connect, or more.
+        </p>
+        <div
+          role="radiogroup"
+          aria-labelledby={`${id}-label`}
+          aria-describedby={missing ? missingId : undefined}
+          aria-invalid={missing ? true : undefined}
+          data-testid="t3-code-allow-modes"
+          // The choice holds still while dohc asks with it.
+          inert={asking !== null}
+          onKeyDown={group.onKeyDown}
+          className="-mx-2 flex flex-col gap-0.5"
+        >
+          {MODES.map((mode, index) => {
+            const checked = picked === mode.value;
+            return (
+              <button
+                key={mode.value}
+                {...group.radio(index)}
+                data-testid={`t3-code-allow-mode-${mode.value}`}
+                aria-labelledby={`${id}-${mode.value}`}
+                aria-describedby={`${id}-${mode.value}-line`}
+                className={`grid grid-cols-[14px_minmax(0,1fr)] items-center gap-x-2.5 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors duration-75 ${
+                  checked ? "bg-selected text-ink" : "text-muted hover:bg-hover hover:text-ink"
+                }`}
+              >
+                <span
+                  aria-hidden
+                  className={`grid size-3.5 place-items-center rounded-full border-[1.5px] ${
+                    checked ? "border-accent" : "border-subtle"
+                  }`}
+                >
+                  {checked ? <span className="size-1.5 rounded-full bg-accent" /> : null}
+                </span>
+                <span id={`${id}-${mode.value}`}>{mode.label}</span>
+                <span
+                  id={`${id}-${mode.value}-line`}
+                  className="col-start-2 text-[12px] text-muted"
+                >
+                  {mode.line}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {missing ? (
+          <FieldError id={missingId} testId="t3-code-allow-mode-missing">
+            Pick a mode.
+          </FieldError>
+        ) : null}
+      </div>
+      {usedPage ? (
+        <div className="flex flex-col gap-2">
+          <p className="m-0">T3 Code asks in your browser what dohc may do there.</p>
+          <SignInCodeSteps />
+        </div>
+      ) : null}
+      {access.allowError ? (
+        <FieldError id={errorId} testId="t3-code-allow-error">
+          {access.allowError}
+        </FieldError>
+      ) : null}
+      <div className="flex min-h-8 flex-wrap items-center gap-2">
+        {asking === "page" ? (
+          <WaitingForT3Code onCancel={access.cancel} />
+        ) : (
+          <>
+            {props.size === "row" ? (
+              <SecondaryButton size="row" {...startProps} />
+            ) : (
+              <PrimaryButton {...startProps} />
+            )}
+            {access.failedHere ? (
+              <SecondaryButton
+                size={props.size === "row" ? "row" : "default"}
+                data-testid="t3-code-allow-on-page"
+                disabled={asking !== null}
+                onClick={() => void allowOnPage()}
+                className="inline-flex items-center gap-1"
+              >
+                <ExternalLink size={12} aria-hidden />
+                Allow on T3 Code's page
+              </SecondaryButton>
+            ) : null}
+            {props.onClose ? (
+              <SecondaryButton
+                size="row"
+                data-testid="t3-code-allow-close"
+                disabled={asking !== null}
+                onClick={props.onClose}
+              >
+                Cancel
+              </SecondaryButton>
+            ) : null}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * What allowing dohc in T3 Code takes. Where dohc can make its own sign-in,
+ * the person picks a mode and allows it here. Elsewhere the button opens T3
+ * Code's page, and the steps say what that page asks for.
+ */
 export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
   const { access } = props;
   const errorId = useId();
+  if (access.state?.canAllowHere)
+    return (
+      <div data-testid="t3-code-allow" className="flex flex-col gap-3 text-[12px] text-muted">
+        <div className="flex flex-col gap-2">
+          <p className="m-0 text-[13px] text-ink">dohc creates its own sign-in in T3 Code.</p>
+          <p className="m-0">
+            With it, dohc can message any of your threads there that run with the mode you pick, or
+            less. dohc messages only the threads you connect to agents.
+          </p>
+        </div>
+        <T3CodeAllowHere access={access} size={props.size} />
+      </div>
+    );
   return (
     <div data-testid="t3-code-allow" className="flex flex-col gap-2 text-[12px] text-muted">
       <p className="m-0 text-[13px] text-ink">
@@ -123,39 +422,21 @@ export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
         less. A thread with full access needs Full access. dohc messages only the threads you
         connect to agents.
       </p>
-      <p className="m-0">If the page asks for a sign-in code:</p>
-      <ol className="m-0 flex list-decimal flex-col gap-1 pl-4">
-        <li>In T3 Code, open Settings, then Sharing &amp; access, then Authorized clients.</li>
-        <li>Choose Create link, then Share, then Copy code only.</li>
-        <li>Paste the code on T3 Code's page.</li>
-      </ol>
+      <SignInCodeSteps />
       {access.allowError ? (
         <FieldError id={errorId} testId="t3-code-allow-error">
           {access.allowError}
         </FieldError>
       ) : null}
       <div className="mt-1 flex min-h-8 items-center gap-2">
-        {access.waiting ? (
-          <>
-            <span role="status" className="inline-flex items-center gap-1.5">
-              <LoaderCircle size={12} aria-hidden className="animate-spin" />
-              Waiting for T3 Code
-            </span>
-            <SecondaryButton
-              size="row"
-              data-testid="t3-code-allow-cancel"
-              aria-label="Cancel waiting for T3 Code"
-              onClick={access.cancel}
-            >
-              Cancel
-            </SecondaryButton>
-          </>
+        {access.asking === "page" ? (
+          <WaitingForT3Code onCancel={access.cancel} />
         ) : props.size === "row" ? (
           <SecondaryButton
             size="row"
             data-testid="t3-code-allow-start"
             aria-describedby={access.allowError ? errorId : undefined}
-            onClick={() => void access.allow()}
+            onClick={() => void access.allow(null)}
           >
             {ALLOW}
           </SecondaryButton>
@@ -163,7 +444,7 @@ export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
           <PrimaryButton
             data-testid="t3-code-allow-start"
             aria-describedby={access.allowError ? errorId : undefined}
-            onClick={() => void access.allow()}
+            onClick={() => void access.allow(null)}
           >
             {ALLOW}
           </PrimaryButton>
@@ -174,38 +455,48 @@ export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
 }
 
 /**
- * The ask again, for a thread that runs with more than dohc was given. T3
- * Code's page takes the mode, so allowing again is how a person changes it.
+ * The ask again, which changes what dohc may do in T3 Code, such as for a
+ * thread that runs with more than dohc was given. Where dohc can make its own
+ * sign-in, the button opens the choice of mode in place, on the mode dohc has
+ * now. Elsewhere it opens T3 Code's page, which takes the mode.
  */
 export function T3CodeAllowAgain(props: { access: T3CodeAccess }) {
   const { access } = props;
   const errorId = useId();
+  const here = access.state?.canAllowHere === true;
+  const [choosing, setChoosing] = useState(false);
+  const opener = useRef<HTMLButtonElement>(null);
+  // Closing the choice returns focus to the button that opened it.
+  const closed = useRef(false);
+  useLayoutEffect(() => {
+    if (choosing || !closed.current) return;
+    closed.current = false;
+    opener.current?.focus();
+  }, [choosing]);
+  const close = () => {
+    closed.current = true;
+    setChoosing(false);
+  };
+  if (here && choosing)
+    return (
+      <div data-testid="t3-code-allow-again" className="py-1.5 text-[12px] text-muted">
+        <T3CodeAllowHere access={access} size="row" focus onAllowed={close} onClose={close} />
+      </div>
+    );
   return (
     <div data-testid="t3-code-allow-again" className="flex flex-col gap-1 text-[12px] text-muted">
       <div className="flex min-h-8 items-center gap-2">
-        {access.waiting ? (
-          <>
-            <span role="status" className="mr-auto inline-flex items-center gap-1.5">
-              <LoaderCircle size={12} aria-hidden className="animate-spin" />
-              Waiting for T3 Code
-            </span>
-            <SecondaryButton
-              size="row"
-              data-testid="t3-code-allow-cancel"
-              aria-label="Cancel waiting for T3 Code"
-              onClick={access.cancel}
-            >
-              Cancel
-            </SecondaryButton>
-          </>
+        {access.asking === "page" ? (
+          <WaitingForT3Code spread onCancel={access.cancel} />
         ) : (
           <>
             <span className="mr-auto">To change what dohc may do in T3 Code, allow it again.</span>
             <SecondaryButton
+              ref={opener}
               size="row"
               data-testid="t3-code-allow-again-start"
               aria-describedby={access.allowError ? errorId : undefined}
-              onClick={() => void access.allow()}
+              onClick={() => (here ? setChoosing(true) : void access.allow(null))}
             >
               Allow again
             </SecondaryButton>

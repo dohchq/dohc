@@ -6,6 +6,7 @@ import type { AgentToolsResult } from "../../agents/agentToolCatalog";
 import type {
   AgentsListeningEvent,
   PersonalAgentsEvent,
+  T3CodeAccess,
   T3CodeConnectionState,
   T3CodeProjectList,
   T3CodeThreadPage,
@@ -66,7 +67,9 @@ const bridgeMock = {
     tools: [],
   })),
   readT3CodeConnection: vi.fn(async (): Promise<T3CodeConnectionState> => SIGNED_IN),
-  allowDohcInT3Code: vi.fn(async (): Promise<T3CodeConnectionState> => SIGNED_IN),
+  allowDohcInT3Code: vi.fn(
+    async (_payload: { access: T3CodeAccess | null }): Promise<T3CodeConnectionState> => SIGNED_IN,
+  ),
   cancelAllowDohcInT3Code: vi.fn(async () => undefined),
   listT3CodeProjects: vi.fn(async (): Promise<T3CodeProjectList> => ({
     projects: [
@@ -122,7 +125,12 @@ const WITH_CHIEF: DesktopUserSettings = {
   agents: { ...SETTINGS.agents, "t3-code": CHIEF },
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  // A test that fails before it uses up an answer it queued must not hand it to the next test.
+  bridgeMock.readT3CodeConnection.mockReset();
+  bridgeMock.allowDohcInT3Code.mockReset();
+});
 afterEach(cleanup);
 
 function renderList(settings: DesktopUserSettings = SETTINGS) {
@@ -194,9 +202,12 @@ it("asks T3 Code to allow dohc, and Cancel or closing the sheet ends the wait", 
   expect(allow.getByText(/Sharing & access, then Authorized clients/)).toBeTruthy();
   expect(allow.getByText(/Copy code only/)).toBeTruthy();
   expect(allow.getByText(/A thread with full access needs Full access\./)).toBeTruthy();
+  // T3 Code's page takes the mode, so dohc offers no choice of one.
+  expect(allow.queryByRole("radio")).toBeNull();
   expect(screen.queryByTestId("agent-add-confirm")).toBeNull();
 
   await userEvent.click(allow.getByRole("button", { name: "Allow dohc in T3 Code" }));
+  expect(bridgeMock.allowDohcInT3Code).toHaveBeenLastCalledWith({ access: null });
   expect(allow.getByRole("status").textContent).toBe("Waiting for T3 Code");
   await userEvent.click(allow.getByRole("button", { name: "Cancel waiting for T3 Code" }));
   expect(bridgeMock.cancelAllowDohcInT3Code).toHaveBeenCalledOnce();
@@ -773,4 +784,282 @@ it("closes the dialog on Escape with nothing changed, and returns focus to Chang
   await waitFor(() => expect(document.activeElement).toBe(opener));
   expect(bridgeMock.changeAgentThread).not.toHaveBeenCalled();
   expect(onSave).not.toHaveBeenCalled();
+});
+
+// Where dohc can make its own sign-in code, allowing it is one decision in dohc.
+const HERE_SIGNED_OUT: T3CodeConnectionState = { ...SIGNED_OUT, canAllowHere: true };
+const allowedHere = (access: T3CodeAccess | null): T3CodeConnectionState => ({
+  ...SIGNED_IN,
+  access,
+  canAllowHere: true,
+});
+const checked = (radio: HTMLElement) => radio.getAttribute("aria-checked") === "true";
+
+it("allows dohc in dohc with the mode the person picks, and the threads follow", async () => {
+  bridgeMock.readT3CodeConnection.mockResolvedValueOnce(HERE_SIGNED_OUT);
+  const allowing = deferred<T3CodeConnectionState>();
+  bridgeMock.allowDohcInT3Code.mockReturnValueOnce(allowing.promise);
+  renderList();
+  await chooseT3Code();
+  const allow = within(await sheet().findByTestId("t3-code-allow"));
+  // No browser opens, so nothing here is about T3 Code's page or its sign-in code.
+  expect(allow.queryByTestId("t3-code-allow-steps")).toBeNull();
+  expect(allow.queryByText(/sign-in code/)).toBeNull();
+  expect(allow.getByText("dohc creates its own sign-in in T3 Code.")).toBeTruthy();
+  expect(
+    allow.getByRole("radiogroup", {
+      name: "Pick the mode of the thread you want to connect, or more.",
+    }),
+  ).toBeTruthy();
+  // T3 Code's own names and words, from the mode that asks most to the one that never asks.
+  expect(allow.getAllByRole("radio").map((radio) => [radio.textContent, checked(radio)])).toEqual([
+    ["SupervisedAsk before commands and file changes.", false],
+    ["Auto-accept editsAuto-approve edits, ask before other actions.", false],
+    ["AutoSupported providers approve routine actions; others still ask.", false],
+    ["Full accessAllow commands and edits without prompts.", false],
+  ]);
+  expect(
+    allow.getByRole("radio", {
+      name: "Full access",
+      description: "Allow commands and edits without prompts.",
+    }),
+  ).toBeTruthy();
+
+  // Nothing is picked for the person, and nothing is asked until they pick.
+  const start = allow.getByTestId<HTMLButtonElement>("t3-code-allow-start");
+  expect(start.textContent).toBe("Allow dohc in T3 Code");
+  await userEvent.click(start);
+  expect(allow.getByRole("alert").textContent).toBe("Pick a mode.");
+  expect(document.activeElement).toBe(allow.getByRole("radio", { name: "Supervised" }));
+  expect(bridgeMock.allowDohcInT3Code).not.toHaveBeenCalled();
+
+  // The arrows move the pick, as in any group of radios.
+  await userEvent.keyboard("{ArrowDown}");
+  expect(checked(allow.getByRole("radio", { name: "Auto-accept edits" }))).toBe(true);
+  expect(document.activeElement).toBe(allow.getByRole("radio", { name: "Auto-accept edits" }));
+  expect(allow.queryByRole("alert")).toBeNull();
+  expect(start.textContent).toBe("Allow with Auto-accept edits");
+  await userEvent.click(allow.getByRole("radio", { name: "Full access" }));
+  expect(start.textContent).toBe("Allow with Full access");
+
+  await userEvent.click(start);
+  expect(start.textContent).toBe("Allowing…");
+  expect(start.disabled).toBe(true);
+  // The choice holds still while dohc asks with it, and a second press asks nothing more.
+  expect(allow.getByTestId("t3-code-allow-modes").hasAttribute("inert")).toBe(true);
+  fireEvent.click(start);
+  expect(bridgeMock.allowDohcInT3Code).toHaveBeenCalledExactlyOnceWith({ access: "full-access" });
+  expect(screen.queryByTestId("agent-add-confirm")).toBeNull();
+
+  await act(async () => allowing.resolve(allowedHere("full-access")));
+  expect(await sheet().findByRole("radio", { name: /^Issue owner/ })).toBeTruthy();
+  expect(screen.getByTestId("agent-add-confirm")).toBeTruthy();
+  expect(sheet().queryByTestId("t3-code-allow")).toBeNull();
+});
+
+it("keeps the pick when dohc could not sign itself in, and offers T3 Code's page with its steps", async () => {
+  const failed = "dohc could not make its own sign-in code in T3 Code.";
+  // As the window receives it: the class and the code go before the words.
+  const cannotAllowHere = () => new Error(`T3CodeError [cannot-allow-here]: ${failed}`);
+  bridgeMock.readT3CodeConnection.mockResolvedValueOnce(HERE_SIGNED_OUT);
+  const asking = deferred<T3CodeConnectionState>();
+  bridgeMock.allowDohcInT3Code.mockReturnValueOnce(asking.promise);
+  renderList();
+  await chooseT3Code();
+  const allow = within(await sheet().findByTestId("t3-code-allow"));
+  const onPage = () => allow.queryByRole("button", { name: "Allow on T3 Code's page" });
+  const auto = allow.getByRole("radio", { name: "Auto" });
+  expect(onPage()).toBeNull();
+  await userEvent.click(auto);
+  await userEvent.click(allow.getByRole("button", { name: "Allow with Auto" }));
+  // Chromium takes focus from a button that turns disabled. jsdom leaves it
+  // there, and only a field that can take focus can give it up.
+  nameField().focus();
+  nameField().blur();
+  expect(document.activeElement).toBe(document.body);
+  await act(async () => asking.reject(cannotAllowHere()));
+
+  expect((await allow.findByTestId("t3-code-allow-error")).textContent).toBe(failed);
+  const start = allow.getByRole<HTMLButtonElement>("button", { name: "Allow with Auto" });
+  expect(checked(auto)).toBe(true);
+  expect(start.disabled).toBe(false);
+  expect(document.activeElement).toBe(start);
+  // The steps are for T3 Code's page, so they wait until the person goes there.
+  expect(allow.queryByTestId("t3-code-allow-steps")).toBeNull();
+
+  const waiting = deferred<T3CodeConnectionState>();
+  bridgeMock.allowDohcInT3Code.mockReturnValueOnce(waiting.promise);
+  await userEvent.click(onPage()!);
+  expect(bridgeMock.allowDohcInT3Code).toHaveBeenLastCalledWith({ access: null });
+  expect(within(allow.getByTestId("t3-code-allow-steps")).getByText(/Copy code only/)).toBeTruthy();
+  expect(allow.getByRole("status").textContent).toBe("Waiting for T3 Code");
+  expect(allow.queryByRole("alert")).toBeNull();
+
+  // Cancel ends the wait, and an answer that comes after it does not allow dohc.
+  await userEvent.click(allow.getByRole("button", { name: "Cancel waiting for T3 Code" }));
+  expect(bridgeMock.cancelAllowDohcInT3Code).toHaveBeenCalledOnce();
+  await act(async () => waiting.resolve(allowedHere(null)));
+  expect(sheet().queryByTestId("t3-code-thread-search")).toBeNull();
+  expect(allow.queryByRole("status")).toBeNull();
+  expect(allow.getByTestId("t3-code-allow-steps")).toBeTruthy();
+  expect(checked(auto)).toBe(true);
+
+  // The same pick goes again from the same button, and the page is still offered.
+  bridgeMock.allowDohcInT3Code.mockRejectedValueOnce(cannotAllowHere());
+  await userEvent.click(allow.getByRole("button", { name: "Allow with Auto" }));
+  expect(bridgeMock.allowDohcInT3Code).toHaveBeenLastCalledWith({ access: "auto" });
+  expect((await allow.findByTestId("t3-code-allow-error")).textContent).toBe(failed);
+
+  await userEvent.click(onPage()!);
+  expect(bridgeMock.allowDohcInT3Code).toHaveBeenLastCalledWith({ access: null });
+  expect(await sheet().findByRole("radio", { name: /^Issue owner/ })).toBeTruthy();
+  expect(screen.getByTestId("agent-add-confirm")).toBeTruthy();
+});
+
+it("ends the ask in dohc when the sheet closes, and reports nothing for its late answer", async () => {
+  bridgeMock.readT3CodeConnection
+    .mockResolvedValueOnce(HERE_SIGNED_OUT)
+    .mockResolvedValueOnce(HERE_SIGNED_OUT);
+  const allowing = deferred<T3CodeConnectionState>();
+  bridgeMock.allowDohcInT3Code.mockReturnValueOnce(allowing.promise);
+  const { onError } = renderList();
+  await chooseT3Code();
+  const allow = within(await sheet().findByTestId("t3-code-allow"));
+  await userEvent.click(allow.getByRole("radio", { name: "Supervised" }));
+  await userEvent.click(allow.getByRole("button", { name: "Allow with Supervised" }));
+  expect(bridgeMock.allowDohcInT3Code).toHaveBeenCalledExactlyOnceWith({
+    access: "approval-required",
+  });
+
+  await userEvent.click(sheet().getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByTestId("agent-add-sheet")).toBeNull();
+  expect(bridgeMock.cancelAllowDohcInT3Code).toHaveBeenCalledOnce();
+  await act(async () => allowing.reject(new Error("The sign-in to T3 Code was cancelled.")));
+  expect(onError).not.toHaveBeenCalled();
+
+  // The sheet opens again on the choice, with nothing picked and no failure.
+  await chooseT3Code();
+  const again = within(await sheet().findByTestId("t3-code-allow"));
+  expect(again.queryByRole("alert")).toBeNull();
+  expect(again.getAllByRole("radio").some(checked)).toBe(false);
+  expect(again.queryByRole("button", { name: "Allow on T3 Code's page" })).toBeNull();
+});
+
+it("names the mode dohc has on the agent's page, and allows again with another one", async () => {
+  bridgeMock.readT3CodeConnection.mockResolvedValueOnce(allowedHere("auto"));
+  const allowing = deferred<T3CodeConnectionState>();
+  bridgeMock.allowDohcInT3Code.mockReturnValueOnce(allowing.promise);
+  const { page, onError } = await openChiefPage();
+  const access = within(page.getByTestId("agent-thread-access"));
+  expect((await access.findByText(/^Allowed with Auto until /)).textContent).toMatch(/2099$/);
+  const again = () => within(page.getByTestId("t3-code-allow-again"));
+  const opener = () => again().getByRole("button", { name: "Allow again" });
+
+  // The choice opens in place on the mode dohc has, and Cancel leaves it as it was.
+  await userEvent.click(opener());
+  expect(again().getAllByRole("radio").filter(checked)).toEqual([
+    again().getByRole("radio", { name: "Auto" }),
+  ]);
+  expect(document.activeElement).toBe(again().getByRole("radio", { name: "Auto" }));
+  expect(again().getByTestId("t3-code-allow-start").textContent).toBe("Allow with Auto");
+  expect(again().queryByText(/sign-in code/)).toBeNull();
+  await userEvent.click(again().getByRole("button", { name: "Cancel" }));
+  expect(again().queryByRole("radio")).toBeNull();
+  expect(document.activeElement).toBe(opener());
+  expect(bridgeMock.allowDohcInT3Code).not.toHaveBeenCalled();
+
+  await userEvent.click(opener());
+  await userEvent.click(again().getByRole("radio", { name: "Full access" }));
+  await userEvent.click(again().getByRole("button", { name: "Allow with Full access" }));
+  expect(bridgeMock.allowDohcInT3Code).toHaveBeenCalledExactlyOnceWith({ access: "full-access" });
+  expect(again().getByTestId<HTMLButtonElement>("t3-code-allow-start").textContent).toBe(
+    "Allowing…",
+  );
+  // Until T3 Code answers, the page says what dohc has now.
+  expect(access.getByText(/^Allowed with Auto until /)).toBeTruthy();
+
+  await act(async () => allowing.resolve(allowedHere("full-access")));
+  expect(access.getByText(/^Allowed with Full access until /)).toBeTruthy();
+  expect(again().queryByRole("radio")).toBeNull();
+  expect(document.activeElement).toBe(opener());
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it("says only until when, for a sign-in the person allowed on T3 Code's page", async () => {
+  bridgeMock.readT3CodeConnection.mockResolvedValueOnce(allowedHere(null));
+  const { page } = await openChiefPage();
+  const access = within(page.getByTestId("agent-thread-access"));
+  expect((await access.findByText(/^Allowed until /)).textContent).toMatch(/2099$/);
+  expect(access.queryByText(/with/)).toBeNull();
+  // dohc does not know the mode, so the choice opens with nothing picked.
+  await userEvent.click(page.getByRole("button", { name: "Allow again" }));
+  const again = within(page.getByTestId("t3-code-allow-again"));
+  expect(again.getAllByRole("radio").some(checked)).toBe(false);
+  expect(document.activeElement).toBe(again.getByRole("radio", { name: "Supervised" }));
+  expect(again.getByTestId("t3-code-allow-start").textContent).toBe("Allow dohc in T3 Code");
+});
+
+it("says on the agent's page why dohc could not sign itself in, beside the pick, and files no notice", async () => {
+  const stopped = "T3 Code is not running on this computer.";
+  bridgeMock.readT3CodeConnection.mockResolvedValueOnce(HERE_SIGNED_OUT);
+  bridgeMock.allowDohcInT3Code.mockRejectedValueOnce(new Error(stopped));
+  const { page, row, onError } = await openChiefPage();
+  expect(await page.findByText("Not allowed")).toBeTruthy();
+  const allow = within(page.getByTestId("t3-code-allow"));
+  await userEvent.click(allow.getByRole("radio", { name: "Full access" }));
+  await userEvent.click(allow.getByRole("button", { name: "Allow with Full access" }));
+  expect((await allow.findByTestId("t3-code-allow-error")).textContent).toBe(stopped);
+  expect(onError).not.toHaveBeenCalled();
+  // T3 Code's page cannot open while T3 Code is not running, so it is not offered.
+  expect(allow.queryByRole("button", { name: "Allow on T3 Code's page" })).toBeNull();
+
+  // The same pick goes again, and the page then reads the thread.
+  bridgeMock.allowDohcInT3Code.mockResolvedValueOnce(allowedHere("full-access"));
+  await userEvent.click(allow.getByRole("button", { name: "Allow with Full access" }));
+  expect(await page.findByText(/^Allowed with Full access until /)).toBeTruthy();
+  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
+  expect(page.queryByTestId("t3-code-allow-error")).toBeNull();
+});
+
+it("changes nothing for an answer that comes after the window changed workspaces", async () => {
+  bridgeMock.readT3CodeConnection.mockResolvedValue(allowedHere("auto"));
+  const allowing = deferred<T3CodeConnectionState>();
+  bridgeMock.allowDohcInT3Code.mockReturnValueOnce(allowing.promise);
+  const both = withChief({ workspaces: ["ws-1", "ws-2"] });
+  const { page, rerender, onError } = await openChiefPage(both);
+  await page.findByText(/^Allowed with Auto until /);
+  await userEvent.click(page.getByRole("button", { name: "Allow again" }));
+  await userEvent.click(page.getByRole("radio", { name: "Full access" }));
+  await userEvent.click(page.getByRole("button", { name: "Allow with Full access" }));
+
+  rerender(both, "ws-2");
+  expect(bridgeMock.cancelAllowDohcInT3Code).toHaveBeenCalledOnce();
+  await act(async () => allowing.resolve(allowedHere("full-access")));
+  // The other workspace's page says what dohc read for it, not the late answer.
+  const shown = within(screen.getByTestId("agent-page"));
+  expect(await shown.findByText(/^Allowed with Auto until /)).toBeTruthy();
+  expect(shown.queryByText(/Full access until/)).toBeNull();
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it("starts the Change thread dialog on the choice of mode when dohc is not allowed", async () => {
+  bridgeMock.readT3CodeConnection
+    .mockResolvedValueOnce(HERE_SIGNED_OUT)
+    .mockResolvedValueOnce(HERE_SIGNED_OUT);
+  const { page } = await openChiefPage();
+  expect(await page.findByText("Not allowed")).toBeTruthy();
+  await userEvent.click(page.getByRole("button", { name: "Change thread" }));
+  const box = changeDialog();
+  // The button waits for a mode, so focus starts on the choice.
+  const supervised = await box.findByRole("radio", { name: "Supervised" });
+  await waitFor(() => expect(document.activeElement).toBe(supervised));
+  expect(screen.queryByTestId("agent-thread-change-confirm")).toBeNull();
+
+  await userEvent.keyboard("{End}");
+  await userEvent.click(box.getByRole("button", { name: "Allow with Full access" }));
+  expect(bridgeMock.allowDohcInT3Code).toHaveBeenCalledExactlyOnceWith({ access: "full-access" });
+  expect(await box.findByRole("radio", { name: /^Issue owner/ })).toBeTruthy();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(box.getByRole("combobox", { name: "Project" })),
+  );
 });

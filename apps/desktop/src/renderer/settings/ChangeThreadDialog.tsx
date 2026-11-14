@@ -44,8 +44,9 @@ export function ChangeThreadDialog(props: {
   const same = thread?.id === props.threadId;
 
   // The dialog holds focus until its first control shows: the project field,
-  // or the button that asks T3 Code while dohc is not allowed there. Focus the
-  // person moved stays where they put it.
+  // or the first control of the ask while dohc is not allowed in T3 Code, which
+  // is the mode the Tab key reaches or the button that opens T3 Code's page.
+  // Focus the person moved stays where they put it.
   useLayoutEffect(() => {
     const held = choice.current;
     if (!held) return;
@@ -54,7 +55,10 @@ export function ChangeThreadDialog(props: {
       if (field) observer.disconnect();
       const active = document.activeElement;
       if (active !== panel.current && active !== document.body) return;
-      (field ?? held.querySelector<HTMLElement>("[data-t3-code-allow-step] button"))?.focus();
+      (
+        field ??
+        held.querySelector<HTMLElement>("[data-t3-code-allow-step] button:not([tabindex='-1'])")
+      )?.focus();
     };
     const observer = new MutationObserver(land);
     observer.observe(held, { childList: true, subtree: true });

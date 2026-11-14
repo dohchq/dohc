@@ -91,6 +91,7 @@ import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import {
   CollectionMoveUnfinishedError,
   ipcWireError,
+  T3_CODE_CANNOT_ALLOW_HERE,
   markDatasetServerNotFound,
   readError,
   USE_THIS_COMPUTER,
@@ -10818,6 +10819,11 @@ function registerIpcHandlers(): void {
           signal: allowing.signal,
           access,
         });
+      } catch (error) {
+        // The window offers T3 Code's page after this failure, and after no other.
+        if (error instanceof T3CodeError && error.problem === T3_CODE_CANNOT_ALLOW_HERE)
+          Reflect.set(error, "wireCode", T3_CODE_CANNOT_ALLOW_HERE);
+        throw error;
       } finally {
         if (allowingT3Code === allowing) allowingT3Code = null;
       }
