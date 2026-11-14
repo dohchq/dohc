@@ -2348,7 +2348,6 @@ async function liveDocumentsFixture(
         h.actions,
         {
           liveDocument: async () => h.document,
-          keepOutsideChange: async () => false,
           sendRendererActivity: activity,
         },
         { workspaceId: operation.workspace.workspaceId, ...input },

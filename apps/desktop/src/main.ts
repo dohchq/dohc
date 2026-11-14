@@ -8544,7 +8544,11 @@ function registerIpcHandlers(): void {
       workspaceLinks.resolve(operation.workspace, input),
   });
   registerOperations(operationBoundary, captureOperations, {
-    outsideChanges: (_input, { operation }) => workspaceOutsideChanges(operation.workspace),
+    outsideChanges: async (_input, { operation }) => {
+      if (shareViewIsPresent(operation.workspace.shareView))
+        throw new Error("Only the original workspace holds outside changes.");
+      return await workspaceOutsideChanges(operation.workspace);
+    },
   });
   registerOperations(operationBoundary, heldChangeOperations, {
     readHeldChange: async ({ path }, { operation }) => ({
@@ -8920,6 +8924,8 @@ function registerIpcHandlers(): void {
     currentCredentialGeneration: () => credentialCacheGeneration,
     relayShareJsonWithCredentials,
     pushRecorded: activity.pushRecorded,
+    keepOutsideChange: async (workspace, path) =>
+      (await requireEngineCapture(workspace, "Engine history")).capture.keepOutsideChange(path),
     ownerLiveStop: async (workspace, action, path, binding, acceptedCursor) => {
       let result: Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>> | undefined;
       try {
@@ -9037,14 +9043,12 @@ function registerIpcHandlers(): void {
     });
     return result;
   };
-  const keepOutsideChange = async (workspace: RegistryEntry, path: string) =>
-    (await requireEngineCapture(workspace, "Engine history")).capture.keepOutsideChange(path);
   ownerLiveDocumentsForCli = {
     list: (operation, input) => agentOwnerLiveDocuments.list(input, operation),
     stop: (operation, input) =>
       stopNamedOwnerLiveDocument(
         agentOwnerLiveDocuments,
-        { ...ownerLiveDocumentDependencies, keepOutsideChange, sendRendererActivity },
+        { ...ownerLiveDocumentDependencies, sendRendererActivity },
         { workspaceId: operation.workspace.workspaceId, ...input },
         operation,
       ),
@@ -9061,7 +9065,6 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation
   >({
     ...ownerLiveDocumentDependencies,
-    keepOutsideChange,
     currentCredentials: () => cachedCredentials,
     warmCredentialCache,
     relayShareJson,

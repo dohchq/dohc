@@ -181,6 +181,9 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
     path: string,
     change: () => Promise<Result>,
   ): Promise<Result>;
+  // Keeps a held outside change to the file at a path as a copy, and puts the
+  // note's text back in the file. False when the path holds none.
+  keepOutsideChange(workspace: Workspace, path: string): Promise<boolean>;
   // Documents whose edits the server refused for good, as this computer last read them.
   ownerLiveQuarantines(workspace: Workspace): readonly OwnerLiveQuarantine[];
   // Stops that took refused edits but could not write the file, from their own records.
@@ -558,6 +561,11 @@ export function createOwnerLiveDocumentActions<
         document.currentPath,
         async (): Promise<StopOwnerLiveDocumentResult> => {
           await unchanged();
+          // A file changed outside dohc while the note was live keeps that
+          // change as a copy first, so Stop leaves the note as it is. A keep
+          // that fails starts no Stop.
+          await dependencies.keepOutsideChange(operation.workspace, document.currentPath);
+          operation.assertCurrent();
           // Stop again writes the file a finished release could not, from that release alone. The records
           // decide, never a list not yet read, so no ordinary Stop starts over a release the file still needs.
           // A release the engine no longer holds keeps its edits for Save recovery copy.
@@ -943,27 +951,19 @@ function inFlightChanges(record: object): Set<string> {
   return changes;
 }
 
-// Keeps a held outside change to the file at a path as a copy, and puts the
-// note's text back in the file. False when the path holds none.
-export interface KeepOutsideChange<Workspace> {
-  keepOutsideChange(workspace: Workspace, path: string): Promise<boolean>;
-}
-
 /**
  * Live documents' Stop for one row, from the window or an agent: the
  * document the row names, or the one at its path now. Windows showing the
- * workspace hear that it stopped. A file changed outside dohc while the note
- * was live keeps that change as a copy first, so Stop leaves the note as it is.
+ * workspace hear that it stopped.
  */
 export async function stopNamedOwnerLiveDocument<
   Workspace extends { workspaceId: string; shareView?: unknown },
   Operation extends { workspace: Workspace; assertCurrent(): void },
 >(
   actions: ReturnType<typeof createOwnerLiveDocumentActions<Workspace, Operation>>,
-  dependencies: Pick<OwnerLiveDocumentActionDependencies<Workspace>, "liveDocument"> &
-    KeepOutsideChange<Workspace> & {
-      sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
-    },
+  dependencies: Pick<OwnerLiveDocumentActionDependencies<Workspace>, "liveDocument"> & {
+    sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
+  },
   input: {
     workspaceId: string;
     path: string;
@@ -978,10 +978,6 @@ export async function stopNamedOwnerLiveDocument<
     input.objectId ??
     (await dependencies.liveDocument(operation.workspace, { path: input.path }))?.objectId;
   operation.assertCurrent();
-  if (input.again === undefined) {
-    await dependencies.keepOutsideChange(operation.workspace, input.path);
-    operation.assertCurrent();
-  }
   const result = await actions.stop(
     { ...input, ...(objectId !== undefined ? { objectId } : {}) },
     operation,
@@ -1000,33 +996,32 @@ export function createRelaySharesIpcHandlers<
   Workspace extends { workspaceId: string; shareView?: unknown },
   Operation extends { workspace: Workspace; assertCurrent(): void },
 >(
-  dependencies: OwnerLiveDocumentActionDependencies<Workspace> &
-    KeepOutsideChange<Workspace> & {
-      currentCredentials(): CloudCredentials | null;
-      warmCredentialCache(): Promise<void>;
-      relayShareJson<Result>(path: string, init?: RequestInit): Promise<Result>;
-      relayShareErrorCopy(status: number, data: { error?: string; code?: string } | null): string;
-      relayShareDiscussionActivityPolls: Pick<
-        ReturnType<typeof createPresencePollRegistry>,
-        "begin" | "cancel"
-      >;
-      retryOwnerLiveQuarantine(
-        workspace: Workspace,
-        objectId: string,
-        incident: string,
-      ): Promise<void>;
-      saveOwnerLiveRecoveryCopy(
-        workspace: Workspace,
-        path: string,
-        incident?: string,
-      ): Promise<SaveOwnerLiveRecoveryCopyResult>;
-      // A grant changed on the relay. Null when the change names no workspace.
-      sharesChanged(workspaceId: string | null): void;
-      sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
-      // An authenticated account listing, applied to this machine's received
-      // shares so a share the owner restored resumes.
-      reconcileReceivedShares(listing: unknown): Promise<void>;
-    },
+  dependencies: OwnerLiveDocumentActionDependencies<Workspace> & {
+    currentCredentials(): CloudCredentials | null;
+    warmCredentialCache(): Promise<void>;
+    relayShareJson<Result>(path: string, init?: RequestInit): Promise<Result>;
+    relayShareErrorCopy(status: number, data: { error?: string; code?: string } | null): string;
+    relayShareDiscussionActivityPolls: Pick<
+      ReturnType<typeof createPresencePollRegistry>,
+      "begin" | "cancel"
+    >;
+    retryOwnerLiveQuarantine(
+      workspace: Workspace,
+      objectId: string,
+      incident: string,
+    ): Promise<void>;
+    saveOwnerLiveRecoveryCopy(
+      workspace: Workspace,
+      path: string,
+      incident?: string,
+    ): Promise<SaveOwnerLiveRecoveryCopyResult>;
+    // A grant changed on the relay. Null when the change names no workspace.
+    sharesChanged(workspaceId: string | null): void;
+    sendRendererActivity(scope: { workspaceId: string; liveDocumentStopped: string }): void;
+    // An authenticated account listing, applied to this machine's received
+    // shares so a share the owner restored resumes.
+    reconcileReceivedShares(listing: unknown): Promise<void>;
+  },
 ): OperationHandlers<typeof relayShareOperations, Event, Operation> {
   type Handlers = OperationHandlers<typeof relayShareOperations, Event, Operation>;
   const {

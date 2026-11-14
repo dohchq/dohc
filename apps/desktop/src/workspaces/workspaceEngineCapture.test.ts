@@ -241,6 +241,7 @@ interface CaptureOptions {
   onKeptFiles?: WorkspaceEngineCaptureOptions["onKeptFiles"];
   onRetainedCopies?: WorkspaceEngineCaptureOptions["onRetainedCopies"];
   onHeldFiles?: WorkspaceEngineCaptureOptions["onHeldFiles"];
+  onOutsideChanges?: WorkspaceEngineCaptureOptions["onOutsideChanges"];
   rustEngineSessions?: EngineWorkspaceSessions;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
@@ -1339,7 +1340,7 @@ describe("workspaceEngineCapture batch capture", () => {
           });
         if (property === "flushCapture")
           return async () => {
-            held = [];
+            if ((await readFile(join(root, "note.md"), "utf8")) === "the note\n") held = [];
           };
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;

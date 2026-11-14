@@ -624,7 +624,8 @@ describe("owner live document enrollment", () => {
       expect(h.ownerLiveQuarantines).not.toHaveBeenCalled();
       expect(h.ownerLiveStop).not.toHaveBeenCalled();
       expect(h.request).not.toHaveBeenCalled();
-      expect(h.keepOutsideChange).not.toHaveBeenCalled();
+      // Stop again keeps an outside change first, as every Stop does.
+      expect(h.keepOutsideChange.mock.calls).toEqual(Array(4).fill([h.workspace, "live.md"]));
     });
 
     it("names the document before it chooses a record or starts a Stop", async () => {
