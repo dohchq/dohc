@@ -53,6 +53,17 @@ describe("a joined workspace", () => {
     expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
   });
 
+  // An ended membership edits nothing, so its pages show no Edit, whatever its level was.
+  it("shows a page with no Edit toggle once a membership at Edit ended", async () => {
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...ENDED, shareView: { ...ENDED.shareView!, access: "edit" } }));
+    expect(await screen.findByTestId("document-menu-trigger")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
+    expect(screen.queryByTestId("markdown-edit-toggle")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+  });
+
   it("keeps the Edit toggle for a member at Edit", async () => {
     const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
     vi.stubGlobal("dohcDesktop", bridge);
@@ -229,7 +240,7 @@ describe("a joined workspace", () => {
     render(shell(bridge, ENDED));
     const band = await screen.findByTestId("shared-view-banner");
     expect(band.dataset.ended).toBe("true");
-    expect(band.textContent).toBe("Your membership ended. This copy stays on this computer.");
+    expect(band.textContent).toBe("Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it.");
     await waitFor(() => expect(screen.getAllByTestId("tree-row").some(row => row.dataset.path === "plan.md")).toBe(true));
     expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
     expect(screen.queryByTestId("share-changes-send")).toBeNull();

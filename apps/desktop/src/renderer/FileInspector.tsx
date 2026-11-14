@@ -308,7 +308,7 @@ type FileInspectorProps = {
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views: every editable view refuses edits.
   readOnly?: boolean;
-  // A joined workspace at View or Comment, whose level allows no editing:
+  // A joined workspace at View or Comment, or one whose membership ended, which allows no editing:
   // a page shows no Edit toggle, since controls the level does not allow are
   // absent, not disabled.
   levelReadOnly?: boolean;

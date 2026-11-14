@@ -3206,7 +3206,9 @@ export function DesktopWorkspaceShell(props: {
         setAccessFor({ view: shareView, access: result.access });
       if (shareView.membership && result.levelChanged && result.access) {
         const words = levelChangedWords(result.access, result.levelChangedBy);
-        if (shareAccess && LEVEL_RANK[result.access] < LEVEL_RANK[shareAccess]) showWarningNotice(words); else showSuccessNotice(words);
+        if (shareAccess && LEVEL_RANK[result.access] < LEVEL_RANK[shareAccess])
+          showWarningNotice(words);
+        else showSuccessNotice(words);
       }
       if (result.status === "ended" || (result.access && result.access !== shareAccess)) {
         void props.refreshWorkspaceRegistry().catch(() => undefined);
@@ -6616,7 +6618,7 @@ export function DesktopWorkspaceShell(props: {
     ? ""
     : shareViewEnded
       ? membershipView
-        ? "Your membership ended. This copy stays on this computer."
+        ? "Your membership ended. This copy stays on this computer. Ask the owner to invite you again to keep working in it."
         : `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
       : shareViewDamaged
         ? !shareView.recipientUserId || needsReopenFor === shareView
@@ -8623,7 +8625,7 @@ export function DesktopWorkspaceShell(props: {
                                       // The lists name this workspace's own notes, never a received share's.
                                       levelReadOnly={
                                         membershipView &&
-                                        (shareAccess === "view" || shareAccess === "comment")
+                                        (shareViewEnded || shareAccess === "view" || shareAccess === "comment")
                                       }
                                       liveEditingPaused={
                                         shareView || isMountedSharePath(path)
