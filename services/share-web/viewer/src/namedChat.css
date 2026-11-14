@@ -76,7 +76,7 @@
 .chat-read-only p { margin: 0; color: var(--viewer-muted); }
 .chat-read-only textarea { display: block; width: 100%; margin-top: 8px; }
 .chat-unsent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.chat-unsent-actions .copy-failed { flex-basis: 100%; margin: 0; color: var(--viewer-danger); font-size: 12px; }
+.chat-unsent-actions .copy-failed { order: 1; flex-basis: 100%; margin: 0; color: var(--viewer-danger); font-size: 12px; }
 .chat-unsent-actions .handoff-button { padding: 3px 9px; }
 
 /* A Group shows its lanes as the desktop does: posts with their threads, and one chat. */

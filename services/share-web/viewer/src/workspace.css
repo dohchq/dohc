@@ -50,7 +50,8 @@
 .unsent-edits p { margin: 0 0 8px; }
 .unsent-edits textarea { display: block; width: 100%; height: 96px; box-sizing: border-box; resize: vertical; border: 1px solid var(--viewer-line); border-radius: 8px; padding: 8px; background: var(--viewer-panel-2); color: var(--viewer-ink); font: inherit; }
 .unsent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.unsent-actions .copy-failed { flex-basis: 100%; margin: 0; color: var(--viewer-danger); }
+/* The failure reads under the whole row, so Copy and Download stay side by side. */
+.unsent-actions .copy-failed { order: 1; flex-basis: 100%; margin: 0; color: var(--viewer-danger); }
 .unsent-discarded { display: flex; width: 100%; box-sizing: border-box; align-items: center; gap: 8px; pointer-events: auto; border: 1px solid var(--viewer-line); border-radius: 12px; padding: 8px 12px; background: var(--viewer-panel); box-shadow: var(--viewer-shadow); color: var(--viewer-muted); font-size: 12px; }
 .unsent-discarded p { min-width: 0; flex: 1; margin: 0; overflow-wrap: anywhere; }
 
