@@ -3168,6 +3168,14 @@ mod tests {
         projected(&doc)
     }
 
+    fn revision(store: &EngineStore, observed: &ObservedOwnerBinding) -> i64 {
+        store
+            .read_with(|c| read_observed_in(c, &observed.binding))
+            .unwrap()
+            .unwrap()
+            .revision
+    }
+
     fn stored_text(store: &EngineStore) -> String {
         let key = DocKey::new("workspace", "main", "object").unwrap();
         store
@@ -3214,7 +3222,13 @@ mod tests {
             put_committed_row(&store, &mut cache, &observed.binding, 5, row.clone()).unwrap(),
             OwnerRowOutcome::Added
         );
-        let shown = open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
+        let shown = open_draft_cached(
+            &store,
+            &mut cache,
+            &observed.binding,
+            revision(&store, &observed),
+        )
+        .unwrap();
         assert!(snapshot_text(&shown).contains("Committed by a collaborator"));
         assert!(!stored_text(&store).contains("Committed by a collaborator"));
 
@@ -3232,7 +3246,13 @@ mod tests {
             &NoFaults,
         )
         .unwrap();
-        let shown = open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
+        let shown = open_draft_cached(
+            &store,
+            &mut cache,
+            &observed.binding,
+            revision(&store, &observed),
+        )
+        .unwrap();
         assert!(snapshot_text(&shown).contains("Owner says: Committed by a collaborator"));
         assert!(!stored_text(&store).contains("Committed by a collaborator"));
         let row_digest = hex_sha256(&row);
@@ -3263,7 +3283,13 @@ mod tests {
         cache.drop_owner_rows_through(&key, 5);
         assert!(stored_text(&store).contains("Committed by a collaborator"));
         assert!(!stored_text(&store).contains("Owner says: "));
-        let shown = open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
+        let shown = open_draft_cached(
+            &store,
+            &mut cache,
+            &observed.binding,
+            revision(&store, &observed),
+        )
+        .unwrap();
         assert!(snapshot_text(&shown).contains("Owner says: Committed by a collaborator"));
     }
 
@@ -3286,8 +3312,15 @@ mod tests {
             put(&store, &mut cache, 5, &first),
             OwnerRowOutcome::Unchanged
         );
-        let text =
-            snapshot_text(&open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap());
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
         assert_eq!(text.matches("First row").count(), 1);
         assert!(text.contains("Second row"));
 
@@ -3300,8 +3333,15 @@ mod tests {
             put(&store, &mut cache, 5, &first),
             OwnerRowOutcome::Unchanged
         );
-        let text =
-            snapshot_text(&open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap());
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
         assert!(text.contains("First row") && text.contains("Second row"));
 
         // A different row at a held cursor drops every row.
@@ -3311,8 +3351,15 @@ mod tests {
             OwnerRowOutcome::Reconnect
         );
         assert!(cache.owner_layer(&key).is_none());
-        let text =
-            snapshot_text(&open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap());
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
         assert!(!text.contains("Second row"));
     }
 
@@ -3328,8 +3375,15 @@ mod tests {
         let row = collaborator.richdoc_append_paragraph("Held through eviction");
         put_committed_row(&store, &mut cache, &observed.binding, 5, row).unwrap();
         cache.clear();
-        let text =
-            snapshot_text(&open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap());
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
         assert!(text.contains("Held through eviction"));
 
         // Rows of another binding generation are never composed.
@@ -3337,8 +3391,15 @@ mod tests {
         later.restore_fence_generation += 1;
         assert!(cache.owner_layer(&key).unwrap().above(&later, 0).is_empty());
         restart_committed_rows(&mut cache, &key);
-        let text =
-            snapshot_text(&open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap());
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
         assert!(!text.contains("Held through eviction"));
     }
 
@@ -3351,7 +3412,13 @@ mod tests {
         collaborator.apply(&checkpoint).unwrap();
         let row = collaborator.richdoc_append_paragraph("Collaborator paragraph");
         put_committed_row(&store, &mut cache, &observed.binding, 5, row).unwrap();
-        let shown = open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
+        let shown = open_draft_cached(
+            &store,
+            &mut cache,
+            &observed.binding,
+            revision(&store, &observed),
+        )
+        .unwrap();
 
         // One editor: a paragraph the relay refuses, then a word inside it.
         let editor = Ydoc::wire();
