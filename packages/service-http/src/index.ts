@@ -3,6 +3,7 @@
 // sync-relay, share-web, and workspace-api import from here instead of carrying copies.
 export {
   ClientClosedRequest,
+  RefusedRequest,
   serveFetchHandler,
   type ServeFetchHandlerOptions,
 } from "./serveFetchHandler";
