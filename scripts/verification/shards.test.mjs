@@ -513,6 +513,7 @@ test("Rust partitions use binary defaults for new tests and the global default f
       ["known slow", "known new_a", "known new_b", "new_crate new", "constructor new"],
       2,
       times,
+      0,
     ),
     [
       ["known slow", "constructor new", "new_crate new"],
@@ -520,6 +521,17 @@ test("Rust partitions use binary defaults for new tests and the global default f
     ],
   );
   assert.deepEqual(partitionRustTests([], 2, times), [[], []]);
+});
+
+test("The reader shard takes less test time to leave room for the reader tests", () => {
+  const times = { defaultSeconds: 10, binaries: {}, tests: {} };
+  const inventory = Array.from({ length: 8 }, (_, i) => `crate t${i}`);
+  const partitions = partitionRustTests(inventory, 2, times, 20);
+  assert.equal(RUST_READER_SHARD, 1);
+  assert.deepEqual(
+    partitions.map((tests) => tests.length),
+    [5, 3],
+  );
 });
 
 test("Rust filters select exact tests in exact binaries and escape filterset syntax", () => {

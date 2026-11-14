@@ -18,6 +18,8 @@ import rustTestTimes from "./rust-test-times.json" with { type: "json" };
 
 export const RUST_SHARDS = 8;
 export const RUST_READER_SHARD = 1;
+// The reader shard runs the reader tests after its partition; they took 27 to 49 s in CI.
+export const RUST_READER_SECONDS = 43;
 export const RUST_POLICY_STEPS = [
   "tree provenance",
   "native target",
@@ -55,7 +57,12 @@ export function passedRustTests(log) {
   ].map((match) => match[1]);
 }
 
-export function partitionRustTests(inventory, count = RUST_SHARDS, times = rustTestTimes) {
+export function partitionRustTests(
+  inventory,
+  count = RUST_SHARDS,
+  times = rustTestTimes,
+  readerSeconds = RUST_READER_SECONDS,
+) {
   if (!Number.isSafeInteger(count) || count < 1)
     throw new Error("A Rust partition count must be a positive integer.");
   if (new Set(inventory).size !== inventory.length) throw new Error("Duplicate Rust test IDs.");
@@ -69,7 +76,10 @@ export function partitionRustTests(inventory, count = RUST_SHARDS, times = rustT
   }));
   if (tasks.some((task) => !Number.isFinite(task.seconds) || task.seconds <= 0))
     throw new Error("Rust test estimates must be positive seconds.");
-  const partitions = Array.from({ length: count }, () => ({ seconds: 0, tests: [] }));
+  const partitions = Array.from({ length: count }, (_, index) => ({
+    seconds: index === RUST_READER_SHARD ? readerSeconds : 0,
+    tests: [],
+  }));
   for (const task of tasks.sort(
     (a, b) => b.seconds - a.seconds || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   )) {
