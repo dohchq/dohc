@@ -325,7 +325,8 @@ export interface RegistryEntry extends CreatedWorkspace {
   confirmedRemovedShares?: ConfirmedShareRemoval[];
   // The grants the owner gave on this workspace, as the relay last listed
   // them. Absent until the first listing. See automations/shareRoster.ts.
-  // Hydrated in memory from stateDir/share-rosters. Never serialized into the registry.
+  // Hydrated in memory from stateDir/share-rosters.
+  // registryStore.test.ts checks that registry writes omit the roster.
   shareRoster?: ShareRoster;
   // The computer that runs this synced workspace's schedules, as the relay
   // last said; null when it recorded none. See automations/automationHost.ts.
