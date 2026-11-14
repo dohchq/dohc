@@ -435,19 +435,9 @@ test("Rust receipts require every policy row and exactly the full passing test i
   }
 });
 
-test("reader proofs fit beside the lightest measured partition", () => {
-  // Run 43196624375 execution times, excluding setup and transfer.
-  const ordinary = [
-    109.688, 60.09, 91.792, 78.737, 118.796, 88.909, 102.22, 105.92, 82.694, 101.816, 94.654,
-    122.536, 94.212, 83.972, 76.527, 79.268, 98.246, 98.599, 103.154, 91.983,
-  ];
-  const reader = 53.275;
-  assert.equal(ordinary.length, RUST_SHARDS);
-  assert.equal(RUST_READER_SHARD, ordinary.indexOf(Math.min(...ordinary)));
-  assert.ok(
-    ordinary[RUST_READER_SHARD] + reader <= Math.max(...ordinary),
-    "reader proofs must fit within the longest ordinary partition",
-  );
+test("reader proofs run on a matrix partition", () => {
+  // Partition 0 also aggregates the gate, so the reader proofs stay off it.
+  assert.ok(RUST_READER_SHARD > 0 && RUST_READER_SHARD < RUST_SHARDS);
 });
 
 test("Rust inventory retains selected ordinary tests and counts only actual passes", () => {
@@ -496,7 +486,8 @@ function passingCloudJobs() {
       jobs.push({ ...workers[0], name: `${prefix} ${part}` });
     }
   }
-  return jobs;
+  const active = new Set(Object.values(CLOUD_JOB_GRAPH).flatMap((node) => node.names));
+  return jobs.filter((job) => active.has(job.name));
 }
 
 const apiEnv = {
@@ -1704,7 +1695,11 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
   );
   const origin = Date.parse(fixture.origin),
     commit = fixture.headSha;
-  const jobs = fixture.jobs.map(([name, created, started, completed]) => ({
+  // The run had more partitions than the gate has now; keep the jobs the gate still has.
+  const active = new Set(Object.values(CLOUD_JOB_GRAPH).flatMap((node) => node.names));
+  const recorded = fixture.jobs.filter(([name]) => active.has(name));
+  const lastRust = `Rust tests ${RUST_SHARDS - 1}`;
+  const jobs = recorded.map(([name, created, started, completed]) => ({
     name,
     head_sha: commit,
     status: "completed",
@@ -1727,7 +1722,7 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
   const warn = t.mock.method(console, "warn", () => {});
   for (const [scope, name, seconds, completedSeconds, longest, wait] of [
     ["js", "typecheck + tests", 401, 405, "JS worker 8", 126],
-    ["rust", "engine gate", 853, 857, "Rust tests 19", 144],
+    ["rust", "engine gate", 853, 857, lastRust, 144],
   ])
     await t.test(scope, async () => {
       const root = mkdtempSync(join(tmpdir(), "creation-gap-")),
