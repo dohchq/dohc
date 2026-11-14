@@ -132,6 +132,8 @@ export const chatWords = {
     `${mine ? `Remove ${emoji} reaction` : emoji}, ${count} ${count === 1 ? "reaction" : "reactions"}`,
   /** A reaction kept on the phone, withheld: nothing sends it until Send. */
   reactionNotSent: (emoji: string) => `Your ${emoji} reaction has not been sent.`,
+  /** The server has answered "pending" for a reaction for a long time. It may still be saved. */
+  reactionStillSending: (emoji: string) => `Your ${emoji} reaction is still sending.`,
   /** The server refused a reaction, or can't find its message. */
   reactionRefused: (emoji: string) => `dohc could not change your ${emoji} reaction.`,
   /** Enqueue failed and nothing was kept. */

@@ -1,6 +1,7 @@
 import type { ClearRequest, FieldChange } from "../../modules/chat-composer";
 import type { ChatWrite } from "../server/chatWrites";
 import { OutboxError, type DiscardTarget, type Outbox, type OutboxState } from "../server/outbox";
+import type { OutboxScope } from "./outboxMessages";
 
 // What a conversation's write controls do, apart from how they look. The outbox is the only thing that keeps or sends a
 // write: this checks the gate, makes the write the route takes, keeps one attempt of each kind from running twice, and
@@ -210,6 +211,18 @@ export type SubmitOutcome =
   | { readonly kind: "blocked" }
   | { readonly kind: "stale" };
 
+/** Why the composer's last submit kept nothing. `parent-gone` holds the reply it was for, as the composer named it. */
+export type SubmitFailure =
+  | { readonly kind: "not-kept" }
+  | { readonly kind: "parent-gone"; readonly replyTo: object | null };
+
+/**
+ * Whether Send stays off because `replyTo`, the reply the composer names now, is the one whose post or send can't take
+ * it. Its text never goes anywhere else until the person cancels Reply or chooses another message.
+ */
+export const replyParentGone = (failure: SubmitFailure | null, replyTo: object | null) =>
+  replyTo !== null && failure?.kind === "parent-gone" && failure.replyTo === replyTo;
+
 /**
  * A reaction to `messageId` the outbox hasn't settled: waiting, withheld, sending or still sending. While one is, the
  * message takes no other, so a stalled reaction is never sent again as another, and taps never pile up.
@@ -242,11 +255,11 @@ export interface ConversationWrites {
   /** Keeps a write. A reply to an outbox post or send names that record in `dependsOn`. */
   submit(workspaceId: string, write: ChatWrite, dependsOn?: string): Promise<SubmitOutcome>;
   /**
-   * Adds or removes the account's reaction, as the state it should end in, never a toggle. One at a time per message:
-   * a second while the first is being kept does nothing.
+   * Adds or removes the account's reaction in `scope`'s workspace, as the state it should end in, never a toggle. One at
+   * a time per message: a second while the first is being kept, or while the account's last isn't settled, does nothing.
    */
   react(
-    workspaceId: string,
+    scope: OutboxScope & { readonly workspaceId: string },
     target: ReactionTarget,
     emoji: string,
     state: "added" | "removed",
@@ -307,13 +320,22 @@ export function createConversationWrites(options: {
         }
       }),
 
-    react: (workspaceId, target, emoji, state) =>
+    react: (scope, target, emoji, state) =>
       once<ReactOutcome>(`react:${target.messageId}`, async (box) => {
-        if (box.state().records.some((record) => reactionWaits(record, target.messageId)))
-          return { kind: "blocked" };
+        // Only the account's own reactions in this workspace hold it: another account's may name the same message ID.
+        const waits = box
+          .state()
+          .records.some(
+            (record) =>
+              record.origin === scope.origin &&
+              record.accountId === scope.accountId &&
+              record.workspaceId === scope.workspaceId &&
+              reactionWaits(record, target.messageId),
+          );
+        if (waits) return { kind: "blocked" };
         try {
           await box.enqueue({
-            workspaceId,
+            workspaceId: scope.workspaceId,
             write: { operation: "react", args: { messageId: target.messageId, emoji, state } },
             thread: target.threadId,
           });

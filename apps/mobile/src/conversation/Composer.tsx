@@ -18,9 +18,11 @@ import {
   clearStatus,
   EMPTY_DRAFT,
   fieldChanged,
+  replyParentGone,
   type Blocked,
   type Draft,
   type Lanes,
+  type SubmitFailure,
   type SubmitOutcome,
 } from "./conversationWrites";
 
@@ -107,16 +109,23 @@ export function Composer({
   // The token of the last clear the field refused, keeping the body sent.
   const [refused, setRefused] = useState(0);
   const [submitting, setSubmitting] = useState(false);
-  // Why the outbox kept nothing: Try again submits the same text, and a reply whose message wasn't sent can't wait.
-  const [failure, setFailure] = useState<"not-kept" | "parent-gone" | null>(null);
+  // Why the outbox kept nothing: Try again submits the same text, and a reply whose message wasn't sent can't wait, so
+  // Send stays off while that reply is chosen (`replyParentGone`).
+  const [failure, setFailure] = useState<SubmitFailure | null>(null);
   const status = clearStatus(clear.request, draft.textRevision, refused);
   const busy = submitting || status === "waiting";
-  const ready = text.trim().length > 0 && blocked === null && !submitting && status === "settled";
+  const ready =
+    text.trim().length > 0 &&
+    blocked === null &&
+    !submitting &&
+    status === "settled" &&
+    !replyParentGone(failure, replyTo);
 
   async function submit() {
     if (!ready) return;
     const sent = draft;
     const kind = mode;
+    const chosen = replyTo;
     setSubmitting(true);
     const outcome = await onSubmit(kind, sent.text, sent.title);
     setSubmitting(false);
@@ -129,7 +138,11 @@ export function Composer({
       if (kind !== "reply") setDraft((current) => clearSent(current, sent));
       if (outcome.kind === "kept") void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } else if (outcome.kind === "not-kept" || outcome.kind === "parent-gone") {
-      setFailure(outcome.kind);
+      setFailure(
+        outcome.kind === "parent-gone"
+          ? { kind: outcome.kind, replyTo: chosen }
+          : { kind: outcome.kind },
+      );
       AccessibilityInfo.announceForAccessibility(
         outcome.kind === "not-kept" ? chatWords.notKept : chatWords.replyParentGone,
       );
@@ -147,9 +160,9 @@ export function Composer({
           <Text style={[styles.problem, { color: theme.muted }]}>{problem.text}</Text>
         )
       ) : null}
-      {failure === "not-kept" ? (
+      {failure?.kind === "not-kept" ? (
         <ProblemLine text={chatWords.notKept} onRetry={() => void submit()} />
-      ) : failure === "parent-gone" ? (
+      ) : failure?.kind === "parent-gone" ? (
         <Text style={[styles.problem, { color: theme.danger }]} accessibilityRole="alert">
           {chatWords.replyParentGone}
         </Text>

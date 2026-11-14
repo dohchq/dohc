@@ -92,15 +92,23 @@ export function ServerConversation() {
   }>();
   const { data } = useAccount();
   if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewhereChat />;
+  // Keyed by the workspace store, which is one sign-in's, and the chat, so a draft, a chosen reply or a controller made
+  // for one never carries to another, even when the first comes back.
+  const writesKey = `${data?.instance ?? 0}:${id}`;
   // Writes are off unless the build turns them on (src/server/phoneWrites.ts): the chat stays read-only, as it was.
   if (thread === "1" || id.startsWith("thread-"))
     return phoneWrites ? (
-      <WritableThread threadId={id} messageId={message ?? null} replyId={reply ?? null} />
+      <WritableThread
+        key={writesKey}
+        threadId={id}
+        messageId={message ?? null}
+        replyId={reply ?? null}
+      />
     ) : (
       <Thread threadId={id} messageId={message ?? null} />
     );
   return phoneWrites ? (
-    <WritableStream groupId={id} name={name ?? ""} />
+    <WritableStream key={writesKey} groupId={id} name={name ?? ""} />
   ) : (
     <Stream groupId={id} name={name ?? ""} />
   );
@@ -172,7 +180,14 @@ function useScreenWrites(target: string) {
   const blocked = state ? blockedBy(state, phoneWrites) : "loading";
   const actions = useLocalActions(writes, blocked !== null);
   const workspaceId = data?.workspaceId ?? null;
-  const react = useReact(writes, workspaceId);
+  const rowScope = useMemo(
+    () =>
+      workspaceId === null
+        ? null
+        : { origin: signIn.origin, accountId: signIn.userId, workspaceId },
+    [signIn, workspaceId],
+  );
+  const react = useReact(writes, rowScope);
   const you = useMemo<Author>(
     () => ({
       id: "local:you",
@@ -181,13 +196,6 @@ function useScreenWrites(target: string) {
       initials: (signIn.email[0] ?? "").toUpperCase(),
     }),
     [signIn],
-  );
-  const rowScope = useMemo(
-    () =>
-      workspaceId === null
-        ? null
-        : { origin: signIn.origin, accountId: signIn.userId, workspaceId },
-    [signIn, workspaceId],
   );
   const reactionsByMessage = useMemo(
     () => (state && rowScope ? reactionRecords(state, rowScope) : null),
@@ -223,8 +231,6 @@ function useScreenWrites(target: string) {
     rowScope,
     message,
     problem,
-    // Keyed by the workspace store, which is one sign-in's, and the target, so a draft never carries elsewhere.
-    composerKey: `${data?.instance ?? 0}:${target}`,
   };
 }
 
@@ -263,7 +269,6 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     rowScope,
     message,
     problem: outboxProblemNow,
-    composerKey,
   } = useScreenWrites(groupId);
   const [replyTo, setReplyTo] = useState<StreamReply | null>(null);
   const local = useCallback(
@@ -324,12 +329,9 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
         const next = chosen && replyWrite(chosen.target, body);
         if (!next) return { kind: "blocked" as const };
         const outcome = await writes.submit(workspaceId, next.write, next.dependsOn);
-        // Kept, or its post or send can't take it any more: the reply context goes, unless another was chosen.
-        if (
-          outcome.kind === "kept" ||
-          outcome.kind === "withheld" ||
-          outcome.kind === "parent-gone"
-        )
+        // Kept: the reply context goes, unless another was chosen. One whose post or send can't take it stays, with
+        // Send off, until the person cancels Reply or chooses another message, so its text never goes to the stream.
+        if (outcome.kind === "kept" || outcome.kind === "withheld")
           setReplyTo((current) => (current === chosen ? null : current));
         return outcome;
       }
@@ -348,7 +350,6 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
       lanes && (lanes.post || lanes.send)
         ? (onLayoutHeight: (height: number) => void, title: string) => (
             <Composer
-              key={composerKey}
               placeholder={chatWords.messageTo(title)}
               lanes={lanes}
               blocked={blocked}
@@ -362,14 +363,10 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
           )
         : lanesProblem
           ? (onLayoutHeight: (height: number) => void) => (
-              <ComposerProblem
-                key={composerKey}
-                problem={lanesProblem}
-                onLayoutHeight={onLayoutHeight}
-              />
+              <ComposerProblem problem={lanesProblem} onLayoutHeight={onLayoutHeight} />
             )
           : null,
-    [lanes, blocked, problem, replyTo, cancelReply, submit, lanesProblem, composerKey],
+    [lanes, blocked, problem, replyTo, cancelReply, submit, lanesProblem],
   );
   const streamWrites = useMemo<ScreenWrites>(
     () => ({ local, message, actions, react, reply, composer }),
@@ -390,19 +387,8 @@ function WritableThread({
   messageId: string | null;
   replyId: string | null;
 }) {
-  const {
-    state,
-    writes,
-    blocked,
-    actions,
-    react,
-    workspaceId,
-    you,
-    rowScope,
-    message,
-    problem,
-    composerKey,
-  } = useScreenWrites(threadId);
+  const { state, writes, blocked, actions, react, workspaceId, you, rowScope, message, problem } =
+    useScreenWrites(threadId);
   const view = useMemo(() => views.thread(threadId), [threadId]);
   const value = useView(view).state.value;
   const thread = value?.kind === "thread" ? value : null;
@@ -443,7 +429,6 @@ function WritableThread({
   const composer = useMemo(
     () => (onLayoutHeight: (height: number) => void) => (
       <Composer
-        key={composerKey}
         placeholder={chatWords.reply}
         lanes={REPLY_LANES}
         blocked={blocked}
@@ -455,7 +440,7 @@ function WritableThread({
         onLayoutHeight={onLayoutHeight}
       />
     ),
-    [composerKey, blocked, problem, parent, cancelReply, submit],
+    [blocked, problem, parent, cancelReply, submit],
   );
   const threadWrites = useMemo<ScreenWrites>(
     () => ({ local, message, actions, react, reply, composer }),

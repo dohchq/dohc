@@ -641,13 +641,25 @@ export function createOutbox(options: {
     return track(epoch, erase(epoch));
   }
 
-  /** Deletes saved records whose result the latest reads show. */
+  /**
+   * Deletes saved records whose result the latest reads show, and with a reaction, the account's earlier saved ones to
+   * the same message and emoji, which it replaced, so none of them shows again over the server's state.
+   */
   function reconcile() {
     if (status !== "ready" || !observed) return;
     const { scope, messages } = observed;
-    for (const record of records.values())
-      if (record.stage === "saved" && scopeOf(record) === scope && shows(record, messages))
-        forget(record.sequence);
+    const saved = [...records.values()].filter(
+      (record) => record.stage === "saved" && scopeOf(record) === scope,
+    );
+    for (const record of saved) {
+      if (!shows(record, messages)) continue;
+      forget(record.sequence);
+      const key = reactionKey(record);
+      if (key === null) continue;
+      for (const earlier of saved)
+        if (earlier.sequence < record.sequence && reactionKey(earlier) === key)
+          forget(earlier.sequence);
+    }
   }
 
   function forget(sequence: number) {
@@ -1184,6 +1196,12 @@ export function createOutbox(options: {
 
 /** The relay stores a reaction's emoji trimmed and in NFC. */
 export const emojiKey = (emoji: string) => emoji.trim().normalize("NFC");
+
+/** The message and emoji a reaction is on, or null for another write. */
+const reactionKey = ({ write }: OutboxRecord) =>
+  write.operation === "react"
+    ? JSON.stringify([write.args.messageId, emojiKey(write.args.emoji)])
+    : null;
 
 /** Whether a read shows a saved record's result: its message by ID, its answer resolved, or its reaction as sent. */
 function shows(record: OutboxRecord, shown: ReadonlyMap<string, ChatMessage>): boolean {

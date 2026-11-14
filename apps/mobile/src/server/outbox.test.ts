@@ -1022,6 +1022,33 @@ describe("the handoff to reads", () => {
     stop();
   });
 
+  it("hands off a reaction's earlier saved records once a read shows the latest, so a removed one never shows again", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("react"), SAVED("thread-x"));
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    await outbox.enqueue({ workspaceId: "ws-1", write: react(), thread: "thread-x" });
+    await vi.waitFor(() => expect(stages(outbox)).toEqual(["saved"]));
+    await outbox.enqueue({
+      workspaceId: "ws-1",
+      write: {
+        operation: "react",
+        args: { messageId: "message-x", emoji: " 👍", state: "removed" },
+      },
+      thread: "thread-x",
+    });
+    // Another emoji's saved reaction to the same message stays until a read shows it.
+    await outbox.enqueue({ workspaceId: "ws-1", write: react("🎉"), thread: "thread-x" });
+    await vi.waitFor(() => expect(stages(outbox)).toEqual(["saved", "saved", "saved"]));
+
+    outbox.handoff(ME, "ws-1", [message("message-x")]);
+    await vi.waitFor(() => expect(outbox.state().records).toHaveLength(1));
+    expect(outbox.state().records[0]?.write.args).toMatchObject({ emoji: "🎉", state: "added" });
+    expect(records(disk)).toHaveLength(1);
+    stop();
+  });
+
   it("matches a reaction by its emoji as the relay stores it, trimmed and in NFC, and sends the arguments as given", async () => {
     const disk = durableDisk();
     const server = testServer();

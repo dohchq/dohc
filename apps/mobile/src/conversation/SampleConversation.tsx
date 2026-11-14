@@ -89,7 +89,7 @@ export function SampleConversation() {
   const writes = useConversationWrites(outbox, true, always);
   const blocked = state ? blockedBy(state, true) : "loading";
   const actions = useLocalActions(writes, blocked !== null);
-  const react = useReact(writes, sampleScope.workspaceId);
+  const react = useReact(writes, sampleScope);
   const messages = useMemo(
     () => (inThread ? sampleThreadFor(id) : sampleMessagesFor(id)),
     [inThread, id],
@@ -189,7 +189,8 @@ export function SampleConversation() {
       if (!next) return { kind: "blocked" };
       const answered = chosen;
       const outcome = await writes.submit(sampleScope.workspaceId, next.write, next.dependsOn);
-      if (outcome.kind === "kept" || outcome.kind === "withheld" || outcome.kind === "parent-gone")
+      // One whose post or send can't take it stays chosen, with Send off, until the person cancels Reply.
+      if (outcome.kind === "kept" || outcome.kind === "withheld")
         setChosen((current) => (current === answered ? null : current));
       return outcome;
     }

@@ -17,6 +17,7 @@ import {
   createWriteScope,
   fieldChanged,
   lanesOf,
+  replyParentGone,
   replyWrite,
   type Draft,
   type WriteActivation,
@@ -685,6 +686,7 @@ describe("a reply's write", () => {
 
 describe("a reaction", () => {
   const target = { messageId: "m-1", threadId: "thread-1" };
+  const HERE = { origin: ORIGIN, accountId: "u-1", workspaceId: "ws-1" };
 
   it("reaches no outbox while phone writes are off", async () => {
     const { outbox, asked } = recordingOutbox();
@@ -693,7 +695,7 @@ describe("a reaction", () => {
       enabled: phoneWrites,
       isCurrent: () => true,
     });
-    expect(await writes.react("ws-1", target, "👍", "added")).toEqual({ kind: "blocked" });
+    expect(await writes.react(HERE, target, "👍", "added")).toEqual({ kind: "blocked" });
     expect(asked).toEqual([]);
   });
 
@@ -704,7 +706,7 @@ describe("a reaction", () => {
         outbox: owed.outbox,
         enabled: true,
         isCurrent: () => true,
-      }).react("ws-1", target, "👍", "added"),
+      }).react(HERE, target, "👍", "added"),
     ).toEqual({ kind: "blocked" });
     const gone = recordingOutbox();
     expect(
@@ -712,7 +714,7 @@ describe("a reaction", () => {
         outbox: gone.outbox,
         enabled: true,
         isCurrent: () => false,
-      }).react("ws-1", target, "👍", "added"),
+      }).react(HERE, target, "👍", "added"),
     ).toEqual({ kind: "stale" });
     expect([...owed.asked, ...gone.asked]).toEqual([]);
   });
@@ -720,7 +722,7 @@ describe("a reaction", () => {
   it("asks for the state it should end in, in its message's thread", async () => {
     const { outbox, inputs } = recordingOutbox();
     const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
-    expect(await writes.react("ws-1", target, "👍", "removed")).toEqual({ kind: "kept" });
+    expect(await writes.react(HERE, target, "👍", "removed")).toEqual({ kind: "kept" });
     expect(inputs).toEqual([
       { workspaceId: "ws-1", write: react("m-1", "removed"), thread: "thread-1" },
     ]);
@@ -730,10 +732,10 @@ describe("a reaction", () => {
     const held = deferred<Kept>();
     const { outbox, inputs } = recordingOutbox(READY, () => held.promise);
     const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
-    const first = writes.react("ws-1", target, "👍", "added");
-    expect(await writes.react("ws-1", target, "👍", "removed")).toEqual({ kind: "blocked" });
+    const first = writes.react(HERE, target, "👍", "added");
+    expect(await writes.react(HERE, target, "👍", "removed")).toEqual({ kind: "blocked" });
     // Another message's reaction doesn't wait for it.
-    const other = writes.react("ws-1", { ...target, messageId: "m-2" }, "👍", "added");
+    const other = writes.react(HERE, { ...target, messageId: "m-2" }, "👍", "added");
     held.resolve({} as Kept);
     expect(await first).toEqual({ kind: "kept" });
     expect(await other).toEqual({ kind: "kept" });
@@ -750,9 +752,22 @@ describe("a reaction", () => {
       const waiting = { ...outboxRecord(react("m-1")), ...fields };
       const { outbox, asked } = recordingOutbox({ ...READY, records: [waiting] });
       const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
-      expect(await writes.react("ws-1", target, "👍", "removed")).toEqual({ kind: "blocked" });
+      expect(await writes.react(HERE, target, "👍", "removed")).toEqual({ kind: "blocked" });
       expect(asked).toEqual([]);
     }
+  });
+
+  it("isn't held by another account's, server's or workspace's reaction to the same message ID", async () => {
+    const waiting = outboxRecord(react("m-1"));
+    const elsewhere = [
+      { ...waiting, accountId: "u-2" },
+      { ...waiting, origin: "https://other.example.com" },
+      { ...waiting, workspaceId: "ws-2" },
+    ];
+    const { outbox, inputs } = recordingOutbox({ ...READY, records: elsewhere });
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.react(HERE, target, "👍", "added")).toEqual({ kind: "kept" });
+    expect(inputs).toEqual([{ workspaceId: "ws-1", write: react("m-1"), thread: "thread-1" }]);
   });
 
   it("takes another once the last is settled", async () => {
@@ -763,7 +778,7 @@ describe("a reaction", () => {
     };
     const { outbox, inputs } = recordingOutbox({ ...READY, records: [saved] });
     const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
-    expect(await writes.react("ws-1", target, "👍", "removed")).toEqual({ kind: "kept" });
+    expect(await writes.react(HERE, target, "👍", "removed")).toEqual({ kind: "kept" });
     expect(inputs).toHaveLength(1);
   });
 
@@ -772,7 +787,26 @@ describe("a reaction", () => {
       Promise.reject(new OutboxError("indeterminate", "op-9")),
     );
     const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
-    expect(await writes.react("ws-1", target, "👍", "added")).toEqual({ kind: "withheld" });
+    expect(await writes.react(HERE, target, "👍", "added")).toEqual({ kind: "withheld" });
+  });
+});
+
+describe("a reply whose post or send can't take it", () => {
+  const to = { name: "Sam", excerpt: "Plans" };
+
+  it("keeps Send off while it's still chosen, so its text never goes elsewhere", () => {
+    expect(replyParentGone({ kind: "parent-gone", replyTo: to }, to)).toBe(true);
+  });
+
+  it("lets Send go once the person cancels Reply or chooses another message", () => {
+    const failure = { kind: "parent-gone", replyTo: to } as const;
+    expect(replyParentGone(failure, null)).toBe(false);
+    expect(replyParentGone(failure, { ...to })).toBe(false);
+  });
+
+  it("keeps nothing off for text the outbox didn't keep, or with no failure", () => {
+    expect(replyParentGone({ kind: "not-kept" }, to)).toBe(false);
+    expect(replyParentGone(null, to)).toBe(false);
   });
 });
 

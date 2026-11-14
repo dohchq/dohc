@@ -52,7 +52,7 @@ export function reactionRecords(
 
 export interface MessageReactions {
   readonly reactions: readonly Reaction[];
-  /** Reactions that need the person: withheld, refused, or missing. */
+  /** Reactions that need the person: withheld, still sending, refused, or missing. */
   readonly marks: readonly ReactionMark[];
   /** A reaction isn't settled, so the message takes no other yet. */
   readonly busy: boolean;
@@ -74,7 +74,12 @@ export function withLocalReactions(
     if (record.write.operation !== "react" || record.write.args.messageId !== messageId) continue;
     const emoji = emojiKey(record.write.args.emoji);
     const state = localState(record);
-    if (state.kind === "refused" || state.kind === "missing" || state.kind === "withheld")
+    if (
+      state.kind === "refused" ||
+      state.kind === "missing" ||
+      state.kind === "withheld" ||
+      state.kind === "stalled"
+    )
       marks.push({ emoji, mark: localMark(record) });
     if (state.kind === "refused" || state.kind === "missing") continue;
     latest.set(emoji, {
@@ -84,9 +89,10 @@ export function withLocalReactions(
   }
   const reactions: Reaction[] = [];
   const seen = new Set<string>();
+  // A removal that isn't settled keeps its chip, at no reactions and pending, so it still shows it's on its way.
   const shown = (emoji: string, others: number, local: { mine: boolean; pending: boolean }) => {
     const count = others + (local.mine ? 1 : 0);
-    if (count > 0)
+    if (count > 0 || local.pending)
       reactions.push({
         emoji,
         count,

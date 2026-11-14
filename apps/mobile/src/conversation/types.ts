@@ -55,7 +55,10 @@ export interface Reaction {
   readonly pending?: boolean;
 }
 
-/** A reaction of this phone's that needs the person: withheld, refused, or for a message the server can't find. */
+/**
+ * A reaction of this phone's that needs the person: withheld, still sending, refused, or for a message the server can't
+ * find.
+ */
 export interface ReactionMark {
   readonly emoji: string;
   readonly mark: LocalMark;

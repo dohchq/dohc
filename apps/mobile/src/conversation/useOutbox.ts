@@ -9,6 +9,7 @@ import {
   type ConversationWrites,
   type WriteOutbox,
 } from "./conversationWrites";
+import type { OutboxScope } from "./outboxMessages";
 import { nextReaction } from "./reactions";
 import type { LocalMark, Message } from "./types";
 
@@ -155,16 +156,20 @@ export interface ReactActions {
   readonly problems: ReadonlyMap<string, string>;
 }
 
-export function useReact(writes: ConversationWrites, workspaceId: string | null): ReactActions {
+/** `scope`: the account and workspace the reactions are in, or null while no workspace is open. */
+export function useReact(
+  writes: ConversationWrites,
+  scope: (OutboxScope & { readonly workspaceId: string }) | null,
+): ReactActions {
   const [problems, setProblem] = useProblems();
   const react = useCallback(
     (message: Message, emoji: string) => {
       const { threadId } = message;
-      if (workspaceId === null || !threadId || message.local || message.reactionsBusy) return;
+      if (scope === null || !threadId || message.local || message.reactionsBusy) return;
       setProblem(message.id, null);
       void writes
         .react(
-          workspaceId,
+          scope,
           { messageId: message.id, threadId },
           emoji,
           nextReaction(message.reactions, emoji),
@@ -175,7 +180,7 @@ export function useReact(writes: ConversationWrites, workspaceId: string | null)
           AccessibilityInfo.announceForAccessibility(chatWords.reactionNotKept);
         });
     },
-    [writes, workspaceId, setProblem],
+    [writes, scope, setProblem],
   );
   return useMemo(() => ({ react, problems }), [react, problems]);
 }

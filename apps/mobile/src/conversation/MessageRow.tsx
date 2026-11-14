@@ -411,8 +411,9 @@ function MessageActions({
 }
 
 /**
- * The reactions this phone keeps for a message that need the person. A withheld one has Send and Discard; one the
- * server refused, or whose message it can't find, has Discard, and its reaction shows as the server has it.
+ * The reactions this phone keeps for a message that need the person. A withheld one has Send and Discard; one still
+ * sending has Discard, and its reaction stays pending; one the server refused, or whose message it can't find, has
+ * Discard, and its reaction shows as the server has it.
  */
 function ReactionFooter({
   marks,
@@ -429,10 +430,17 @@ function ReactionFooter({
         const problem = actions.problems.get(mark.operationId);
         return (
           <View key={mark.operationId} style={styles.local}>
-            <Text style={[styles.localText, { color: theme.danger }]}>
+            <Text
+              style={[
+                styles.localText,
+                { color: mark.state.kind === "stalled" ? theme.muted : theme.danger },
+              ]}
+            >
               {mark.state.kind === "withheld"
                 ? chatWords.reactionNotSent(emoji)
-                : chatWords.reactionRefused(emoji)}
+                : mark.state.kind === "stalled"
+                  ? chatWords.reactionStillSending(emoji)
+                  : chatWords.reactionRefused(emoji)}
             </Text>
             {problem ? (
               <Text style={[styles.localText, { color: theme.danger }]} accessibilityRole="alert">

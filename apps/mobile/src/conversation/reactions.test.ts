@@ -150,6 +150,38 @@ describe("this phone's reactions over the server's", () => {
     expect(shown.busy).toBe(true);
   });
 
+  it("keep the chip of the account's sole reaction, at none and pending, while its removal isn't settled", () => {
+    const sole = [{ emoji: "👍", count: 1, mine: true }];
+    for (const fields of [
+      {},
+      { withheld: true },
+      { stage: "sending" as const, attempted: true },
+      { stage: "stalled" as const, attempted: true },
+    ]) {
+      const shown = withLocalReactions(sole, [reacted("👍", "removed", fields)], "m-1");
+      expect(shown.reactions).toEqual([{ emoji: "👍", count: 0, pending: true }]);
+      expect(shown.busy).toBe(true);
+    }
+    // Saved, it goes, as the server will show it.
+    expect(withLocalReactions(sole, [reacted("👍", "removed", saved)], "m-1").reactions).toEqual(
+      [],
+    );
+  });
+
+  it("list one still sending, so it can be discarded from its message", () => {
+    const stalled = reacted("👍", "removed", { stage: "stalled", attempted: true });
+    const shown = withLocalReactions([{ emoji: "👍", count: 1, mine: true }], [stalled], "m-1");
+    expect(shown.marks).toEqual([
+      {
+        emoji: "👍",
+        mark: expect.objectContaining({
+          operationId: stalled.operationId,
+          state: { kind: "stalled" },
+        }),
+      },
+    ]);
+  });
+
   it("match an emoji typed in another Unicode form", () => {
     const shown = withLocalReactions(
       [{ emoji: "é", count: 1, mine: true }],
