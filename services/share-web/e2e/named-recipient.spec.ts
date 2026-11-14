@@ -48,7 +48,7 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
     sendTimeoutMs: 1000,
     drainPollMs: 10,
   };
-  const doc = markdownToYDoc("# Shared file\n\nEdit together.");
+  const doc = markdownToYDoc("# Shared file\n\n- [ ] tick me\n\nEdit together.");
   const binding = {
     workspaceId: "named:grant",
     mainVersionId: "main" as const,
@@ -254,6 +254,14 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
     await page.keyboard.insertText(" Browser edit.");
     await expect.poll(() => yDocToMarkdown(doc)).toContain("Browser edit.");
     await expect(page.getByRole("status")).toContainText("Changes saved");
+    const box = editor.getByRole("checkbox");
+    await box.click();
+    await expect.poll(() => yDocToMarkdown(doc)).toContain("- [x] tick me");
+    await expect(box).toBeChecked();
+    await box.click();
+    await expect.poll(() => yDocToMarkdown(doc)).toContain("- [ ] tick me");
+    await expect(box).not.toBeChecked();
+    await expect(box).toHaveAccessibleName("tick me");
     expect(
       await editor.evaluate((node) => node.getBoundingClientRect().height),
     ).toBeGreaterThanOrEqual(360);
@@ -297,6 +305,8 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
     await expect(page.getByLabel("Draft recovery")).toHaveCount(0);
     refuseSession!();
     await expect(editor).toHaveAttribute("contenteditable", "false");
+    await box.click();
+    await expect(box).not.toBeChecked();
     await expect(page.getByLabel("Draft recovery")).toBeVisible();
     await expect(editor).toContainText("Unsynced draft.");
     await page.getByRole("button", { name: "Open current file", exact: true }).click();
