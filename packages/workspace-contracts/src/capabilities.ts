@@ -605,6 +605,9 @@ const LISTED_CAPABILITIES = {
     "Read what your agents' threads are doing with the messages dohc forwarded.",
     { ipc: ["readAgentThreadLines"] },
   ),
+  "agent.thread.open": capability("Open one of your agents' threads in its own tool.", {
+    ipc: ["openAgentThread"],
+  }),
   "agent.thread.t3code.allow": capability("Allow dohc in T3 Code on this computer.", {
     ipc: ["allowDohcInT3Code", "cancelAllowDohcInT3Code"],
   }),

@@ -10747,6 +10747,12 @@ function registerIpcHandlers(): void {
   });
   registerOperations(operationBoundary, agentThreadOperations, {
     readAgentThreadLines: ({ workspaceId }) => agentThreadLinesOf(workspaceId),
+    openAgentThread: async ({ agentId }) => {
+      const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
+      const thread = agents[agentId]?.thread;
+      if (!thread) throw new Error("This agent has no thread to open.");
+      await shell.openExternal(await t3Code().threadLink(thread.id));
+    },
     readT3CodeConnection: t3CodeConnectionState,
     allowDohcInT3Code: async () => {
       allowingT3Code?.abort();

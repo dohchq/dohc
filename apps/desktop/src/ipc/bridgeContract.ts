@@ -8263,6 +8263,16 @@ export const agentThreadOperations = {
     result: T3CodeThreadPage,
     guard: "trusted-sender",
   },
+  // Opens the agent's thread in its tool's own window. Main builds the link
+  // from the agent's saved thread, so a window names an agent and never a link.
+  openAgentThread: {
+    capabilityId: "agent.thread.open",
+    scope: "workspace",
+    channel: "desktop:open-agent-thread",
+    payload: z.strictObject({ workspaceId: z.string().min(1), agentId: AgentId }),
+    guard: "active-workspace",
+    inactiveMessage: "The thread was not opened because this window changed workspaces.",
+  },
   // Readies a thread to serve this workspace as an agent, before the agent is
   // saved as on: sets aside what the agent has unread, then tells the thread
   // what dohc will send it.

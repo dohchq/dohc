@@ -13,6 +13,7 @@
     "desktop:list-not-versioned-files",
     "desktop:list-t3-code-projects",
     "desktop:list-t3-code-threads",
+    "desktop:open-agent-thread",
     "desktop:personal-agents",
     "desktop:app-view",
     "desktop:app-view-event",
