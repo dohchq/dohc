@@ -101,15 +101,23 @@ export function useT3CodeAccess(
       return { state: await bridge().readT3CodeConnection({}), after };
     },
   });
-  // T3 Code's latest answer to an ask made here, and which answer it was.
-  const [answered, setAnswered] = useState<{ state: T3CodeConnectionState; nth: number } | null>(
-    null,
-  );
+  // T3 Code's latest answer to an ask made here, which answer it was, and
+  // the workspace the window showed then.
+  const [answered, setAnswered] = useState<{
+    state: T3CodeConnectionState;
+    nth: number;
+    session: typeof session;
+  } | null>(null);
   // The answer stands over every read that began before it, however late that
   // read comes in. A read that began after it is newer, and replaces it: the
-  // sign-in may have changed elsewhere, as in the Change thread dialog.
+  // sign-in may have changed elsewhere, as in the Change thread dialog. In one
+  // workspace a later read never began earlier, so a replaced answer stays
+  // replaced. Another workspace's reads start over, so the answer ends with
+  // the workspace it was given in.
   const held =
-    answered !== null && (read.value === undefined || read.value.after < answered.nth)
+    answered !== null &&
+    answered.session === session &&
+    (read.value === undefined || read.value.after < answered.nth)
       ? answered.state
       : null;
   const [asking, setAsking] = useState<"here" | "page" | null>(null);
@@ -146,7 +154,7 @@ export function useT3CodeAccess(
       const state = await bridge().allowDohcInT3Code({ access: mode });
       if (!asks.isCurrent(token)) return false;
       answers.current += 1;
-      setAnswered({ state, nth: answers.current });
+      setAnswered({ state, nth: answers.current, session });
       setFailedHere(false);
       allowed = true;
     } catch (cause) {
