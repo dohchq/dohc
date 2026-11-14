@@ -186,11 +186,11 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     return reaching;
   };
   /** Tells a thread what dohc will send it. Rejects when the tool does not take it. */
-  const introduce = (threadId: string, agentName: string) =>
+  const introduce = (threadId: string, agentName: string, severalWorkspaces = false) =>
     dependencies.t3Code.forward({
       threadId,
       how: "line",
-      message: introductionText({ cli: dependencies.cli, agentName }),
+      message: introductionText({ cli: dependencies.cli, agentName, severalWorkspaces }),
       // One introduction for each time a person connects this thread as this agent.
       forwardId: `dohc-intro-${randomUUID()}`,
     });
@@ -274,13 +274,19 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
      * before the agent is saved with it: tells the thread what dohc will send
      * it. Nothing is set aside. A message that still waits for the agent goes
      * to the new thread once it is saved, as when the old thread was gone
-     * from the tool. Rejects when T3 Code does not take the introduction.
+     * from the tool. The new thread gets every workspace the agent forwards
+     * from, so the introduction says when that is more than one. Rejects when
+     * T3 Code does not take the introduction.
      */
     async change(
       workspaceId: string,
-      agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note">,
+      agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note" | "workspaces">,
     ): Promise<void> {
-      await introduce(reached(workspaceId, agent).threadId, agent.name);
+      await introduce(
+        reached(workspaceId, agent).threadId,
+        agent.name,
+        (agent.workspaces?.length ?? 0) > 1,
+      );
     },
     /**
      * Readies the thread an agent has to serve one more workspace, before the

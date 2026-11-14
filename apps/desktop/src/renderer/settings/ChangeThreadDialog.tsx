@@ -18,11 +18,14 @@ export function ChangeThreadDialog(props: {
   agentName: string;
   // The thread the agent has now.
   threadId: string;
+  // How many workspaces besides this one the agent forwards from. An agent
+  // has one thread, so their messages go to the new thread too.
+  otherWorkspaces: number;
   // The new thread is ready: save the agent with it.
   onChanged: (threadId: string) => void;
   onClose: () => void;
 }) {
-  const { workspaceId, agentId, agentName } = props;
+  const { workspaceId, agentId, agentName, otherWorkspaces } = props;
   const [thread, setThread] = useState<T3CodeThreadChoice | null>(null);
   const [ready, setReady] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -116,10 +119,19 @@ export function ChangeThreadDialog(props: {
           <h2 id={`${id}-title`} className="m-0 text-base font-semibold text-ink wrap-anywhere">
             Change {agentName}&apos;s thread
           </h2>
-          <p id={`${id}-body`} className="m-0 text-[13px] text-muted">
-            From now on, dohc forwards to the thread you choose, and the old thread keeps the
-            messages it has.
-          </p>
+          <div id={`${id}-body`} className="flex flex-col gap-1 text-[13px] text-muted">
+            <p className="m-0">
+              From now on, dohc forwards to the thread you choose, and the old thread keeps the
+              messages it has.
+            </p>
+            {otherWorkspaces > 0 ? (
+              <p data-testid="agent-thread-change-workspaces" className="m-0">
+                {`The thread you choose gets messages from this workspace and ${otherWorkspaces} other ${
+                  otherWorkspaces === 1 ? "workspace" : "workspaces"
+                }.`}
+              </p>
+            ) : null}
+          </div>
         </div>
         {/* The choice holds still while its thread is readied. */}
         <div ref={choice} inert={busy} className="flex flex-col gap-4">

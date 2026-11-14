@@ -431,6 +431,12 @@ describe("agent threads", () => {
     expect(order).toEqual(["sent intro"]);
     expect(sent[0]).toMatchObject({ threadId: "t3-thread-2", how: "line" });
     expect(sent[0]!.message).toContain('their agent "Chief"');
+    expect(sent[0]!.message).not.toContain("more than one workspace");
+
+    // A thread that gets several workspaces' messages is told so, and asked to keep them apart.
+    await agentThreads.change(WORKSPACE, { ...next, workspaces: [WORKSPACE, "ws-2"] });
+    expect(sent[1]!.message).toContain("forwards messages from more than one workspace");
+    expect(sent[1]!.message).toContain("Do not carry what you learned from one workspace");
 
     const refused = new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
     forward.mockRejectedValueOnce(refused);
@@ -449,7 +455,7 @@ describe("agent threads", () => {
     expect(order).toEqual(["read m2", "sent workspace"]);
     expect(sent[0]).toMatchObject({ threadId: "t3-thread-1", how: "line" });
     // The thread learns it now holds two workspaces' messages, and the name is quoted.
-    expect(sent[0]!.message.split("\n")[0]).toContain('another workspace, named "Launch"');
+    expect(sent[0]!.message.split("\n")[0]).toContain('from the workspace named "Launch"');
     expect(sent[0]!.message).toContain("Do not carry what you learned from one workspace");
 
     // Nothing is added for a thread dohc cannot tell, or a workspace that is gone.

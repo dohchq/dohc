@@ -107,6 +107,9 @@ const bridgeMock = {
     async (_payload: { workspaceId: string; agentId: string; threadId: string }): Promise<void> =>
       undefined,
   ),
+  readyAgentThreadWorkspace: vi.fn(
+    async (_payload: { workspaceId: string; agentId: string }): Promise<void> => undefined,
+  ),
 };
 vi.mock("../bridge", () => ({ bridge: () => bridgeMock }));
 
@@ -132,6 +135,10 @@ beforeEach(() => {
   bridgeMock.allowDohcInT3Code.mockReset();
 });
 afterEach(cleanup);
+
+// The switch for the workspace the window shows, on the page of an agent with a thread.
+const workspaceSwitch = (page: ReturnType<typeof within>) =>
+  page.getByRole("switch", { name: "Forward messages from this workspace to Chief of Staff" });
 
 function renderList(settings: DesktopUserSettings = SETTINGS) {
   const onSave = vi.fn(
@@ -430,7 +437,10 @@ it("saves the forwarding switch, what a message does while the thread works, and
   expect(page.queryByTestId("agent-connect")).toBeNull();
   expect(page.queryByText("Through MCP")).toBeNull();
   expect((await page.findByText(/^Allowed until /)).textContent).toMatch(/2099/);
-  expect(page.getByTestId("agent-thread-workspace").textContent).toBe("This workspace");
+  expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("true");
+  expect(page.getByTestId("agent-thread-workspace").textContent).toBe(
+    "Forward from this workspace",
+  );
   const saved = () => onSave.mock.lastCall![0].agents["t3-code"]!;
 
   await userEvent.click(page.getByRole("switch", { name: "Forward messages to Chief of Staff" }));
@@ -1191,4 +1201,272 @@ it("starts the Change thread dialog on the choice of mode when dohc is not allow
   await waitFor(() =>
     expect(document.activeElement).toBe(box.getByRole("combobox", { name: "Project" })),
   );
+});
+
+// An agent's thread gets a workspace's messages only once the person turns
+// that workspace on (ADR 0016). Here the agent forwards from ws-2, and the
+// window shows ws-1.
+const ELSEWHERE = withChief({ workspaces: ["ws-2"] });
+const askDialog = () => within(screen.getByTestId("agent-workspace-dialog"));
+const askConfirm = () => screen.getByTestId<HTMLButtonElement>("agent-workspace-confirm");
+// The page of an agent in a workspace it may not forward from, which has no Thread row.
+async function openChiefPageIn(settings: DesktopUserSettings) {
+  const rendered = renderList(settings);
+  await userEvent.click(screen.getByRole("button", { name: "Chief of Staff" }));
+  return { ...rendered, page: within(screen.getByTestId("agent-page")) };
+}
+// The same page with the ask open.
+async function openAsk(settings: DesktopUserSettings = ELSEWHERE) {
+  const opened = await openChiefPageIn(settings);
+  const turnOn = workspaceSwitch(opened.page);
+  await userEvent.click(turnOn);
+  return { ...opened, turnOn };
+}
+
+it("offers no thread, Open or Change in a workspace the agent does not forward from", async () => {
+  const { page, onError } = await openChiefPageIn(ELSEWHERE);
+  // T3 Code allows dohc, which is when a page that forwards from here reads the thread.
+  expect(await page.findByText(/^Allowed until /)).toBeTruthy();
+  expect(bridgeMock.readAgentThread).not.toHaveBeenCalled();
+  expect(page.queryByTestId("agent-page-thread")).toBeNull();
+  expect(page.queryByRole("button", { name: "Open in T3 Code" })).toBeNull();
+  expect(page.queryByRole("button", { name: "Change thread" })).toBeNull();
+  expect(onError).not.toHaveBeenCalled();
+
+  // The page says why, on the row with the switch that changes it.
+  expect(page.getByTestId("agent-thread-workspace").textContent).toBe(
+    "Forward from this workspaceIts thread gets no messages from this workspace.",
+  );
+  expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("false");
+
+  // What does not depend on this workspace stays.
+  expect(page.getByRole("switch", { name: "Forward messages to Chief of Staff" })).toBeTruthy();
+  expect(page.getByRole("button", { name: "Allow again" })).toBeTruthy();
+  expect(page.getByRole("radio", { name: "Wait in line" })).toBeTruthy();
+  expect(page.getByRole("textbox", { name: "Your note" })).toBeTruthy();
+});
+
+it("asks before a workspace's messages go to the thread, and says what the thread then holds", async () => {
+  const { page, turnOn, onSave } = await openAsk();
+  const dialog = screen.getByRole("dialog", {
+    name: "Forward messages from Trip to Chief of Staff?",
+  });
+  const holds =
+    "From now on, dohc forwards messages from this workspace to Chief of Staff's thread, which also holds messages from 1 other workspace.";
+  const appears =
+    "What the thread learns in one workspace can appear in what it posts in another, where other people can read it.";
+  expect(askDialog().getByText(holds)).toBeTruthy();
+  expect(askDialog().getByText(appears)).toBeTruthy();
+  // A screen reader reads both sentences after the title.
+  expect(document.getElementById(dialog.getAttribute("aria-describedby")!)!.textContent).toBe(
+    holds + appears,
+  );
+  expect(askConfirm().textContent).toBe("Forward from this workspace");
+  expect(document.activeElement).toBe(askConfirm());
+  // Nothing has taken effect.
+  expect(bridgeMock.readyAgentThreadWorkspace).not.toHaveBeenCalled();
+  expect(onSave).not.toHaveBeenCalled();
+  expect(turnOn.getAttribute("aria-checked")).toBe("false");
+
+  await userEvent.click(askDialog().getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(turnOn));
+  expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("false");
+  expect(bridgeMock.readyAgentThreadWorkspace).not.toHaveBeenCalled();
+  expect(onSave).not.toHaveBeenCalled();
+  expect(bridgeMock.readAgentThread).not.toHaveBeenCalled();
+});
+
+it("counts the other workspaces in the ask, and says when the agent's forwarding is off", async () => {
+  const { rerender } = await openAsk(withChief({ workspaces: ["ws-2", "ws-3"] }));
+  expect(
+    askDialog().getByText(
+      "From now on, dohc forwards messages from this workspace to Chief of Staff's thread, which also holds messages from 2 other workspaces.",
+    ),
+  ).toBeTruthy();
+  // An agent that forwards from no workspace has a thread that held some before.
+  rerender(withChief({ workspaces: [], enabled: false }));
+  expect(
+    askDialog().getByText(
+      "Once Forward messages is on, dohc forwards messages from this workspace to Chief of Staff's thread, which keeps the messages it already has.",
+    ),
+  ).toBeTruthy();
+});
+
+it("turns a workspace on: tells the thread, then saves the agent with it and nothing else", async () => {
+  const telling = deferred();
+  bridgeMock.readyAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
+  const { page, onSave, rerender } = await openAsk();
+  // Two presses before the window draws again tell the thread once.
+  act(() => {
+    askConfirm().click();
+    askConfirm().click();
+  });
+  expect(bridgeMock.readyAgentThreadWorkspace).toHaveBeenCalledExactlyOnceWith({
+    workspaceId: "ws-1",
+    agentId: "t3-code",
+  });
+  // While dohc tells the thread the button says so, nothing is saved, and the dialog stays.
+  expect(askConfirm().textContent).toBe("Turning on…");
+  expect(askConfirm().disabled).toBe(true);
+  expect(askDialog().getByRole<HTMLButtonElement>("button", { name: "Cancel" }).disabled).toBe(
+    true,
+  );
+  fireEvent.keyDown(document.body, { key: "Escape" });
+  expect(screen.getByTestId("agent-workspace-dialog")).toBeTruthy();
+  expect(onSave).not.toHaveBeenCalled();
+
+  await act(async () => telling.resolve());
+  expect(onSave).toHaveBeenCalledOnce();
+  const saved = onSave.mock.calls[0]![0];
+  expect(saved).toEqual(withChief({ workspaces: ["ws-2", "ws-1"] }));
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+  expect(bridgeMock.readyAgentThreadWorkspace).toHaveBeenCalledOnce();
+
+  // The saved agent's page is the page of a workspace it forwards from.
+  rerender(saved);
+  expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("true");
+  expect(await page.findByText("Chief of Staff: dohc")).toBeTruthy();
+  expect(page.getByRole("button", { name: "Open in T3 Code" })).toBeTruthy();
+  expect(page.getByRole("button", { name: "Change thread" })).toBeTruthy();
+  expect(page.getByTestId("agent-thread-workspace").textContent).toBe(
+    "Forward from this workspace",
+  );
+});
+
+it("reads the thread only once the workspace is saved, not when Settings first show it", async () => {
+  const saving = deferred<DesktopUserSettingsResult | null>();
+  const { page, onSave, rerender } = await openAsk();
+  onSave.mockReturnValueOnce(saving.promise);
+  await userEvent.click(askConfirm());
+  await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
+  const saved = onSave.mock.calls[0]![0];
+  // Settings show the change at once. Main does not have it yet, and would
+  // find no thread for this workspace.
+  rerender(saved);
+  expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("true");
+  expect(askConfirm().textContent).toBe("Turning on…");
+  expect(page.queryByTestId("agent-page-thread")).toBeNull();
+  expect(bridgeMock.readAgentThread).not.toHaveBeenCalled();
+
+  await act(async () => saving.resolve({ settings: saved, source: "stored" }));
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+  expect(await page.findByText("Chief of Staff: dohc")).toBeTruthy();
+  expect(bridgeMock.readAgentThread).toHaveBeenCalledExactlyOnceWith({
+    workspaceId: "ws-1",
+    agentId: "t3-code",
+  });
+});
+
+it("saves nothing when the thread could not be told, says why in the ask, and asks again", async () => {
+  const stopped = "T3 Code is not running on this computer.";
+  bridgeMock.readyAgentThreadWorkspace.mockRejectedValueOnce(new Error(stopped));
+  const { page, onSave, onError } = await openAsk();
+  await userEvent.click(askConfirm());
+  expect((await askDialog().findByTestId("agent-workspace-error")).textContent).toBe(stopped);
+  expect(askDialog().getByRole("alert").textContent).toBe(stopped);
+  expect(onSave).not.toHaveBeenCalled();
+  // The ask is still open, so it says why itself, and files no notice.
+  expect(onError).not.toHaveBeenCalled();
+  expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("false");
+  expect(bridgeMock.readAgentThread).not.toHaveBeenCalled();
+  expect(askConfirm().textContent).toBe("Forward from this workspace");
+  expect(askConfirm().disabled).toBe(false);
+  expect(document.activeElement).toBe(askConfirm());
+
+  // The same button asks again, and the reason goes while it does.
+  const telling = deferred();
+  bridgeMock.readyAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
+  await userEvent.click(askConfirm());
+  expect(askDialog().queryByTestId("agent-workspace-error")).toBeNull();
+  expect(bridgeMock.readyAgentThreadWorkspace).toHaveBeenCalledTimes(2);
+  await act(async () => telling.resolve());
+  expect(onSave).toHaveBeenCalledOnce();
+  expect(onSave.mock.calls[0]![0].agents["t3-code"]!.workspaces).toEqual(["ws-2", "ws-1"]);
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+});
+
+it("says in its own words that the thread could not be told, when the error says nothing", async () => {
+  bridgeMock.readyAgentThreadWorkspace.mockRejectedValueOnce(undefined);
+  const { onSave } = await openAsk();
+  await userEvent.click(askConfirm());
+  expect((await askDialog().findByTestId("agent-workspace-error")).textContent).toBe(
+    "dohc could not tell Chief of Staff's thread about this workspace.",
+  );
+  expect(onSave).not.toHaveBeenCalled();
+});
+
+it("turns a workspace off without asking: saves the agent without it and nothing else", async () => {
+  const several = withChief({ workspaces: ["ws-2", "ws-1", "ws-3"] });
+  const { page, row, onSave, rerender } = await openChiefPage(several);
+  expect(await row.findByText("Chief of Staff: dohc")).toBeTruthy();
+  await userEvent.click(workspaceSwitch(page));
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+  expect(onSave).toHaveBeenCalledOnce();
+  const saved = onSave.mock.calls[0]![0];
+  expect(saved).toEqual(withChief({ workspaces: ["ws-2", "ws-3"] }));
+  expect(bridgeMock.readyAgentThreadWorkspace).not.toHaveBeenCalled();
+
+  // The page is then one of a workspace the agent does not forward from.
+  rerender(saved);
+  expect(page.queryByTestId("agent-page-thread")).toBeNull();
+  expect(page.queryByRole("button", { name: "Change thread" })).toBeNull();
+  expect(workspaceSwitch(page).getAttribute("aria-checked")).toBe("false");
+  // Turning it on again asks again.
+  await userEvent.click(workspaceSwitch(page));
+  expect(screen.getByTestId("agent-workspace-dialog")).toBeTruthy();
+  expect(bridgeMock.readyAgentThreadWorkspace).not.toHaveBeenCalled();
+});
+
+it("saves no workspace for an answer that comes after the window changed workspaces", async () => {
+  const telling = deferred();
+  bridgeMock.readyAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
+  const { onSave, onError, rerender } = await openAsk();
+  await userEvent.click(askConfirm());
+  // The window now shows ws-2, which the agent forwards from.
+  rerender(ELSEWHERE, "ws-2");
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+  await act(async () => telling.resolve());
+  expect(onSave).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+
+  // Back in ws-1 the ask is closed, and the workspace is still off.
+  rerender(ELSEWHERE, "ws-1");
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+  expect(
+    workspaceSwitch(within(screen.getByTestId("agent-page"))).getAttribute("aria-checked"),
+  ).toBe("false");
+});
+
+it("saves no workspace for an answer that comes after the agent's page is gone", async () => {
+  const telling = deferred();
+  bridgeMock.readyAgentThreadWorkspace.mockReturnValueOnce(telling.promise);
+  const { onSave, onError, rerender } = await openAsk();
+  await userEvent.click(askConfirm());
+  // The agent was removed from the settings file.
+  rerender(SETTINGS);
+  expect(screen.queryByTestId("agent-workspace-dialog")).toBeNull();
+  await act(async () => telling.resolve());
+  expect(onSave).not.toHaveBeenCalled();
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it("says in the Change thread dialog how many other workspaces get the new thread", async () => {
+  const { rerender } = await openChangeDialog(withChief({ workspaces: ["ws-1", "ws-2"] }));
+  const others = () => changeDialog().queryByTestId("agent-thread-change-workspaces");
+  expect(others()!.textContent).toBe(
+    "The thread you choose gets messages from this workspace and 1 other workspace.",
+  );
+  // A screen reader reads it with the dialog's first sentence.
+  const dialog = screen.getByRole("dialog", { name: "Change Chief of Staff's thread" });
+  expect(document.getElementById(dialog.getAttribute("aria-describedby")!)!.textContent).toMatch(
+    /messages it has\.The thread you choose gets messages from this workspace and 1 other workspace\.$/,
+  );
+  rerender(withChief({ workspaces: ["ws-3", "ws-1", "ws-2"] }));
+  expect(others()!.textContent).toBe(
+    "The thread you choose gets messages from this workspace and 2 other workspaces.",
+  );
+  // An agent that forwards from this workspace alone has nothing more to say.
+  rerender(WITH_CHIEF);
+  expect(others()).toBeNull();
 });
