@@ -717,9 +717,6 @@ fn link_message_payload(message_id: &str, body: &str) -> serde_json::Value {
     })
 }
 
-/// A link message replays with its link grant, link principal and name
-/// snapshot, names no account, and reads back the same whether it applied
-/// at once or waited for its thread.
 #[test]
 fn a_link_message_replays_with_its_link_and_no_account() {
     use dohc_engine_domain::{ChatActorKind, ChatMessageLinkAuthor, LinkedChatStore};
@@ -801,10 +798,6 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     );
 }
 
-/// A link message names its link and nothing account-shaped, stays within
-/// the link body cap, uses the link message id prefix and comes from its link
-/// principal's relay origin; no other message names a link. Each refusal is
-/// recorded and acked, and the next op applies.
 #[test]
 fn a_link_message_with_an_account_or_without_its_link_is_refused() {
     let (_scratch, _path, mut engine) = open_store();
@@ -882,9 +875,6 @@ fn a_link_message_with_an_account_or_without_its_link_is_refused() {
     );
 }
 
-/// Only the relay names a message with the link message prefix. A device's
-/// message that takes such an id first is refused, so the link post that
-/// later arrives with it still applies.
 #[test]
 fn a_message_that_takes_a_link_message_id_is_refused() {
     let (_scratch, _path, mut engine) = open_store();
@@ -990,10 +980,6 @@ fn agent_chats(engine: &EngineStore, agent_id: &str) -> Vec<String> {
         .expect("agent chats")
 }
 
-/// The relay writes a personal agent's DM, a new thread and a post from the
-/// agent's origin. The post is the agent's for its account, names its
-/// connection, and applies the same on a named recipient's computer and
-/// after waiting for its thread.
 #[test]
 fn a_personal_agent_origin_writes_its_dm_threads_and_posts() {
     use dohc_engine_domain::LinkedChatStore;
@@ -1163,9 +1149,6 @@ fn a_personal_agent_post_that_is_not_the_agents_own_is_refused() {
     assert_eq!(stored, 0);
 }
 
-/// A personal agent posts in a Group, in its own chat, or on a file. A post in
-/// a person's DM or another agent's chat is refused, and so is a waiting post
-/// whose thread arrives in one.
 #[test]
 fn a_personal_agent_posts_only_where_the_relay_lets_it() {
     let (_scratch, _path, mut engine) = open_store();
@@ -1416,8 +1399,6 @@ fn a_personal_agent_posts_only_where_the_relay_lets_it() {
     assert_eq!(stored, 0);
 }
 
-/// The personal origin carries only its agent's DM, new threads under the
-/// personal prefix, and posts. Anything else from it is refused.
 #[test]
 fn a_personal_agent_origin_carries_only_its_chat() {
     let (_scratch, _path, mut engine) = open_store();
@@ -1440,7 +1421,6 @@ fn a_personal_agent_origin_carries_only_its_chat() {
             &NoLiveLeases,
         ));
     }
-    // Only its own agent's DM, and only threads it names as the relay does.
     let mut group = personal_dm_payload(PERSONAL_AGENT);
     group["kind"] = json!("channel");
     group["slug"] = json!("helper");
@@ -1490,9 +1470,6 @@ fn a_personal_agent_origin_carries_only_its_chat() {
     );
 }
 
-/// No other origin writes as a personal agent: not its id, a connection, or
-/// either personal prefix. A thread a device takes first under the personal
-/// prefix is refused, so the relay's own thread still applies.
 #[test]
 fn no_other_origin_writes_as_a_personal_agent() {
     let (_scratch, _path, mut engine) = open_store();
@@ -1565,8 +1542,6 @@ fn no_other_origin_writes_as_a_personal_agent() {
     assert_eq!(message_connections(&engine, "own-agent"), (None, None));
 }
 
-/// A link holder's post starts no Group automation, even one whose prefix it
-/// matches. A member's same post does.
 #[test]
 fn a_link_post_claims_no_group_automation() {
     let (_scratch, _path, mut engine) = open_store();
@@ -3687,8 +3662,6 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     );
 }
 
-/// #5c (reserved agent-channel): the agent kind/name/slug hold iff the reserved
-/// agent wire id is present; malformed shapes are rejected, a correct one applies.
 #[test]
 fn reserved_agent_channel_shapes_rejected() {
     let (_scratch, _path, mut engine) = open_store();
@@ -3726,8 +3699,6 @@ fn reserved_agent_channel_shapes_rejected() {
     ));
 }
 
-/// A thread whose agent's wire id maps to a group is refused, and the next op
-/// from its device still applies.
 #[test]
 fn a_thread_for_an_agent_wire_id_that_maps_to_a_group_is_refused() {
     let (_scratch, _path, mut engine) = open_store();
@@ -3913,10 +3884,6 @@ fn an_agent_chat_from_sync_takes_its_slug_from_a_group() {
     assert_eq!(name_and_slug(&peer, "notes-group"), moved_notes_group());
 }
 
-/// A name from another device reaches chat without characters that hide or
-/// reorder text, for a person, an agent and the person it acts for, a
-/// reaction, and a post that waited for its thread. Joining characters and
-/// variation selectors stay.
 #[test]
 fn imported_chat_names_drop_characters_that_hide_or_reorder_text() {
     let (_scratch, _path, mut engine) = open_store();
@@ -5042,8 +5009,6 @@ fn log_reads(reads: &std::sync::atomic::AtomicUsize) -> usize {
 fn replay_reads_the_log_only_when_the_builds_kinds_change() {
     let (_scratch, path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "read-fixture");
-    // A copy that hasn't recorded its owner keeps nothing quietly, so it
-    // never scans and stores nothing.
     let reads = watch_log_reads(&mut engine);
     assert_eq!(
         replay_retained_owner_private(&mut engine, &NoFaults).expect("unseeded"),
@@ -5074,7 +5039,6 @@ fn replay_reads_the_log_only_when_the_builds_kinds_change() {
     let this_build = stored_fingerprint(&engine).expect("stored");
     assert!(this_build.contains("chat.thread.read.set"));
 
-    // Reopened by the same build, it reads only the fingerprint.
     drop(engine);
     let mut engine = EngineStore::open(&path, 3_001).expect("reopen");
     let reads = watch_log_reads(&mut engine);
@@ -5099,8 +5063,6 @@ fn replay_reads_the_log_only_when_the_builds_kinds_change() {
     assert_eq!(log_reads(&reads), before);
     assert_eq!(applies.get(), 1);
 
-    // A crash before the fingerprint commits leaves the next open to scan
-    // again, which finds nothing left to apply.
     let crash = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
     assert!(matches!(
         replay_retained_owner_private(&mut engine, crash.as_ref()),
@@ -5283,8 +5245,6 @@ fn a_record_that_fails_to_replay_stays_kept_and_the_rest_still_apply() {
         Some(FUTURE_PRIVATE_KIND)
     );
     assert_eq!(tried.borrow().len(), 4);
-    // Then the fingerprint holds: no more scans, and the record stays kept
-    // for the next build whose owner-private kinds differ.
     assert_eq!(replay(&mut engine).expect("settled"), 0);
     assert_eq!(tried.borrow().len(), 4);
     assert_eq!(log_row(&engine, "broken", 0).expect("kept").3, "refused");
@@ -5330,8 +5290,6 @@ fn a_feed_read_with_a_null_marker_is_malformed() {
     assert_eq!(feed_rows, 0);
 }
 
-/// The engine's owner-private list and the relay's registry name the same
-/// kinds, and each routes to the chat applier that replays it.
 #[test]
 fn the_owner_private_kinds_match_the_relay_registry() {
     let source = std::fs::read_to_string(

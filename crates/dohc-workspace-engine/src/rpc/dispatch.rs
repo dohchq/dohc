@@ -15,7 +15,10 @@ use serde_json::json;
 
 fn method_requires_initial_capture_ready(method: &str) -> bool {
     (method.starts_with("sync.")
-        && !matches!(method, "sync.remoteChanges" | "sync.collectionsWaiting"))
+        && !matches!(
+            method,
+            "sync.remoteChanges" | "sync.collectionsWaiting" | "sync.firstExportsHeldOpen"
+        ))
         || method.starts_with("share.")
         || method.starts_with("links.")
         || method.starts_with("search.")
@@ -490,6 +493,10 @@ impl EngineService {
                 Box::pin(self.sync_probe(&ctx, request.workspace, request.params)).await?
             }
             "sync.remoteChanges" => self.sync_remote_changes(&ctx, request.workspace).await?,
+            "sync.firstExportsHeldOpen" => {
+                self.sync_first_exports_held_open(&ctx, request.workspace)
+                    .await?
+            }
             "sync.collectionsWaiting" => {
                 self.sync_collections_waiting(&ctx, request.workspace)
                     .await?
@@ -1827,6 +1834,7 @@ mod tests {
             "sync.applyPull",
             "sync.pullHosted",
             "sync.remoteChanges",
+            "sync.firstExportsHeldOpen",
             "sync.push",
             "sync.recoverOrigin",
             "versionedBinary.read",

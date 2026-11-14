@@ -543,9 +543,6 @@ fn measure_hold(case: &str, lineage: &Lineage, updates: &[Vec<u8>], merges: bool
     });
 }
 
-/// Measure a real released hold of `count` pending entries through the
-/// whole inspection: its window, each activation, validating every entry,
-/// the tail's commitment, the merge, the projection and the artifact.
 fn measure_released_hold(count: usize) {
     let case = format!("released hold of {count} stored entries");
     let (f, binding, entries) = released_with_pending_entries(count);
@@ -722,9 +719,6 @@ fn measure_held_proof_peak_heap() {
     measure_released_hold(50_000);
 }
 
-/// A measurement counts only a complete preservation: a contribution whose
-/// dependency never arrives leaves the merge pending, and `measure` refuses
-/// it before it reports anything.
 #[test]
 #[ignore = "measurement: run with --release --ignored --nocapture --test-threads=1"]
 #[should_panic(expected = "PendingContributionDependencies")]

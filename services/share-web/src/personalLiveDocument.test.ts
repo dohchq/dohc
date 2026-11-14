@@ -19,11 +19,6 @@ import { PERSONAL_SIGN_IN_UNAVAILABLE, servePersonalMcp } from "./personalMcp";
 import { createPersonalLiveClient } from "./personalLiveClient";
 import { LIVE_DOCUMENT_PREPARING, remoteLiveDocument } from "./remoteLiveDocument";
 
-// A personal agent's live document tools, against a fake relay and a real
-// live socket. The relay decides readiness, reach and level; these tests check
-// what the tools ask it, which token each session carries, and how each answer
-// reads to the agent.
-
 const limits = {
   provider: {
     frames: {
@@ -450,7 +445,6 @@ it("says a full connection limit at once when the relay closes the socket for it
 it("says to try again when the relay closes the socket because it can't check the sign-in, and reads once it can", async () => {
   let reason: string | undefined = "personal_agent_unavailable";
   const f = await fixture({ close: () => (reason ? [1013, reason] : undefined) });
-  // Without the close handling, the call answers with no code, so the agent can't tell that a retry may help.
   expect(await f.call("dohc_edit_document", { find: "world", replacement: "friend" })).toEqual({
     ok: false,
     path: "doc.md",

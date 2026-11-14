@@ -86,10 +86,6 @@ test("in-editor image: subfolder doc renders a relative image under its folder",
 });
 
 test("in-editor image: a subfolder doc renders an UPWARD-relative image from the workspace root", async () => {
-  // The global-folder attachment mode links a nested doc to one folder at the
-  // workspace root with `../`. This proves the whole path is live: the relaxed
-  // sanitizer preserves `..`, the resolver normalizes it back under the root,
-  // and the dohc-file protocol serves the bytes (naturalWidth > 0).
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {

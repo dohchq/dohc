@@ -1,8 +1,8 @@
 use dohc_engine_domain::{
-    ComparisonStatus, ConflictChoice, ConflictContentKind, ConflictStatus, CreateNamedVersion,
-    DomainError, MergeTextFileFromVersion, MergeTextFileResult, NoFaults, ResolveConflictKind,
-    ResolveTextConflict, VersionedTextStore, WriteBinaryFile, WriteText, binary_delete_job_id,
-    binary_write_job_id, write_binary_file_in_tx,
+    CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind, ConflictStatus,
+    CreateNamedVersion, DomainError, MergeTextFileFromVersion, MergeTextFileResult, NoFaults,
+    ResolveConflictKind, ResolveTextConflict, VersionedTextStore, WriteBinaryFile, WriteText,
+    binary_delete_job_id, binary_write_job_id, write_binary_file_in_tx,
 };
 use dohc_engine_storage::{
     EngineStore, MaterializationOperation, Preimage, hex_sha256, put_binary_blob,
@@ -164,9 +164,6 @@ fn head_content_kind(store: &EngineStore, version_id: &str, path: &str) -> Strin
         .expect("head content kind")
 }
 
-/// Differing bytes open a conflict carrying both sides, and each side resolves
-/// to its own bytes.
-///
 #[test]
 fn differing_bytes_open_a_conflict_resolvable_by_side() {
     let (_scratch, mut store) = open();
@@ -255,9 +252,22 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
     assert_eq!(moment_count(&store), before);
     assert_eq!(binary_head_sha(&store, "main", "logo.png"), main_sha);
 
-    // The kept conflict counts as merged, so the version's next bytes conflict
-    // again. That conflict resolves the other way, so both choices cannot be
-    // wired to the same side.
+    let comparison_after_keeping_current = VersionedTextStore::new(&mut store)
+        .compare_text_file_versions(&CompareTextFileVersions {
+            workspace_id: WS.to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "feat".to_owned(),
+            path: "logo.png".to_owned(),
+        })
+        .expect("compare after keeping current");
+    assert_eq!(
+        comparison_after_keeping_current
+            .base
+            .unwrap()
+            .snapshot
+            .blob_sha256,
+        feat_sha
+    );
     let feat_sha = write_binary(
         &mut store,
         "feat",
@@ -296,10 +306,6 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
     assert_eq!(binary_head_sha(&store, "main", "logo.png"), feat_sha);
 }
 
-/// A new binary file, present only in the source: base and current are both
-/// absent, so nothing on the target can be lost and the merge fast-forwards
-/// instead of asking the user to adjudicate a disagreement that does not exist.
-///
 #[test]
 fn a_new_source_only_binary_file_fast_forwards() {
     let (_scratch, mut store) = open();

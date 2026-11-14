@@ -1087,7 +1087,6 @@ fn a_rolled_back_transition_keeps_the_previous_state_and_its_pull() {
     ));
     assert_eq!(pull_token(&engine).as_ref(), Some(&token));
 
-    // Saving a claim refusal, after `pending` committed.
     let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
     let claims = RelaySyncClient::new(ClaimRelay::default());
     *claims.transport().refusal.lock().unwrap() = Some(RelayError::EpochSuperseded);

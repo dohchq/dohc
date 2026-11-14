@@ -48,7 +48,6 @@ function nativeHost(adopted: boolean) {
   });
 }
 
-// The relay's retained stop cut for an activated service owner: register, no events, fence already recorded.
 function stopAccess(client: unknown) {
   const store = {
     openStopRestoreCut: () => ({

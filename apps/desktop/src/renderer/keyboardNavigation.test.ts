@@ -104,7 +104,6 @@ it("draws focus only under the keyboard's mark", () => {
       .filter((part) => part.includes(":focus-visible"));
     for (const part of parts) expect(part, selector).toContain(`[${KEYBOARD_NAV_ATTRIBUTE}] `);
   }
-  // A keyboard focus rule that hides the outline leaves a row with no line.
   for (const [rule, body] of css.matchAll(
     /\[data-keyboard-nav\][^{}]*:focus-visible[^{}]*\{([^}]*)\}/g,
   )) {

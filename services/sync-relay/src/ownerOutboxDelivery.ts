@@ -33,6 +33,7 @@ import {
 } from "./storage/serviceKeptEdits.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 import { receiptFirstSeed, type ServiceSeedDelivery } from "./serviceOwnerTransport.js";
+import { asRelayWrite } from "./relayMainThreadTiming.js";
 
 export type LiveAdmissionValidation =
   | LiveJournalValidation
@@ -41,6 +42,18 @@ export type LiveAdmissionValidation =
       readonly reason: "admission-unavailable";
       waitForCapacity(signal?: AbortSignal): Promise<void>;
     };
+
+/** Where one admission's validations spent their time, in milliseconds, added across its attempts. */
+export interface LiveCheckTiming {
+  /** From sending the work to the worker until its answer arrived, less the worker's own time. */
+  hopMs: number;
+  /** In the worker: rebuilding the document from the checkpoint, the suffix and the candidate. */
+  replayMs: number;
+  /** In the worker: projecting the rebuilt document to Markdown. */
+  projectionMs: number;
+  /** In the worker, outside the replay and the projection. */
+  workerOtherMs: number;
+}
 
 export interface OwnerOutboxAdmission {
   readonly activation?: ServiceActivationAccess;
@@ -69,6 +82,7 @@ export interface OwnerOutboxAdmission {
       retainStateUpdate?: boolean;
     },
     signal?: AbortSignal,
+    timing?: LiveCheckTiming,
   ): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
 
@@ -261,7 +275,7 @@ export async function drainOwnerOutbox(
     seedDelivery?: ServiceSeedDelivery;
     applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
   },
-): Promise<{ admittedEntries: number; hasMore: boolean; retryReady?: boolean }> {
+): Promise<{ admittedEntries: number; hasMore: boolean; retryReady?: boolean; empty?: boolean }> {
   const { storage, admission, client, registrationId, binding, host, signal, adoption } = options;
   for (const value of [admission.maxEntriesPerDrain, admission.maxBytesPerDrain]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid owner drain budget.");
@@ -356,7 +370,7 @@ export async function drainOwnerOutbox(
   }
   if (status.pendingBytes === 0) {
     if (!receiptFirst) adoption.applied();
-    return { admittedEntries: 0, hasMore: false };
+    return { admittedEntries: 0, hasMore: false, empty: true };
   }
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
   const quarantine = async (known: OwnerKnownRefusal) => {
@@ -509,24 +523,26 @@ export async function drainOwnerOutbox(
         check();
         return { admittedEntries, hasMore: true, retryReady: true };
       }
-      const committed = storage.commitLiveUpdateJournal(
-        {
-          host,
-          actor,
-          expectedAuthority: current.authority,
-          trustedAccount,
-          metadata: {
-            deliveryId: entry.deliveryId,
-            updateDigest: entry.updateDigest,
-            binding,
-            ...(authorContext ? { authorContext } : {}),
+      const committed = asRelayWrite("owner-outbox", () =>
+        storage.commitLiveUpdateJournal(
+          {
+            host,
+            actor,
+            expectedAuthority: current.authority,
+            trustedAccount,
+            metadata: {
+              deliveryId: entry.deliveryId,
+              updateDigest: entry.updateDigest,
+              binding,
+              ...(authorContext ? { authorContext } : {}),
+            },
+            cutToken: cut.cut,
+            validation,
+            updateBytes: entry.update,
+            receivedAtMs: Date.now(),
           },
-          cutToken: cut.cut,
-          validation,
-          updateBytes: entry.update,
-          receivedAtMs: Date.now(),
-        },
-        admission.activation,
+          admission.activation,
+        ),
       );
       if (committed.result.kind === "retry")
         return { admittedEntries, hasMore: true, retryReady: true };

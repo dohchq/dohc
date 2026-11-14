@@ -6,6 +6,7 @@ import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-upda
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import { createLiveFrameSession } from "@dohc/live-session-contract/live-frame";
 import type { LiveAuthorContext } from "@dohc/live-session-contract";
+import { isNamedLiveStopped } from "@dohc/security-contract/link-refusal";
 import {
   createNamedLiveProvider,
   type NamedLiveProviderLimits,
@@ -70,6 +71,8 @@ class Refused extends Error {}
 export class LiveAuthorityUnavailableError extends Error {}
 /** The server answered that it cannot start editing now. The page tries again by itself. */
 export class LiveHostUnavailableError extends Error {}
+/** The server answered that live editing of the document stopped until its owner starts it again. */
+export class LiveStoppedError extends Error {}
 /** The server answered that the link can take no more people. Trying again cannot help. */
 export class LiveLinkFullError extends Error {}
 /** The server answered that the owner removed this account's access. */
@@ -181,7 +184,8 @@ export function createNamedLiveBrowserTransport<
         value.status !== "disconnected" ||
         value.reason === "authority-unavailable" ||
         value.reason === "access-removed" ||
-        value.reason === "link-full"
+        value.reason === "link-full" ||
+        value.reason === "live-stopped"
       )
         return;
       reconnectTimer = setTimeout(() => {
@@ -294,10 +298,12 @@ export function createNamedLiveBrowserTransport<
             if (refused)
               throw record(value) && value.code === "share_access_removed"
                 ? new AccessRemoved()
-                : new LiveAuthorityUnavailableError();
+                : isNamedLiveStopped(value, response.status)
+                  ? new LiveStoppedError()
+                  : new LiveAuthorityUnavailableError();
             return value;
           } catch (error) {
-            throw refused && !(error instanceof AccessRemoved)
+            throw refused && !(error instanceof AccessRemoved || error instanceof LiveStoppedError)
               ? new LiveAuthorityUnavailableError()
               : error;
           } finally {
@@ -604,9 +610,11 @@ export function createNamedLiveBrowserTransport<
                     ? !options.authorize && "grantId" in target
                       ? await recheck(held, String(target.grantId))
                       : "authority-unavailable"
-                    : error instanceof LiveHostUnavailableError
-                      ? "host-unavailable"
-                      : "connection-failed",
+                    : error instanceof LiveStoppedError
+                      ? "live-stopped"
+                      : error instanceof LiveHostUnavailableError
+                        ? "host-unavailable"
+                        : "connection-failed",
         );
       }
     }

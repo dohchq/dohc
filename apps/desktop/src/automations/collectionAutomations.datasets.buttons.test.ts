@@ -237,7 +237,6 @@ ${step}`;
     await f.writeAutomations(markPaid(hold + settle));
     await f.executor.open();
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
-    // The window's press path, as main hands it to the CLI, over this computer's executor.
     type Operation = {
       workspace: { workspaceId: string; rootPath: string };
       state: { collectionAutomations: typeof f.executor };
@@ -372,7 +371,6 @@ ${step}`;
     f.crashAfterOwnerInvoke(RELEASE);
     await expect(undo()).rejects.toThrow("dohc stopped.");
     expect((await f.record(second))?.values[STATUS]).toBe("Open");
-    // Stop and restore of the second definition finishes its run, and leaves the first run's reverse unsent.
     await expect(
       f.executor.undoRunsOf(
         [{ collectionPath: "Budget", id: "mark-paid", definitionHash: "0123456789abcdef" }],

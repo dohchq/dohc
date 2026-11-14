@@ -7,7 +7,9 @@ import {
   listT3CodeProjects,
   listT3CodeThreads,
   openT3CodeSession,
+  answerT3CodeQuestion,
   readT3CodeAddress,
+  readT3CodeQuestion,
   readT3CodeRun,
   readT3CodeThread,
   sendToT3CodeThread,
@@ -15,6 +17,7 @@ import {
   t3CodeOriginOnThisComputer,
 } from "./t3Code";
 import { T3CodeSignInNotKept, createT3CodeSignInStore } from "./t3CodeSignInStore";
+import { AgentThreadAnswers, agentThreadOperations } from "../ipc/bridgeContract";
 import { browser, startFakeT3Code } from "../testing/fakeT3Code";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -22,7 +25,6 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-// Each test's stand-in for T3 Code's server is closed when the test ends.
 async function fakeT3Code() {
   const fake = await startFakeT3Code();
   cleanups.push(fake.close);
@@ -122,7 +124,6 @@ describe("signing in to T3 Code", () => {
 
   it("stops every step when the person cancels, and when nobody answers while the browser is still opening", async () => {
     const t3 = await fakeT3Code();
-    // Cancelled before it began: nothing is asked of T3 Code.
     const cancelled = new AbortController();
     cancelled.abort();
     await expect(
@@ -132,7 +133,6 @@ describe("signing in to T3 Code", () => {
       message: "The sign-in to T3 Code was cancelled.",
     });
     expect(t3.registrations).toEqual([]);
-    // The step that opens the browser never returns, and the person cancels during it.
     const during = new AbortController();
     let entered = false;
     const open = () => {
@@ -181,7 +181,6 @@ describe("signing in to T3 Code", () => {
       origin: t3.origin,
       open: async (url) => {
         const redirect = new URL(new URL(url).searchParams.get("redirect_uri")!);
-        // Another page on this computer guesses the address but not the state.
         expect((await fetch(`${redirect.href}?code=stolen&state=guess`)).status).toBe(404);
         // A path that is not a URL is refused too, and the sign-in goes on.
         expect((await fetch(`${redirect.origin}//[`)).status).toBe(404);
@@ -344,6 +343,7 @@ describe("T3 Code's thread tools", () => {
       working: true,
       activeRunId: "run-9",
       waitingOnPerson: true,
+      questionId: null,
       closed: false,
       // Each run is in line, going, or over. One with a status dohc does not
       // know is going until T3 Code gives it an end.
@@ -434,6 +434,7 @@ describe("T3 Code's thread tools", () => {
       working: false,
       activeRunId: null,
       waitingOnPerson: false,
+      questionId: null,
       closed: true,
       runs: [],
     });
@@ -464,9 +465,264 @@ describe("T3 Code's thread tools", () => {
 
     t3.refusals.t3_thread_wait = "run_not_found: Run r1 does not belong to thread t1.";
     await expect(readT3CodeRun(session, asked)).resolves.toBe("ended");
-    // Any other refusal is not an answer about the run.
     t3.refusals.t3_thread_wait = "thread_not_found: Thread t1 is no longer available.";
     await expect(readT3CodeRun(session, asked)).rejects.toMatchObject({ problem: "thread-gone" });
+  });
+
+  it("tells a question that waits on the person from anything else that does", async () => {
+    const t3 = await fakeT3Code();
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
+    let pending = 0;
+    t3.tools.t3_thread_read = () => ({
+      recentRuns: [],
+      thread: {
+        title: "Chief",
+        activeRunId: "run-1",
+        pendingRequestCount: pending,
+        archived: false,
+        settled: false,
+      },
+    });
+    const listed = () => t3.calls.filter((call) => call.tool === "t3_pending_request");
+
+    // Nothing waits: dohc does not ask for the questions.
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: false,
+      questionId: null,
+    });
+    expect(listed()).toEqual([]);
+
+    // Something waits, and T3 Code lists no question: an approval, say.
+    pending = 1;
+    t3.tools.t3_pending_request = () => ({ requestIds: [] });
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: null,
+    });
+    expect(listed().at(-1)?.args).toEqual({ action: "list", threadId: "t1" });
+
+    // One thing waits, and it is a question.
+    t3.tools.t3_pending_request = () => ({ requestIds: ["q-1"] });
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: "q-1",
+    });
+    // A question and an approval wait: an answer here would leave the thread waiting.
+    pending = 2;
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: null,
+    });
+    // Two questions wait and nothing else: the first T3 Code lists is given.
+    t3.tools.t3_pending_request = () => ({ requestIds: ["q-1", "q-2"] });
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: "q-1",
+    });
+    // An id too long to carry is no reason to lose what the thread is doing.
+    pending = 1;
+    t3.tools.t3_pending_request = () => ({ requestIds: ["q".repeat(513)] });
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: null,
+    });
+
+    // A T3 Code that refuses the list still says the thread waits.
+    t3.refusals.t3_pending_request = "capability_denied: This credential cannot control threads.";
+    await expect(readT3CodeThread(session, "t1")).resolves.toMatchObject({
+      waitingOnPerson: true,
+      questionId: null,
+    });
+    // A thread that is gone is not a thread with no question.
+    t3.refusals.t3_pending_request = "thread_not_found: The thread was not found.";
+    await expect(readT3CodeThread(session, "t1")).rejects.toMatchObject({
+      problem: "thread-gone",
+    });
+  });
+
+  it("reads a thread's question box as the person is to see it", async () => {
+    const t3 = await fakeT3Code();
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
+    const asked = { threadId: "t1", requestId: "q-1" };
+    t3.tools.t3_pending_request = () => ({
+      requestId: "q-1",
+      questions: [
+        {
+          id: "where",
+          header: "Target",
+          question: "Which build?",
+          options: [
+            { label: "Mac", description: "The signed build", value: "mac" },
+            { label: "Windows", description: "" },
+          ],
+          multiSelect: true,
+          allowCustomAnswer: false,
+          required: false,
+          initialAnswer: "",
+        },
+        { id: "why", header: "", question: "Why?", options: [] },
+      ],
+    });
+
+    await expect(readT3CodeQuestion(session, asked)).resolves.toEqual({
+      status: "open",
+      requestId: "q-1",
+      questions: [
+        {
+          id: "where",
+          header: "Target",
+          question: "Which build?",
+          // An option with no value of its own is answered with its label.
+          options: [
+            { label: "Mac", description: "The signed build", value: "mac" },
+            { label: "Windows", description: "", value: "Windows" },
+          ],
+          multiSelect: true,
+          allowCustomAnswer: false,
+          required: false,
+        },
+        // What a question leaves out is as T3 Code takes it: one choice, the
+        // person's own text allowed, and an answer wanted.
+        {
+          id: "why",
+          header: "",
+          question: "Why?",
+          options: [],
+          multiSelect: false,
+          allowCustomAnswer: true,
+          required: true,
+        },
+      ],
+    });
+    expect(t3.calls.at(-1)).toEqual({
+      tool: "t3_pending_request",
+      args: { action: "read", ...asked },
+    });
+
+    // A provider may name a question by its own words, however long they are.
+    const words = "Which of these should I do first? ".repeat(100);
+    t3.tools.t3_pending_request = () => ({
+      requestId: "q-1",
+      questions: [{ id: words, header: "", question: words, options: [] }],
+    });
+    await expect(readT3CodeQuestion(session, asked)).resolves.toMatchObject({
+      status: "open",
+      questions: [{ id: words }],
+    });
+    // Every id dohc shows a question under comes through the answer's own check.
+    const ids = [words, "constructor", "toString", "hasOwnProperty"];
+    expect(
+      Object.keys(AgentThreadAnswers.parse(Object.fromEntries(ids.map((id) => [id, "yes"])))),
+    ).toEqual(ids);
+    // The one id an answer cannot be keyed by: such a box is answered in T3 Code.
+    t3.tools.t3_pending_request = () => ({
+      requestId: "q-1",
+      questions: [{ id: "__proto__", header: "", question: "?", options: [] }],
+    });
+    await expect(readT3CodeQuestion(session, asked)).rejects.toMatchObject({
+      problem: "unexpected",
+    });
+    expect(
+      Object.keys(AgentThreadAnswers.parse(Object.fromEntries([["__proto__", "yes"]]))),
+    ).toEqual([]);
+
+    // A box too large to lay out at once is not shown.
+    t3.tools.t3_pending_request = () => ({
+      requestId: "q-1",
+      questions: Array.from({ length: 20 }, (_, index) => ({
+        id: `q${index}`,
+        header: "",
+        question: "?".repeat(15_000),
+        options: [],
+      })),
+    });
+    await expect(readT3CodeQuestion(session, asked)).rejects.toMatchObject({
+      problem: "unexpected",
+      message: "This question is too long for dohc to show.",
+    });
+
+    // A box larger than dohc shows is one the person answers in T3 Code.
+    t3.tools.t3_pending_request = () => ({
+      requestId: "q-1",
+      questions: Array.from({ length: 21 }, (_, index) => ({
+        id: `q${index}`,
+        header: "",
+        question: "?",
+        options: [],
+      })),
+    });
+    await expect(readT3CodeQuestion(session, asked)).rejects.toMatchObject({
+      problem: "unexpected",
+    });
+
+    for (const [words, status] of [
+      ["invalid_request: The user-input request was already answered.", "already-answered"],
+      ["invalid_request: The user-input request is no longer pending (expired).", "closed"],
+      ["invalid_request: The pending user-input request was not found.", "closed"],
+    ] as const) {
+      t3.refusals.t3_pending_request = words;
+      await expect(readT3CodeQuestion(session, asked)).resolves.toEqual({ status });
+    }
+    t3.refusals.t3_pending_request = "orchestration_error: The operation could not be completed.";
+    await expect(readT3CodeQuestion(session, asked)).rejects.toMatchObject({
+      problem: "refused",
+    });
+  });
+
+  it("answers a thread's question, and says when someone answered first", async () => {
+    const t3 = await fakeT3Code();
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
+    const answer = {
+      threadId: "t1",
+      requestId: "q-1",
+      answers: { where: ["mac", "Windows"], why: "The release is today." },
+    };
+    t3.tools.t3_pending_request = () => ({ sequence: 12 });
+
+    await expect(answerT3CodeQuestion(session, answer)).resolves.toBe("answered");
+    expect(t3.calls.at(-1)).toEqual({
+      tool: "t3_pending_request",
+      args: { action: "respond", ...answer },
+    });
+
+    for (const [words, status] of [
+      ["invalid_request: The user-input request was already answered.", "already-answered"],
+      // The same, when the other answer landed while this one was on its way.
+      ["orchestration_error: Runtime request q-1 is resolved.", "already-answered"],
+      // The words that tell follow the request's id, however long it is.
+      [`orchestration_error: Runtime request ${"q".repeat(400)} is resolved.`, "already-answered"],
+      [`orchestration_error: Runtime request ${"q".repeat(400)} is expired.`, "closed"],
+      ["orchestration_error: Runtime request q-1 is cancelled.", "closed"],
+      ["orchestration_error: Runtime request q-1 was not found.", "closed"],
+      ["invalid_request: The user-input request is no longer pending (cancelled).", "closed"],
+    ] as const) {
+      t3.refusals.t3_pending_request = words;
+      await expect(answerT3CodeQuestion(session, answer)).resolves.toBe(status);
+    }
+    // An answer T3 Code does not take is not an answer someone else gave.
+    t3.refusals.t3_pending_request = "orchestration_error: Answer each question before sending.";
+    await expect(answerT3CodeQuestion(session, answer)).rejects.toMatchObject({
+      problem: "refused",
+      message: "orchestration_error: Answer each question before sending.",
+    });
+    t3.refusals.t3_pending_request =
+      "capability_denied: This tool changes the environment, and this MCP client was approved for read-only access.";
+    await expect(answerT3CodeQuestion(session, answer)).rejects.toMatchObject({
+      problem: "refused",
+    });
+  });
+
+  it("says something of a refusal T3 Code gave no words for, which a window can be told", () => {
+    const words = new T3CodeError("refused", "").message;
+    expect(words).toBe("T3 Code refused the call.");
+    expect(new T3CodeError("refused", " \n").message).toBe("T3 Code refused the call.");
+    // The answer a window gets about an agent's thread takes those words.
+    expect(
+      agentThreadOperations.readAgentThread.result.parse({ threadId: "t1", problem: words }),
+    ).toEqual({ threadId: "t1", problem: words });
+    expect(() =>
+      agentThreadOperations.readAgentThread.result.parse({ threadId: "t1", problem: "" }),
+    ).toThrow();
   });
 
   it("tells a sign-in T3 Code no longer takes from a call it refused and an answer it cannot read", async () => {

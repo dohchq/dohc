@@ -823,7 +823,6 @@ const withHistory = <T extends SyncRelayStorage>(storage: T): T => {
   );
   return storage;
 };
-// The fixture document after the owner's restore that kept its live session through its own revocation.
 async function kept() {
   const f = await activated(),
     restore = keptByOwnerRestore(f.raw, key.namespace);

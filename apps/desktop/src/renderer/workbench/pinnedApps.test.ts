@@ -73,8 +73,6 @@ describe("sidebar views", () => {
     expect(keepActiveViewAfterRailChange(onSearch, rail, [...rail, appViewId("report")])).toBe(
       onSearch,
     );
-    // A view the rail never showed, opened by a link, stays open through any
-    // rail change.
     const onHistory = setView(defaultWorkbenchState(), "history");
     expect(keepActiveViewAfterRailChange(onHistory, rail, ["search"])).toBe(onHistory);
     const onApp = setView(defaultWorkbenchState(), appViewId("apps/trip"));

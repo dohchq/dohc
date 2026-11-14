@@ -41,8 +41,6 @@ const OWNER = "ana";
 const THREAD = "thread-1";
 const ORIGIN = "server-copy";
 
-// A reply that answers a question: the reply's message, the follow a first
-// message may add, then the decision it resolves.
 const replyStage = (id = "reply-1"): PublicationStage => ({
   key: `${id}:reply`,
   role: "reply",
@@ -186,7 +184,6 @@ const advance = (storage: SyncRelayStorage, stage: OperationStage, message?: "pu
     ...(message ? { message } : {}),
   })!.record;
 
-// Waits until `signal` aborts, then rejects with its reason, as a request held in the engine or the lane does.
 const heldUntil = (signal: AbortSignal | undefined) =>
   new Promise<never>((_, reject) => {
     if (signal === undefined) return;
@@ -194,7 +191,6 @@ const heldUntil = (signal: AbortSignal | undefined) =>
     signal.addEventListener("abort", () => reject(signal.reason), { once: true });
   });
 
-/** A copy whose engine answers receipts from `receipts`, by stage key; a key it doesn't hold answers absent. */
 function copy(receipts: Map<string, unknown>) {
   const sent: string[] = [];
   let steps = 0;
@@ -254,7 +250,6 @@ function copy(receipts: Map<string, unknown>) {
     failReceipts: (fail: boolean) => {
       failReceipts = fail;
     },
-    /** Steps, or receipt reads, wait in the lane or the engine until their attempt ends. */
     hold: (what: "step" | "receipts") => {
       if (what === "step") holdStep = true;
       else holdReceipts = true;
@@ -262,7 +257,6 @@ function copy(receipts: Map<string, unknown>) {
   };
 }
 
-/** Reads receipts as the engine would answer them, decoded as the wrapper decodes them. */
 const reader =
   (receipts: Map<string, unknown>): ReceiptReader =>
   async (stageKeys) =>

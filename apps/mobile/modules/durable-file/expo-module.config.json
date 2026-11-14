@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["DurableFileModule"]
+  },
+  "android": {
+    "modules": ["app.dohc.durablefile.DurableFileModule"]
+  }
+}

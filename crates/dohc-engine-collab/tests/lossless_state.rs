@@ -91,7 +91,6 @@ fn deleted_yjs_payload_survives_native_replay_compaction_and_restart() {
             .encode_full_state(),
         fixture.retained_state
     );
-    // Existing collected bytes cannot recover their deleted values by reloading.
     let collected = Ydoc::wire();
     collected.apply(&fixture.collected_state).unwrap();
     assert_ne!(collected.encode_full_state(), fixture.retained_state);

@@ -448,7 +448,6 @@ async function fixture(options: { idleTimeoutMs?: number; retentionMs?: number }
     clock,
     checkStatuses,
     nextCheck: () => checked.promise,
-    /** The relay's answer to a check share-web would send now. */
     async check() {
       const response = await fetch(`${relayUrl}/sync/live/named-sessions/resolve`, {
         method: "POST",
@@ -650,7 +649,6 @@ it("brings a page back with one new session after a sleep longer than its sessio
   const sessions = () => asked.filter((path) => path === "/api/live/named-session").length;
   expect(sessions()).toBe(1);
 
-  // The computer sleeps past the window a session no check has reached, and its socket drops.
   f.clock.now += NAMED_SESSION_FIRST_WINDOW_MS + 60_000;
   const before = asked.length;
   const dropped = until(false);

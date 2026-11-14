@@ -27,6 +27,7 @@ import {
   type NamedFrameNativeHost,
 } from "./namedLiveFrameHost.js";
 import { createPersonalLiveRoutes, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
+import type { SessionHostBlock } from "./linkRefusal";
 import {
   audience,
   binding,
@@ -240,7 +241,8 @@ async function fixture() {
 
   // The handler's clock is the one a fresh read checks a token's expiry with.
   let clock = 2000,
-    supported = true;
+    supported = true,
+    block: SessionHostBlock | undefined;
   const fence = new Fence();
   const h = testHandler(storage, {
     credentialFence: fence,
@@ -280,6 +282,7 @@ async function fixture() {
     personalAgents: h.personalAgents,
     limiter: h.personalLimiter,
     supported: () => supported,
+    sessionHostBlocked: () => block,
   });
   const http = serveFetchHandler({
     handler: (incoming) => routes.handle(incoming),
@@ -432,7 +435,6 @@ async function fixture() {
     changes.notify(binding);
     return updateBytes;
   }
-  /** The journal accepts each admission, so a test sees what the route committed. */
   function admitting() {
     vi.spyOn(storage, "readLiveUpdateJournalCut").mockReturnValue({
       kind: "cut",
@@ -505,6 +507,9 @@ async function fixture() {
     },
     setSupported: (value: boolean) => {
       supported = value;
+    },
+    setBlock: (value: SessionHostBlock | undefined) => {
+      block = value;
     },
   };
 }
@@ -609,6 +614,43 @@ it("mints a ticket only for an agent at Edit, and only while the self-hosted liv
       .status,
   ).toBe(404);
 });
+
+// A held document gives the reason the agent's open gives. Any other block reads as not found.
+it.each([
+  [
+    "held",
+    409,
+    {
+      ok: false,
+      code: "live-edit-unadmitted",
+      error: "Live editing of this file stopped on the server. Only its owner can start it again.",
+    },
+  ],
+  ["stopped", 404, { ok: false, error: "not found" }],
+] as const)(
+  "refuses an agent's ticket for a document the session host %s, until the block lifts",
+  async (blocked, status, answer) => {
+    const f = await fixture(),
+      helper = f.agent("helper"),
+      commenter = f.agent("commenter", "comment");
+    f.setBlock(blocked);
+    const refused = await f.ticketRequest(helper);
+    expect([refused.status, await refused.json()]).toEqual([status, answer]);
+    // A document the agent can't reach, or can't edit, says nothing about its block.
+    const hidden = await f.ticketRequest(helper, {
+      workspaceId: scope.workspaceId,
+      objectId: "hidden-object",
+    });
+    expect([hidden.status, await hidden.json()]).toEqual([404, { ok: false, error: "not found" }]);
+    const viewing = await f.ticketRequest(commenter);
+    expect([viewing.status, await viewing.json()]).toEqual([
+      404,
+      { ok: false, error: "not found" },
+    ]);
+    f.setBlock(undefined);
+    expect(Object.keys(await f.mint(helper)).sort()).toEqual(["expiresAtMs", "token"]);
+  },
+);
 
 // A full share of tickets still answers a personal agent as before; only a link caller is asked to try again.
 it("refuses a personal agent at its share of unexpired tickets", async () => {

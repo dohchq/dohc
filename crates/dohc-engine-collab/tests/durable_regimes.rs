@@ -646,7 +646,6 @@ fn local_only_close_prunes_the_cache() {
     }
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 3);
 
-    // A close before settling refuses to prune (would discard unsettled edits).
     assert!(matches!(
         close_session(&mut ts.store, &key, false, None, &NoFaults, 1_500),
         Err(CollabError::UnsettledClose)
@@ -1002,8 +1001,6 @@ fn replicated_close_never_prunes_the_lineage() {
         matches!(out, CloseOutcome::Compacted(_)),
         "replicated compacts, not prunes"
     );
-    // Durable lineage survives: a snapshot remains and reconstructs identically —
-    // a peer can bootstrap from it.
     assert!(
         count(&ts.store, "ydoc_snapshots", &key) >= 1,
         "snapshot durable"
@@ -2617,7 +2614,6 @@ mod crash {
             )
             .expect("rec");
             assert_eq!(out, TxnOutcome::Crashed { committed: true });
-            // Reopen (dropping `store` closes the connection; the file stays).
             drop(store);
             let mut store = reopen(&dir);
             assert_eq!(

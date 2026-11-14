@@ -528,8 +528,6 @@ describe("ChatLane", () => {
       ),
     );
     expect(screen.queryByTestId("chats-lane-run-actions")).toBeNull();
-    // An agent a message won't wake: the step in Settings is a button that
-    // opens the Agents page, on the same line a message button takes.
     for (const [nextStep, label] of [
       [{ kind: "add-agent" }, "Add an agent in Settings"],
       [{ kind: "turn-on", name: "Nova" }, "Turn Nova on in Settings"],

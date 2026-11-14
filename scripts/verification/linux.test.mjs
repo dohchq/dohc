@@ -329,7 +329,6 @@ test(
     };
     const stopped = await job({ verify, signal: stop.signal, stopFails: true });
     assert.equal(stopped.error.stopped, true);
-    // A run that passed, then was stopped while its scope would not stop, keeps the stop too.
     const late = new AbortController();
     const stoppedInCleanup = await job({
       verify: ends({ receipt: passed }),

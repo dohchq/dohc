@@ -65,8 +65,6 @@ vi.mock("./collab/useEngineDoc", () => ({
   useEngineDoc: () => engineDocState,
 }));
 
-// A stub editor that reports a live body distinct from the disk body, so the
-// test can tell whether the menu read the editor or the stale prop.
 const editorSerialize = vi.hoisted(() => vi.fn());
 vi.mock("./editor/artifactSource", () => ({
   prepareArtifactSource: () => undefined,

@@ -243,7 +243,6 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     // conversation is an editor tab: another sidebar view leaves it on screen.
     await page.getByRole("button", { name: "Close Nova", exact: true }).click();
     await expect(page.getByTestId("chats-lane-message")).toHaveCount(0);
-    // The agent's conversation is its channel's chat lane, not its posts.
     await page.evaluate(async (workspaceId) => {
       const api = (
         window as unknown as {
@@ -638,7 +637,6 @@ test("a runner that exits silently says why under the message and posts a notice
     await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
     await setDispatchPaused(page, false);
 
-    // The toast sits above the message box, so Send stays in reach.
     const toasts = page.getByTestId("notice-toasts");
     await expect(toasts).toContainText("Nova didn't reply in \"");
     await waitForVisibleAnimations(page);

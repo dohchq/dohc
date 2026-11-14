@@ -52,7 +52,6 @@ type Behavior = (put: Put, signal: AbortSignal) => Promise<void>;
 /** The server's runner rows by account and workspace. Each PUT takes the next queued behavior, if any. */
 function fakeServer() {
   const puts: Put[] = [];
-  // For each PUT: the (fake) wall-clock time, the session whose client sent it, and whether it was current then.
   const putTimes: number[] = [];
   const putSessions: ChatWakeSession[] = [];
   const putCurrent: boolean[] = [];
@@ -144,11 +143,9 @@ function fakeServer() {
 function memoryLedger(rows: ChatRunnerLedgerEntry[] = []) {
   const state = {
     rows,
-    /** Reads throw this while set; `once` clears it after one read. */
     listFails: null as { error: Error; once: boolean } | null,
     removeFailsOnce: false,
     addFailsOnce: false,
-    /** Resolves on the next removal that succeeds. */
     removed: deferred<void>(),
   };
   const same = (a: ChatRunnerLedgerEntry, b: ChatRunnerLedgerEntry) =>
@@ -181,7 +178,6 @@ function memoryLedger(rows: ChatRunnerLedgerEntry[] = []) {
   return { state, ledger };
 }
 
-/** Backoffs the test ends: each records its length and signal, and waits for `release` or its signal. */
 function heldSleeps() {
   const sleeps: Array<{ ms: number; signal: AbortSignal; release: () => void }> = [];
   const watchers: Array<{ at: number; resolve: () => void }> = [];
@@ -198,7 +194,6 @@ function heldSleeps() {
   return {
     sleeps,
     sleep,
-    /** Resolves once `count` backoffs have started. */
     until: (count: number) =>
       sleeps.length >= count
         ? Promise.resolve()
@@ -380,13 +375,11 @@ describe("publishing this computer's agents", () => {
       r.server.refuse(new ChatWakeBusyError());
       await r.roster.reconcile(a);
       await backoffs.until(1);
-      // A's backoff is held. The next snapshot's first publication fails too.
       a.end();
       const next = session(scope);
       r.server.refuse(new ChatWakeBusyError());
       await r.roster.reconcile(next);
       await backoffs.until(2);
-      // It took over the one backoff, and its count started again.
       expect(backoffs.sleeps[0]!.signal.aborted).toBe(true);
       expect(backoffs.sleeps[1]!.ms).toBe(1_000);
       backoffs.sleeps[0]!.release();
@@ -424,19 +417,16 @@ describe("publishing this computer's agents", () => {
     await r.roster.reconcile(a);
     expect(r.deps.ledgerUnreadable).toHaveBeenCalledOnce();
     expect(r.deps.log).not.toHaveBeenCalled();
-    // Still unreadable on the backoff's pass: offered again, and still nothing goes out or is written.
     await backoffs.until(1);
     backoffs.sleeps[0]!.release();
     await backoffs.until(2);
     expect(r.deps.ledgerUnreadable).toHaveBeenCalledTimes(2);
     expect(r.server.puts).toEqual([]);
     expect(r.ledger.state.rows).toEqual([]);
-    // The person repairs the file and chooses Try again.
     r.ledger.state.listFails = null;
     await r.roster.reconcile(a);
     expect(r.deps.clearLedgerUnreadable).toHaveBeenCalled();
     expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
-    // That pass settled, so the sleeping backoff was called off.
     expect(backoffs.sleeps[1]!.signal.aborted).toBe(true);
   });
 
@@ -554,7 +544,6 @@ describe("withdrawing an account that left", () => {
     await entered.promise;
     expect(r.deps.timeout).toHaveBeenCalledExactlyOnceWith(CHAT_RUNNER_WITHDRAW_MS);
     expect(r.server.puts.map((put) => put.scope)).toEqual(["A", "A"]);
-    // The withdrawal's deadline passes.
     r.deadline.abort();
     await Promise.all([withdrawn, published]);
     expect(r.server.row("B", "ws9")).toEqual(CLAUDE_ON);
@@ -594,7 +583,6 @@ describe("withdrawing an account that left", () => {
   });
 });
 
-/** The production sleep on the (fake) timer clock, counting how many waits have started. */
 function countedSleep() {
   let started = 0;
   const watchers: Array<{ at: number; resolve: () => void }> = [];
@@ -633,14 +621,12 @@ describe("keeping the relay's lease", () => {
     expect(r.server.puts).toHaveLength(2);
     await checks.until(1);
     await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS - CHAT_RUNNER_CHECK_MS);
-    // An ordinary reconciliation before then sends nothing.
     await r.roster.reconcile(a);
     expect(r.server.puts).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(CHAT_RUNNER_CHECK_MS);
     await r.server.untilDone(4);
     // The same declarations again: the relay starts each lease again.
     expect(r.server.puts.slice(2)).toEqual(r.server.puts.slice(0, 2));
-    // Its session ends: nothing more goes out for it, and stop leaves no timer.
     a.end();
     await vi.advanceTimersByTimeAsync(2 * CHAT_RUNNER_REFRESH_MS);
     expect(r.server.puts).toHaveLength(4);
@@ -687,11 +673,9 @@ describe("keeping the relay's lease", () => {
     r.owned.A = ["ws1"];
     await r.roster.reconcile(session("A"));
     await checks.until(1);
-    // The renewal's pass can't read the ledger, once.
     r.ledger.state.listFails = { error: new Error("The disk is busy."), once: true };
     await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
     await backoffs.until(1);
-    // Its retry reads the ledger, then can't save the workspace's row, once, before the PUT.
     r.ledger.state.addFailsOnce = true;
     await vi.advanceTimersByTimeAsync(1_000);
     await backoffs.until(2);
@@ -723,7 +707,6 @@ describe("keeping the relay's lease", () => {
     const r = setup();
     r.owned.A = ["ws1"];
     const a = session("A");
-    // Confirmed while the computer's clock ran four days ahead.
     vi.setSystemTime(Date.now() + 4 * 24 * HOUR);
     await r.roster.reconcile(a);
     expect(r.server.puts).toHaveLength(1);

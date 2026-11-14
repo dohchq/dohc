@@ -95,7 +95,7 @@ function useServerList<T>(signIn: SignIn, read: (client: ServerClient) => Promis
 function SettingsScreen() {
   const theme = useTheme();
   const signIn = useSignIn();
-  const { account, workspaces, reloadWorkspaces, setShowOnPhone } = useAccount();
+  const { account, outbox, workspaces, reloadWorkspaces, setShowOnPhone } = useAccount();
   const server = serverName(signIn.origin);
   const sessions = useServerList(signIn, listSessions);
   const agents = useServerList(signIn, listAgents);
@@ -120,18 +120,27 @@ function SettingsScreen() {
     [pending, signIn],
   );
 
+  // Signing out deletes the outbox, so the sheet counts what it would lose, or warns when it can't count. When the
+  // delete can't be made safe, the phone stays signed in and says so here, with Try again.
+  const [signOutFailed, setSignOutFailed] = useState(false);
+  const leave = useCallback(() => {
+    setSignOutFailed(false);
+    account.signOut().catch(() => {
+      if (signIn.isCurrent()) setSignOutFailed(true);
+    });
+  }, [account, signIn]);
   const signOut = useCallback(async () => {
+    const message = accountWords.signOutBody(outbox.signOutCounts());
     if (
       await confirm({
         title: accountWords.signOutTitle(server),
-        message: accountWords.signOutBody,
+        message,
         confirm: accountWords.signOut,
         destructive: true,
       })
-    ) {
-      void account.signOut();
-    }
-  }, [account, server]);
+    )
+      leave();
+  }, [leave, outbox, server]);
 
   const end = (session: AccountSession) =>
     act(session.sessionId, async () => {
@@ -297,6 +306,7 @@ function SettingsScreen() {
       </Section>
 
       <Section>
+        {signOutFailed ? <ProblemLine text={accountWords.signOutFailed} onRetry={leave} /> : null}
         <Pressable
           accessibilityRole="button"
           onPress={() => void signOut()}

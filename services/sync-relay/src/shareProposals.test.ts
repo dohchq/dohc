@@ -539,10 +539,6 @@ describe("the origin an accept writes", () => {
 
 describe("what the granter does under an open proposal", () => {
   it("deletes the file where the granter has it now, not where the recipient read it", async () => {
-    // Same rule as a content-only edit, in the other direction: the recipient
-    // asked for the file to be gone, not for a path to be gone. A delete
-    // naming the path the recipient read would name a path the granter no
-    // longer has.
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
@@ -787,7 +783,6 @@ describe("what an open proposal survives", () => {
     ).toBe(409);
     expect((await granter.sharedMoments(shareId)).length).toBe(0);
 
-    // And its content is reclaimable again, because nothing open holds it.
     const swept = await storage.collectUnreferencedBlobs(WORKSPACE, {
       nowMs: 4242 + 365 * 24 * 60 * 60 * 1000,
     });
@@ -884,10 +879,6 @@ function narrowToComment(storage: SyncRelayStorage, shareId: string): void {
 }
 
 describe("the recipient's blob route", () => {
-  // A per-op route is a new surface on the granter's workspace, so it owes the
-  // same gate the listing owes and the same generic 404 — one answer for every
-  // way a lookup can fail, so nothing on it can be used to probe what exists.
-
   it("gates the single-proposal route exactly as the listing is gated", async () => {
     const storage = await testStorage();
     const h = handler(storage);

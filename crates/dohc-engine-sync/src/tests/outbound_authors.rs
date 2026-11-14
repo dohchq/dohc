@@ -322,11 +322,6 @@ const PRIVATE_AUTHOR_FIELDS: [&str; 5] = [
     "principalId",
 ];
 
-/// A fresh journal never publishes the grant authority the relay credited a
-/// shared change under. Without a settlement proof, both credentials publish
-/// the moment as attribution unavailable, and no private field reaches the
-/// wire. A live settlement's moment ID earns no exception. A moment without
-/// relay credit keeps its authors.
 #[test]
 fn a_fresh_journal_publishes_unproved_shared_credit_as_unavailable() {
     let agent = json!({"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0});
@@ -340,7 +335,6 @@ fn a_fresh_journal_publishes_unproved_shared_credit_as_unavailable() {
         ("record-moment", json!([agent, link]), None),
         (settlement.as_str(), json!([public]), None),
         (settlement.as_str(), json!([person, agent, named]), None),
-        // Without relay credit, the authors travel.
         (settlement.as_str(), json!([agent]), Some(json!([agent]))),
     ] {
         for native_settlements in [true, false] {
@@ -413,9 +407,6 @@ fn a_fresh_journal_publishes_unproved_shared_credit_as_unavailable() {
     }
 }
 
-/// The unavailable mark a fresh journal gives unproved shared credit is what
-/// the relay first received, so a retry after a lost acknowledgement and the
-/// relay's echo both match it exactly.
 #[test]
 fn a_fresh_unavailable_mark_pushes_retries_and_echoes_exactly() {
     let authors = json!([

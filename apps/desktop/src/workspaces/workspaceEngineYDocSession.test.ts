@@ -1197,10 +1197,6 @@ it("never reports a save seq the settled file does not back", async () => {
   await honest.stop().catch(() => undefined);
 });
 it("refuses a live session for a path the entered version does not have", async () => {
-  // The interleaving, at the point it actually decides: the user clicked
-  // draftOnly.md while switchVersion("main") was on the capture chain, so the
-  // open runs after the switch — against a version with no snapshot for the
-  // path, over a folder the switch already removed it from.
   const DRAFT_ONLY = "notes/draftOnly.md";
 
   const refusal = await capture

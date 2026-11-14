@@ -1075,7 +1075,6 @@ describe("error words", () => {
   });
 
   it("tells a request the Collection's host refused for replaced rules from its other conflicts, across IPC", () => {
-    // The host's own check, with rules approved at revision 2 and no history that reaches the request's revision 1.
     const none = {
       prepare: () => ({ get: () => undefined, all: () => [] }),
     } as unknown as Parameters<typeof resolveCompatibleDatasetRevision>[0];

@@ -64,8 +64,8 @@ export class MixedRelayTransportError extends Error {
   }
 }
 
-// The server answered that it is busy. The engine already split the push
-// down to one change, so a later pass is all that is left to try.
+// The server answered that it is busy: it had no room for the request, or
+// for even one change's settlement proof. A later pass is all that is left.
 export class RelayBusyError extends Error {
   constructor() {
     super("The server is busy.");
@@ -475,7 +475,7 @@ function translateRelayError(method: string, error: unknown): never {
   if (
     SYNC_PASS_METHODS.has(method) &&
     error.wireCode === "OVERLOADED" &&
-    error.message === "settlement-proof-budget"
+    (error.message === "settlement-proof-budget" || error.message === "relay-server-busy")
   ) {
     throw new RelayBusyError();
   }
@@ -528,6 +528,8 @@ export interface EngineRelayWorkspaceClient {
   commitCursor(cursor: Record<string, JsonValue | undefined>): Promise<CommitRelayCursorResult>;
   // Collections updates wait for a pull that has not committed its last page.
   collectionsWaiting(): Promise<boolean>;
+  // Notes whose first file record waits only for their open editing session to end.
+  firstExportsHeldOpen(): Promise<string[]>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
   claim(): Promise<void>;
   bootstrapJoinIdentity(
@@ -885,6 +887,13 @@ export class EngineRelayClient {
             workspaceId: workspace.workspaceId,
           }),
         ).waiting,
+      firstExportsHeldOpen: async () =>
+        decodeWorkspaceResult(
+          WORKSPACE_METHOD.syncFirstExportsHeldOpen,
+          await request(WORKSPACE_METHOD.syncFirstExportsHeldOpen, {
+            workspaceId: workspace.workspaceId,
+          }),
+        ).paths,
       recoverOrigin: async () => {
         const result = resultRecord(
           await request("sync.recoverOrigin", {

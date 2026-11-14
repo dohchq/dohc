@@ -561,7 +561,6 @@ test("only the first start of a data-disk deployment may initialize its relay", 
   assert.equal(result(relayCheck([record, database, hostData]), false), "");
   assert.equal(result(relayCheck([record, database, snapshotState]), false), "");
   assert.equal(result(empty, true), "");
-  // Snapshot state is not relay data, so it never stands in for a deployment.
   for (const files of [[], [hostData], [snapshotState], [hostData, snapshotState]]) {
     assert.match(
       result(relayCheck(files), false),
@@ -710,7 +709,6 @@ function composeDependencies(files) {
   return services;
 }
 
-// True when Compose starts the service only after the relay is healthy, directly or through another service it waits for.
 function waitsForHealthyRelay(services, name, seen = new Set()) {
   if (seen.has(name)) return false;
   seen.add(name);

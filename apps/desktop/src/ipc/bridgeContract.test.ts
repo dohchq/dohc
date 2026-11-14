@@ -4130,8 +4130,6 @@ describe("engine Y.Doc update IPC contract", () => {
         message: "dohc is still moving notes.",
       },
     });
-    // The accepted shape alone would still pass this test after the schema
-    // widened operation past delete/move, or dropped message's min(1) bound.
     expect(
       OpenEngineYDocSessionResult.safeParse({
         available: false,

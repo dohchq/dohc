@@ -103,8 +103,6 @@ function stubPaneLayout(tall: () => boolean = () => true) {
   };
 }
 
-// Keeps each ResizeObserver, so a test can report that the note's content
-// changed size.
 function stubResizeObservers() {
   const observers: Array<{
     callback: ResizeObserverCallback;
@@ -155,8 +153,6 @@ function stubResizeObservers() {
   return { resize, watched };
 }
 
-// Opens the note with the person scrolled partway down its read view, then
-// shows its editor while the editor's content is still short.
 async function openScrolledWithShortEditor(layout: { tall: boolean }) {
   code.editor.release();
   code.collaboration.release();

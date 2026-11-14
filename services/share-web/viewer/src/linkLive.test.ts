@@ -165,21 +165,75 @@ it("reports a refused link ticket as unavailable, not as a failed connection", a
     session.close();
   }
 });
-it("stops on a link that can take no more people, without trying again", async () => {
+// Neither answer changes until someone else acts: the owner makes a new link, or starts live editing again.
+it.each([
+  ["link_full", "link-full"],
+  ["link_live_stopped", "live-stopped"],
+] as const)("stops on %s without trying again", async (code, reason) => {
   vi.useFakeTimers();
   vi.stubGlobal("location", { origin: "https://share.example.test" });
   const fetch = vi.fn(async (url: RequestInfo | URL) =>
     url === "/api/live/link-document"
       ? Response.json({ objectId: "object-a", limits })
-      : Response.json(linkRefusalBody("link_full"), { status: 403 }),
+      : Response.json(linkRefusalBody(code), { status: LINK_REFUSALS[code].status }),
   );
   vi.stubGlobal("fetch", fetch);
   const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
   try {
     await session.reconnect();
-    expect(session.state()).toMatchObject({ status: "disconnected", reason: "link-full" });
+    expect(session.state()).toMatchObject({ status: "disconnected", reason });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(fetch).toHaveBeenCalledTimes(2);
+  } finally {
+    session.close();
+    vi.useRealTimers();
+  }
+});
+// Try again asks once. It works only after the owner starts live editing again.
+it("asks once on Try again while live editing is stopped, and opens the file once it started again", async () => {
+  vi.useFakeTimers();
+  class Socket extends EventTarget {
+    readyState = 1;
+    bufferedAmount = 0;
+    protocol = "dohc-live-v1";
+    extensions = "";
+    binaryType = "arraybuffer";
+    constructor() {
+      super();
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+    send() {}
+    close() {
+      this.readyState = 3;
+    }
+  }
+  vi.stubGlobal("WebSocket", Socket);
+  vi.stubGlobal("location", { origin: "https://share.example.test" });
+  let stopped = true;
+  const fetch = vi.fn(async (url: RequestInfo | URL) =>
+    url === "/api/live/link-document"
+      ? Response.json({ objectId: "object-a", limits })
+      : stopped
+        ? Response.json(linkRefusalBody("link_live_stopped"), { status: 503 })
+        : Response.json({
+            token: "ab".repeat(32),
+            publicPrincipalId: "public-link-a",
+            expiresAtMs: Date.now() + 60_000,
+          }),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const session = await openLinkDocument("abcdefghijkl", "docs/a.md", new AbortController().signal);
+  try {
+    await session.reconnect();
+    expect(session.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+    await session.reconnect();
+    expect(session.state()).toMatchObject({ status: "disconnected", reason: "live-stopped" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    stopped = false;
+    await session.reconnect();
+    expect(session.state().status).toBe("connecting");
+    expect(fetch).toHaveBeenCalledTimes(4);
   } finally {
     session.close();
     vi.useRealTimers();

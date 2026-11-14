@@ -59,10 +59,15 @@ it("runs the same validator without detaching input", async () => {
     expected = createLiveMarkdownJournalValidator(policy)(input);
   expect(expected.kind).toBe("accepted");
   const original = input.checkpoint.slice();
-  const pending = validate(input);
+  const timing = { hopMs: 0, replayMs: 0, projectionMs: 0, workerOtherMs: 0 };
+  const pending = validate(input, undefined, timing);
   if (expected.kind !== "accepted") throw Error("Expected accepted validation");
   const { stateUpdate: _stateUpdate, ...evidence } = expected.evidence;
+  // The worker's own times reach the caller's timing and never the verdict.
   expect(await pending).toEqual({ kind: "accepted", evidence });
+  expect(timing.replayMs).toBeGreaterThan(0);
+  expect(timing.projectionMs).toBeGreaterThan(0);
+  for (const ms of Object.values(timing)) expect(Number.isFinite(ms)).toBe(true);
   expect(input.checkpoint).toEqual(original);
   expect(await validate({ ...input, candidate: Uint8Array.of(255) })).toEqual(
     createLiveMarkdownJournalValidator(policy)({ ...input, candidate: Uint8Array.of(255) }),
@@ -204,7 +209,6 @@ it("fails a job whose child exits abnormally, and replaces the child", async () 
   // The child cannot read a missing input and exits with an uncaught error.
   try {
     await expect(validate(null as never)).rejects.toThrow("exited");
-    // Its stack can name files, so the log counts its lines and shows none of them.
     await vi.waitFor(() =>
       expect(
         log.mock.calls.some(([line]) =>

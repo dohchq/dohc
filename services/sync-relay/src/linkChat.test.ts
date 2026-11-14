@@ -193,7 +193,6 @@ function retune(f: Fixture, grantId: string, access: string, shareId = f.shareId
   );
 }
 
-// A follow from the latest message, returned once it is waiting for the next.
 async function parkFollow(f: Fixture, capability: string) {
   const latest = (await json(await readChat(f, capability, history))).nextCursor;
   const entered = deferred(),
@@ -335,7 +334,6 @@ describe("link chat on a Group share", () => {
       }),
     );
     expect(JSON.stringify(page)).not.toContain("acme");
-    // The Group's name reads the same way.
     expect(
       (
         await f.h(
@@ -908,7 +906,6 @@ describe("link posts in a Group's channel", () => {
     );
     expect(served.map((op) => op.payload)).toEqual([stored.payload]);
 
-    // Nothing on the relay wakes for it: no notice, no automation wake.
     expect(
       f.storage.readNoticeChanges({
         recipientUserId: OWNER,

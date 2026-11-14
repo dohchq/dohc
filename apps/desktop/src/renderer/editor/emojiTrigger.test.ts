@@ -155,7 +155,6 @@ describe("makeEmojiPlugin — appendTransaction auto-insert gating", () => {
     const editor = makeEditor("<p>hi :smile</p>");
     editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)));
 
-    // Type the final ':' — a real ReplaceStep inserting it at the cursor.
     editor.view.dispatch(editor.state.tr.insertText(":"));
 
     expect(editor.state.doc.textContent).toContain("😄");

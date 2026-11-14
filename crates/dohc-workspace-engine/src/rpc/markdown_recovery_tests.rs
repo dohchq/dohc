@@ -1238,8 +1238,6 @@ impl FailingReaderSaves {
         (cancel, passes, task)
     }
 
-    /// Recovery stops on its own: a wake after the reader's last answer
-    /// attempts nothing, and every save stays owed.
     async fn assert_recovery_stopped(&self, passes: &mut UnboundedReceiver<Vec<DocKey>>) {
         let dispatched = self.reader.dispatch_count();
         self.open.actor.markdown_recovery_wake().notify_one();

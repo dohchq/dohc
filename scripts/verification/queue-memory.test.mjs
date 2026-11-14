@@ -65,7 +65,6 @@ test("only consecutive matching low-memory failures corroborate a check", () => 
       .outcome,
     "failed",
   );
-  // A package test failure names a log under the attempt folder, and its step row has no log.
   const commandFailure = (output) => ({
     ...receipt,
     output,
@@ -179,7 +178,6 @@ async function serviceHarness(
     const run = pending.shift();
     // One clock sample while the worker is held records the injected free memory.
     t.mock.timers.tick(20);
-    // A package test failure names a log in a folder of the attempt, and its step row has no log.
     const log = javascript ? join(run.output, "js-tests", "pkg.log") : join(run.output, "rust.log");
     const result = {
       ...fields,

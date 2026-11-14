@@ -360,6 +360,7 @@ impl RelayError {
             | RelayError::ClaimRefused(_)
             | RelayError::StreamIdentityMismatch
             | RelayError::SettlementProofBudget
+            | RelayError::ServerBusy
             | RelayError::AuthorshipMismatch
             | RelayError::UnknownChatOperation
             | RelayError::ShareReadOnly
@@ -513,6 +514,9 @@ pub enum RelayError {
     StreamIdentityMismatch,
     #[error("settlement proof verification is temporarily over budget")]
     SettlementProofBudget,
+    /// The relay had no room for the request. Try again later.
+    #[error("relay server is busy")]
+    ServerBusy,
     #[error("relay authorship check failed")]
     AuthorshipMismatch,
     #[error("relay cannot verify this chat operation")]

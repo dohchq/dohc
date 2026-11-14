@@ -496,7 +496,6 @@ test(
       ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
       // A change to one package selects only the JavaScript gate, which runs that package and its dependents, and only the repository tests that read the source tree.
       ["pr", null, null, "packages/fixture/src/index.ts"],
-      // A run that keeps going runs every repository test.
       ["pr", "js", null, "packages/fixture/src/index.ts", false, true],
       ["pr", null, null, null, true],
       ["pr", "js", null, null, true],
@@ -659,6 +658,7 @@ test(
                 "Verifier must restore the caller's compilation policy",
               );
               const report = JSON.parse(readFileSync(join(root, ".dohc-dev/report.json"), "utf8"));
+              if (keepGoing) assert.equal(report.repositoryTests, "test:repo");
               if (preQueueFault) {
                 assert.equal(result.status, 1, result.stderr);
                 assert.match(

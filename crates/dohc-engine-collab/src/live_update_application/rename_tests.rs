@@ -41,12 +41,6 @@ fn entry_of(f: &Fixture, delivery: &str) -> (String, i64, Option<i64>) {
         .unwrap()
 }
 
-/// P carried C1 and C2 when it released, and
-/// a person renamed the document before S captured it at its new path. S's
-/// coverage takes P's outbox at the old path, which the rename proves, and
-/// names each entry by its original outbox and sequence. S's seed opens the
-/// outbox at its own binding, whose high-water mark the coverage keeps. C1
-/// and C2 stay where P queued them, with their receipts, and still resolve.
 #[test]
 fn a_successor_covers_its_predecessors_outbox_across_a_rename() {
     let (mut f, covered, c1, c2) = released_carrying_twice(6);
@@ -115,9 +109,6 @@ fn carried_across_renames_to(second: &str) -> (Fixture, Vec<(String, i64, Dispos
     (f, coverage)
 }
 
-/// A successor of a successor covers outboxes at two earlier bindings: S2
-/// takes P's outbox at owner.md and S1's at first.md, both proved by the
-/// renames, with each entry under its original outbox, sequence and receipt.
 #[test]
 fn a_second_successor_covers_outboxes_at_two_earlier_paths() {
     let (mut f, coverage) = carried_across_two_renames();
@@ -132,8 +123,6 @@ fn a_second_successor_covers_outboxes_at_two_earlier_paths() {
     }
 }
 
-/// The same retained outboxes give the same coverage, whatever order they
-/// are named in, and the adoption stores its digest.
 #[test]
 fn coverage_does_not_depend_on_the_order_outboxes_are_named() {
     let (mut f, coverage) = carried_across_two_renames();
@@ -160,9 +149,6 @@ fn coverage_does_not_depend_on_the_order_outboxes_are_named() {
     assert_eq!(succession_row(&f, &id).4, outboxes_digest(&forward));
 }
 
-/// One budget bounds coverage across every outbox: S2's four entries, two in
-/// each outbox, refuse it at three, with no writes, though either outbox
-/// alone fits. At four it adopts.
 #[test]
 fn coverage_across_outboxes_has_one_budget() {
     let (mut f, coverage) = carried_across_two_renames();
@@ -182,13 +168,6 @@ fn coverage_across_outboxes_has_one_budget() {
 
 type CoverageDamage = (&'static str, fn(&mut Fixture, &CarriedDelivery));
 
-/// Only a binding the chain held, which a rename proves, is coverage. Each
-/// refuses S's adoption at the renamed path with no writes:
-/// - an outbox no activation of the chain held, at a path the document never
-///   had, though it holds C2 whole;
-/// - an arbitrary historical binding: P's binding and outbox at such a path;
-/// - a forged rename: the moment at the new path is a write, names another
-///   source path, or changed the text.
 #[test]
 fn coverage_refuses_unproved_bindings_without_writes() {
     let damages: [CoverageDamage; 5] = [
@@ -271,10 +250,6 @@ fn proves(f: &Fixture, binding: &LiveObjectBinding) -> Result<(), ApplicationErr
     f.store.read_with(|conn| require_historical(conn, &held, &f.key, &[binding], 100))
 }
 
-/// A real restore proves the generation it fenced. P adopts at generation 0;
-/// a restore fences it and resumes it at 1. Registered at 1, the coverage
-/// proves P's binding at 0, and no other: neither a generation no restore
-/// led from, nor P's binding at a path the document never had.
 #[test]
 fn a_resumed_restore_proves_the_generation_it_fenced() {
     let (f, original) = resumed_at_one();

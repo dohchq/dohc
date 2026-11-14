@@ -47,7 +47,6 @@ function replicaEngine(
     unsettled?: boolean;
     beforeJournal?: () => void;
     beforeVersion?: () => void;
-    /** Paths someone deleted: the file is gone, and its document's history stays. */
     deleted?: readonly string[];
   } = {},
 ) {

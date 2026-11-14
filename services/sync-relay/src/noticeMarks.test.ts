@@ -26,8 +26,6 @@ import {
   testStorage,
 } from "./testing";
 
-// The owner's phone marks its Notices with `POST /sync/notices/marks?scope=phone`; a computer marks them without scope.
-
 afterEach(async () => {
   vi.useRealTimers();
   await closeTestStorages();
@@ -41,8 +39,6 @@ async function relay() {
   storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
   storage.claimWorkspace({ workspaceId: "bens", ownerUserId: "ben", createdAtMs: 1 });
   let clock = NOW;
-  // `Bearer session:<user>:<session>` is a valid sign-in, under `rename` while it is set. `holdSession(n)` holds the
-  // nth sign-in check from now until its release.
   let rename: string | null = null;
   let checks = 0;
   let held: { at: number; reached(): void; open: Promise<void> } | null = null;
@@ -115,7 +111,6 @@ async function relay() {
       nowMs: clock,
       ...overrides,
     });
-  // A row of the whole list as it stands, as a computer reads it.
   const row = (noticeId: string, userId = "ana") =>
     storage
       .readNoticeChanges({ recipientUserId: userId, cursor: null, limit: 200, nowMs: clock })
@@ -138,7 +133,6 @@ async function relay() {
   };
 }
 
-// Takes the handler's answer or its pending promise, as the helpers return it.
 async function ok(
   answer: Response | Promise<Response>,
 ): Promise<{ ok: true; dismissed: string[] }> {
@@ -211,7 +205,6 @@ it("clears only the mark it names, and starts the row's retention again by the s
     dismissedAtMs: null,
     expiresAtMs: at + NOTICE_UNREAD_RETENTION_MS,
   });
-  // Unread alone doesn't undo Done.
   expect(f.row("both")).toMatchObject({
     readAtMs: null,
     dismissedAtMs: markedAt,
@@ -229,14 +222,12 @@ it("clears only the mark it names, and starts the row's retention again by the s
     expiresAtMs: at + NOTICE_UNREAD_RETENTION_MS,
   });
 
-  // A replay changes nothing and starts no retention again.
   const rows = ["unread", "both", "restore-read", "restore-unread"].map((id) => f.row(id));
   f.advance(DAY);
   await ok(f.phone(inverse));
   expect(f.storage.noticeHead("ana")).toBe(head + 4);
   expect(["unread", "both", "restore-read", "restore-unread"].map((id) => f.row(id))).toEqual(rows);
 
-  // The phone's read and dismissed mark as a computer's do.
   await ok(
     f.phone({
       marks: [
@@ -275,7 +266,6 @@ it("brings back nothing the relay no longer holds, lost access, or another accou
   expect(f.row("expired")).toBeUndefined();
   expect(f.row("same", "ben")).toEqual(ben);
 
-  // A share's row that lost its target keeps it lost.
   f.storage.createShare({
     share: {
       shareId: "share-ben",
@@ -322,7 +312,6 @@ it("keeps first-dismissal receipts through a restore, so no later dismissal is f
   expect(
     (await ok(f.phone({ marks: [{ noticeId: "skip", mark: "dismissed" }] }))).dismissed,
   ).toEqual([]);
-  // The computer that dismissed it first still hears so when it asks again.
   expect((await ok(dismiss("laptop"))).dismissed).toEqual(["skip"]);
   expect(count(f.storage, "sync_relay_notice_dismissals")).toBe(receipts);
 });
@@ -347,7 +336,6 @@ it("skips an automation wake in a phone batch and marks the rest, and no mark br
   expect(f.row("n-1")?.dismissedAtMs).toBe(f.now());
   expect(f.row(wakeId)).toEqual(before);
 
-  // Read all still reads it, and it keeps waiting.
   await ok(f.phone({ marks: [{ noticeId: wakeId, mark: "read" }] }));
   expect(f.row(wakeId)).toMatchObject({
     readAtMs: f.now(),
@@ -355,7 +343,6 @@ it("skips an automation wake in a phone batch and marks the rest, and no mark br
     wake,
   });
 
-  // The computer consuming it dismisses it first, once.
   expect(
     (
       await ok(
@@ -421,7 +408,6 @@ it("takes exactly the fields each sender may send, within its bounds, and change
     expect(response.status, JSON.stringify(body)).toBe(400);
   }
 
-  // Only the account's own Bearer session marks for the phone.
   const missing = await denialBytes(
     await f.phone({ marks: [mark] }, { headers: { cookie: "session=x" } }),
   );

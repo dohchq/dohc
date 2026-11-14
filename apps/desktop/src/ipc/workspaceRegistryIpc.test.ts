@@ -49,7 +49,6 @@ async function registryHarness() {
         installId: "install-here",
         label: "This Mac",
       });
-      // The real creation reports a folder it made from nothing.
       const fresh = emptyFolders.has(input.rootPath) ? { folder: "7:42" } : null;
       return {
         workspace: { workspaceId: "workspace", ...input, mode: defaultWorkspaceMode(input.kind) },

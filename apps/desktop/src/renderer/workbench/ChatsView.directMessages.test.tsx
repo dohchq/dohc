@@ -16,9 +16,6 @@ import {
   renderView,
 } from "./ChatsView.testHarness";
 
-// Direct messages: participants-only conversations behind the collaboration
-// gate. Solo (available:false, no DMs) renders nothing, and the DM
-// conversation is one running thread whose composer sends on Enter.
 describe("ChatsView direct messages", () => {
   it("marks the message request a notice's Open names and focuses its Accept, until the next click", async () => {
     bridgeMock.syncDms.mockResolvedValue({

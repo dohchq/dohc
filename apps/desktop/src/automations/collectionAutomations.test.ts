@@ -81,7 +81,6 @@ type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 // documents with the engine's idempotency rule, and files adopted as records.
 // Formulas run in the real evaluator.
 
-// Each world's engine open, which prepares its .dohc/local.
 const localState = fakeLocalStateOpens();
 const sharedEvaluator = createAutomationFormulaEvaluator();
 afterAll(() => sharedEvaluator.close());

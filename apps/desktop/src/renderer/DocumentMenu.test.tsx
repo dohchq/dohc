@@ -598,8 +598,6 @@ describe("DocumentMenu", () => {
       "You can copy this document when it opens.",
     );
 
-    // The user ends it, and reopening starts from nothing — a stale
-    // instruction would describe an attempt from before.
     await user.keyboard("{Escape}");
     expect(screen.queryByTestId("document-menu-status")).toBeNull();
     await user.click(screen.getByTestId("document-menu-trigger"));
@@ -622,10 +620,6 @@ describe("DocumentMenu", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
-  // A clipboard write settles after the click that started it, and a refusal
-  // stands until the user closes the menu. A late "Copied" must not land on
-  // top of an instruction the user is still reading, or start the timer that
-  // closes the menu under them.
   it("ignores a clipboard write that settles after a later action answered", async () => {
     const user = userEvent.setup();
     stubClipboard();

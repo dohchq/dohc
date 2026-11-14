@@ -96,7 +96,6 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     },
   };
 });
-// What another local user's file reports: anyone's uid but this user's.
 const madeByAnotherUser = (stats: import("node:fs").Stats) =>
   Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { uid: stats.uid + 1 });
 
@@ -756,7 +755,6 @@ describe("workspace settings file store", () => {
   });
 
   it("refuses to write through a symlinked .dohc and never lands files outside", async () => {
-    // The engine prepared .dohc/local, then something put a link at .dohc.
     const workspace = await openedWorkspace();
     const root = workspace.rootPath;
     const outside = await createTestScratch("dohc-workspace-settings-");

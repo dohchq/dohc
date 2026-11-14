@@ -154,16 +154,11 @@ describe("ChatsView channels", () => {
   });
 });
 
-// Journey 3: the navigator kept an unread badge more than 30s after
-// the thread was read. It hands every conversation to the editor, so it never
-// reaches its own mark-read and had no reason to refetch the counts it loaded
-// at mount. The shell reports each landed read through readRevision.
 describe("ChatsView panel navigator unread badges", () => {
   function navigator(readRevision: number, threadRevision = 0) {
     return navigatorView(readRevision, { onOpenInTab: vi.fn(), threadRevision });
   }
 
-  // Clearing a badge must never cost the user the navigator itself.
   it("keeps a working navigator when the badge refresh fails, and retries on the next read", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ unreadCount: 2 })],
@@ -172,7 +167,6 @@ describe("ChatsView panel navigator unread badges", () => {
     const view = render(navigator(0));
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
-    // The refresh the read triggers fails.
     bridgeMock.listChatChannels.mockRejectedValue(new Error("offline"));
     view.rerender(navigator(1));
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
@@ -181,8 +175,6 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
     expect(screen.getByTestId("chats-channel-unread").textContent).toBe("2 unread");
 
-    // The signal was not spent on that failure: the next read still refetches
-    // and the badge catches up.
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ unreadCount: 0 })],
       fileThreads: [],
@@ -227,17 +219,12 @@ describe("ChatsView panel navigator unread badges", () => {
     });
     view.rerender(navigator(1));
 
-    // The badge catches up, and the invitation is still on offer.
     await waitFor(() => {
       expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
     });
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
 
-  // Keeping the cached rows is only half of honest. An unreachable
-  // listing with nothing cached committed no rows and said nothing, so the
-  // section that lists invitations disappeared and the surface read as "you
-  // have no shares".
   it("says dohc could not read the shares when the relay is unreachable, and offers a retry", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel()],
@@ -256,10 +243,8 @@ describe("ChatsView panel navigator unread badges", () => {
     // Nothing is cached, so nothing on screen is stale — saying so would be
     // false.
     expect(notice.textContent).not.toContain("out of date");
-    // The section itself must survive.
     expect(screen.getByTestId("chats-shared-with-you")).toBeTruthy();
 
-    // The Next has to work on this surface: the retry asks again.
     const before = bridgeMock.listChatChannelShares.mock.calls.length;
     bridgeMock.listChatChannelShares.mockResolvedValue(
       shareListing({
@@ -278,7 +263,6 @@ describe("ChatsView panel navigator unread badges", () => {
     await waitFor(() => {
       expect(bridgeMock.listChatChannelShares.mock.calls.length).toBeGreaterThan(before);
     });
-    // A reached relay takes the notice down and lists the invitation.
     await waitFor(() => {
       expect(screen.queryByTestId("chats-shares-unreadable")).toBeNull();
     });
@@ -377,9 +361,7 @@ describe("ChatsView panel navigator unread badges", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
     });
-    // The invitation dohc already knew about is still on offer...
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
-    // ...and it is marked as possibly older than this answer.
     const notice = screen.getByTestId("chats-shares-unreadable");
     expect(notice.dataset.failure).toBe("over-limit");
     expect(notice.textContent).toContain("This list may be out of date.");
@@ -421,8 +403,6 @@ describe("ChatsView panel navigator unread badges", () => {
     view.rerender(navigator(1));
     await waitFor(() => expect(answerShares).toHaveLength(2));
 
-    // Switch to account B. Its listing cannot reach the relay and resolves
-    // first — the relay lane stays unclaimed.
     act(() => emitCloudSessionChanged("session-b"));
     await waitFor(() => expect(answerShares).toHaveLength(3));
     await act(async () => {
@@ -435,8 +415,6 @@ describe("ChatsView panel navigator unread badges", () => {
     });
     expect(screen.queryByTestId("chats-join-shared")).toBeNull();
 
-    // Account A's stalled read answers last, with A's rows. It was issued
-    // under the old session: it must commit nothing.
     await act(async () => {
       answerShares[1](shareListing({ sessionKey: "session-a", received: [invitation] }));
       await Promise.resolve();
@@ -471,7 +449,6 @@ describe("ChatsView panel navigator unread badges", () => {
           }),
         );
       }
-      // The new session's relay stalls forever.
       return new Promise(() => {});
     });
     render(navigator(0));
@@ -520,7 +497,6 @@ describe("ChatsView panel navigator unread badges", () => {
     render(navigator(0));
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
 
-    // Transition start: preserve, ask for nothing.
     act(() => emitCloudSessionChanged("session-a", "changing"));
     await act(async () => {
       await Promise.resolve();
@@ -577,7 +553,6 @@ describe("ChatsView panel navigator unread badges", () => {
       />,
     );
 
-    // Mount: one person has the channel.
     await waitFor(() => expect(answerShares).toHaveLength(1));
     await act(async () => {
       answerShares[0](shareListing({ granted: [grant("ana@example.com", "share-1")] }));
@@ -600,8 +575,6 @@ describe("ChatsView panel navigator unread badges", () => {
     );
     await waitFor(() => expect(answerShares).toHaveLength(2));
 
-    // Meanwhile the user shares the channel with someone else, and that
-    // lookup answers first.
     await user.click(screen.getByTestId("chats-share-add-people"));
     await user.type(screen.getByTestId("chats-share-email"), "bo@example.com");
     await user.click(screen.getByTestId("chats-share-submit"));
@@ -622,7 +595,6 @@ describe("ChatsView panel navigator unread badges", () => {
       await Promise.resolve();
     });
 
-    // Bo is still there.
     const members = screen.getAllByTestId("chats-share-member");
     expect(members).toHaveLength(2);
     expect(members.map((el) => el.textContent).join(" ")).toContain("bo@example.com");

@@ -108,18 +108,13 @@ test("a PASS verdict requires scratch cleanup to have passed", () => {
 });
 
 test("a required step is matched by its whole name, not as a substring", () => {
-  // Reading the line by substring let any row whose name merely contained a
-  // required name answer for it, so a run that never verified its target
-  // passed the check by carrying a row about something else.
   const forged = passVerdict.replace("native target=PASS", "not-native target=PASS");
   assert.throws(() => check(forged), /native target/);
 
-  // The genuine row still satisfies the requirement beside the forged one.
   assert.doesNotThrow(() =>
     check(passVerdict.replace("native target=PASS", "not-native target=PASS native target=PASS")),
   );
 
-  // Two rows for one step leave the step's result ambiguous, so neither wins.
   assert.throws(
     () => check(passVerdict.replace("native target=PASS", "native target=SKIP native target=PASS")),
     /2 rows for required CI gate step `native target`/,
@@ -155,9 +150,6 @@ test("an extra ` | ` is rejected, because the verdict is read by position", () =
 });
 
 test("a summary field that is not a list of rows is refused, not scanned", () => {
-  // The row reader starts at the field's first character and every character
-  // must belong to a row. Its guard for "this is not a row list at all" was
-  // the one branch here nothing exercised, so deleting it changed no test.
   const [when, gate, plat, verdict] = passVerdict.split(" | ");
   assert.throws(
     () => check([when, gate, plat, verdict, "see the log above"].join(" | ")),
@@ -209,10 +201,6 @@ test("the gate name is required in its own field, not anywhere in the line", () 
 });
 
 test("the verdict must name the commit its gate examined", () => {
-  // The `tree provenance` row says a check ran. It does not say which tree it
-  // read — a producer that drops or mangles the stamp keeps a green row over
-  // a verdict that names no commit, which is the decorative-row defect this
-  // checker exists to refuse, one level up.
   assert.throws(
     () => check(passVerdict.replace(", head 1f47af31 clean, 11 reads", "")),
     /does not name the commit the run examined/,
@@ -223,7 +211,6 @@ test("the verdict must name the commit its gate examined", () => {
     () => check(passVerdict.replace("head 1f47af31 clean, 11 reads", "head UNATTRIBUTABLE")),
     /does not name the commit the run examined/,
   );
-  // Not a commit.
   assert.throws(
     () => check(passVerdict.replace("head 1f47af31", "head zzzzzzzz")),
     /does not name the commit the run examined/,
@@ -271,10 +258,6 @@ test("the verdict must name the commit its gate examined", () => {
 });
 
 test("the verdict must name THIS checkout's commit, not any commit", () => {
-  // A stamp's shape is not its value. `head deadbeef clean, 11 reads` parses
-  // perfectly, and a stale log carrying it would approve a gate run over
-  // whatever tree that commit was — which is the substitution the whole stamp
-  // exists to prevent, one level up from the last round's finding.
   assert.throws(
     () =>
       requireCiPassVerdict(
@@ -298,14 +281,10 @@ test("the verdict must name THIS checkout's commit, not any commit", () => {
     () => requireCiPassVerdict(passVerdict, () => `1f47af39${CHECKOUT_HEAD.slice(8)}`),
     /verdict examined `1f47af31`/,
   );
-  // No checkout, no verification. Falling through to acceptance here would
-  // make the check optional for exactly the callers that cannot satisfy it.
   assert.throws(
     () => requireCiPassVerdict(passVerdict, () => null),
     /could not answer `git rev-parse HEAD`/,
   );
-  // And a caller that supplies no resolver at all is refused rather than
-  // silently skipping the commit check.
   assert.throws(() => requireCiPassVerdict(passVerdict), /needs a resolveHead\(\)/);
 });
 
@@ -1664,8 +1643,6 @@ for (const detached of [false, true]) {
         assert.notEqual(capture(command), null, `\`${command}\` must run here`);
       }
 
-      // The log exists now, and the checkout is where it was: same commit,
-      // same branch or none, same worktree.
       const seeded = read();
       assert.equal(seeded.reflog.present, true);
       assert.equal(git("rev-parse", "HEAD"), head);
@@ -1673,9 +1650,6 @@ for (const detached of [false, true]) {
       assert.deepEqual(seeded.dirty, []);
       assert.equal(classifyTreeProvenance(readingsOf(seeded, seeded)).status, "PASS");
 
-      // And the seeded log does the job it was seeded for: HEAD moves away and
-      // back inside a step, both readings name one commit, and the run is
-      // refused anyway.
       git("update-ref", "-m", "away", "HEAD", `${head}~1`);
       git("update-ref", "-m", "back", "HEAD", head);
       const moved = read();
@@ -1702,17 +1676,13 @@ test("a HEAD that moved and came back inside one step is refused", () => {
   assert.equal(returned.status, "FAIL");
   assert.match(returned.reason, /HEAD was updated 2 times/);
   assert.match(returned.reason, /during `test --workspace`/);
-  // The commit both readings agree on is named, and the stamp is the
-  // judgement's — never the reading's.
   assert.match(returned.reason, /1f47af31/);
   assert.equal(returned.stamp, "UNATTRIBUTABLE");
 
-  // One move is the same defect, and reads as one.
   const once = classifyTreeProvenance(readingsOf(A, logged(1)));
   assert.equal(once.status, "FAIL");
   assert.match(once.reason, /HEAD was updated 1 time /);
 
-  // A log that stayed put across every step is the ordinary case, and passes.
   assert.equal(classifyTreeProvenance(readingsOf(A, A, A)).status, "PASS");
 });
 

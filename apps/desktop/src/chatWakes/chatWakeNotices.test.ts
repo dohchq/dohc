@@ -67,7 +67,6 @@ describe("wake rows in Notices", () => {
       ["ws", "wake-unreadable"],
       ["later", "wake-unreadable"],
     ]);
-    // Once taken back, a new failure shows it again.
     notices.report(null, "unreadable", null);
     expect(deps.report).toHaveBeenCalledTimes(4);
   });

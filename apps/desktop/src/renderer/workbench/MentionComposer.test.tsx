@@ -19,8 +19,6 @@ const candidates: MentionCandidate[] = [
   { id: "user:you", kind: "user", handle: "you", label: "You", description: "you" },
 ];
 
-// A tiny controlled harness so the composer behaves like it does in ChatsView
-// (parent owns the value).
 function Harness(props: {
   fileCandidates?: { path: string; label: string; readPath?: string }[];
   onSend?: () => void;

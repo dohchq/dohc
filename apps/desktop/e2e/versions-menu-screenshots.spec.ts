@@ -302,7 +302,6 @@ test("@ui-audit the versions menu and what it opens", async () => {
     await createFailed.getByRole("button", { name: "Dismiss workspace error" }).click();
     await expect(createFailed).toHaveCount(0);
 
-    // Both sides change notes.md, so the merge has a conflict to decide.
     await writeCaptured(page, temp.rootPath, "Draft", "notes.md", "# Notes\n\nDraft's notes.\n");
     await switchTo(page, "Main");
     await writeCaptured(page, temp.rootPath, "Main", "notes.md", "# Notes\n\nMain's notes.\n");

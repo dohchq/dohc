@@ -3976,7 +3976,8 @@ async function dispatchWorkspace(
           ok: true as const,
           copyPath: saved.copyPath,
           packagePath: saved.packagePath,
-          folder: posix.dirname(saved.packagePath),
+          notInNote: saved.notInNote,
+          folder: posix.dirname(saved.copyPath ?? saved.packagePath),
           storedOn: saved.storedOn,
           keptEdits: saved.keptEdits,
         };

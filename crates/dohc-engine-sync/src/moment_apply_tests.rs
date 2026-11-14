@@ -349,8 +349,6 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
     };
     let before = snapshot(&store, "object");
 
-    // Only an audited settlement of the owner's own document at a later
-    // restore generation is a reason to wait. Anything else is still refused.
     let changed = |change: fn(&mut LiveObjectBinding)| {
         let mut binding = next.clone();
         change(&mut binding);
@@ -926,6 +924,8 @@ struct DrainWindow {
     restored_text: String,
 }
 
+const CAPTURE_RELEASED_AT_MS: i64 = 20;
+
 fn drain_window() -> DrainWindow {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
     let mut owner = restore_owner();
@@ -985,13 +985,14 @@ fn drain_window() -> DrainWindow {
                    source_moment_id,source_digest,source_byte_length,host_coordinate_json,\
                    released_at_ms,released_restore_generation,released_accepted_cursor,\
                    released_boundary_json,carried_manifest_json) \
-                 VALUES ('relay','capture','ws','main','object',?1,?2,?3,?4,?5,'{}',20,1,1,'null','[]')",
+                 VALUES ('relay','capture','ws','main','object',?1,?2,?3,?4,?5,'{}',?6,1,1,'null','[]')",
                 params![
                     next.lineage_claim_id,
                     serde_json::to_string(&next).unwrap(),
                     owner.initial_moment,
                     text_sha(&owner.initial_text),
-                    owner.initial_text.len() as i64
+                    owner.initial_text.len() as i64,
+                    CAPTURE_RELEASED_AT_MS
                 ],
             )
         })
@@ -1081,12 +1082,6 @@ fn refusal_message(store: &EngineStore, origin: &str) -> String {
         .unwrap()
 }
 
-/// At the drain's first decision that waits for validation, the waiting
-/// settlement rolls back with its scheduling, the one before it commits with
-/// its report, and nothing after it is read. Once validation completes the
-/// drain goes on from the settlement that waited, in the same report: every
-/// row it completes, before and after the wait, carries one id, and its
-/// change is reported once.
 #[test]
 fn a_drain_that_waits_for_validation_commits_only_the_settlements_before_it() {
     let DrainWindow {
@@ -1167,10 +1162,6 @@ fn a_drain_that_waits_for_validation_commits_only_the_settlements_before_it() {
     );
 }
 
-/// A completed validation authorizes nothing by itself. The owner's binding
-/// moves while the drain waits, so the settlement that waited is refused
-/// when the drain goes on; and a tail input that changes after validation
-/// completes makes it wait again for the generation it then reads.
 #[test]
 fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
     let DrainWindow {
@@ -1185,13 +1176,12 @@ fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
     let mut report = crate::moment_apply::pending::PendingSettlementReport::default();
     let (pending, _) = drain_to_host(&mut store, &tails, &mut report);
     pending.validate().wait().unwrap();
-    // The capture's release record changes: the generation moves past the
-    // one just validated.
+    let capture_release_moved_ms = CAPTURE_RELEASED_AT_MS + 1;
     store
         .read_with(|conn| {
             conn.execute(
-                "UPDATE live_owner_activations SET released_at_ms=21 WHERE activation_id='capture'",
-                [],
+                "UPDATE live_owner_activations SET released_at_ms=?1 WHERE activation_id='capture'",
+                [capture_release_moved_ms],
             )
         })
         .unwrap();
@@ -1226,10 +1216,6 @@ fn a_drain_decides_the_settlement_that_waited_again_from_what_it_reads() {
     assert!(report.changes.is_empty());
 }
 
-/// A request that stops waiting leaves its committed prefix for the next
-/// pull, which reclaims it under a report of its own. Rows a report applied
-/// stay reclaimable, with their materialization, until a cursor naming that
-/// report commits: an older report releases nothing.
 #[test]
 fn an_abandoned_drain_leaves_its_committed_prefix_and_materialization_to_the_next_pull() {
     let DrainWindow {
@@ -1282,10 +1268,6 @@ fn an_abandoned_drain_leaves_its_committed_prefix_and_materialization_to_the_nex
     assert!(drain_queue(&store).is_empty());
 }
 
-/// A pull whose drain waits keeps what it fetched and the drain's report.
-/// Its next run fetches nothing again and goes on with the same report, so
-/// the cursor it returns owns the settlement that committed before the wait,
-/// with that settlement's refusal.
 #[test]
 fn a_pull_whose_drain_waits_goes_on_with_the_same_report() {
     let DrainWindow {
@@ -3495,9 +3477,6 @@ fn moment_append_equal_text_for_bound_owner_keeps_live_binding_checks() {
     assert_eq!(snapshot(&store, "object"), before);
 }
 
-/// A conflict that names the history-only predecessor as its incoming side
-/// holds it only while the conflict is open. After a resolution, a successor
-/// of the equal preimage adopts the local head. An unequal preimage never does.
 #[test]
 fn file_successor_of_a_resolved_conflicts_incoming_side_adopts_the_local_preimage() {
     for (status, before_text, adopts) in [
@@ -4252,11 +4231,6 @@ fn recover_ended(store: &mut EngineStore) -> Result<crate::OpenArtifactDrain, Sy
     )
 }
 
-/// Recovery in a pass writes what the rows of a document it completes
-/// committed as drain reports, in the transaction that removes them, so a
-/// later op's wait, an abandoned pass or a restart still reports them once,
-/// with no recovery failure. The direct recovery API answers the same
-/// results at once.
 #[test]
 fn recovery_in_a_pass_reports_what_it_removed_through_drain_reports() {
     type Reported = (

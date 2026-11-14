@@ -151,8 +151,6 @@ fn nested1b_canonical_frontmatter_fold_drops_redundant_witness() {
 #[test]
 fn nested1b_flat_unsupported_marker_keeps_builder_refusal() {
     let source = "-\tparent\n  - child";
-    // Source retains two flat items here, not an item-block body. The native
-    // builders still refuse its unsupported marker indentation, as on main.
     let normalized = normalize_list_tabs(source, MarkdownReading::Source);
     let (blocks, _) = parse_markdown_blocks_checked(&normalized, MarkdownReading::Source);
     assert!(!refused_fold_item_bodies(&blocks));

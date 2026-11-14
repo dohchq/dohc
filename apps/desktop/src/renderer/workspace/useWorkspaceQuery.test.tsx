@@ -65,7 +65,6 @@ describe("useWorkspaceQuery", () => {
         <Files />
       </WorkspaceSessionProvider>
     );
-    // A to B to A, without unmounting the reader.
     const view = render(visit("A"));
     view.rerender(visit("B"));
     view.rerender(visit("A"));

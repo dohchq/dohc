@@ -405,7 +405,6 @@ it("refuses each write outside the hosted documents at its own coordinate and le
     inserted: 1,
     currentMaxOriginSeq: 10,
   });
-  // Once the session host releases it, the uncovered document retires and the credential ends.
   expect(
     f.storage.releaseServiceHostEnrollment({
       workspaceId: ws,
@@ -611,7 +610,6 @@ it("settles a moved or replaced document's work without taking back its old loca
   expect(await answer(binding.objectId, "docs/a.md", privateEdit.sha256)).toEqual(absent);
   expect(await answer("object-b", "docs/b.md", successor.sha256)).toEqual(absent);
   expect(f.hostCoordinate(3)).toBeNull();
-  // A reopened relay keeps which rows departed, and the column admits nothing else.
   openSyncRelayStorage(f.path, f.config).close();
   expect(
     f.raw

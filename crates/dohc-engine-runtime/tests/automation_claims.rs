@@ -55,7 +55,6 @@ fn seed_identity(db: &Path, workspace_id: &str) {
         .expect("seed identity");
 }
 
-/// Sync is genuinely on: identity plus a durable relay position.
 fn enable_sync(db: &Path, workspace_id: &str) {
     seed_identity(db, workspace_id);
     let mut store = EngineStore::open(db, 9_106).expect("open store");
@@ -1168,8 +1167,6 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
         "a running claim is never served twice within one attempt"
     );
 
-    // The settle crashes inside its transaction, before the commit is
-    // durable: the done transition rolls back whole.
     let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     handle
         .automation_settle(
@@ -1190,8 +1187,6 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
         "a crashed settle leaves the claim running for the reaper"
     );
 
-    // Restart: the open-time reaper requeues the stale running claim, and
-    // the next claim serves it again as attempt 2.
     let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
     let reclaimed = handle
         .automation_reclaim_running(
@@ -1573,7 +1568,6 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
             &NoFaults,
         )
         .expect("watch");
-        // A member's message arrives before its thread and is parked.
         let early = ReplicationEnvelope {
             settlement_admission: None,
             admitted_author_snapshot: None,

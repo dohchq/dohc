@@ -279,7 +279,6 @@ it("keeps an unreadable row for a queue whose head the engine refuses, and fails
       unreadable("damaged", "owner-outbox-state-corrupt"),
       record("after", "paused"),
     ]);
-  // Never cached: each read asks the engine again.
   expect(heads.has("outbox-waiting")).toBe(false);
   await expect(
     readOwnerLiveQuarantines(client, "handle", {

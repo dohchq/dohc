@@ -3,9 +3,6 @@ import { createAccountFeedWaits, readAccountFeed, type AccountFeedAnswer } from 
 import { DiscussionActivityHub } from "./discussionActivity";
 import type { AccountFeedLogRow } from "./storage/accountFeed";
 
-// The feed's parts over a stand-in for the relay's log and journal, which
-// counts the rows each read asks for.
-
 type JournalRow = { journalCursor: number; objectId: string; path: string };
 
 function backlog(log: AccountFeedLogRow[], journal: JournalRow[]) {

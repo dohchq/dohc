@@ -39,10 +39,6 @@ import {
   type HandlerOverrides,
 } from "./testing";
 
-// The direct lane, driven through the real route: the owner writes real
-// files to its log, the recipient uploads content through its share and
-// writes directly, and the assertions read the owner's own log.
-
 afterEach(closeTestStorages);
 
 const OWNER = "owner";

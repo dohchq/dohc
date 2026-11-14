@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import { CircleAlert, CloudOff, Link, LoaderCircle, Plug } from "lucide-react";
 import {
   MAX_PREFERRED_NAME_LENGTH,
@@ -14,22 +14,11 @@ import {
   type DesktopUserSettings,
 } from "../../settings/userSettings";
 import { AgentLinkAppMenu } from "../agentLinkApps";
-import { ipcErrorMessage } from "../ipcError";
 import { Overlay } from "../Overlay";
 import { CopyButton } from "../ui/CopyButton";
-import { FieldError, PrimaryButton, RetryRow, SecondaryButton } from "../ui/controls";
-import { SkeletonRows } from "../ui/SkeletonRows";
+import { FieldError, PrimaryButton, SecondaryButton } from "../ui/controls";
 import { HueControl, SwitchControl } from "./SettingRow";
-import {
-  T3_CODE,
-  T3_CODE_CANNOT_KEEP,
-  T3CodeAllow,
-  T3CodeAllowAgain,
-  T3CodeThreadPicker,
-  t3CodeAllowed,
-  useT3CodeAccess,
-  type T3CodeThreadChoice,
-} from "./T3CodeThread";
+import { T3_CODE, T3CodeChoice, type T3CodeThreadChoice } from "./T3CodeThread";
 import { ToolReadiness, type ReadinessTone } from "./ToolReadiness";
 
 export type ToolTileState =
@@ -87,55 +76,6 @@ const baseName = (choice: RunsWith) =>
   AGENT_TOOLS.find((entry) => entry.id === choice)?.name ?? "Agent";
 
 const THREAD_SEARCH_ID = "agent-add-thread-search";
-
-// T3 Code on Add agent: why dohc cannot connect it, the ask that allows dohc
-// there, or the thread to connect. `onReady` says when a thread can be chosen.
-function T3CodeChoice(props: {
-  picked: string | null;
-  onPick: (thread: T3CodeThreadChoice | null) => void;
-  error: string | null;
-  onReady: (ready: boolean) => void;
-}) {
-  const access = useT3CodeAccess();
-  const { state } = access;
-  const ready = state !== undefined && state.canKeep && t3CodeAllowed(state);
-  const { onReady } = props;
-  useEffect(() => {
-    onReady(ready);
-    return () => onReady(false);
-  }, [onReady, ready]);
-  if (access.readError !== null)
-    return (
-      <RetryRow testId="t3-code-access-retry" onRetry={() => void access.retryRead()}>
-        {ipcErrorMessage(access.readError, "dohc could not check whether T3 Code allows it.")}
-      </RetryRow>
-    );
-  if (state === undefined)
-    return <SkeletonRows testId="t3-code-access-loading" label="Checking T3 Code" rows={2} />;
-  if (!state.canKeep)
-    return (
-      <p data-testid="t3-code-cannot-keep" className="m-0 text-[13px] text-danger">
-        {T3_CODE_CANNOT_KEEP}
-      </p>
-    );
-  if (!ready)
-    return (
-      <div className="rounded-lg border border-line bg-bg px-3 py-3">
-        <T3CodeAllow access={access} />
-      </div>
-    );
-  return (
-    <>
-      <T3CodeThreadPicker
-        picked={props.picked}
-        onPick={props.onPick}
-        error={props.error}
-        searchId={THREAD_SEARCH_ID}
-      />
-      <T3CodeAllowAgain access={access} />
-    </>
-  );
-}
 
 /**
  * Add agent: name and color, then what the agent runs with. Claude Code and
@@ -479,6 +419,7 @@ export function AddAgentSheet(props: {
             picked={thread?.id ?? null}
             onPick={pickThread}
             error={threadMissing ? "Choose a thread." : null}
+            searchId={THREAD_SEARCH_ID}
             onReady={setT3CodeReady}
           />
         ) : choice !== null && choice !== "link" ? (

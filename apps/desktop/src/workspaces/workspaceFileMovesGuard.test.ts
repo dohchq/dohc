@@ -9,9 +9,6 @@ import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { LiveFolderError, LivePageOwnedError } from "./workspaceEngineCapture";
 import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs } from "./workspaceFileMoves";
 
-// Every route that renames or moves a live page waits for the move
-// guard first, before it takes the workspace lock or calls the capture.
-
 const fsCalls = vi.hoisted(() => ({ count: 0 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();

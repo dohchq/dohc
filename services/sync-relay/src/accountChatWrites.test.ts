@@ -874,7 +874,6 @@ describe("a phone's chat write through the server's copy", () => {
   it("replays nothing once access ends while a replay's target read waits, from a retry or in the background", async () => {
     const replies = (f: Awaited<ReturnType<typeof fixture>>) =>
       f.engine.asked.filter((method) => method === CHATS_METHOD.messageSend).length;
-    // A reply whose send's answer was lost, so its stage never committed as far as anything knows.
     const unsent = async () => {
       const f = await fixture();
       await seed(f.chats);

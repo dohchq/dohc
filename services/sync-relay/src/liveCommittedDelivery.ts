@@ -21,6 +21,7 @@ import type { StopRestoreLookup } from "./storage/liveRestoreOperation";
 import type { LiveRestorePreparation } from "./liveRestorePreparation";
 import { LiveHostRegistrations, sameLiveHostDocument } from "./liveHostRegistration";
 import { settlementResponse, settlementPending, type SettlementOutcome } from "./liveSettlement";
+import { asRelayWrite } from "./relayMainThreadTiming";
 export { createLiveJournalHistoryAuthority, type LiveJournalHistoryAuthority };
 
 export type CommittedDeliveryOutcome =
@@ -166,11 +167,15 @@ export class LiveCommittedDelivery {
         if (next.kind === "bootstrap") {
           if (result?.status !== "bootstrapped")
             throw new Error("Invalid durable bootstrap acknowledgement.");
-          this.#store.acknowledgeBootstrap(drain, result.ack);
+          asRelayWrite("drain-acknowledge", () =>
+            this.#store.acknowledgeBootstrap(drain!, result.ack),
+          );
         } else {
           if (result?.status !== "applied")
             throw new Error("Invalid durable application acknowledgement.");
-          this.#store.acknowledge(drain, next.predecessor, result.ack);
+          asRelayWrite("drain-acknowledge", () =>
+            this.#store.acknowledge(drain!, next.predecessor, result.ack),
+          );
         }
         settledSinceApply = false;
       }

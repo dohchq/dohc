@@ -246,7 +246,6 @@ function makeBridge(
         fields: collectionPath === "Log" ? [{ name: "Entry", type: "text" }] : [],
       },
     })),
-    // Main's check, for real: the file contract's writer and the formula parser.
     checkCollectionAutomation: vi.fn(async ({ automation }: { automation: Automation }) => {
       const written = writeAutomationsFile([{ status: "valid", automation }]);
       return {
@@ -291,8 +290,6 @@ function makeBridge(
     })),
   };
   vi.stubGlobal("dohcDesktop", bridge);
-  // Another writer changes the file; the panel reads it again, as it does
-  // when a run settles.
   const replaceFile = (next: ListCollectionAutomationsResult) => {
     current = next;
     for (const listener of failureListeners) listener({ workspaceId: "ws-1" });
@@ -1166,7 +1163,6 @@ describe("an automation's runs", () => {
         name: "Try again",
       }),
     ).toBeNull();
-    // A change too large to claim keeps its own reason, and none can start it.
     const unclaimedRow = screen.getByTestId("automation-run-atc_unclaimed");
     expect(unclaimedRow.textContent).toContain(TOO_LARGE);
     expect(within(unclaimedRow).queryByRole("button", { name: "Try again" })).toBeNull();

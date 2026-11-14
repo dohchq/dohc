@@ -60,7 +60,6 @@ test("open editors list caps its height and keeps the active row in view", async
     expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
     expect(metrics.overflowY).toBe("auto");
 
-    // The last opened editor is active and in view; the first scrolled out.
     expect(await rowInView(list, names[13])).toBe(true);
     expect(await rowInView(list, names[0])).toBe(false);
 
@@ -184,7 +183,6 @@ test("a focused row scrolled flush to its list's edge keeps its whole focus outl
         "inside",
       );
     }
-    // The outline covers the whole rounded row, under the close button too.
     const [rowBox, openBox] = await Promise.all([row.boundingBox(), open.boundingBox()]);
     expect(openBox?.width).toBeCloseTo(rowBox?.width ?? 0, 0);
 

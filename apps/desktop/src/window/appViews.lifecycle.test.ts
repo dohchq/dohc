@@ -322,13 +322,14 @@ it("denies permission checks and display capture, and guards main-frame requests
   guest.emit("input-event", {}, { type: "rawKeyDown", key: "Escape" });
   guest.emit("will-frame-navigate", { ...navigation, url: "https://example.com/shortcut" });
   expect(links()).toHaveLength(1);
-  // A navigation the page starts keeps a press; a reload by dohc drops it.
+  const pageNavigation = { isMainFrame: true, isSameDocument: false, initiator: {} };
+  const dohcReload = { isMainFrame: true, isSameDocument: false, initiator: null };
   guest.emit("before-mouse-event", {}, { type: "mouseDown" });
-  guest.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false, initiator: {} });
+  guest.emit("did-start-navigation", pageNavigation);
   guest.emit("will-frame-navigate", { ...navigation, url: "https://example.com/kept" });
   expect(links()).toHaveLength(2);
   guest.emit("before-mouse-event", {}, { type: "mouseDown" });
-  guest.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false, initiator: null });
+  guest.emit("did-start-navigation", dohcReload);
   guest.emit("will-frame-navigate", { ...navigation, url: "https://example.com/reloaded" });
   expect(links()).toHaveLength(2);
   expect(guest.setWindowOpenHandler.mock.calls[0]![0]({ url: "file:///evil" })).toEqual({

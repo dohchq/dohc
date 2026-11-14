@@ -868,6 +868,8 @@ it("resumes a real configured service activation after a lost native adoption re
     });
     if (binding.kind !== "current") throw new Error("Activated binding is unavailable.");
     const capture = await active.captureNative(binding.binding);
+    // The read always reports a replay. The save's own answer may come from its apply (false on a first
+    // apply) or, when a pass applied the row first, from this read, so the test cannot pin either.
     expect(
       await capture.client.readLiveApplicationAck(
         {
@@ -878,7 +880,7 @@ it("resumes a real configured service activation after a lost native adoption re
         },
         { deliveryId: ack.deliveryId, updateDigest: ack.updateDigest },
       ),
-    ).toEqual(ack);
+    ).toEqual({ ...ack, applicationReplayed: true });
     const settled = await active.settle(document);
     const expected = yDocToMarkdown(provider.doc);
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(expected);

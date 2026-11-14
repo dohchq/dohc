@@ -87,22 +87,8 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     leases: &dyn LeaseProbe,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
-    if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
-        return Ok(Vec::new());
-    }
-    let rows: Vec<(String, String, Option<String>)> = collect_rows(
-        tx,
-        "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path) \
-         FROM ydoc_docs d LEFT JOIN snapshots s \
-           ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
-          AND s.object_id=d.object_id \
-         WHERE d.workspace_id=?1 AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane!=1 \
-         ORDER BY d.version_id, d.object_id",
-        workspace_id,
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
     let mut sharing_declined = Vec::new();
-    for (version_id, object_id, path) in rows {
+    for (version_id, object_id, path) in unclaimed_bases_in_tx(tx, workspace_id)? {
         let Some(path) = path else {
             // Legacy never-settled rows can predate durable Y.Doc paths. A
             // later local update supplies the path and retries origination.
@@ -133,6 +119,27 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
         }
     }
     Ok(sharing_declined)
+}
+
+/// The unclaimed lineages the first sweep would originate, with their paths.
+fn unclaimed_bases_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<Vec<(String, String, Option<String>)>, SyncError> {
+    if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+        return Ok(Vec::new());
+    }
+    collect_rows(
+        tx,
+        "SELECT d.version_id, d.object_id, COALESCE(s.path,d.path) \
+         FROM ydoc_docs d LEFT JOIN snapshots s \
+           ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
+          AND s.object_id=d.object_id \
+         WHERE d.workspace_id=?1 AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane!=1 \
+         ORDER BY d.version_id, d.object_id",
+        workspace_id,
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
 }
 
 /// Originate the lineage a live session holds, once enrollment is ready. The
@@ -249,7 +256,7 @@ macro_rules! head_export_exclusions_sql {
 // use all columns of the JSON expression indexes.
 const COVERED_HEADS_SQL: &str = concat!(
     "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
-                     d.head_update_seq,d.head_snapshot_seq,d.lineage_claim_id FROM snapshots s JOIN ydoc_docs d \
+                     d.head_update_seq,d.head_snapshot_seq,d.lineage_claim_id,s.path FROM snapshots s JOIN ydoc_docs d \
                      ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id \
                        AND d.object_id=s.object_id \
                    JOIN moments h ON h.workspace_id=s.workspace_id \
@@ -313,6 +320,101 @@ const COVERED_HEADS_SQL: &str = concat!(
                      ORDER BY h.moment_order"
 );
 
+type CoveredHead = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    String,
+    String,
+);
+
+/// The heads the second sweep would export, each with its path last.
+fn covered_heads_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<Vec<CoveredHead>, SyncError> {
+    let mut statement = tx
+        .prepare_cached(COVERED_HEADS_SQL)
+        .map_err(SyncError::corrupt)?;
+    statement
+        .query_map([workspace_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            ))
+        })
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)
+}
+
+/// The paths whose first file record the sweeps would send now, but skip
+/// because an open editing session holds the document. Leaving the document
+/// ends its session, and the next pass sends the record.
+pub fn first_exports_held_open_in(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    leases: &dyn LeaseProbe,
+) -> Result<Vec<String>, SyncError> {
+    let tx = conn.unchecked_transaction().map_err(SyncError::corrupt)?;
+    first_exports_held_open_in_tx(&tx, workspace_id, leases)
+}
+
+fn first_exports_held_open_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    leases: &dyn LeaseProbe,
+) -> Result<Vec<String>, SyncError> {
+    let held = |version_id: String, object_id: String| {
+        leases.is_live(&DocKey {
+            workspace_id: workspace_id.to_owned(),
+            version_id,
+            object_id,
+        })
+    };
+    let mut journaled = tx
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM replication_log r \
+               WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
+                 AND json_extract(r.payload_json,'$.versionId')=+?2 \
+                 AND json_extract(r.payload_json,'$.objectId')=+?3)",
+        )
+        .map_err(SyncError::corrupt)?;
+    let mut paths = Vec::new();
+    for (version_id, object_id, path) in unclaimed_bases_in_tx(tx, workspace_id)? {
+        let Some(path) = path else { continue };
+        // An unclaimed lineage can already have a file record, such as one
+        // that arrived from the server.
+        let recorded: bool = journaled
+            .query_row(params![workspace_id, version_id, object_id], |row| {
+                row.get(0)
+            })
+            .map_err(SyncError::corrupt)?;
+        if !recorded && held(version_id, object_id) {
+            paths.push(path);
+        }
+    }
+    for (_, version_id, object_id, _, _, _, _, _, path) in covered_heads_in_tx(tx, workspace_id)? {
+        if held(version_id, object_id) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 /// Export an object's first file artifact only after this origin has journaled
 /// its base. Durable coverage and the strict peer projection must both agree
 /// with the head; disk materialization is not part of either proof.
@@ -321,29 +423,17 @@ pub(crate) fn export_covered_heads_in_tx(
     workspace_id: &str,
     leases: &dyn LeaseProbe,
 ) -> Result<(), SyncError> {
-    let candidates = {
-        let mut statement = tx
-            .prepare_cached(COVERED_HEADS_SQL)
-            .map_err(SyncError::corrupt)?;
-        statement
-            .query_map([workspace_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, String>(7)?,
-                ))
-            })
-            .map_err(SyncError::corrupt)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(SyncError::corrupt)?
-    };
-    for (moment_id, version_id, object_id, sha, kind, update_seq, snapshot_seq, lineage_claim_id) in
-        candidates
+    for (
+        moment_id,
+        version_id,
+        object_id,
+        sha,
+        kind,
+        update_seq,
+        snapshot_seq,
+        lineage_claim_id,
+        _,
+    ) in covered_heads_in_tx(tx, workspace_id)?
     {
         let key = DocKey {
             workspace_id: workspace_id.to_owned(),

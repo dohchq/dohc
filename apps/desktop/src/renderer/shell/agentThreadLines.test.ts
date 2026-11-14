@@ -7,6 +7,7 @@ import { createAgentThreadLinesStore } from "./agentThreadLines";
 const line = (state: AgentThreadLine["state"], chatThreadId = "thread-1"): AgentThreadLine => ({
   agentId: "nova",
   chatThreadId,
+  questionId: null,
   forwardedAtMs: 0,
   state,
   sinceMs: 1_000,
@@ -153,7 +154,6 @@ it("says nothing of a read that failed for an earlier time it listened", async (
   const stopFirst = store.subscribe(() => undefined);
   stopFirst();
   const stopSecond = store.subscribe(() => undefined);
-  // The second read answers, and then the first one fails.
   reads[1]!.resolve({ workspaceId: "ws-a", revision: 1, lines: [line("working")] });
   await reads[1]!.promise;
   reads[0]!.reject(new Error("the first read failed"));
@@ -163,7 +163,6 @@ it("says nothing of a read that failed for an earlier time it listened", async (
   expect(failures).toEqual([]);
   expect(store.lines()).toEqual([line("working")]);
 
-  // A read that fails for the time it listens now is still reported.
   stopSecond();
   store.subscribe(() => undefined);
   const failed = new Error("the third read failed");

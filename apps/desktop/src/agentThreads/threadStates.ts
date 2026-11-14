@@ -19,7 +19,7 @@ export type AgentThreadLineState =
   /** The tool took the message, and other work is ahead of it. */
   | "in-line"
   | "working"
-  /** The thread's own question or approval is open in the tool. */
+  /** Something waits on the person in the tool: the thread's own question, an approval, or another request. */
   | "waiting-in-tool"
   /** The work ended, dohc reminded the thread once, and it posted nothing. */
   | "silent";
@@ -33,6 +33,11 @@ export interface AgentThreadLine {
   sinceMs: number;
   /** When the message went to the thread, so a chat can tell its newest line. */
   forwardedAtMs: number;
+  /**
+   * The tool's id for the question the thread waits on, when what it waits on
+   * is a question. The question itself is never kept here.
+   */
+  questionId: string | null;
 }
 
 export interface ThreadStatesDependencies {
@@ -176,11 +181,16 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     state: AgentThreadLineState,
     sentAtMs: number,
     toolMs: number,
+    questionId: string | null = null,
   ): void {
     if (!isCurrent(row)) return;
     const key = keyOf(row);
     const before = lines.get(key);
-    if (before?.state === state) return;
+    if (before?.state === state) {
+      // The same state with another question, as when one was answered and the thread asked the next.
+      if (before.questionId !== questionId) lines.set(key, { ...before, questionId });
+      return;
+    }
     const now = nowMs();
     // The tool's time for a state is when it began, unless the line was in
     // another state since then, as work that waited on the person and went on.
@@ -192,6 +202,7 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       state,
       sinceMs,
       forwardedAtMs: row.forwardedAtMs,
+      questionId,
     });
   }
 
@@ -205,7 +216,7 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       const since = thread.runs.filter((entry) => entry.requestedAtMs >= reminder.atMs);
       if (since.some((entry) => entry.state === "working") || thread.working)
         return thread.waitingOnPerson
-          ? show(row, "waiting-in-tool", reminder.atMs, nowMs())
+          ? show(row, "waiting-in-tool", reminder.atMs, nowMs(), thread.questionId)
           : show(row, "working", reminder.atMs, reminder.atMs);
       if (since.some((entry) => entry.state === "in-line"))
         return show(row, "in-line", reminder.atMs, reminder.atMs);
@@ -220,7 +231,7 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     if (phase === "in-line") return show(row, "in-line", sentAtMs, run?.requestedAtMs ?? sentAtMs);
     if (phase === "working")
       return thread.waitingOnPerson
-        ? show(row, "waiting-in-tool", sentAtMs, nowMs())
+        ? show(row, "waiting-in-tool", sentAtMs, nowMs(), thread.questionId)
         : show(row, "working", sentAtMs, run?.startedAtMs ?? sentAtMs);
     if (reminder.state === "sent") return show(row, "silent", sentAtMs, run?.endedAtMs ?? nowMs());
 
@@ -244,7 +255,7 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       threadId: row.toolThreadId,
       message,
       how: "line",
-      forwardId: `remind-${forwardIdOf(row.workspaceId, row.agentId, row.messageId)}`,
+      forwardId: `remind-${forwardIdOf(row.workspaceId, row.agentId, row.messageId, row.toolThreadId)}`,
     });
     const at = nowMs();
     const reminded: ForwardRow = {
@@ -353,9 +364,11 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
   return {
     /**
      * The tool took a message. Its line shows from now, in place of an older
-     * one for that agent and chat thread. A message reported again, as when
-     * it could not be marked read and went a second time, keeps its row, so
-     * a reminder already recorded for it is not sent again. Nothing here
+     * one for that agent and chat thread. A message reported again for the
+     * same thread, as when it could not be marked read and went a second
+     * time, keeps its row, so a reminder already recorded for it is not sent
+     * again. The same message taken by another thread, after the agent was
+     * pointed at it, is that thread's work and starts a row of its own. Nothing here
      * waits: the row is taken in, and saved, behind the caller, once the
      * saved rows are read.
      */
@@ -363,7 +376,8 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       void loaded.then(() => {
         if (stopped) return;
         const key = keyOf(row);
-        if (rows.get(key)?.messageId === row.messageId) return;
+        const had = rows.get(key);
+        if (had?.messageId === row.messageId && had.toolThreadId === row.toolThreadId) return;
         const next: ForwardRow = { ...row, reminder: { state: "none" } };
         const shown = lines.delete(key);
         read.delete(key);

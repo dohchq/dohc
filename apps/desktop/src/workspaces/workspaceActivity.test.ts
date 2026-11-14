@@ -708,7 +708,6 @@ describe("workspaceActivity agent run state", () => {
   it("names the run in an agent's writes for a dispatched or Settings run, and not for a self-test", async () => {
     const { activity } = await opened();
     expect(activity.agentWriteRunId(id)).toBeNull();
-    // A run started from Settings has no dispatch.
     await activity.claimAgentRun(id, run("settings-run"));
     expect(activity.agentWriteRunId(id)).toBe("settings-run");
     await activity.clearAgentRun(id, "settings-run");
@@ -850,8 +849,6 @@ describe("workspaceActivity history-off status", () => {
 
   it("does not raise the history-off status before open or without a captureFor gate", async () => {
     const activity = createWorkspaceActivity(() => {});
-    // Unknown/unopened workspace: status is derivable but never claims
-    // history is off (nothing is known yet).
     expect(activity.getStatus("activity-test").historyRecordingUnavailable).toBe(false);
     const status = await activity.open(workspace());
     expect(status.historyRecordingUnavailable).toBe(false);
@@ -1593,7 +1590,6 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.open(workspace());
     await activity.close("activity-test");
     expect(stopped).toBe(1);
-    // The entry is gone: status derives from nothing and re-open works.
     expect(activity.getStatus("activity-test").conflictCount).toBe(0);
     await activity.close("activity-test"); // idempotent, never throws
     await activity.stopAll();

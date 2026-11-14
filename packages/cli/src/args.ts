@@ -697,10 +697,11 @@ const DOCUMENT_VERBS = {
     notes: [
       "Accepts every recovery but unreadable.",
       "With an incident from kept-edits, dohc saves exactly those kept edits. Without one, it saves edits a Stop could not write first.",
-      "dohc writes a recovery package with every kept edit, and a readable copy when it can read the edits as a document.",
+      "dohc writes a readable copy next to the document when it can read the edits as a document. Kept edits the note has no place for are listed at the end of the copy, and notInNote counts them.",
+      "dohc also keeps a recovery package with every kept edit on this computer, in .dohc/local/live-recovery, which does not sync.",
       "For edits the server keeps, dohc then tells the server the copy is saved, and the recovery becomes copied.",
       "keptEdits is kept when the edits stay where storedOn says, and copied when the server may now release them.",
-      "It is ended for edits a Stop could not write: dohc no longer keeps them, and the copy holds them.",
+      "It is ended for edits a Stop could not write: dohc no longer keeps them, and the copy holds them, or the package when there is no copy.",
       "dohc writes these files itself, not as the agent that asked.",
     ],
     parse: (input) => {

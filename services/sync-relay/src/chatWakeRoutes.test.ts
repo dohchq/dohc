@@ -19,8 +19,6 @@ import {
   testStorage,
 } from "./testing";
 
-// The routes run over real storage, with the wakes a publication would make written to it directly.
-
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();

@@ -27,7 +27,6 @@ fn reconcile(
     reconcile_activation(&mut f.store, &retirement_scope(), &key, after, journal, &NoFaults)
 }
 
-/// Each native entry: delivery, pending, receipt, update blob, terminal blob, reason.
 type EntryState = (
     String,
     bool,
@@ -548,11 +547,6 @@ fn a_refused_seed_with_later_applied_work_holds_its_retirement() {
     assert_eq!((native_entries(&f), pending_bytes(&f)), before);
 }
 
-/// Phase A ends one activation in its owner: only registrations tagged with
-/// it, and only its document's cache entry. Its binding row stays, and it
-/// never registers under this owner again.
-/// Another document, `other` at `other.md`, with the fixture's text and base.
-/// Returns its binding.
 fn other_document(f: &mut Fixture) -> LiveObjectBinding {
     let fixture: Value =
         serde_json::from_str(include_str!("../../tests/owner-source/owner-source-seed.json"))
@@ -818,7 +812,6 @@ fn retirement_validates_the_exact_activation_before_reading_its_entries() {
     write(&mut f, "UPDATE live_device_application_bindings SET activation_id=NULL");
     assert!(refused(&mut f, &key));
     write(&mut f, "UPDATE live_device_application_bindings SET activation_id='adoption'");
-    // A source captured while another activation holds the lineage was overtaken.
     let source = RetirementKey { activation_id: "captured".into(), ..key.clone() };
     retain_captured(&mut f);
     assert!(refused(&mut f, &source), "its binding names another activation");
@@ -1098,13 +1091,6 @@ fn covered_and_carried() -> (Fixture, LiveUpdateReceipt, LiveUpdateReceipt, i64)
     (f, covered, carried, sequence)
 }
 
-/// Release: an adopted activation releases only after its
-/// document left the scope and parked, and only once its delivery and
-/// settlement are reconciled again in the release's own transaction. It
-/// stores B, F and the carried deliveries, deletes only its own binding, and
-/// keeps everything else. Settled through F, it holds back neither unload
-/// nor parking. A duplicate release and a reconciliation answer from what it
-/// stored and write nothing.
 #[test]
 fn an_adopted_activation_releases_once_parked_and_reconciled() {
     let (mut f, covered, carried, sequence) = covered_and_carried();
@@ -1156,7 +1142,6 @@ fn an_adopted_activation_releases_once_parked_and_reconciled() {
     );
     assert_eq!(f.store.table_row_count("live_device_application_bindings").unwrap(), 0);
     assert_eq!(rows(&f, &RELEASE_KEEPS), kept, "sources, history, settlements and input stay");
-    // The settlement through F leaves nothing pending.
     assert!(!f
         .store
         .read_with(|conn| settlement_pending(conn, "namespace", &f.key, &f.binding.lineage_claim_id, None))
@@ -1227,9 +1212,6 @@ fn each_release_class_needs_its_own_evidence() {
     }
 }
 
-/// A released activation answers from its stored release
-/// once a successor holds the lineage and applied the carried delivery,
-/// which a recomputation would count. It writes nothing.
 #[test]
 fn a_released_replay_answers_from_its_release_after_a_successor() {
     let (mut f, covered, carried, _) = covered_and_carried();
@@ -1409,10 +1391,6 @@ fn bound(f: &Fixture) -> (i64, bool) {
         .unwrap()
 }
 
-/// A fence that has not landed is
-/// cancelled for good. The fence request still in flight, or replayed later,
-/// refuses, so the document keeps its generation and the relay keeps the
-/// retirement key it had. A duplicate answers the same; another key refuses.
 #[test]
 fn a_restore_fence_that_never_landed_is_cancelled_for_good() {
     let mut f = Fixture::new();
@@ -1447,12 +1425,6 @@ fn a_restore_fence_that_never_landed_is_cancelled_for_good() {
     assert_eq!(cancel(&mut f, &input).unwrap(), cancelled);
 }
 
-/// A cancellation racing a fence whose reply was
-/// lost ends that fence for good at its generation, with the fence's stopped
-/// binding and the accepted endpoint it froze. A duplicate answers the
-/// committed receipt; the fence's replay refuses; no other operation, key or
-/// host can claim the fenced generation. Once the restore is admitted,
-/// cancellation refuses.
 #[test]
 fn a_committed_restore_fence_ends_in_its_terminal_cancellation_until_admission() {
     let mut f = Fixture::new();
@@ -1509,9 +1481,6 @@ fn a_committed_restore_fence_ends_in_its_terminal_cancellation_until_admission()
     assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
 }
 
-/// A released activation never regains live authority, after a
-/// reconnect (a new owner, whose retired set is empty) or a restart (the
-/// store reopened), whether it adopted or not.
 #[test]
 fn a_released_activation_never_regains_live_authority() {
     for adopted in [true, false] {
@@ -1543,14 +1512,6 @@ fn a_released_activation_never_regains_live_authority() {
     }
 }
 
-/// After Phase A and a restart, no owner retired the
-/// activation in memory, but its durable intent still refuses every way back
-/// to live authority, whether it adopted or not. A named or unnamed
-/// registration serving it is refused before any binding changes, a capture
-/// or resume before it retains anything, and an adoption, through a handle
-/// that serves no activation too, before it writes. The retirement still
-/// releases. Another document's activation captures, resumes, registers and
-/// adopts throughout.
 #[test]
 fn a_retiring_activation_never_serves_again_after_a_restart() {
     let writes = [&RELEASE_WRITES[..], &["binary_blobs", "live_owner_retirements"]].concat();
@@ -1632,8 +1593,6 @@ fn a_retiring_activation_never_serves_again_after_a_restart() {
     }
 }
 
-/// The readers that change once the current activation is released (round
-/// 3, "Gap after release"), each before and after the release.
 #[test]
 fn readers_after_a_release() {
     let (mut f, covered, carried, _) = covered_and_carried();
@@ -1745,12 +1704,6 @@ fn readers_after_a_release() {
     assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), observed);
 }
 
-/// A never-adopted release carries its predecessor's
-/// deliveries, but has no adoption to state their limits. The configured
-/// host's budget must still cover the limits they were accepted under: the
-/// chain's last adopted activation's, through any number of never-adopted
-/// releases. A never-adopted release records no adoption fact. A chain no
-/// activation adopted has no limits to cover.
 #[test]
 fn carried_deliveries_keep_the_limits_they_were_accepted_under() {
     let exceeds = |f: &Fixture, bytes: i64| {
@@ -1922,7 +1875,6 @@ fn a_local_append_and_a_stop_preparation_never_interleave() {
     assert_eq!(appended(&f), before);
     assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
 
-    // The fence's retirement meets no edit it cannot answer for.
     begin(&mut f, 10).unwrap();
     preparations.end(&f.cut.adoption_id);
     assert!(!preparations.blocks(&f.cut.adoption_id, 0));

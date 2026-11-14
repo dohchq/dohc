@@ -1160,8 +1160,6 @@ fn publication_state_reads_each_coordinate_against_its_origin_cursor_and_refusal
     expected[last] = ChatCoordinateState::Refused;
     assert_eq!(states(&mut store, "post"), expected);
 
-    // Each coordinate reads its own origin's cursor, and a receipt belongs
-    // to its workspace.
     store
         .write_with(&NO_FAULTS, |tx| {
             tx.execute_batch(&format!(

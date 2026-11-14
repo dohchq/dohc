@@ -22,9 +22,6 @@ import {
   renderShell,
 } from "./DesktopWorkspaceShell.testHarness";
 
-// The Collection page and its History are real; only the records table,
-// which reads records, stands aside. While `page.loading` is set, the page
-// suspends as its first load does.
 const page = vi.hoisted(() => ({ loading: null as Promise<void> | null }));
 vi.mock("./TransactionalCollectionPage", () => ({
   TransactionalCollectionPage: () => <div data-testid="collection-records" />,

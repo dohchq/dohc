@@ -555,7 +555,6 @@ import {
   isChatWakeLine,
 } from "@dohc/workspace-contracts/chat-wakes";
 import {
-  CHAT_WAKES_ON,
   chatWakeBackoffMs,
   createChatWakeLifetime,
   sleepUnlessAborted,
@@ -607,6 +606,7 @@ import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCr
 import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
 import { cliForThread } from "./agentThreads/forwardedText";
 import { createForwardLedger } from "./agentThreads/forwardLedger";
+import { T3CodeError } from "./agentThreads/t3Code";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -682,6 +682,7 @@ import {
   createOwnerPendingShare,
   listOwnerPendingSharePaths,
 } from "./workspaces/ownerPendingShare";
+import { createNotSentWhileOpen } from "./workspaces/notSentWhileOpen";
 import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import { resumeWorkspaceLinkRewrites } from "./workspaces/workspaceLinkRewrites";
 import { createServerOwnerConnection } from "./workspaces/serverOwnerConnection";
@@ -1520,7 +1521,6 @@ const chatRunners = createChatRunnerRoster({
   log: (error) => console.error("[desktop] chat runners:", error),
 });
 const chatWakes = createChatWakeLifetime({
-  on: CHAT_WAKES_ON,
   intents: createChatWakeIntents(chatWakeIntentsFile()),
   roster: chatRunners,
   client: (wakeSession) => createChatWakeClient({ relay: wakeSession.relay }),
@@ -3320,15 +3320,22 @@ function engineForWorkspace(
     },
     // Workspace activity keeps the Collections wait, so it outlasts this
     // engine when the person signs out.
-    afterPass: ({ failed }) =>
-      withWorkspaceAttachment(workspace, (lease) =>
-        workspaceActivity.syncPassEnded(
-          canonicalWorkspaceFor(lease),
-          lease.state.activity,
-          failed,
-          () => daemonRelay.collectionsWaiting(),
-        ),
-      ) ?? Promise.resolve(false),
+    afterPass: async ({ failed }) => {
+      const collections =
+        withWorkspaceAttachment(workspace, (lease) =>
+          workspaceActivity.syncPassEnded(
+            canonicalWorkspaceFor(lease),
+            lease.state.activity,
+            failed,
+            () => daemonRelay.collectionsWaiting(),
+          ),
+        ) ?? Promise.resolve(false);
+      const notSent = failed
+        ? false
+        : notSentWhileOpen.read(workspace.workspaceId, () => daemonRelay.firstExportsHeldOpen());
+      const [collectionsChanged, notSentChanged] = await Promise.all([collections, notSent]);
+      return collectionsChanged || notSentChanged;
+    },
     capture,
     onChange: createRelayOnChange(workspace),
     // Joined shared channels refresh on the same cadence as the
@@ -3717,6 +3724,7 @@ const activity = {
       ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       ownerLiveQuarantines: desktopEngine.ownerLiveQuarantines(workspaceId),
       ownerPendingShare: [...ownerPendingShare.paths(workspaceId)],
+      notSentWhileOpen: [...notSentWhileOpen.paths(workspaceId)],
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
   recordShareViewStoreRefusal: (
@@ -6879,6 +6887,9 @@ const { startDesktopCliServer } = createDesktopCliServer({
   rememberPendingCliRunMessageLink,
 });
 
+// New notes whose first file waits for their open editor to be left.
+const notSentWhileOpen = createNotSentWhileOpen();
+
 // Shared notes whose files trail their text while edits wait for the server.
 const ownerPendingShare = createOwnerPendingShare({
   read: (workspaceId) =>
@@ -7902,10 +7913,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         void automationWakeConsumer.resume();
         // Reads the account without waiting for a window, so wakes start at login on an idle computer.
         chatWakes.start();
-        if (CHAT_WAKES_ON)
-          void warmCredentialCache().catch((error: unknown) =>
-            console.error("[desktop] chat wake sign-in:", error),
-          );
+        void warmCredentialCache().catch((error: unknown) =>
+          console.error("[desktop] chat wake sign-in:", error),
+        );
         app.on("browser-window-focus", () => {
           resumeRunNow();
           void automationWakeConsumer.resume();
@@ -10764,14 +10774,41 @@ function registerIpcHandlers(): void {
     canKeep: t3Code().canKeep(),
     signedInUntilMs: await t3Code().signedInUntil(),
   });
+  // The thread of an agent that serves the workspace a window has open. A
+  // window names the agent, and never the thread.
+  const agentThreadFor = async (workspaceId: string, agentId: string): Promise<string> => {
+    const { settings } = await readCachedUserSettingsFile(stateDir());
+    const agent = forwardingAgents(settings, workspaceId).find(({ id }) => id === agentId);
+    if (!agent) throw new Error("This agent has no thread for this workspace.");
+    return agent.thread.id;
+  };
+  // An agent with a thread that serves the workspace a window has open,
+  // whether it is on or off, for the agent's own page in Settings.
+  const agentWithThreadFor = async (workspaceId: string, agentId: string) => {
+    const { settings } = await readCachedUserSettingsFile(stateDir());
+    const agent = listAgents(settings).find(({ id }) => id === agentId);
+    if (!agent?.thread || !agent.workspaces?.includes(workspaceId))
+      throw new Error("This agent has no thread for this workspace.");
+    return { ...agent, thread: agent.thread };
+  };
   registerOperations(operationBoundary, agentThreadOperations, {
     readAgentThreadLines: ({ workspaceId }) => agentThreadLinesOf(workspaceId),
+    // An agent that is off still has its thread, and its page opens it.
     openAgentThread: async ({ workspaceId, agentId }) => {
-      // Only a thread whose agent serves the workspace this window has open.
-      const { settings } = await readCachedUserSettingsFile(stateDir());
-      const agent = forwardingAgents(settings, workspaceId).find(({ id }) => id === agentId);
-      if (!agent) throw new Error("This agent has no thread for this workspace.");
+      const agent = await agentWithThreadFor(workspaceId, agentId);
       await shell.openExternal(await t3Code().threadLink(agent.thread.id));
+    },
+    readAgentThreadQuestion: async ({ workspaceId, agentId, requestId }) =>
+      t3Code().question(await agentThreadFor(workspaceId, agentId), requestId),
+    answerAgentThreadQuestion: async ({ workspaceId, agentId, requestId, answers }) => {
+      const status = await t3Code().answer(
+        await agentThreadFor(workspaceId, agentId),
+        requestId,
+        answers,
+      );
+      // The thread goes on, or someone answered first: the line is looked at again now.
+      agentThreads().look(workspaceId);
+      return { status };
     },
     readT3CodeConnection: t3CodeConnectionState,
     allowDohcInT3Code: async () => {
@@ -10802,6 +10839,31 @@ function registerIpcHandlers(): void {
         })),
         nextCursor: page.nextCursor,
       };
+    },
+    readAgentThread: async ({ workspaceId, agentId }) => {
+      const agent = await agentWithThreadFor(workspaceId, agentId);
+      const threadId = agent.thread.id;
+      try {
+        const { title, closed } = await t3Code().thread(threadId);
+        return { threadId, title, closed };
+      } catch (error) {
+        // Said with the thread it is about, which a thrown error could not be.
+        if (error instanceof T3CodeError) return { threadId, problem: error.message };
+        throw error;
+      }
+    },
+    changeAgentThread: async ({ workspaceId, agentId, threadId }) => {
+      const agent = await agentWithThreadFor(workspaceId, agentId);
+      if (agent.thread.id === threadId)
+        throw new Error(`${agent.name} is already connected to this thread.`);
+      // One thread is one agent (ADR 0016).
+      const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
+      const connected = Object.values(agents).find((other) => other.thread?.id === threadId);
+      if (connected) throw new Error(`${connected.name} is already connected to this thread.`);
+      await agentThreads().change(workspaceId, {
+        ...agent,
+        thread: { ...agent.thread, id: threadId },
+      });
     },
     readyAgentThread: async ({ workspaceId, agentId, name, threadId }) => {
       const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;

@@ -27,7 +27,6 @@ import {
   resetAutomationButtonsForTests,
 } from "./useAutomationButtons";
 
-// The shell opens the ⚡ panel at a run; these tests open none.
 const noRun = async () => null;
 const FAILED = "dohc could not read this record's history.";
 
@@ -241,7 +240,6 @@ describe("RecordButtonsRow", () => {
     );
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    // A press someone else is running leaves words on the button, which show while the pointer is over it.
     bridge.pressAutomationButton.mockResolvedValueOnce({
       busy: true,
       reason: "Running for this record.",
@@ -529,7 +527,6 @@ describe("RecordButtonsRow", () => {
   });
 });
 
-// What main says about a shared view's buttons, from the computer that runs the owner's automations.
 const UNCHECKED = "dohc cannot check this button now. Try again when its host is available.";
 const CHECKING_BUTTON = "dohc is checking whether you can use this button.";
 const BUTTON_NOT_CHECKED = "dohc could not check this button.";
@@ -608,7 +605,6 @@ describe("RecordButtonsRow in an Edit share view", () => {
       check: true,
     });
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
-    // It stays while main answers, so focus stays, and it asks nothing more.
     expect(again.getAttribute("aria-disabled")).toBe("true");
     expect(wordsOf(button)).toBe(CHECKING_BUTTON);
     await user.keyboard("{Enter}");

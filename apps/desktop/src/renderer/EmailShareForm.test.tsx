@@ -31,7 +31,6 @@ afterEach(() => {
   cleanup();
 });
 
-// The level is chosen from the menu on the access itself.
 async function chooseAccess(user: ReturnType<typeof userEvent.setup>, level: "view" | "edit") {
   await user.click(screen.getByTestId("share-access"));
   await user.click(await screen.findByTestId(`share-access-${level}`));

@@ -22,6 +22,7 @@ import {
   allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
   MixedRelayTransportError,
+  RelayBusyError,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
@@ -364,6 +365,21 @@ describe("EngineRelayClient", () => {
     await next.claim();
     await expect(next.push()).resolves.toBeDefined();
     expect(daemon.requests.filter((request) => request.method === "sync.claim")).toHaveLength(2);
+    await h.live.closeAll();
+  });
+
+  it("reads the server's busy answer as busy", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.push") {
+        throw new DaemonRefusalError(
+          { code: "OVERLOADED", message: "relay-server-busy", retry: "afterBackoff" },
+          new Error("busy"),
+        );
+      }
+      return undefined;
+    });
+    const h = await harness(daemon);
+    await expect(h.client.push()).rejects.toBeInstanceOf(RelayBusyError);
     await h.live.closeAll();
   });
 

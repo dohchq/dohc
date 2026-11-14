@@ -298,7 +298,6 @@ it("closes the daemon immediately when storage loses continuity standing", async
   expect(existsSync(captured.nativePath)).toBe(false);
 });
 
-// Proves: an engine that ends by itself is logged with its exit code and signal, and the host stops with it.
 it("logs an engine that exits by itself with its code and signal", async () => {
   const f = await fixture();
   let exit!: (code: number | null, signal: NodeJS.Signals | null) => void;
@@ -320,8 +319,6 @@ it("logs an engine that exits by itself with its code and signal", async () => {
   }
 });
 
-// Proves: an engine the relay stops after a missed request deadline is logged as stopped by the relay, and its exit
-// that follows as one the relay caused.
 it("logs an engine the relay stops for a missed deadline, then its exit", async () => {
   const f = await fixture();
   let captured!: ReturnType<typeof clientFrom>,
@@ -494,7 +491,6 @@ it("logs a pass over a second at most once a minute, with cut ids, timings and f
   try {
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(100);
-    // The third pass's settlement reaches the engine and then fails.
     clock += 60_000;
     failSettle = true;
     await vi.advanceTimersByTimeAsync(100);
@@ -2208,7 +2204,6 @@ it("stops the engine for a held read it answers neither at the deadline nor on c
     if (request.method !== "sync.heldDocument") return through(...args);
     deadlines.push(request.deadlineMs);
     const cancel = args[3] as AbortSignal;
-    // The engine holds the read past its caller's deadline.
     await new Promise((resolve) => cancel.addEventListener("abort", resolve, { once: true }));
     // A healthy engine answers the cancel. A stuck one does not, and the client's own deadline ends the read later.
     if (answersCancel)
@@ -3001,6 +2996,20 @@ it("records a departed application only as the next accepted row, for its adopti
     next: null,
   });
   expect(() => store.departedOwnerDelivery(input)).toThrow("Committed delivery stale-session.");
+});
+
+it("hands a submission the engine's answer to the drain that applied its row, once", async () => {
+  const o = await enrolledServiceHost({ frameChanges: true });
+  const native = await o.host.captureNative(o.binding);
+  const edit = o.acceptEdit("applied");
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+  const identity = { deliveryId: edit.deliveryId, updateDigest: edit.updateDigest };
+  expect(native.takeAppliedAck!(identity)).toEqual({
+    ...edit,
+    localYDocSequence: edit.journalCursor + 1,
+    applicationReplayed: false,
+  });
+  expect(native.takeAppliedAck!(identity)).toBeUndefined();
 });
 
 // Proves: deleting the last Edit share cuts off admission at once, as Stop
@@ -3878,7 +3887,6 @@ const pushRestoredUpdate = (o: Enrolled) => {
     );
   return fullState;
 };
-// The note's first text, depth first.
 const firstText = (node: Y.XmlFragment | Y.XmlElement): Y.XmlText | null => {
   for (const child of node.toArray()) {
     const found =
@@ -3887,7 +3895,6 @@ const firstText = (node: Y.XmlFragment | Y.XmlElement): Y.XmlText | null => {
   }
   return null;
 };
-// The successor's native capture: the restored state, sourced from the restore's settlement moment.
 
 const restoredCapture = (o: Enrolled, fullState: Buffer): NativeOwnerActivation => {
   const moment = o.raw
@@ -4446,7 +4453,6 @@ const replacementActivation = async (
   return { ...o.sibling, path, objectId: document.objectId };
 };
 
-// Appends real path changes from another device, with unchanged text unless supplied.
 const documentMoves = (o: Enrolled) => {
   let sequence = 0;
   return (row: typeof o.sibling, path: string, text?: string) => {
@@ -8738,6 +8744,139 @@ it("settles and publishes an editor's edit on an idle host at once, with the fix
     ),
   );
   expect(held()).toBe(true);
+});
+
+// An open drains its note at each step: the ticket, its redemption, the upgrade and the first sync.
+// Proves: on an idle host a step after a drain that read the owner queue empty and applied nothing sends the engine
+// nothing, and a step after one that applied an edit drains once more.
+it("drains an idle note at most once across an open's four steps", async () => {
+  const { o, held } = await idleNote();
+  // Passes leave the note alone, so each drain counted is an open's.
+  o.passes.deliver = false;
+  const drains = vi.spyOn(OwnerCommittedDelivery.prototype, "drain");
+  try {
+    const open = async () => {
+      await o.host.captureNative(o.binding);
+      for (let step = 0; step < 3; step++)
+        await expect(o.host.drain(o.document)).resolves.toEqual({
+          kind: "done",
+          terminalReceipt: o.tip(),
+          continueDrain: false,
+        });
+    };
+    const requests = o.ownerRequests();
+    await open();
+    // The pass that settled the note read its owner queue empty, so the open drains nothing.
+    expect(drains).toHaveBeenCalledTimes(0);
+    expect(o.ownerRequests()).toBe(requests);
+    const edit = o.acceptEdit("typed");
+    await open();
+    // One drain applies the edit, and the next reads the queue empty with nothing to apply.
+    expect(drains).toHaveBeenCalledTimes(2);
+    expect(o.tip()).toEqual(edit);
+    expect(held()).toBe(true);
+  } finally {
+    drains.mockRestore();
+  }
+});
+
+// Proves: a drain after a hosted pull still runs, and admits the owner edit that pull queued.
+it("drains an idle note again after a hosted pull queued an owner edit", async () => {
+  const { o, passes } = await idleNote();
+  o.native.binding = o.binding;
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+  // The pass pulls but leaves the note to the drain below.
+  o.passes.deliver = false;
+  let queued = false;
+  o.requestListeners.add((method) => {
+    if (method === "sync.pullHosted" && !queued) {
+      queued = true;
+      o.nativeEdits("desktop");
+    }
+  });
+  const before = passes();
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  notifyRelayWrite(o.f.storage);
+  await vi.waitFor(() => expect(passes()).toBeGreaterThan(before));
+  expect(queued).toBe(true);
+  expect(journaled(o, "edit-desktop")).toEqual([]);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+  expect(journaled(o, "edit-desktop")).toHaveLength(1);
+});
+
+// Proves: a settlement right after a drain does not record the note quiet when a hosted pull queued an owner edit
+// between the two, so the next drain still runs and admits it.
+it("drains an idle note again after a pull between a drain and its settlement", async () => {
+  const { o, passes } = await idleNote();
+  o.native.binding = o.binding;
+  o.passes.deliver = false;
+  const drains = vi.spyOn(OwnerCommittedDelivery.prototype, "drain"),
+    checks = vi.spyOn(OwnerCommittedDelivery.prototype, "drained");
+  try {
+    // The pass that settled the note recorded it quiet, so this drain is answered from that record.
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(drains).toHaveBeenCalledTimes(0);
+    const consumer = checks.mock.contexts.at(-1) as OwnerCommittedDelivery;
+    let queued = false;
+    o.requestListeners.add((method) => {
+      if (method === "sync.pullHosted" && !queued) {
+        queued = true;
+        o.nativeEdits("desktop");
+      }
+    });
+    const before = passes();
+    appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+    notifyRelayWrite(o.f.storage);
+    await vi.waitFor(() => expect(passes()).toBeGreaterThan(before));
+    expect(queued).toBe(true);
+    await consumer.settleDrained(o.document);
+    expect(journaled(o, "edit-desktop")).toEqual([]);
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(journaled(o, "edit-desktop")).toHaveLength(1);
+  } finally {
+    drains.mockRestore();
+    checks.mockRestore();
+  }
+});
+
+// Proves: a drain after a journal row arrived, after a drain that ended pending, and after an owner's Try again, still
+// runs, as does each drain while the owner queue is held for its owner.
+it("drains an idle note again after a new row, a pending drain, and a Try again", async () => {
+  const { o } = await idleNote();
+  o.passes.deliver = false;
+  const drains = vi.spyOn(OwnerCommittedDelivery.prototype, "drain");
+  try {
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(drains).toHaveBeenCalledTimes(0);
+    const edit = o.acceptEdit("row");
+    o.lost.pending = true;
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "pending" });
+    o.lost.pending = false;
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(o.tip()).toEqual(edit);
+    expect(drains).toHaveBeenCalledTimes(2);
+    const refused = refusedNative(o);
+    for (let drain = 0; drain < 2; drain++)
+      await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(drains).toHaveBeenCalledTimes(4);
+    expect(journaled(o, "edit-d")).toEqual([]);
+    await refused.grant();
+    await o.host.drain(o.document);
+    expect(drains).toHaveBeenCalledTimes(5);
+    expect(journaled(o, "edit-d")).toHaveLength(1);
+  } finally {
+    drains.mockRestore();
+  }
+});
+
+// Proves: after a restore moves the note's binding, a drain does not answer from the drain before it.
+it("does not answer a drain from before a restore fence", async () => {
+  const { o } = await idleNote();
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+  o.restore();
+  await expect(o.host.drain(o.document)).rejects.toThrow(
+    "Service document activation is incomplete.",
+  );
 });
 
 // An owner's desktop that is not in a live session pushes its edit to the relay's log. The host's pull brings it to

@@ -67,8 +67,6 @@ fn an_unreadable_policy_holds_capture_instead_of_widening_or_retiring() {
         "the held op must neither update nor retire the existing head"
     );
 
-    // A malformed file is a different case: capture stays floor-only, because
-    // writes are never dropped for a bad policy.
     std::fs::remove_dir_all(scratch.path().join(".dohc/files.toml")).expect("rm dir");
     write_file(
         scratch.path(),
@@ -101,8 +99,6 @@ fn ignored_binary_and_secret_routes_do_not_write() {
         ingest(&mut sink, ".dohc/ignored.md").expect("ignored path"),
         IngestOutcome::NotOwned
     );
-    // Binary content captures as a BINHEAD binary head; secret content
-    // captures into the encrypted store (never the plaintext one).
     assert!(matches!(
         ingest(&mut sink, "binary.md").expect("binary capture"),
         IngestOutcome::Captured { .. }
@@ -172,8 +168,6 @@ fn broken_files_toml_keeps_capture_floor_only() {
     write_file(scratch.path(), "notes/a.md", b"kept");
     let (db, mut sink) = sink_for(&scratch, &supervisor);
 
-    // A malformed policy never drops writes. Capture stays floor-only rather
-    // than failing closed.
     assert!(matches!(
         ingest(&mut sink, "notes/a.md").expect("floor-only capture"),
         IngestOutcome::Captured { .. }

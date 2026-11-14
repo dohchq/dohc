@@ -113,6 +113,8 @@ class Client implements EngineDaemonClient {
               workspace: String(workspaceIdOf(request)).startsWith("desktop-startup-smoke-")
                 ? "smoke"
                 : "workspace-handle",
+              // As the engine says once it has kept .dohc/local out of sync.
+              localStateReady: true,
             }
           : request.method === "workspace.close"
             ? { closed: true }
@@ -168,7 +170,6 @@ function fixture(options: { ownerLiveReleases?: UnwrittenReleases } = {}) {
   const daemons: ReturnType<typeof createRustEngineDaemon>[] = [];
   const spawns: EngineClientSpawnOptions[] = [];
   let quitting = false;
-  // Stands in for the durable file of releases whose file write is not confirmed.
   const unwritten: UnwrittenRelease[] = [];
   const recoveries = new Map<string, string>();
   const dependencies: Dependencies = {
@@ -317,10 +318,6 @@ const unexpectedKeptEdits = async (): Promise<unknown> => {
 const unexpectedOpen = async (): Promise<"hosted" | "refused"> => {
   throw new Error("Unexpected owner open.");
 };
-/**
- * A server-owned workspace whose delivery offers these documents, for quarantine tests. The server keeps `kept`.
- * `listed` sees each list read's `fresh` flag after the list is read, and can hold back its answer.
- */
 async function quarantinedOwner(
   documents: { path: string; objectId: string; head?: () => number }[],
   server: {
@@ -344,6 +341,7 @@ async function quarantinedOwner(
     ),
   );
   const rootPath = await createTestScratch("dohc-owner-quarantine-");
+  mkdirSync(resolve(rootPath, ".dohc", "local"), { recursive: true });
   f.rows.set("owner", { workspaceId: "owner", rootPath, kind: "personal", mode: "local-first" });
   const bindingOf = (path: string, objectId: string) => ({
     workspaceId: "owner",
@@ -579,6 +577,7 @@ async function keptRelease(
   stored: ReturnType<typeof recoveryQueue>["queue"] = recoveryQueue(keptBinding).queue,
 ) {
   const rootPath = await createTestScratch("dohc-unwritten-");
+  mkdirSync(resolve(rootPath, ".dohc", "local"), { recursive: true });
   const file = join(await createTestScratch("dohc-unwritten-state-"), "owner-live-releases.json");
   const { liveRecoveryPackage } = await import("./ownerLiveRecoveryCopy");
   await createUnwrittenReleases(() => file).put(
@@ -664,7 +663,7 @@ async function keptRelease(
         id: request.id,
         result:
           request.method === "workspace.open"
-            ? { workspace: "workspace-handle" }
+            ? { workspace: "workspace-handle", localStateReady: true }
             : request.method === "ydoc.ownerStop.list"
               ? { stops: engine.stops.filter(listedStop) }
               : request.method === "workspace.close"
@@ -1207,6 +1206,7 @@ describe("server owner peer lifecycle", () => {
       ),
     );
     const rootPath = await createTestScratch("dohc-server-owner-quarantine-");
+    mkdirSync(resolve(rootPath, ".dohc", "local"), { recursive: true });
     f.rows.set("owner", { workspaceId: "owner", rootPath, kind: "personal", mode: "local-first" });
     const binding = {
       workspaceId: "owner",
@@ -1289,7 +1289,6 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
       expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
       expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "owner" });
-      // The workspace as a renderer operation names it.
       const workspace = await f.authorities.withAuthority("owner", (lease) => ({
         workspaceId: "owner",
         rootPath: lease.binding.canonicalRootPath,
@@ -1389,7 +1388,6 @@ describe("server owner peer lifecycle", () => {
     ownerDeliveryMock.pass.mockImplementation(async (options) =>
       options.document.binding.currentPath === "notes/plan.md" ? planResult : "empty",
     );
-    // What the next pass of plan.md is given as the server's head.
     const nextPlanHead = async () => {
       for (;;) {
         const before = ownerDeliveryMock.pass.mock.calls.length;
@@ -1516,7 +1514,7 @@ describe("server owner peer lifecycle", () => {
           id: request.id,
           result:
             request.method === "workspace.open"
-              ? { workspace: "workspace-handle" }
+              ? { workspace: "workspace-handle", localStateReady: true }
               : request.method === "engine.ping"
                 ? { ok: true }
                 : null,
@@ -1567,7 +1565,8 @@ describe("server owner peer lifecycle", () => {
         const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md");
         expect(saved).toEqual({
           copyPath: "notes/plan (recovered).md",
-          packagePath: "notes/plan (recovered).dohc-recovery.json",
+          packagePath: ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json",
+          notInNote: 0,
           storedOn: "this-computer",
           keptEdits: "ended",
         });
@@ -1742,7 +1741,7 @@ describe("server owner peer lifecycle", () => {
         request.method === "ydoc.ownerStop.release"
           ? { stops: [{ ...releasedStop, binding, materialized: false }] }
           : request.method === "workspace.open"
-            ? { workspace: "workspace-handle" }
+            ? { workspace: "workspace-handle", localStateReady: true }
             : request.method === "ydoc.ownerStop.list"
               ? { stops: [] }
               : request.method === "engine.ping"
@@ -1921,7 +1920,8 @@ describe("server owner peer lifecycle", () => {
       const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md");
       expect(saved).toEqual({
         copyPath: "notes/plan (recovered).md",
-        packagePath: "notes/plan (recovered).dohc-recovery.json",
+        packagePath: ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json",
+        notInNote: 0,
         storedOn: "server",
         keptEdits: "copied",
       });

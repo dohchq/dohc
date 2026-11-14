@@ -1041,7 +1041,6 @@ describe("orphanedDrafts persistence", () => {
     clock.mockReturnValue(base + 1);
     captureOrphanedDraft("ws-1", "target.md", "the survivor");
     const [doomed] = draftsFor(useOrphanedDrafts, "ws-1", "gone.md");
-    // Frees the low id in storage; the survivor keeps the higher one.
     dismissOrphanedDraft("ws-1", "gone.md", doomed.id);
 
     const next = await relaunch(base + 2);
@@ -1123,7 +1122,6 @@ describe("orphanedDrafts persistence", () => {
   });
 
   it("removes malformed current-format recovery records", async () => {
-    // A half-written value still holds whatever draft text reached it.
     seedStoredDrafts('[{"text":"UNPARSEABLE_BODY');
     const broken = await relaunch();
     expect(draftsFor(broken.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);

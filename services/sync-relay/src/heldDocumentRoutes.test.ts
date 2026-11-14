@@ -69,14 +69,12 @@ const inspection: HeldDocumentInspection = {
   resolution: null,
 };
 const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-// A blob as the engine client hands it over, after checking it against what it announced.
 const blob = (
   bytes: Uint8Array,
   announced: { sha256?: string; totalBytes?: number } = {},
 ): StreamedBlob => ({ bytes, sha256: sha256(bytes), totalBytes: bytes.length, ...announced });
 // Preserved text past the engine's in-band limit, as the session host answers it whole.
 const markdown = "# Plan\n\n" + "Kept paragraph with ünïcode.\n\n".repeat(4096);
-// The binding and the work it covers, as the engine streams them; the details name them by digest.
 const contributions = Buffer.from(
   JSON.stringify({ binding, coveredContributions: [], mergedContributionIds: [], version: 1 }),
 );
@@ -97,8 +95,6 @@ const preserved: HeldDocumentInspection = {
     inbandLimitBytes: 48 * 1024,
   },
 };
-// The same preservation, its artifact past what the engine streams: only the artifact is refused, and its
-// merged commitment still answers.
 const tooLarge: HeldDocumentInspection = {
   ...preserved,
   preservation: {
@@ -189,7 +185,6 @@ function fakeHost(
   };
 }
 
-/** A host answering `inspected` with the artifact the engine streams for it, as the session host does. */
 function streaming(
   inspected: HeldDocumentInspection,
   asked: string[] = [],
@@ -270,7 +265,6 @@ describe("held document routes", () => {
     expect(host.calls).toEqual([]);
   });
 
-  /** A host whose reads wait until `release`, and `asked` once one began. */
   function waitingHost() {
     let release!: () => void, began!: () => void;
     const answered = new Promise<void>((resolve) => {

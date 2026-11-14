@@ -735,7 +735,6 @@ describe("private named live gateway", () => {
   // The gateway pings both legs every half idle period: 200 ms here, so ten pings
   // (one session re-check) take about 2 s.
   const keepaliveLimits = { ...limits, idleTimeoutMs: 400 };
-  /** Answers the first `rounds` of the gateway's pings; returns how many arrived. */
   function answer(peer: WebSocket, rounds = Infinity) {
     let seen = 0;
     peer.on("ping", (data) => {

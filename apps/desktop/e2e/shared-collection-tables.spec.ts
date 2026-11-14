@@ -115,7 +115,6 @@ for (const surface of ["standalone", "mount"] as const) {
           collectionPath = `shared-with-me/${mounted.mount.label}/${COLLECTION}`;
           workspaceId = hostId;
         }
-        // These are real IPC reads against the recipient daemon, with no Collection stubs.
         await expect
           .poll(
             () =>

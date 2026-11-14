@@ -473,7 +473,6 @@ it("keeps agent name, glyph and opaque border contrast on every surface in both 
           String(hue) + "/" + surface,
         ).toBeGreaterThanOrEqual(4.5);
       }
-      // The name and sparkle beside the avatar take the hue measured above.
       expect(agentTextClass(token)).toBe(hue ? "text-hue-" + hue : "text-agent");
       const classes = presentationClasses(token, "agent");
       expect(classes).toContain(hue ? "border-hue-" + hue : "border-agent");

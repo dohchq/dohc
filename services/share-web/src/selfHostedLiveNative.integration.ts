@@ -992,6 +992,8 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     });
     if (binding.kind !== "current") throw new Error("Activated binding is unavailable.");
     const capture = await active!.captureNative(binding.binding);
+    // The read always reports a replay. The save's own answer may come from its apply (false on a first
+    // apply) or, when a pass applied the row first, from this read, so the test cannot pin either.
     expect(
       await capture.client.readLiveApplicationAck(
         {
@@ -1002,7 +1004,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
         },
         { deliveryId: ack.deliveryId, updateDigest: ack.updateDigest },
       ),
-    ).toEqual(ack);
+    ).toEqual({ ...ack, applicationReplayed: true });
     const settled = await active!.settle(document);
     const expected = yDocToMarkdown(provider.doc);
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(expected);
@@ -1257,6 +1259,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
         depth: agent.depth,
       },
     ]);
+    // As for the save above, the read always reports a replay.
     expect(
       await capture.client.readLiveApplicationAck(
         {
@@ -1267,7 +1270,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
         },
         { deliveryId: agentAck.deliveryId, updateDigest: agentAck.updateDigest },
       ),
-    ).toEqual(agentAck);
+    ).toEqual({ ...agentAck, applicationReplayed: true });
     const agentMarkdown = yDocToMarkdown(agentProvider.doc);
     agentProvider.close();
     agentProvider.doc.destroy();
@@ -2250,9 +2253,11 @@ async function openSelfHostProof(name: string) {
         openRelay();
         await startSupervisor();
       },
-      /** Whether browsers are told live editing of the document is unavailable, as the relay's `main.ts` decides it. */
+      /** What browsers are told about live editing of the document, as the relay's `main.ts` decides it. */
       sessionHostBlocked: (document: { workspaceId: string; objectId: string }) =>
-        storage.getLiveHostControl()?.configuredMode === "service" && supervisor!.stopped(document),
+        storage.getLiveHostControl()?.configuredMode === "service"
+          ? supervisor!.sessionBlock(document)
+          : undefined,
       /**
        * Holds the reply to the next live application the engine completes.
        * `applied` resolves once the engine applied it; `release` lets the reply through.

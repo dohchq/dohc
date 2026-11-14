@@ -62,7 +62,6 @@ afterEach(() => {
   for (const seam of [lstat, mkdir, readFile, stat]) vi.mocked(seam).mockReset();
 });
 
-// stat answers as the filesystem does, except a bigint stat of `path` reports `answer`'s.
 function statOf(
   path: string,
   answer: (real: import("node:fs").BigIntStats) => Promise<import("node:fs").BigIntStats>,
@@ -179,12 +178,13 @@ describe("createWorkspaceFolder", () => {
     });
     expect(await readdir(root)).toEqual([".dohc"]);
     expect(await readSyncHistory(root), "a new folder never synced").toBe("never-synced");
-    // Its schedules run on the computer that made it, whichever computer reads the folder.
-    expect(await scheduleComputer(root, { installId: "install-desk", label: "Desk" })).toEqual({
-      kind: "computer",
-      computer,
-    });
-    // So do its Collections, whose store it makes later.
+    const otherComputer = { installId: "install-desk", label: "Desk" };
+    for (const readingComputer of [computer, otherComputer]) {
+      expect(await scheduleComputer(root, readingComputer)).toEqual({
+        kind: "computer",
+        computer,
+      });
+    }
     expect(JSON.parse(await readFile(join(root, ".dohc", "collections.json"), "utf8"))).toEqual({
       version: 1,
       workspaceId: created.workspaceId,

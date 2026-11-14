@@ -37,9 +37,6 @@ async function tempWorkspace(workspaceId: string) {
   return { workspaceId, rootPath };
 }
 
-// Until `settle` runs, `lstat` on the root never answers. `settle` then ends
-// the calls already waiting, with `failure` if given, and later calls answer
-// at once.
 async function hangRoot(rootPath: string) {
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   const root = resolve(rootPath);
@@ -87,7 +84,6 @@ function sessionsFor(client: OpenClient) {
   );
 }
 
-// Settles to the run's error, or to "still waiting" well past the deadline.
 async function outcomeOf(run: Promise<unknown>): Promise<unknown> {
   const bound = Promise.withResolvers<string>();
   const timer = setTimeout(() => bound.resolve("still waiting"), DEADLINE_MS * 20);

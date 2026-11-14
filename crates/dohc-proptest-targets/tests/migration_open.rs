@@ -78,8 +78,6 @@ proptest! {
     // ignore the env var.
     #![proptest_config(ProptestConfig::default())]
 
-    /// Non-empty arbitrary bytes are refused with the typed corruption
-    /// classification and the rejected evidence remains byte-for-byte intact.
     #[test]
     fn arbitrary_file_bytes_fail_closed(bytes in prop::collection::vec(any::<u8>(), 1..4096)) {
         let scratch = ScratchDir::new().expect("scratch");

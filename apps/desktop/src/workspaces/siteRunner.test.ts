@@ -27,8 +27,6 @@ import {
   type SiteLogEntry,
 } from "./siteRunner";
 
-// What each pid a still-running answer holds is now, for a failure message:
-// the app, a late exit ("gone"), or another program.
 async function describePids(pids: readonly number[]): Promise<string> {
   const read = (pid: number) =>
     process.platform === "win32"

@@ -2023,7 +2023,6 @@ describe("relaySyncEngine", () => {
       expect(sync.snapshot().syncFailure).toBeNull();
       expect(changes).toHaveBeenCalled();
       const calls = pushMock.mock.calls.length + pullMock.mock.calls.length;
-      // No backoff retry and no new pass: retrying cannot help until dohc updates.
       sync.queueSync();
       sync.queuePull();
       await sync.retryNow({ countsAsAttempt: true });

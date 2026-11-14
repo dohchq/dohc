@@ -290,7 +290,6 @@ test(
       ]);
       failed = false;
     } finally {
-      // Cleanup failures fail a passing test; after a failure they are reported beside its error.
       const problems = [];
       for (const name of containers) docker(["rm", "--force", name], { allowFailure: true });
       for (const name of volumes) docker(["volume", "rm", name], { allowFailure: true });

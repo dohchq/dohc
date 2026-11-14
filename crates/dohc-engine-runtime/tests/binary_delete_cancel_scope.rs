@@ -42,10 +42,6 @@ fn delete_input(moment_id: &str, request_id: &str, now_ms: i64) -> DeleteTextFil
     }
 }
 
-/// delete -> recreate -> delete, each blocked from reaching disk by a
-/// one-shot post-commit materialize crash, then unblocked (a fresh actor over
-/// the same db replays every pending job with no faults -- the daemon-restart
-/// shape).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -84,8 +80,6 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
         vec![1, 1, 1]
     );
 
-    // Recreate at the same path with B1: commits, but its post-commit
-    // materialize is also blocked -- job W stays pending, disk still B0.
     actor
         .versioned_binary_write(
             binary_input("obj-v2", "moment-v2", "req-v2", vec![2, 2, 2], 30),

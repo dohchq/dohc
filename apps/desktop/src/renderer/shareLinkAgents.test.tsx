@@ -61,7 +61,6 @@ const shell = {
 type View = {
   open: boolean;
   dialog: number;
-  // The link's row is on screen, so the list is mounted.
   listShown: boolean;
   revision: number;
 };
@@ -276,7 +275,6 @@ describe("LinkAgentsList", () => {
     const { set } = renderList();
     await user.click(await screen.findByTestId("share-link-agent-disconnect-c1"));
 
-    // Closing "more links" takes the list away; the dialog stays open.
     set({ listShown: false });
     expect(screen.queryByRole("region")).toBeNull();
     set({ listShown: true });

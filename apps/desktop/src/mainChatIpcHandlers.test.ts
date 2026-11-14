@@ -280,10 +280,6 @@ describe("readRelayChatShareLanes", () => {
     ).toBe(true);
   });
 
-  // Another workspace's received lane being
-  // unreadable must not blank a workspace that has shares of its own. The
-  // scoping runs before the cap, so the rows homed elsewhere never count
-  // against this workspace's lane.
   it("still answers this workspace's shares when the rows claimed elsewhere would blow the cap", async () => {
     const claimedElsewhere = Array.from(
       { length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },

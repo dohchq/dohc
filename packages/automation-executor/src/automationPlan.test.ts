@@ -317,7 +317,6 @@ describe("what the executor can run", () => {
     expect(
       unsupportedReason(scheduled("{find: 'record.Owner == trigger.record.Owner', as: mine}")),
     ).toMatch(/cannot compare with trigger\.record/);
-    // A formula built on the trigger record has none to read either.
     for (const find of [
       "{find: 'record.Owner == trigger.record.Owner + \"\"', as: mine}",
       "{find: 'record.Owner == lower(trigger[\"record\"].Owner)', as: mine}",
@@ -649,7 +648,6 @@ describe("schedule and press scopes", () => {
       inputsOf(null),
     );
     expect(request.scope).not.toHaveProperty("record");
-    // The due time reads in the schedule's own zone, whatever this computer's is.
     expect(request.scope.trigger).toEqual({
       kind: "schedule",
       dueAt: "2026-09-25T09:00:00.000+00:00",
@@ -1212,7 +1210,6 @@ describe("what a step can read", () => {
         "do: [{find: 'true', as: team}, {set: {X: '=globalThis.team.length'}}]",
       ].join("\n"),
     );
-    // A result a formula reaches without naming it is not read, and reading it that way says so.
     expect([...(namesUsed(entryAt(indirect, 1).step) as Set<string>)]).toEqual(["globalThis"]);
     expect(
       unavailableTo(1, bindingsIn(indirect), new Set(["team"]), new Set(["globalThis"])),

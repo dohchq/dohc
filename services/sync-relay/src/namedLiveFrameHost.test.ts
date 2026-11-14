@@ -5,6 +5,7 @@ import {
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
+import { format } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   EngineClient,
@@ -219,6 +220,7 @@ async function setup(maxListeners = 4, reserveBytes?: (size: number) => () => vo
     deadlineMs: 5000,
     nextRequestId: () => ++requestId,
     drain,
+    takeAppliedAck: vi.fn((): typeof ack | undefined => undefined),
   };
   const bounds = {
     maxClientVectorBytes: 32,
@@ -283,7 +285,6 @@ it("shows each named recipient its own share's selector on one binding and one n
   });
   const minted = await tickets.mint({ objectId: binding.objectId }, secondScope);
   const ticket = (await tickets.redeem(minted!.token, secondScope))!;
-  // Both recipients' accepted events carry the lineage's one recorded binding.
   expect(ticket.binding).toEqual(f.capture.ticket.binding);
   expect(ticket.binding).toEqual(binding);
   const second = captureNamedLiveFrameHost({
@@ -558,6 +559,27 @@ it.each(["applied", "missing", "receipt-only"])(
   },
 );
 
+it.each([
+  ["takes the ACK of the drain that applied the row without asking the engine again", 11, 0],
+  ["asks the engine when the drain's ACK names another journal row", 12, 1],
+])("%s", async (_name, journalCursor, ackReads) => {
+  const f = await setup();
+  journal(f);
+  const applied = { ...ack, journalCursor, applicationReplayed: false };
+  f.native.takeAppliedAck.mockReturnValueOnce(applied);
+  expect(
+    await f.capture.submit(
+      { deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes },
+      new AbortController().signal,
+    ),
+  ).toEqual({ result: "success", ack: ackReads ? ack : applied });
+  expect(f.native.takeAppliedAck).toHaveBeenCalledExactlyOnceWith({
+    deliveryId: ack.deliveryId,
+    updateDigest: hash(bytes),
+  });
+  expect(f.peer.requests.filter((r) => r.method === "liveApplication.ack")).toHaveLength(ackReads);
+});
+
 it("rechecks revocation after asynchronous validation and never commits its stale result", async () => {
   const f = await setup(),
     commit = journal(f),
@@ -634,35 +656,54 @@ it("logs a slow or unsuccessful submission with cut ids, timings and a fixed wor
     reason: "capacity-refused",
   });
   const object = binding.objectId.slice(0, 8);
+  // The clock stands still inside each step, so every step's time is 0; no loop sampler runs here.
+  const steps = {
+    checkMs: 0,
+    waitMs: 0,
+    queryMs: 0,
+    verifyMs: 0,
+    copyMs: 0,
+    hopMs: 0,
+    replayMs: 0,
+    projectionMs: 0,
+    workerOtherMs: 0,
+    freshMs: 0,
+    loopMaxMs: null,
+    loopHeldMs: null,
+  };
+  const refused = {
+    submitter: "named",
+    object,
+    ...steps,
+    commitMs: null,
+    drainMs: null,
+    attempts: 0,
+    rows: null,
+    suffixBytes: null,
+    checkpointBytes: null,
+    result: "capacity-refused",
+  };
   expect(log.mock.calls).toEqual([
     [
       "Live submit answered.",
-      { submitter: "named", object, checkMs: 0, commitMs: 0, drainMs: 600, result: "success" },
-    ],
-    [
-      "Live submit answered.",
       {
         submitter: "named",
         object,
-        checkMs: 0,
-        commitMs: null,
-        drainMs: null,
-        result: "capacity-refused",
+        ...steps,
+        commitMs: 0,
+        drainMs: 600,
+        attempts: 1,
+        rows: 0,
+        suffixBytes: 0,
+        checkpointBytes: 2,
+        result: "success",
       },
     ],
-    [
-      "Live submit answered.",
-      {
-        submitter: "named",
-        object,
-        checkMs: 0,
-        commitMs: null,
-        drainMs: null,
-        result: "capacity-refused",
-        repeated: 2,
-      },
-    ],
+    ["Live submit answered.", refused],
+    ["Live submit answered.", { ...refused, repeated: 2 }],
   ]);
+  // The line is flat, so the console prints every figure, not an [Object] in its place.
+  expect(format(...log.mock.calls[0]!)).toMatch(/drainMs: 600,.*rows: 0,/s);
   const shown = JSON.stringify(log.mock.calls);
   // No part of a delivery id, which the client chooses, reaches the log.
   for (const hidden of [

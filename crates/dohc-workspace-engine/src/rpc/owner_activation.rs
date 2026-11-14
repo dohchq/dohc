@@ -231,7 +231,7 @@ impl EngineService {
             let activation_id = params.activation_id.clone();
             let key = tokio::task::spawn_blocking(move || {
                 use rusqlite::OptionalExtension;
-                let store = dohc_engine_storage::EngineStore::open_read_only(held.database_path()).map_err(|_|workspace_unavailable())?;
+                let store = held.open_reader().map_err(|_|workspace_unavailable())?;
                 // A resume finds its document through the activation it retained, so one
                 // with no head, as once it parked, still answers whether it is ready.
                 // One whose retirement began finds none, before it takes the lease.

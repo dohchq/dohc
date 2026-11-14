@@ -152,9 +152,6 @@ test("switching the active version while a rich doc stays open re-binds the edit
     });
     await expect.poll(() => editorText(page), { timeout: 15_000 }).toContain(draftSentinel);
 
-    // The re-bind: switch back to Main while the same file stays open. The
-    // editor must not keep showing Draft's live doc. It re-binds to Main's
-    // lineage: Main's content, without the draft edit.
     await switchVersionViaMenu(page, "Main");
     await waitForEngineEditor(page);
     await expect.poll(() => editorText(page), { timeout: 20_000 }).toContain(mainSentinel);
@@ -177,9 +174,6 @@ test("switching the active version while a rich doc stays open re-binds the edit
     await waitForEngineEditor(page);
     await expect.poll(() => editorText(page), { timeout: 20_000 }).toContain(draftSentinel);
 
-    // Engine authority: the draft edit landed in Draft's snapshot only; Main's
-    // snapshot is untouched. This is the "edits land in the correct version"
-    // half of the re-bind.
     await expect
       .poll(() => engineSnapshotText(temp.rootPath, draftId ?? "", "plan.md"), {
         timeout: 30_000,

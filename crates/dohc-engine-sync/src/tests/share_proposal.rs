@@ -109,8 +109,6 @@ fn proposal_scan_position(engine: &EngineStore, share_id: &str) -> Option<i64> {
         .expect("scan position")
 }
 
-/// The pinned level decides what this replica offers, not just what the relay
-/// accepts. A view or comment share must not reach the relay at all.
 #[test]
 fn share_proposal_submit_offers_nothing_below_edit_level() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["v1"]);
@@ -239,8 +237,6 @@ fn share_proposal_submit_keeps_changes_inside_the_grant() {
     );
 }
 
-/// A run of local writes to one file is one change: the base the recipient
-/// started from, and the content it ended with.
 #[test]
 fn share_proposal_submit_consolidates_repeated_edits_to_one_change() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["v0", "v1", "v2"]);
@@ -375,9 +371,6 @@ fn share_proposal_submit_carries_a_rename_and_an_edit_as_one_change() {
     );
 }
 
-/// Decision 3, in one integer. The scan stops at the journal's high-water mark
-/// read when the submit began, and that mark — not the last op offered — is
-/// what the next submit resumes from.
 #[test]
 fn share_proposal_submit_bounds_the_scan_at_the_submit_moment() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["one", "outside", "three"]);
@@ -420,8 +413,6 @@ fn share_proposal_submit_bounds_the_scan_at_the_submit_moment() {
         "the recorded position is the journal's high-water mark, not the last op offered",
     );
 
-    // Journaled after the first submit read its mark, so it belongs to the
-    // next one — and to that one only.
     journal_local_moment(
         &mut engine,
         &local_moment_payload(
@@ -819,9 +810,6 @@ fn the_submit_bound_is_not_the_replication_page_size() {
     assert_eq!(crate::MAX_SHARE_PROPOSAL_OPS, 2_500);
 }
 
-/// The bound counts FILES, and it stops at the op that would admit one file
-/// too many. An op folding into a file the scan already holds is not that op,
-/// so no file is ever offered half consolidated and then offered again.
 #[test]
 fn share_proposal_submit_never_splits_one_file_across_two_submits() {
     let (_scratch, _path, mut engine) = proposal_fixture(&[]);
@@ -902,10 +890,6 @@ fn share_proposal_submit_never_splits_one_file_across_two_submits() {
     assert_eq!(second.submitted, 1);
 }
 
-/// A file the recipient edited out of the shared paths is not this share's to
-/// offer at all — not even the state it held before it left. It is dropped
-/// whole and counted, because a silent drop leaves the recipient believing it
-/// sent work it never sent.
 #[test]
 fn share_proposal_submit_counts_a_file_edited_out_of_the_share() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2", "kept"]);
@@ -1079,10 +1063,6 @@ fn share_proposal_submit_saturates_the_skipped_count_at_the_bound() {
     assert_eq!(outcome.submitted, 1, "the in-grant file must still travel",);
 }
 
-/// The bound stops the scan at the op that would admit one file too many, so a
-/// scan holding exactly the bound stopped at nothing and has nothing left to
-/// offer. Saying otherwise sends the recipient back for a submit that carries
-/// no change.
 #[test]
 fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
     let (_scratch, _path, mut engine) = proposal_fixture(&[]);
@@ -1328,8 +1308,6 @@ fn apply_accepted_change(
     }
 }
 
-/// The recipient was current, so the rewritten base IS the granter's head. The
-/// accept is a clean apply — this is what makes the base rewrite worth doing.
 #[test]
 fn an_accepted_change_on_the_granters_head_applies_without_a_conflict() {
     let (_scratch, _path, mut engine) = granter_fixture();
@@ -1363,9 +1341,6 @@ fn an_accepted_change_on_the_granters_head_applies_without_a_conflict() {
     );
 }
 
-/// The file drifted after the recipient read it, so the rewritten base is a
-/// real, older granter moment. One conflict, with a correct three-way base —
-/// never a silent overwrite.
 #[test]
 fn an_accepted_change_on_a_stale_base_opens_one_conflict_against_that_base() {
     let (_scratch, _path, mut engine) = granter_fixture();

@@ -1,5 +1,6 @@
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
+import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
 import { badRequest, errorResponse, notFound, relayError } from "./errors";
 import type { LinkAuthorityResolver, PersonalAuthority } from "./linkAuthority";
 import {
@@ -44,6 +45,7 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   live_host_full: "This server is hosting as many documents for agents as it can.",
   live_hosting_unsupported: "This server does not host live documents for agents.",
   "live-document-without-lineage": "The owner must open this document in dohc on a desktop first.",
+  "live-edit-unadmitted": LINK_REFUSALS.link_live_stopped.error,
   "document-unavailable": "The document is no longer at this path.",
   "workspace-changed": "The workspace changed. The owner must open the document again.",
   "live-history-over-budget":
@@ -77,6 +79,11 @@ function answerResponse(answer: PersonalLiveDocumentAnswer): Response {
     { ok: false, code: answer.reason, error: REFUSAL_MESSAGES[answer.reason] ?? REFUSED },
     409,
   );
+}
+
+/** An agent's refusal of a document, as its open words it, for a ticket that finds the same reason. */
+export function personalLiveRefusal(reason: PersonalLiveDocumentRefusal): Response {
+  return answerResponse({ status: "refused", reason });
 }
 
 export function createPersonalLiveDocumentRoute(input: {

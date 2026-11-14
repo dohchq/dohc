@@ -748,9 +748,6 @@ class MockClient implements EngineDaemonClient {
   }
 }
 
-// The daemon's retryable refusals, which seven ladder tests below raise. The
-// disposition is the part under test in every one of them, so it stays at the
-// call site while the envelope shape does not.
 function daemonRefusal(
   code: DaemonErrorCode,
   message: string,
@@ -2731,9 +2728,6 @@ describe("EngineWorkspaceSessions", () => {
         "drop the deadline check -> all six attempts run and the rejection is EngineWorkspaceRebindError instead.",
       ).toBe(4);
       const message = (outcome as Error).message;
-      // The rejection names the constraint, the configured limit with its
-      // unit, and the observed wait (AGENTS.md: show agents the limits they
-      // hit).
       expect(message).toContain("withRetryBudget budgetMs limit of 6000ms");
       // The two durations differ by the first attempt, which the budget
       // deliberately does not charge.
@@ -3130,9 +3124,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("gates an open refused with the immediate disposition", async () => {
-      // `immediate` is the fourth Retryability value. It must be gated like
-      // every other retry decision, and must not wait: the daemon said retry
-      // now.
       const workspace = await tempWorkspace("workspace-open-immediate");
       let nowMs = 0;
       let opens = 0;

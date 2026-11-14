@@ -1,6 +1,3 @@
-//! Real-store envelope validation, secret corruption refusals, and byte limits.
-//! Copied stores retain independent commits and replay them after reopen.
-
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dohc_engine_domain::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};
@@ -63,10 +60,10 @@ fn looks_structurally_valid(envelope: &ReplicationEnvelope) -> bool {
 }
 
 fn arbitrary_string() -> impl Strategy<Value = String> {
+    let control_byte_strings = "[\\x00-\\x1f]{0,16}";
     prop_oneof![
         "[a-zA-Z0-9_-]{0,64}",
-        // Adversarial: control bytes, which `bounded()` must reject.
-        "[\\x00-\\x1f]{0,16}",
+        control_byte_strings,
         // Adversarial: right at / just over the 512-byte identifier cap.
         prop::collection::vec(any::<char>(), 500..520)
             .prop_map(|chars| chars.into_iter().collect()),
@@ -449,9 +446,6 @@ proptest! {
         }
     }
 
-    /// Structurally-random envelopes through the REAL apply boundary: never
-    /// panics, and a structurally-invalid envelope is refused before the
-    /// caller's mutation closure runs (no store mutation attempted).
     #[test]
     fn structurally_random_envelopes_fail_closed_before_any_mutation(
         envelope in arbitrary_envelope(),
@@ -534,8 +528,6 @@ fn copied_stores_apply_independently_and_keep_commits_after_reopen() {
     assert!(matches!(replay.primary, ApplyDisposition::Skipped));
 }
 
-/// Seed-corpus sanity: a non-secret `op_kind` routed to the secret applier is
-/// rejected as unsupported (never panics, never applies).
 #[test]
 fn seed_non_secret_op_kind_is_rejected_by_secret_applier() {
     let (_scratch, mut engine) = store();

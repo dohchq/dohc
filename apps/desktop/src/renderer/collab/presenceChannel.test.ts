@@ -257,7 +257,6 @@ describe("createPresenceChannel", () => {
   });
 
   it("stop() during a poll-retry sleep terminates the loop instead of leaking it", async () => {
-    // Relay outage: every poll fails, so the loop parks in its retry sleep.
     let polls = 0;
     const transport: PresenceTransport = {
       publish: async () => ({ version: 1, peers: [] }),

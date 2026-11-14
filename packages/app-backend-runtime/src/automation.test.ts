@@ -631,7 +631,6 @@ describe("memory between runs", () => {
     }
     return false; })`;
   const size = 8 << 20;
-  // New, resized, and transferred buffers must not expose a prior run.
   const probes = [
     `new Uint8Array(new ArrayBuffer(${size}))`,
     `(() => { const b = new ArrayBuffer(16, { maxByteLength: ${size} }); b.resize(${size}); return new Uint8Array(b); })()`,

@@ -1001,11 +1001,6 @@ describe("explorer destructive change flush boundaries", () => {
   });
 });
 
-// Set-aside draft recovery at the shell seams. The drafts live in a module
-// store keyed by workspace + path. The shell owns the two integrations under
-// test: path remapping on explorer renames, and the distinction between
-// recovery (dot, no save promise) and savable-dirty (dot and the
-// version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
   it.each(["EBUSY"])(
     "reports a %s draft read failure in Notices and retries discovery",
@@ -1138,7 +1133,6 @@ describe("set-aside draft recovery", () => {
   it("keeps a deleted path's set-aside draft reachable from the notice center", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    // The path is in no listing and no tab: only the store knows it.
     captureOrphanedDraft(WORKSPACE.workspaceId, "deleted/gone.md", "Kept!");
     // Another workspace's draft must NOT leak into this workspace's notice
     // center — the close guard is the global surface.

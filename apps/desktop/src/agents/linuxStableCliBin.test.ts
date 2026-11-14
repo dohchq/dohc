@@ -276,8 +276,8 @@ describe("syncLinuxStableCliBin on Linux x64", () => {
         .filter((name) => name.startsWith("node-"))
         .sort();
 
+    expect(readFileSync(join(f.targetDir, "dohc-mcp"), "utf8")).toContain(f.nodeFileName);
     await syncLinuxStableCliBin(f);
-    // The launcher still named the first release's Node.js when this refresh began.
     expect(nodeFiles()).toEqual([f.nodeFileName, `node-${pinned.sha256}`].sort());
     await syncLinuxStableCliBin(f);
     expect(nodeFiles()).toEqual([`node-${pinned.sha256}`]);

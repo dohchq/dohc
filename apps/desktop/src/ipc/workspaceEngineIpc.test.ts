@@ -151,7 +151,6 @@ type SharedHistoryStore = Pick<
   "listHistoryPage" | "getMoment"
 >;
 
-/** `sharedStore` makes the renderer's workspace a received share view backed by that store. */
 async function harness(
   sharedStore?: SharedHistoryStore,
   policyRoot?: string,
@@ -167,7 +166,6 @@ async function harness(
     mode: "local-first",
     ...(sharedStore ? { shareView: {} as NonNullable<RegistryEntry["shareView"]> } : {}),
   };
-  // Open and writable, but not the workspace this renderer shows.
   const other: RegistryEntry = {
     workspaceId: "other",
     rootPath: "C:/other",
@@ -412,13 +410,11 @@ async function harness(
       body: { ok: false },
     }),
   );
-  // The sign-in: every sign-in, sign-out, or credential load starts a new generation.
   const session: { account: string | null; generation: number; loaded: Promise<void> } = {
     account: "person-local",
     generation: 1,
     loaded: Promise.resolve(),
   };
-  // As main asks: nothing when signed out, and each answer names the sign-in it asked as.
   const sent = vi.fn();
   const serverRuns = createServerRuns(async (workspaceId, request): Promise<ServerAnswer> => {
     sent();
@@ -466,7 +462,6 @@ async function harness(
     stateDir: () => stateDirectory,
     warmCredentialCache,
     currentCredentials: () => identity.credentials,
-    // Read from main's own account, as the sign-in stands when the request arrives.
     localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),
     registerHandler: (channel, handler) => {
       handlers.set(channel, handler);
@@ -1049,8 +1044,6 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.retryCloudSync, asked)).rejects.toThrow("readonly");
     expect(h.retryCloudSync).toHaveBeenCalledTimes(1);
   });
-  // A renderer showing one workspace must not start another open workspace's
-  // push and pull.
   it("refuses a sync retry for an open workspace this renderer does not show", async () => {
     const h = await harness();
     const foreign = { workspaceId: "other", reason: "person" };
@@ -1362,7 +1355,6 @@ describe("workspace engine IPC registrations", () => {
       ["workspace", stamp, "claim-here"],
       ["workspace", stamp, "claim-gone"],
     ]);
-    // The page never waits on the server.
     expect(h.relay).not.toHaveBeenCalled();
   });
 
@@ -1505,7 +1497,6 @@ describe("workspace engine IPC registrations", () => {
     await expect(locate()).resolves.toEqual({ location: "unavailable" });
     expect(h.relay).not.toHaveBeenCalled();
 
-    // While a credential load reads the store, the answer is kept under the account it asked as.
     h.relay.mockResolvedValue(shown);
     h.sent.mockClear();
     const loaded = h.loading();
@@ -2482,7 +2473,6 @@ describe("workspace engine IPC registrations", () => {
     });
 
     it.each([
-      // The workspace authority retires an operation whose folder changed.
       [
         "its folder moves",
         { rootPath: "C:/moved" },
@@ -2564,7 +2554,6 @@ describe("workspace engine IPC registrations", () => {
         },
       ]);
       expect(installation![0]!.self).toBe(true);
-      // History reads the attached folder by its canonical path.
       expect(h.readSyncHistory).toHaveBeenCalledWith("C:/canonical");
       // A record dohc can't read may say the folder synced.
       h.readSyncHistory.mockResolvedValue("unknown");

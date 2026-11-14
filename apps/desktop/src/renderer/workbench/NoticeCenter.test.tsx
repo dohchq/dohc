@@ -110,7 +110,6 @@ function renderNotices(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
   return render(noticeElement(props));
 }
 
-// Opens a message's Details and copies them, as a person would.
 async function copyDetails(
   user: { click: (element: Element) => Promise<void> },
   message: HTMLElement,
@@ -192,7 +191,6 @@ describe("automation notices", () => {
     );
     await userEvent.click(within(notice).getByRole("button", { name: "Allow" }));
     expect(onAllowAutomationHold).toHaveBeenCalledWith(hold);
-    // The same step held on the owner's server is its own row, and says where it waits.
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const onServer = await screen.findByTestId(
       "notice-automation-hold-server-collection:Trip#spend-0",
@@ -233,8 +231,6 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-kept-typing")).toBeNull();
   });
 
-  // The row belongs to the document, not its path: a rename keeps the
-  // dismissal, and a refusal after a new save is news.
   it("keeps a dismissal across a rename and announces a refusal after a new save", async () => {
     const user = userEvent.setup();
     const { rerender } = renderNotices({ syncStatus: declinedStatus(declined()) });
@@ -290,9 +286,6 @@ describe("notice center", () => {
     expect(onRebuildEngineStore).not.toHaveBeenCalled();
   });
 
-  // A toast sits above an open dialog. When the toast that holds focus goes
-  // away, focus goes back to the control F6 left from in the dialog, not to
-  // the Notices button behind it.
   it("hands focus back to where F6 left the dialog when the focused toast goes away", async () => {
     const error = {
       id: "shell-error-1",
@@ -328,8 +321,6 @@ describe("notice center", () => {
     await waitFor(() => expect(document.activeElement).toBe(restore));
   });
 
-  // A workspace error arrives as a toast in the corner and stays as a row in
-  // Notices. Try again and Copy ride with it; closing the toast keeps the row.
   it("shows a workspace error as a toast and a notice with retry and copy", async () => {
     const onRetryWorkspaceError = vi.fn();
     const onDismissWorkspaceError = vi.fn();
@@ -358,7 +349,6 @@ describe("notice center", () => {
     await copyDetails(user, toast);
     expect(await navigator.clipboard.readText()).toContain("Workspace: personal");
     expect(screen.getAllByRole("status").some((el) => el.textContent === "Copied")).toBe(true);
-    // Closing the toast marks the error seen: the toast goes, the row stays.
     await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
     rerender(noticeElement(barProps(true)));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
@@ -494,8 +484,6 @@ describe("notice center", () => {
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 
-  // A dismissal answers one workspace. The same failure in the next workspace
-  // is news the user has not seen, so it must still be announced.
   it("announces an identical live delivery failure in another workspace", () => {
     vi.useFakeTimers();
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
@@ -716,7 +704,6 @@ describe("notices sent to you", () => {
       expect(onOpenSentNotice).toHaveBeenCalledOnce();
 
       await act(async () => answers[0]?.resolve("dohc could not open this share."));
-      // The row no longer opens, so its Open shows, to try again.
       expect(screen.queryByTestId("sent-notice-a-opening")).toBeNull();
       expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
       expect(within(screen.getByTestId("sent-notice-a")).getByRole("status").textContent).toBe(
@@ -750,7 +737,6 @@ describe("notices sent to you", () => {
       expect(onOpenSentNotice).toHaveBeenCalledTimes(2);
       expect(signals[1]?.aborted).toBe(false);
 
-      // Ana's late answer puts nothing on Ben's row.
       await act(async () => answers[0]?.resolve("Your access to this ended."));
       expect(within(screen.getByTestId("sent-notice-a")).queryByRole("status")).toBeNull();
     });
@@ -772,7 +758,6 @@ describe("notices sent to you", () => {
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(document.activeElement).toBe(screen.getByTestId("notice-center"));
 
-    // A row that opens is one stop: the control that opens it.
     await userEvent.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(screen.getByTestId("notice-agent-active-open-row"));
     await userEvent.keyboard("{ArrowDown}");
@@ -782,7 +767,6 @@ describe("notices sent to you", () => {
     await userEvent.keyboard("{ArrowUp}");
     expect(document.activeElement).toBe(screen.getByTestId("sent-notice-a-open-row"));
 
-    // Delete keeps the keyboard in the list: focus moves on first.
     await userEvent.keyboard("{Delete}");
     expect(onDismissSentNotice).toHaveBeenCalledWith(sentRow("a").notice);
     expect(document.activeElement).toBe(screen.getByTestId("sent-notice-b-open-row"));
@@ -791,7 +775,6 @@ describe("notices sent to you", () => {
     expect(onOpenSentNotice).toHaveBeenCalledWith(sentRow("b").notice, expect.any(AbortSignal));
     await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
 
-    // This computer's rows open where they are about, not their own action.
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.keyboard("{ArrowDown}{Enter}");
     expect(onOpenTarget).toHaveBeenCalledExactlyOnceWith(
@@ -835,7 +818,6 @@ describe("Details", () => {
     const details = screen.getByRole("button", { name: "Details" });
     expect(details.getAttribute("aria-expanded")).toBe("false");
     expect(document.getElementById(details.getAttribute("aria-controls") ?? "")).toBeNull();
-    // Details is the last worded action.
     expect(details.parentElement?.lastElementChild).toBe(details);
 
     await user.click(details);

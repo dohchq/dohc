@@ -225,7 +225,6 @@ describe("a failed run's notice", () => {
     expect(automationFailedElsewhereBody(unclaimed, null)).toBe(
       "It could not start on another person's computer, so no one can try it again.",
     );
-    // A run that started and failed can run again only where it ran.
     expect(automationFailedElsewhereBody(failure(), null)).toBe(FAILED_ELSEWHERE_BODY);
   });
 

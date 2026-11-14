@@ -1174,10 +1174,6 @@ fn broken_collection_schema_degrades_and_recovers_without_data_loss() {
     supervisor.close(&db).expect("close actor");
 }
 
-/// The path agents use (commitment 5): a record written, edited, and
-/// deleted on disk claims on this computer, once per change. The record has
-/// no Y.Doc lineage, so capture itself indexes its frontmatter; a body-only
-/// edit changes no field and claims nothing.
 #[test]
 fn disk_writes_to_a_record_claim_once_each_and_body_edits_claim_nothing() {
     use dohc_engine_domain::{AutomationChangeKind, AutomationSubscription, AutomationTrigger};

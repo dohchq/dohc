@@ -1,8 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 
-// Keyboard-nav unit tests. Pure function; no DOM.
-
 function sampleRows(opts: { teamExpanded?: boolean } = {}): FlatRow[] {
   const teamExpanded = opts.teamExpanded ?? true;
   return [

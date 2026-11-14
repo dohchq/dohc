@@ -170,7 +170,6 @@ it("lists an unfinished restore and declines it before its fence", async () => {
   }
 });
 
-// While the fencing host is away, declining stays pending and preserves access restrictions.
 it("keeps a fenced restore pending while its host is absent", async () => {
   const f = fixture();
   try {

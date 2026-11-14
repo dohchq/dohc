@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ForwardLedger, ForwardRow } from "./forwardLedger";
+import { forwardIdOf } from "./forwarding";
 import { T3CodeError, type T3CodeRun, type T3CodeThreadState } from "./t3Code";
 import { createThreadStates, type ThreadStatesDependencies } from "./threadStates";
 
@@ -32,12 +33,12 @@ const thread = (runs: T3CodeRun[], over: Partial<T3CodeThreadState> = {}): T3Cod
   working: runs.some((entry) => entry.state === "working"),
   activeRunId: runs.find((entry) => entry.state === "working")?.id ?? null,
   waitingOnPerson: false,
+  questionId: null,
   closed: false,
   runs,
   ...over,
 });
 
-/** A ledger in memory that keeps what was saved, in order. */
 function memoryLedger(start: ForwardRow[] = []) {
   let rows = [...start];
   const saved: ForwardRow["reminder"]["state"][] = [];
@@ -61,7 +62,6 @@ function memoryLedger(start: ForwardRow[] = []) {
 
 function setup(over: Partial<ThreadStatesDependencies> = {}, start: ForwardRow[] = []) {
   const store = memoryLedger(start);
-  // The chat thread's messages after the forwarded one, by who wrote them.
   const chat: Array<{ authorAgentId?: string }> = [];
   let now = 5_000;
   let state = thread([run("run-1", "in-line")]);
@@ -148,6 +148,7 @@ describe("what an agent thread is doing with a forwarded message", () => {
       state: "in-line",
       sinceMs: 1_100,
       forwardedAtMs: 1_000,
+      questionId: null,
     });
 
     tool(thread([run("run-1", "working")]));
@@ -158,11 +159,45 @@ describe("what an agent thread is doing with a forwarded message", () => {
     tool(thread([run("run-1", "working")], { waitingOnPerson: true }));
     await states.check();
     expect(line(states)).toMatchObject({ state: "waiting-in-tool", sinceMs: 7_000 });
-    // The same state at a later look keeps the time it began.
     at(9_000);
     await states.check();
     expect(line(states)).toMatchObject({ state: "waiting-in-tool", sinceMs: 7_000 });
     expect(changes.every((workspaceId) => workspaceId === WORKSPACE)).toBe(true);
+    states.stop();
+  });
+
+  it("carries the id of the question the thread waits on, and nothing of the question", async () => {
+    const { states, tool, at, changes, rows } = setup();
+    states.forwarded(forwarded());
+    at(7_000);
+    // Something waits on the person, and it is not a question: an approval, say.
+    tool(thread([run("run-1", "working")], { waitingOnPerson: true }));
+    await states.check();
+    expect(line(states)).toMatchObject({ state: "waiting-in-tool", questionId: null });
+
+    // Now a question waits.
+    tool(thread([run("run-1", "working")], { waitingOnPerson: true, questionId: "q-1" }));
+    const before = changes.length;
+    await states.check();
+    expect(line(states)).toMatchObject({
+      state: "waiting-in-tool",
+      sinceMs: 7_000,
+      questionId: "q-1",
+    });
+    // The chat is told, though the state is the same.
+    expect(changes.length).toBe(before + 1);
+
+    // It was answered and the thread asked another.
+    tool(thread([run("run-1", "working")], { waitingOnPerson: true, questionId: "q-2" }));
+    await states.check();
+    expect(line(states)).toMatchObject({ state: "waiting-in-tool", questionId: "q-2" });
+
+    // The thread works again: no question goes with the line.
+    tool(thread([run("run-1", "working")]));
+    await states.check();
+    expect(line(states)).toMatchObject({ state: "working", questionId: null });
+    // The saved row holds ids and times only.
+    expect(JSON.stringify(rows())).not.toContain("q-");
     states.stop();
   });
 
@@ -200,19 +235,17 @@ describe("what an agent thread is doing with a forwarded message", () => {
         threadId: "t3-1",
         message: "REMINDER",
         how: "line",
-        forwardId: expect.stringMatching(/^remind-dohc-[0-9a-f]{64}$/),
+        // Named for the message in this thread, so another thread can take its own.
+        forwardId: `remind-${forwardIdOf(WORKSPACE, "chief", "m1", "t3-1")}`,
       },
     ]);
-    // Saved as none when forwarded, recorded before the reminder went, sent after.
     expect(saved).toEqual(["none", "recorded", "sent"]);
     expect(line(states)).toMatchObject({ state: "in-line" });
 
-    // The reminder's own work goes on: no second reminder.
     tool(thread([run("run-remind", "working"), run("run-1", "ended")]));
     await states.check();
     expect(line(states)).toMatchObject({ state: "working" });
 
-    // It ends with nothing posted: the chat says so, and nothing more is sent.
     at(9_000);
     runState("ended", "run-remind");
     tool(thread([run("run-remind", "ended", { endedAtMs: 8_000 }), run("run-1", "ended")]));
@@ -328,7 +361,6 @@ describe("what an agent thread is doing with a forwarded message", () => {
     await states.check();
     expect(forward).not.toHaveBeenCalled();
 
-    // The tool says the run itself is over: now dohc reminds the thread.
     runState("ended");
     await states.check();
     expect(forward).toHaveBeenCalledTimes(1);
@@ -351,7 +383,6 @@ describe("what an agent thread is doing with a forwarded message", () => {
   it("shows a reminder that may have gone before a restart by the thread's work since, and never sends it again", async () => {
     const stopped: ForwardRow = { ...forwarded(), reminder: { state: "recorded", atMs: 3_000 } };
     const { states, tool, forward } = setup({}, [stopped]);
-    // The reminder went, and its work is going: the line must not say finished.
     tool(thread([run("run-r", "working", { requestedAtMs: 3_100 }), run("run-1", "ended")]));
     await states.check();
     expect(line(states)).toMatchObject({ state: "working", sinceMs: 3_000 });
@@ -436,10 +467,32 @@ describe("what an agent thread is doing with a forwarded message", () => {
     states.stop();
   });
 
+  it("follows a message in the thread that took it last, when the agent was pointed at another", async () => {
+    // Saved before dohc stopped: the message went to one thread, and was reminded there.
+    const saved: ForwardRow = {
+      ...forwarded(),
+      reminder: { state: "sent", runId: "run-remind", atMs: 2_000 },
+    };
+    const { states, tool, forward, sent, rows } = setup({}, [saved]);
+    // The agent has another thread now, and that thread takes the same message.
+    states.forwarded(forwarded({ toolThreadId: "t3-2", runId: "run-9", forwardedAtMs: 4_000 }));
+    tool(thread([run("run-9", "working", { requestedAtMs: 4_100, startedAtMs: 4_200 })]));
+    await states.check();
+
+    expect(rows().map((row) => [row.toolThreadId, row.reminder.state])).toEqual([["t3-2", "none"]]);
+    expect(line(states)).toMatchObject({ state: "working", forwardedAtMs: 4_000 });
+
+    // Its work there ends in silence: that thread gets its own reminder.
+    tool(thread([run("run-9", "ended", { requestedAtMs: 4_100 })]));
+    await states.check();
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(sent[0]).toMatchObject({ threadId: "t3-2" });
+    states.stop();
+  });
+
   it("does not take a run the list shows as over for over while the tool continues it after a restart", async () => {
     const { states, tool, forward, runState, askedRuns } = setup();
     states.forwarded(forwarded());
-    // The tool restarted: the message's run ended, and another run continues its work.
     tool(thread([run("run-continues", "working"), run("run-1", "ended")]));
     runState("working");
 
@@ -449,7 +502,6 @@ describe("what an agent thread is doing with a forwarded message", () => {
     expect(line(states)).toMatchObject({ state: "working" });
     expect(forward).not.toHaveBeenCalled();
 
-    // The run that continues it is over too.
     tool(thread([run("run-continues", "ended"), run("run-1", "ended")]));
     runState("ended");
     await states.check();
@@ -553,7 +605,6 @@ describe("what an agent thread is doing with a forwarded message", () => {
     const { states, tool } = setup({ ledger: { ...store.ledger, put: () => never } });
     tool(thread([run("run-1", "working")]));
 
-    // It returns at once, and the line shows from what the tool says.
     states.forwarded(forwarded());
     await vi.waitFor(() => expect(line(states)).toMatchObject({ state: "working" }));
     states.stop();
@@ -569,14 +620,12 @@ describe("what an agent thread is doing with a forwarded message", () => {
     expect(line(states)).toMatchObject({ state: "silent" });
     read.mockClear();
 
-    // The agent replies, and another workspace's chat changes: nothing is read here.
     chat.push({ authorAgentId: "chief" });
     await states.check("ws-2");
     expect(line(states)).toMatchObject({ state: "silent" });
 
     await states.check(WORKSPACE);
     expect(line(states)).toBeNull();
-    // A settled line asks the tool nothing.
     expect(read).not.toHaveBeenCalled();
     states.stop();
   });
@@ -657,7 +706,6 @@ describe("what an agent thread is doing with a forwarded message", () => {
     tool(thread([run("run-1", "ended")]));
 
     await states.check();
-    // Not recorded, so not sent, and not taken for a reminder that may have gone.
     expect(forward).not.toHaveBeenCalled();
     expect(errors.length).toBeGreaterThan(0);
     expect(line(states)).toBeNull();

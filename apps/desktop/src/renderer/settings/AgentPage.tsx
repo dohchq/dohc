@@ -4,12 +4,14 @@ import {
   ChevronLeft,
   CircleAlert,
   Clock,
+  ExternalLink,
   FilePenLine,
   Forward,
   History,
   KeyRound,
   LoaderCircle,
   MessageSquare,
+  MessagesSquare,
   Monitor,
   Pause,
   Pencil,
@@ -31,8 +33,10 @@ import {
   MAX_AGENT_NOTE_LENGTH,
   type Agent,
   type AgentSettings,
+  type AgentThread,
   type DesktopUserSettings,
 } from "../../settings/userSettings";
+import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { CopyButton } from "../ui/CopyButton";
 import { RetryRow, SecondaryButton } from "../ui/controls";
@@ -40,6 +44,9 @@ import { isComposingKey } from "../ui/keys";
 import { Menu } from "../ui/Menu";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
+import { ChangeThreadDialog } from "./ChangeThreadDialog";
 import { HueControl, SwitchControl } from "./SettingRow";
 import {
   T3_CODE,
@@ -304,11 +311,149 @@ function AgentNote(props: {
   );
 }
 
+const THREAD_READ_FAILED = "dohc could not read this thread from T3 Code.";
+
+// The thread an agent is connected to, by its title in T3 Code, with the ways
+// to open it there and to connect the agent to another one. The title is read
+// once the page knows T3 Code allows dohc, or could not check. While the page
+// says T3 Code does not allow dohc, no title can be read, and the row does not
+// say why a second time.
+function ThreadRow(props: {
+  agent: Agent;
+  thread: AgentThread;
+  workspaceId: string;
+  access: "checking" | "refused" | "usable";
+  onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
+  onError?: PageError | undefined;
+  // The dialog may have got dohc allowed in T3 Code.
+  onAllowChecked: () => void;
+}) {
+  const { agent, thread, workspaceId, access } = props;
+  const report = useRef(props.onError);
+  report.current = props.onError;
+  const read = useWorkspaceQuery(useWorkspaceSession(), {
+    // A new thread, or dohc allowed again, reads again.
+    key: JSON.stringify([agent.id, thread.id, access]),
+    manual: access !== "usable",
+    load: () => bridge().readAgentThread({ workspaceId, agentId: agent.id }),
+  });
+  const { error, retry } = read;
+  // Settings show a save before it lands, so the answer may be for the thread
+  // the agent had until now. It is not shown, and the thread is read again
+  // until the answer is for the thread the agent has here.
+  const answered = read.value;
+  const current = answered?.threadId === thread.id ? answered : undefined;
+  const value = current && "title" in current ? current : undefined;
+  useEffect(() => {
+    if (answered === undefined || answered.threadId === thread.id) return;
+    const timer = setTimeout(() => void retry(), 300);
+    return () => clearTimeout(timer);
+  }, [answered, thread.id, retry]);
+  // Why this thread could not be read: what the tool said of it, or why dohc could not ask.
+  const failure =
+    error !== null
+      ? ipcErrorMessage(error, THREAD_READ_FAILED)
+      : current && "problem" in current
+        ? current.problem
+        : null;
+  // A failed read says why once, in Notices, with its Try again.
+  useEffect(() => {
+    if (failure !== null) report.current?.(failure, error ?? new Error(failure), retry);
+  }, [failure, error, retry]);
+  const [changing, setChanging] = useState(false);
+  // A row that is gone, with its agent or its workspace, reports nothing.
+  const shown = useRef(true);
+  useEffect(() => {
+    shown.current = true;
+    return () => {
+      shown.current = false;
+    };
+  }, []);
+  const open = async (): Promise<void> => {
+    if (!shown.current) return;
+    try {
+      await bridge().openAgentThread({ workspaceId, agentId: agent.id });
+    } catch (cause) {
+      if (!shown.current) return;
+      report.current?.(
+        ipcErrorMessage(cause, `dohc could not open ${agent.name}'s thread in ${T3_CODE}.`),
+        cause,
+        open,
+      );
+    }
+  };
+  return (
+    <>
+      <PageRow testId="agent-page-thread" icon={<MessagesSquare size={14} />} label="Thread" wrap>
+        {access === "refused" ? null : failure !== null ? (
+          <div className="ml-auto min-w-0">
+            <RetryRow testId="agent-page-thread-retry" onRetry={() => void retry()}>
+              {failure}
+            </RetryRow>
+          </div>
+        ) : (
+          <span data-testid="agent-page-thread-title" className={VALUE}>
+            {value === undefined ? (
+              <LoaderCircle size={12} aria-label="Reading the thread" className="animate-spin" />
+            ) : (
+              <span className="min-w-0 truncate text-ink" title={value.title}>
+                {value.title}
+              </span>
+            )}
+          </span>
+        )}
+      </PageRow>
+      <div className="flex min-h-11 flex-wrap items-center justify-end gap-x-2 gap-y-1 border-b border-line px-3 py-2 text-[12px]">
+        {failure === null && value?.closed ? (
+          // T3 Code says which of the two only together. dohc still forwards to
+          // the thread, so this claims nothing about what the thread then does.
+          <p data-testid="agent-page-thread-closed" className="m-0 mr-auto min-w-0 text-muted">
+            {`This thread is archived or settled in ${T3_CODE}.`}
+          </p>
+        ) : null}
+        <SecondaryButton
+          size="row"
+          data-testid="agent-page-thread-open"
+          onClick={() => void open()}
+        >
+          <ExternalLink size={12} aria-hidden />
+          {`Open in ${T3_CODE}`}
+        </SecondaryButton>
+        <SecondaryButton
+          size="row"
+          data-testid="agent-page-thread-change"
+          onClick={() => setChanging(true)}
+        >
+          Change thread
+        </SecondaryButton>
+      </div>
+      {changing ? (
+        <ChangeThreadDialog
+          workspaceId={workspaceId}
+          agentId={agent.id}
+          agentName={agent.name}
+          threadId={thread.id}
+          onChanged={(id) =>
+            props.onChange((current) =>
+              current.thread ? { ...current, thread: { ...current.thread, id } } : current,
+            )
+          }
+          onClose={() => {
+            setChanging(false);
+            if (access === "refused") props.onAllowChecked();
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
 // What a person changes about an agent with a thread: whether dohc forwards
-// to it, whether T3 Code still allows dohc, what a message does while the
-// thread works, and the note that goes with each one.
+// to it, which thread it is, whether T3 Code still allows dohc, what a message
+// does while the thread works, and the note that goes with each one.
 function ThreadAgentBoxes(props: {
   agent: Agent;
+  workspaceId: string;
   onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
   onError?: PageError | undefined;
 }) {
@@ -340,6 +485,27 @@ function ThreadAgentBoxes(props: {
             />
           </span>
         </PageRow>
+        {agent.thread ? (
+          // Another agent or workspace starts the row over, which closes its dialog.
+          <ThreadRow
+            key={`${props.workspaceId}:${agent.id}`}
+            agent={agent}
+            thread={agent.thread}
+            workspaceId={props.workspaceId}
+            access={
+              state === undefined
+                ? readError === null
+                  ? "checking"
+                  : "usable"
+                : allowed
+                  ? "usable"
+                  : "refused"
+            }
+            onChange={onChange}
+            onError={props.onError}
+            onAllowChecked={() => void retryRead()}
+          />
+        ) : null}
         <PageRow icon={<KeyRound size={14} />} label={`dohc in ${T3_CODE}`} wrap>
           {readError !== null ? (
             <div data-testid="agent-thread-access" className="ml-auto min-w-0">
@@ -584,7 +750,12 @@ export function AgentPage(props: {
       </div>
 
       {forwarded ? (
-        <ThreadAgentBoxes agent={agent} onChange={onChange} onError={props.onError} />
+        <ThreadAgentBoxes
+          agent={agent}
+          workspaceId={props.workspaceId}
+          onChange={onChange}
+          onError={props.onError}
+        />
       ) : launched ? (
         <>
           <div className={`${BOX} mt-5`}>

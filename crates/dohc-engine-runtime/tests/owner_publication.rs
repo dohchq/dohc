@@ -3398,10 +3398,6 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     supervisor.close_all().unwrap();
 }
 
-/// The retirement form of settlement: once Phase A ended the activation's
-/// registration, the host settles what it applied through its durable
-/// binding alone, materializes it, answers a replay with the same
-/// settlement, and refuses a terminal past F.
 #[tokio::test]
 async fn a_retiring_activation_settles_through_its_durable_binding() {
     let f = Fixture::new();
@@ -3638,8 +3634,6 @@ fn latest_pending(store: &EngineStore) -> (String, String, String) {
         .unwrap()
 }
 
-/// The relay's receipt for the latest pending owner entry at `cursor`,
-/// saved by the owner without applying it.
 async fn accept_latest(actor: &ActorHandle, store: &EngineStore, cursor: i64) -> LiveUpdateReceipt {
     let (outbox, delivery, digest) = latest_pending(store);
     actor
@@ -3952,7 +3946,6 @@ impl HostWindow {
 
 const RETAINED: &str = " Retained.";
 
-/// How the released chain retains [`RETAINED`], as release classifies it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Retained {
     Carried,
@@ -3960,9 +3953,7 @@ enum Retained {
     /// adoption seed holds it. The relay accepted the seed and the host
     /// never applied it.
     Seed,
-    /// An owner edit still pending when Stop began, which the relay's
-    /// journal answered during reconciliation.
-    Own,
+    PendingOwnerEditFoundInJournal,
 }
 
 /// A host whose root activation released with [`RETAINED`] unapplied, its
@@ -4135,7 +4126,7 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
         journal_cursor: 2,
         accepting_host_epoch: 1,
     };
-    if retained != Retained::Own {
+    if retained != Retained::PendingOwnerEditFoundInJournal {
         accept_latest(&actor, &store, 2).await;
     }
     let scope = dohc_engine_runtime::actor::OwnedRetirementScope {
@@ -4154,7 +4145,7 @@ async fn retained_window(retained: Retained) -> RetainedWindow {
         .begin_retirement(scope.clone(), coordinate.clone(), key.clone(), false)
         .await
         .unwrap();
-    if retained == Retained::Own {
+    if retained == Retained::PendingOwnerEditFoundInJournal {
         let journal = JournalEvidence {
             receipts: vec![accepted],
             absent: vec![],
@@ -4276,9 +4267,6 @@ fn ingress_rows(store: &EngineStore) -> Vec<String> {
     )
 }
 
-/// Every row a synced file operation could write to the document: those of
-/// [`ingress_rows`], its path, outbox, attribution requests and
-/// materialization, and none that name the neighbour.
 fn document_rows(store: &EngineStore) -> Vec<String> {
     let mut rows = ingress_rows(store);
     rows.extend(table_rows(
@@ -4562,8 +4550,6 @@ impl Desktop {
     }
 }
 
-/// The relay's hosted feed for the host's scope. Each row keeps its origin
-/// coordinate and takes the next relay position after the host's cursor.
 struct HostedFeed {
     scope: std::sync::Mutex<dohc_engine_sync::HostedScope>,
     rows: std::sync::Mutex<Vec<dohc_engine_sync::ReplicationEnvelope>>,
@@ -4805,8 +4791,6 @@ fn hosted_pass(
     }
 }
 
-/// [`dohc_engine_sync::apply_replication_envelope`], applied again after
-/// each released-tail validation it waits for completes.
 fn settled_apply(
     store: &mut EngineStore,
     cache: &mut dohc_engine_collab::WriterDocCache,
@@ -4827,8 +4811,6 @@ fn settled_apply(
     }
 }
 
-/// The binding `pass` held `object` with, when it stopped the document
-/// before `op`, held unapplied for released retained work.
 fn held_binding(
     pass: &dohc_engine_sync::HostedPassOutcome,
     op: &dohc_engine_sync::ReplicationEnvelope,
@@ -4846,8 +4828,6 @@ fn held_binding(
         .then(|| *binding.clone())
 }
 
-/// `pass` stopped `object` before `op`, which it held unapplied, bound to
-/// `op` on the feed the pull named.
 fn stopped_before(
     pass: &dohc_engine_sync::HostedPassOutcome,
     op: &dohc_engine_sync::ReplicationEnvelope,
@@ -4862,9 +4842,6 @@ fn stopped_before(
     })
 }
 
-/// An update that only adds content applies in the released window, though
-/// it repeats a deletion both sides already hold, and the successor then
-/// captures and adopts. The retained seed survives both.
 #[tokio::test]
 async fn a_safe_desktop_append_applies_in_the_released_window_and_the_successor_adopts() {
     let mut w = retained_window(Retained::Seed).await;
@@ -5026,11 +5003,6 @@ fn ydoc_row(
     }
 }
 
-/// The hold is one document's: the pass applies a neighbour and commits,
-/// later rows of the held document wait unapplied, and the document reads
-/// its own rows from there. Each later pass, and one after a restart, holds
-/// again with nothing written and no more work. A held document never
-/// reaches successor capture, and loses nothing.
 #[tokio::test]
 async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
     let mut w = retained_window(Retained::Carried).await;
@@ -5083,8 +5055,6 @@ async fn a_released_lineage_hold_is_one_documents_across_passes_and_restart() {
     ));
     assert_ne!(ingress_rows(&w.store), rows, "the neighbour applied");
     let rows = ingress_rows(&w.store);
-    // The commit keeps the hold's own reason and the binding the pull
-    // derived, the feed's namespace in it, never a generic wait.
     let binding = held_binding(&pass, &fold).unwrap();
     let hold = dohc_engine_sync::HostedDocumentStatus::Held(
         dohc_engine_sync::HostedHold::ReleasedLineageUnsettled {
@@ -5209,8 +5179,6 @@ fn settled_drain(w: &mut RetainedWindow) -> dohc_engine_sync::YdocDrainResult {
     }
 }
 
-/// Each queued Y.Doc update of the store: its coordinate and the feed it
-/// recorded.
 fn queued_updates(store: &EngineStore) -> Vec<(String, i64, String, Option<String>)> {
     store
         .read_with(|conn| {
@@ -5286,8 +5254,6 @@ fn inspected_window(store: &EngineStore) -> dohc_engine_sync::HeldDocumentInspec
         .expect("the window document is held")
 }
 
-/// Every row that holds a document's native state, its blobs' bytes among
-/// them: what inspection must leave exactly as it was.
 fn native_rows(store: &EngineStore) -> Vec<String> {
     table_rows(
         store,
@@ -5362,10 +5328,6 @@ fn rebound(w: &mut RetainedWindow) -> Box<ReleasedLineageBinding> {
     binding
 }
 
-/// Work only an outbox holds merges into scratch state, is named in
-/// `mergedContributionIds`, and appears in the preserved text and native
-/// state, while the canonical head stays byte for byte without it. A binding
-/// derived before that work existed no longer stands.
 #[tokio::test]
 async fn an_outbox_only_contribution_is_preserved_without_changing_the_head() {
     let (mut w, desktop, _client) = held_for_a_queued_fold().await;
@@ -5545,7 +5507,6 @@ impl dohc_engine_sync::LeaseProbe for BothLive {
 
 const BOTH: [(&str, &str); 2] = [(RECORD_OBJECT, RECORD_PATH), ("object", WINDOW_PATH)];
 
-/// Each row a feed served, with its bytes, in relay order.
 type Served = Vec<(dohc_engine_sync::ReplicationEnvelope, Vec<u8>)>;
 
 fn served_again(rows: &Served) -> dohc_engine_sync::RelaySyncClient<HostedFeed> {
@@ -5675,12 +5636,6 @@ fn owed_title_reported_once(
     assert_eq!(remote_titles(&next.record_facts), 0, "{after:?}: {next:?}");
 }
 
-/// The pass's inactive drain applies the record's queued title change, which
-/// an earlier drain applied to the head before its lineage was archived, to
-/// that archive and removes its row; the window's drain then waits for
-/// validation. Whether the request resumes, is abandoned, or the store
-/// restarts, the change reaches the next reporting boundary once through the
-/// drain report its removal wrote.
 #[tokio::test]
 async fn an_inactive_drains_facts_survive_a_later_wait() {
     for after in [AfterWait::Resume, AfterWait::Abandon, AfterWait::Restart] {
@@ -5796,7 +5751,6 @@ fn record_update_parked(store: &EngineStore) -> bool {
         .unwrap()
 }
 
-/// How a request whose drain waited goes on.
 #[derive(Debug, Clone, Copy)]
 enum AfterWait {
     Resume,
@@ -5863,7 +5817,6 @@ async fn a_completed_documents_facts_survive_a_later_documents_wait() {
             .count();
         assert_eq!(reported, 1, "{after:?}: {pass:?}");
         assert_eq!(field_history(&w.store), 1, "{after:?}");
-        // Draining the record again duplicates nothing.
         assert_eq!(
             record_moments_and_conflicts(&w.store),
             committed,
@@ -6014,12 +5967,6 @@ fn holds_archived(
         )
 }
 
-/// The drain a document's own operations run: its queued updates of an
-/// archived lineage released tails protect stay queued with their blobs and
-/// feeds, the archive keeps its state, and the drain reports and stores the
-/// document's hold of that lineage. After a restart the drain holds again
-/// with nothing written. Once nothing protects the lineage, the drain
-/// applies the updates to the archive and leaves no hold.
 #[tokio::test]
 async fn a_documents_drain_holds_its_protected_archived_lineage() {
     let (mut w, desktop, _client, queued, archive) = archived_window(2).await;
@@ -6200,9 +6147,6 @@ async fn a_pass_whose_released_binding_went_stale_commits_nothing() {
     }
 }
 
-/// The ingress gate's own sites: a base state, a delta of another lineage
-/// and an update at another path hold while protected, never passing as an
-/// ordinary update. The same update at the document's path applies.
 #[tokio::test]
 async fn a_released_window_holds_a_base_another_lineage_and_another_path() {
     let mut w = retained_window(Retained::Carried).await;
@@ -6315,7 +6259,6 @@ async fn a_released_window_holds_a_base_another_lineage_and_another_path() {
     w.close().await;
 }
 
-/// Write `sql` past the store's own checks, as a damaged store could hold it.
 fn write_unchecked(w: &RetainedWindow, sql: &str) {
     let raw = rusqlite::Connection::open(engine_db_path(&w.root).unwrap()).unwrap();
     raw.execute_batch(&format!(
@@ -6552,9 +6495,6 @@ fn settlement_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<Stri
         .unwrap()
 }
 
-/// A validation that fails fails its commit once, committing nothing;
-/// nothing retries it on its own. A commit cancelled while it waits for
-/// validation committed nothing either, and its retry commits.
 #[tokio::test]
 async fn a_waiting_commit_fails_or_cancels_without_committing() {
     let (w, desktop, _client, pass) = held_pass().await;
@@ -6597,8 +6537,6 @@ async fn a_waiting_commit_fails_or_cancels_without_committing() {
     w.close().await;
 }
 
-/// With nothing retained, a released chain protects nothing: the desktop's
-/// fold applies in the window as it does outside it.
 #[tokio::test]
 async fn with_nothing_retained_a_desktop_fold_applies_in_the_released_window() {
     let mut w = adopted_window(false).await;
@@ -6660,20 +6598,11 @@ fn notes(root: &ScratchDir) -> Vec<(String, Vec<u8>)> {
     files
 }
 
-/// In the released window the owner deletes, renames or writes binary bytes
-/// over the document on the desktop, so no `ydoc.update` comes first. The
-/// host's hosted pull holds the row before it retires or rebinds the
-/// lineage, and a neighbour in the same pass applies. Native state, retained
-/// records, attribution, the snapshot, settlement evidence and the files
-/// stay as they were, nothing is acknowledged, and successor capture finds
-/// the document not ready. The delete holds over the owner's own pending
-/// work too, and a row with no relay position is refused rather than held at
-/// an invented one.
 #[tokio::test]
 async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_chain_retains() {
     for (change, retained) in [
         (FileChange::Delete, Retained::Carried),
-        (FileChange::Delete, Retained::Own),
+        (FileChange::Delete, Retained::PendingOwnerEditFoundInJournal),
         (FileChange::Rename, Retained::Carried),
         (FileChange::Binary, Retained::Carried),
     ] {

@@ -36,7 +36,6 @@ afterEach(() => {
   }
 });
 
-// A process the command left behind, which only its tree kill would reach.
 function orphan(): ChildProcess {
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   started.push(child);

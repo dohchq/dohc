@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto";
+import { open } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { z } from "zod";
+import { validateUserMaterializePath } from "@dohc/workspace-core";
+import { atomicCreateFile, syncAndClose, type DurableFileOperations } from "../atomicReplaceFile";
+import { localStateFolder, type LocalStateWorkspace } from "./workspaceLocalState";
 import {
   parseLiveObjectBinding,
   type OwnerYDocOutboxEntry,
   type OwnerYDocOutboxRecovery,
 } from "@dohc/workspace-engine-client";
 import type { DocumentProjection } from "./documentProjection";
+import type { RecoveredDocument } from "./recoveredDocument";
 
 export const LIVE_RECOVERY_FORMAT = "dohc.live-recovery";
 const OPEN =
@@ -18,24 +24,68 @@ export type LiveRecoverySource = {
   storedOn: "this-computer" | "server";
 };
 
-/** Workspace-relative paths of what Save recovery copy wrote, and where the kept edits stay. */
+/**
+ * Workspace-relative paths of what Save recovery copy wrote, and where the
+ * kept edits stay. `notInNote` counts the kept edits the copy lists at its
+ * end because the note has no place for them.
+ */
 export type LiveRecoveryFiles = {
   copyPath: string | null;
   packagePath: string;
+  notInNote: number;
   storedOn: LiveRecoverySource["storedOn"];
 };
 
-/** Where Save recovery copy writes. `create` makes one new file on disk and refuses an existing path with EEXIST. */
+/**
+ * Where Save recovery copy writes. `create` makes one new file in the
+ * workspace and refuses an existing path with EEXIST. `keep` makes one on
+ * this computer only, outside what syncs, under the copy's path, and returns
+ * null when that name is taken.
+ */
 export type LiveRecoveryWrites = {
   create(relativePath: string, text: string): Promise<string>;
   exists(relativePath: string): Promise<boolean>;
+  keep(relativePath: string, text: string): Promise<string | null>;
 };
 
 const MAX_NAME_ATTEMPTS = 100;
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const base64 = (bytes: Uint8Array) =>
   Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
-const isEexist = (error: unknown) => (error as NodeJS.ErrnoException).code === "EEXIST";
+const KEPT_FOLDER = "live-recovery";
+
+/**
+ * Keeps a package in `.dohc/local/live-recovery` on this computer, in the
+ * folders of the copy it goes with, so it never syncs.
+ */
+export function keepOnThisComputer(
+  workspace: LocalStateWorkspace,
+  operations: Pick<DurableFileOperations, "open" | "platform"> = {},
+): LiveRecoveryWrites["keep"] {
+  const { open: openFolder = open, platform = process.platform } = operations;
+  return async (path, text) => {
+    // Validated like any path dohc writes to disk.
+    const validated = validateUserMaterializePath(path, { platform });
+    if (!validated.ok) throw new Error(`Invalid file path (${validated.reason}): ${path}`);
+    const relativePath = validated.normalized;
+    const slash = relativePath.lastIndexOf("/");
+    const name = slash < 0 ? KEPT_FOLDER : `${KEPT_FOLDER}/${relativePath.slice(0, slash)}`;
+    const folder = await localStateFolder(workspace, name, {
+      path: `.dohc/local/${name}`,
+      lead: "dohc could not open the folder on this computer where it keeps recovery packages.",
+    });
+    const file = join(folder, relativePath.slice(slash + 1));
+    if (!(await atomicCreateFile(file, text, 0o600, operations))) return null;
+    // The package's own folder is flushed with it. Any of the folders above
+    // it may be new, so each one's entry is flushed in its parent as well.
+    if (platform !== "win32")
+      for (let up = folder, depth = name.split("/").length; depth > 0; depth -= 1) {
+        up = dirname(up);
+        await syncAndClose(await openFolder(up, "r"));
+      }
+    return `.dohc/local/${KEPT_FOLDER}/${relativePath}`;
+  };
+}
 
 const Bytes = z
   .object({
@@ -169,10 +219,12 @@ function recoveredName(path: string, attempt: number, extension?: string): strin
 }
 
 /**
- * Saves a refused queue next to its file and leaves the queue as it is. The
- * package is written first and always, under the first number whose copy
- * name is free too. The readable copy is projected off main afterwards; when
- * it cannot be made, the saved package is the result.
+ * Saves a refused queue as a readable copy next to its file and leaves the
+ * queue as it is. The package, which only a program reads, is written first
+ * and always, on this computer, under the first number whose copy name is
+ * free too. The readable copy is projected off main afterwards; when it
+ * cannot be made, the saved package is the result. A copy that can't be
+ * written throws.
  */
 export async function saveLiveRecoveryCopy(
   recovery: LiveRecoveryPackage,
@@ -181,31 +233,40 @@ export async function saveLiveRecoveryCopy(
   now = Date.now(),
 ): Promise<LiveRecoveryFiles> {
   const updates = liveRecoveryUpdates(recovery);
+  const parts = updates.length - recovery.updates.length;
+  // Base before checkpoint: a checkpoint that dropped a deleted block's
+  // contents, applied first, would drop the kept edits typed in it as well.
+  const accepted = updates.slice(0, parts).reverse();
+  const kept = updates.slice(parts);
   const text = JSON.stringify({ ...recovery, savedAt: new Date(now).toISOString() }, null, 2);
   for (let attempt = 1; attempt <= MAX_NAME_ATTEMPTS; attempt += 1) {
     const copyName = recoveredName(recovery.path, attempt);
     if (await writes.exists(copyName)) continue;
-    let packagePath: string;
-    try {
-      packagePath = await writes.create(
-        recoveredName(recovery.path, attempt, ".dohc-recovery.json"),
-        text,
-      );
-    } catch (error) {
-      if (isEexist(error)) continue;
-      throw error;
+    const packagePath = await writes.keep(
+      recoveredName(recovery.path, attempt, ".dohc-recovery.json"),
+      text,
+    );
+    if (packagePath === null) continue;
+    const packageOnly = { copyPath: null, packagePath, notInNote: 0, storedOn: recovery.storedOn };
+    let copy: RecoveredDocument | null = null;
+    // A second run starts a fresh worker, in case the first exited or ran out of time.
+    for (let run = 1; ; run += 1) {
+      try {
+        copy = await projection.run({ kind: "recover", accepted, kept });
+        break;
+      } catch (error) {
+        console.error("[desktop] live recovery copy could not be projected:", error);
+        if (run === 2) return packageOnly;
+      }
     }
-    try {
-      const markdown = await projection.run({ kind: "recover", updates });
-      return {
-        copyPath: markdown === null ? null : await writes.create(copyName, markdown),
-        packagePath,
-        storedOn: recovery.storedOn,
-      };
-    } catch (error) {
-      console.error("[desktop] live recovery copy kept only its package:", error);
-      return { copyPath: null, packagePath, storedOn: recovery.storedOn };
-    }
+    if (copy === null) return packageOnly;
+    // A copy that can't be written is an error, so the caller keeps what it holds for Try again.
+    return {
+      copyPath: await writes.create(copyName, copy.markdown),
+      packagePath,
+      notInNote: copy.notInNote,
+      storedOn: recovery.storedOn,
+    };
   }
   throw new Error(
     "dohc could not find a free name for the recovery copy. Rename older recovery copies, then try again.",

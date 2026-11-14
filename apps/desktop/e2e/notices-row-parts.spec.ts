@@ -4,12 +4,6 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspace";
 
-// The states page's toasts and Notices rows, drawn by a real browser. A
-// row's worded action is the toast's bordered button and starts where the
-// row's text starts; a row with nowhere to go draws no pointer and no hover.
-// With UI_AUDIT_SHOT_DIR set, it also saves both themes at rest, with a row's
-// button hovered, and with a row that goes nowhere hovered.
-
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR;
 const BLEED = 16;
 const BUTTON_STYLE = [

@@ -1,6 +1,11 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import {
+  NAMED_LIVE_STOPPED,
+  NAMED_LIVE_STOPPED_STATUS,
+  isNamedLiveStopped,
+} from "@dohc/security-contract/link-refusal";
 import { namedAccountCookie } from "./namedAccountCookie";
 import {
   parseNamedLiveBrowserClientLimits,
@@ -81,13 +86,24 @@ export function createNamedLiveTicketClient(options: {
         }),
       );
       if (
-        response.status !== 200 ||
+        ![200, NAMED_LIVE_STOPPED_STATUS].includes(response.status) ||
         response.redirected ||
         response.headers.has("location") ||
         response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
           "application/json"
       )
         return refusal();
+      // Only the exact answer that live editing stopped on the server passes, rebuilt here.
+      if (response.status !== 200)
+        return isNamedLiveStopped(
+          await readBoundedJson(response, limits.maxResponseBytes, signal).catch(() => null),
+          response.status,
+        )
+          ? Response.json(NAMED_LIVE_STOPPED, {
+              status: NAMED_LIVE_STOPPED_STATUS,
+              headers: { "cache-control": "private, no-store" },
+            })
+          : refusal();
       const parsed = await readBoundedJson(response, limits.maxResponseBytes, signal);
       if (
         !parsed ||

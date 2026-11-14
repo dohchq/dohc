@@ -33,6 +33,7 @@ const line = (more: Partial<AgentThreadLine> = {}): AgentThreadLine => ({
   agentId: "nova",
   chatThreadId: "thread-1",
   forwardedAtMs: 0,
+  questionId: null,
   state: "working",
   sinceMs: NOW - 4_000,
   ...more,
@@ -151,19 +152,34 @@ it.each([
   expect(within(status).getByText("Nova")).toBeTruthy();
 });
 
+it("offers Answer here only while the thread waits on a question", () => {
+  const { push } = stubDesktop();
+  render(chat());
+  const buttons = () => screen.getAllByRole("button").map((button) => button.textContent);
+
+  // An approval, say, is answered in the tool.
+  push([line({ state: "waiting-in-tool" })]);
+  expect(buttons()).toEqual(["Open in T3 Code"]);
+
+  push([line({ state: "waiting-in-tool", questionId: "question-1" })]);
+  expect(buttons()).toEqual(["Answer here", "Open in T3 Code"]);
+  expect(within(screen.getByRole("status")).getByText("Waiting for you in T3 Code")).toBeTruthy();
+
+  push([line({ state: "working" })]);
+  expect(buttons()).toEqual(["Open in T3 Code"]);
+});
+
 it("shows nothing for another workspace's lines", async () => {
   const { push, reads } = stubDesktop();
   const view = render(chat());
   push([line()], "ws-b");
   expect(screen.queryByTestId("agent-thread-line")).toBeNull();
 
-  // A chat of another workspace never borrows this workspace's lines.
   push([line()]);
   expect(screen.getByTestId("agent-thread-line")).toBeTruthy();
   view.rerender(chat({ shown: "ws-b" }));
   expect(screen.queryByTestId("agent-thread-line")).toBeNull();
 
-  // The window moved on: the first workspace's slow read paints nothing.
   const moved = settingsWith({ nova: agent("Nova", { workspaces: ["ws-a", "ws-b"] }) });
   view.rerender(chat({ workspaceId: "ws-b", settings: moved }));
   expect(reads.map((read) => read.workspaceId)).toEqual(["ws-a", "ws-b"]);
@@ -198,7 +214,6 @@ it("counts the time a state has lasted, outside the status, and stops with the l
   await act(() => vi.advanceTimersByTimeAsync(74_000));
   expect(elapsed.textContent).toBe("1m 21s");
 
-  // A new state counts from its own start.
   push([line({ state: "silent", sinceMs: Date.now() - 2_000 })]);
   expect(screen.getByTestId("agent-thread-line-elapsed").textContent).toBe("2s");
 
@@ -275,7 +290,6 @@ it("opens the agent's thread, and reports a refusal with Try again", async () =>
   expect(reported.cause).toBe(failure);
   expect(clear).not.toHaveBeenCalled();
 
-  // Try again opens it, which takes the failure's notice back.
   await act(async () => reported.retry?.());
   expect(desktop.openAgentThread).toHaveBeenCalledTimes(2);
   expect(clear).toHaveBeenCalledExactlyOnceWith(reported.identity);

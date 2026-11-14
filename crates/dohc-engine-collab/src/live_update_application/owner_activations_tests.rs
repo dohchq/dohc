@@ -18,7 +18,6 @@ fn binding_activation(f: &Fixture) -> (Option<String>, i64) {
         .unwrap()
 }
 
-/// Every lineage-scoped read, by the class it belongs to.
 #[derive(Debug, PartialEq)]
 struct Reads {
     origin: Option<String>,
@@ -324,7 +323,6 @@ fn a_successor_follows_the_released_tail_of_its_own_chain() {
     assert_eq!(chain_tail(&f, "namespace").unwrap().as_deref(), Some("adoption"));
     release_unadopted(&mut f, "namespace", "object", "never-adopted", Some("adoption"));
     add_activation(&mut f, "third", "never-adopted", true, 0);
-    // Released rows of another namespace, and of another document, are other chains.
     release_unadopted(&mut f, "elsewhere", "object", "foreign", None);
     release_unadopted(&mut f, "namespace", "other", "sibling", None);
     assert_eq!(chain_tail(&f, "namespace").unwrap().as_deref(), Some("third"));

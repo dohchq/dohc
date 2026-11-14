@@ -74,7 +74,6 @@ async function ownerLog(relay: SyncRelayHandle, workspaceId: string): Promise<Lo
   return (JSON.parse(read.body) as { ops: LogOp[] }).ops;
 }
 
-/** The paths the relay wrote into the owner's workspace for the recipient. */
 async function directPaths(relay: SyncRelayHandle, workspaceId: string): Promise<string[]> {
   return (await ownerLog(relay, workspaceId))
     .filter(

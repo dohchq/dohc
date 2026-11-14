@@ -92,7 +92,6 @@ ${threadId}`;
     failMarks: (fail: boolean) => {
       failMark = fail;
     },
-    /** Runs before each read of a chat thread settles. */
     holdThread: (hold: () => Promise<void>) => {
       beforeThread = hold;
     },
@@ -132,8 +131,8 @@ describe("forwarding", () => {
     await forwarding.wake(WORKSPACE);
 
     expect(sent.map((message) => message.forwardId)).toEqual([
-      forwardIdOf(WORKSPACE, "chief", "m1"),
-      forwardIdOf(WORKSPACE, "chief", "m2"),
+      forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-1"),
+      forwardIdOf(WORKSPACE, "chief", "m2", "t3-thread-1"),
     ]);
     expect(sent.every((message) => message.threadId === "t3-thread-1")).toBe(true);
     expect(sent[0]!.how).toBe("line");
@@ -282,19 +281,110 @@ describe("forwarding", () => {
     forwarding.stop();
   });
 
-  it("sends a message again under the same id when it could not be marked read", async () => {
-    const { forwarding, sent, failMarks } = setup([request("m1", 10)], { retryAfterMs: [60_000] });
+  it("marks a message read on the next try, without sending it again, when the tool took it and the read marker failed", async () => {
+    const { forwarding, sent, marks, failMarks } = setup([request("m1", 10)], {
+      retryAfterMs: [60_000],
+    });
     failMarks(true);
 
     await forwarding.wake(WORKSPACE);
+    expect(marks).toEqual([]);
     failMarks(false);
     await forwarding.wake(WORKSPACE);
     await forwarding.wake(WORKSPACE);
 
     expect(sent.map((message) => message.forwardId)).toEqual([
-      forwardIdOf(WORKSPACE, "chief", "m1"),
-      forwardIdOf(WORKSPACE, "chief", "m1"),
+      forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-1"),
     ]);
+    expect(marks).toEqual(["m1"]);
+    forwarding.stop();
+  });
+
+  it("sends a message again under the same id after a restart, when it was never marked read", async () => {
+    const before = setup([request("m1", 10)], { retryAfterMs: [60_000] });
+    before.failMarks(true);
+    await before.forwarding.wake(WORKSPACE);
+    before.forwarding.stop();
+
+    // A new forwarder does not know the tool took it. The tool tells by the id.
+    before.failMarks(false);
+    const after = setup([], { retryAfterMs: [60_000], chats: before.chats });
+    await after.forwarding.wake(WORKSPACE);
+
+    expect([...before.sent, ...after.sent].map((message) => message.forwardId)).toEqual([
+      forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-1"),
+      forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-1"),
+    ]);
+    // This time it is marked read, and it goes no more.
+    expect(before.marks).toEqual(["m1"]);
+    await after.forwarding.wake(WORKSPACE);
+    expect(after.sent).toHaveLength(1);
+    after.forwarding.stop();
+  });
+
+  it("gives a message a name the next thread can take, when the agent is pointed at it after a restart", async () => {
+    const before = setup([request("m1", 10), request("m2", 20)], { retryAfterMs: [60_000] });
+    // The first thread takes m1, its read marker fails, and dohc stops.
+    before.failMarks(true);
+    await before.forwarding.wake(WORKSPACE);
+    before.forwarding.stop();
+    before.failMarks(false);
+
+    // dohc starts again with the agent on another thread. The tool refuses,
+    // for good, a name it took for the first thread, as T3 Code does.
+    const names = new Map(before.sent.map((message) => [message.forwardId, message.threadId]));
+    const after = setup([], {
+      retryAfterMs: [60_000],
+      chats: before.chats,
+      workspace: async () => ({
+        name: "Launch",
+        agents: [{ ...agent, threadId: "t3-thread-new" }],
+      }),
+    });
+    after.tool.forward.mockImplementation(async (input) => {
+      const tookFor = names.get(input.forwardId);
+      if (tookFor !== undefined && tookFor !== input.threadId)
+        throw new Error(`Command was already handled for thread ${tookFor}.`);
+      names.set(input.forwardId, input.threadId);
+      after.sent.push(input);
+    });
+    await after.forwarding.wake(WORKSPACE);
+
+    // Nothing waits behind m1: it and m2 both reach the thread the agent has now.
+    expect(after.sent.map((message) => [message.threadId, message.forwardId])).toEqual([
+      ["t3-thread-new", forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-new")],
+      ["t3-thread-new", forwardIdOf(WORKSPACE, "chief", "m2", "t3-thread-new")],
+    ]);
+    expect(after.problems.filter(([, , problem]) => problem !== null)).toEqual([]);
+    expect(before.marks).toEqual(["m1", "m2"]);
+    after.forwarding.stop();
+  });
+
+  it("does not give the next thread a message the last one took, and goes on to the messages after it", async () => {
+    let agents: ServedAgent[] = [agent];
+    const { forwarding, sent, marks, failMarks } = setup([request("m1", 10), request("m2", 20)], {
+      retryAfterMs: [60_000],
+      workspace: async () => ({ name: "Launch", agents }),
+    });
+    // The first thread takes m1, and its read marker fails.
+    failMarks(true);
+    await forwarding.wake(WORKSPACE);
+    expect(sent.map((message) => [message.threadId, message.forwardId])).toEqual([
+      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-1")],
+    ]);
+
+    // The person points the agent at another thread. The tool would refuse
+    // m1's id there, and every message after m1 would wait behind it.
+    failMarks(false);
+    agents = [{ ...agent, threadId: "t3-thread-new" }];
+    await forwarding.wake(WORKSPACE, true);
+
+    // m1 is only marked read. m2, which waited behind it, goes to the new thread.
+    expect(sent.map((message) => [message.threadId, message.forwardId])).toEqual([
+      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-1")],
+      ["t3-thread-new", forwardIdOf(WORKSPACE, "chief", "m2", "t3-thread-new")],
+    ]);
+    expect(marks).toEqual(["m1", "m2"]);
     forwarding.stop();
   });
 
@@ -331,7 +421,6 @@ describe("forwarding", () => {
 
   it("keeps forwarding while chat writes keep coming", async () => {
     const { forwarding, sent, holdThread } = setup([request("m1", 10), request("m2", 20)]);
-    // Each read of a chat thread meets another chat write, twenty times over.
     let reads = 0;
     holdThread(async () => {
       reads += 1;
@@ -341,8 +430,8 @@ describe("forwarding", () => {
     await forwarding.wake(WORKSPACE);
 
     expect(sent.map((message) => message.forwardId)).toEqual([
-      forwardIdOf(WORKSPACE, "chief", "m1"),
-      forwardIdOf(WORKSPACE, "chief", "m2"),
+      forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-1"),
+      forwardIdOf(WORKSPACE, "chief", "m2", "t3-thread-1"),
     ]);
     // No write sent it back to read a chat thread again.
     expect(reads).toBe(2);
@@ -366,8 +455,8 @@ describe("forwarding", () => {
     await Promise.all([first, second]);
 
     expect(sent.map((message) => message.forwardId)).toEqual([
-      forwardIdOf(WORKSPACE, "chief", "m1"),
-      forwardIdOf(WORKSPACE, "chief", "m2"),
+      forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-1"),
+      forwardIdOf(WORKSPACE, "chief", "m2", "t3-thread-1"),
     ]);
   });
 
@@ -380,7 +469,7 @@ describe("forwarding", () => {
     await forwarding.wake(WORKSPACE);
 
     expect(sent.map((message) => message.forwardId)).toEqual(
-      sameMoment.map((row) => forwardIdOf(WORKSPACE, "chief", row.messageId)),
+      sameMoment.map((row) => forwardIdOf(WORKSPACE, "chief", row.messageId, "t3-thread-1")),
     );
   });
 
@@ -399,10 +488,10 @@ describe("forwarding", () => {
     await forwarding.wake(WORKSPACE);
 
     expect(sent.map((message) => [message.threadId, message.forwardId])).toEqual([
-      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m1")],
-      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m2")],
-      ["t3-thread-2", forwardIdOf(WORKSPACE, "scout", "m1")],
-      ["t3-thread-2", forwardIdOf(WORKSPACE, "scout", "m2")],
+      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m1", "t3-thread-1")],
+      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m2", "t3-thread-1")],
+      ["t3-thread-2", forwardIdOf(WORKSPACE, "scout", "m1", "t3-thread-2")],
+      ["t3-thread-2", forwardIdOf(WORKSPACE, "scout", "m2", "t3-thread-2")],
     ]);
   });
 
@@ -537,13 +626,11 @@ describe("forwarding", () => {
     fail(new Error("down"));
     await work;
 
-    // Nothing is reported, no other message goes out, and nothing waits to try again.
     expect(problems).toEqual([]);
     expect(tool.forward).toHaveBeenCalledTimes(1);
     expect(marks).toEqual([]);
     expect(vi.getTimerCount()).toBe(0);
 
-    // The workspace comes back: its messages go out as for any workspace.
     await forwarding.wake(WORKSPACE);
     expect(tool.forward).toHaveBeenCalledTimes(3);
     expect(marks).toEqual(["m1", "m2"]);
@@ -577,7 +664,9 @@ describe("forwarding", () => {
     await forwarding.wake("ws-1");
 
     expect(new Set(asked)).toEqual(new Set(["ws-1"]));
-    expect(sent.map((message) => message.forwardId)).toEqual([forwardIdOf("ws-1", "chief", "m1")]);
+    expect(sent.map((message) => message.forwardId)).toEqual([
+      forwardIdOf("ws-1", "chief", "m1", "t3-thread-1"),
+    ]);
     expect(sent[0]!.message).toContain("from one");
     expect(sent[0]!.message).toContain("--workspace ws-1 ");
     expect(stores["ws-1"].marks).toEqual(["m1"]);
@@ -585,7 +674,7 @@ describe("forwarding", () => {
 
     await forwarding.wake("ws-2");
 
-    expect(sent[1]!.forwardId).toBe(forwardIdOf("ws-2", "chief", "m1"));
+    expect(sent[1]!.forwardId).toBe(forwardIdOf("ws-2", "chief", "m1", "t3-thread-1"));
     expect(sent[1]!.forwardId).not.toBe(sent[0]!.forwardId);
     expect(sent[1]!.message).toContain("from two");
     expect(sent[1]!.message).toContain("--workspace ws-2 ");

@@ -242,8 +242,6 @@ describeWithPostgres("closed sign-up", () => {
     });
     expect(emailsTo(email)).toHaveLength(emailsBeforeSignIn);
 
-    // Choosing the password proves the mailbox; then the desktop's device
-    // sign-in completes as on an open server.
     const chosen = "chosen-from-the-link-123";
     await choosePassword(closed, email, chosen);
     const signin = await closed.api.signInEmail({

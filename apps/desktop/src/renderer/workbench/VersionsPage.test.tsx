@@ -98,8 +98,6 @@ function deferred<T>() {
 
 const READS_FAILED = "dohc could not finish loading Versions.";
 
-// The page's notices reach these as the shell's Notices: `onError` files or
-// changes a row, and `onSettled` takes one back.
 type OnError = NoticeSink["report"];
 
 function Page(props: {

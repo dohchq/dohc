@@ -9,8 +9,10 @@ import {
   type ReactNode,
 } from "react";
 import { AppState, View } from "react-native";
+import { nativeDurableFile } from "../../modules/durable-file";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheFiles } from "../server/cacheFiles";
+import { createDurableFiles } from "../server/durableFiles";
 import { createNoticeFiles } from "../server/noticeFiles";
 import {
   clearNoticesOnSignInChange,
@@ -18,6 +20,7 @@ import {
   type NoticeStore,
 } from "../server/noticeStore";
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
+import { createOutbox, type Outbox } from "../server/outbox";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import {
   createWorkspaceList,
@@ -31,6 +34,8 @@ import { secureSignInStore } from "./secureSignInStore";
 interface AccountValue {
   readonly account: Account;
   readonly state: AccountState;
+  /** Chat writes waiting for the server. Nothing adds to it yet. */
+  readonly outbox: Outbox;
   readonly workspaces: WorkspaceList;
   /** The workspace open on the phone: the one chosen, or the first that shows. Null when none shows. */
   readonly currentWorkspaceId: string | null;
@@ -62,14 +67,28 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // The account's Notices live in their own store, beside the list, so they outlive the open workspace
 // (src/server/noticeStore.ts). It reads while the app is in the foreground, and reads the whole list again on each
 // return, when the account's workspace list is read again too. Its files empty whenever the sign-in changes or ends.
+//
+// The outbox (src/server/outbox.ts) is the account's too, beside the cache and outside any workspace's store. It sends
+// only with its records' own account, keeps them through a 401, and deletes them at Sign out. A read that shows a saved
+// write's result hands it off. An app-state change tries again whatever failed, and asks again at once.
 export function AccountProvider({ children }: { children: ReactNode }) {
-  const [account] = useState(() => createAccount({ store: secureSignInStore, fetch }));
+  // Sign out deletes the outbox: the sign-in ends, and its token goes, once that delete can't be lost.
+  const [outbox] = useState(() => createOutbox({ files: createDurableFiles(nativeDurableFile()) }));
+  const [account] = useState(() =>
+    createAccount({ store: secureSignInStore, fetch, onSignOut: (leave) => outbox.signOut(leave) }),
+  );
   const state = useSyncExternalStore(account.subscribe, account.state);
   useEffect(() => void account.restore(), [account]);
   const signIn = state.status === "signed-in" ? state.signIn : null;
 
   const [cache] = useState(() => createReadCache(createCacheFiles()));
   useEffect(() => cache.follow(account), [account, cache]);
+
+  useEffect(() => outbox.follow(account), [account, outbox]);
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", () => outbox.wake());
+    return () => subscription.remove();
+  }, [outbox]);
 
   // The saved list shows until the server's answers, so a relaunch opens the last workspace from the cache.
   const list = useMemo<WorkspaceListStore | null>(
@@ -81,8 +100,16 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   // Made during render, so the first frame for a new workspace already reads from its own store. Making one starts
   // nothing: subscribing follows the list, and the effect runs the feed and stops it all once another replaces it.
   const open = useMemo(
-    () => (signIn && list ? createOpenWorkspace({ signIn, list, cache }) : null),
-    [signIn, list, cache],
+    () =>
+      signIn && list
+        ? createOpenWorkspace({
+            signIn,
+            list,
+            cache,
+            onMessages: (workspaceId, messages) => outbox.handoff(signIn, workspaceId, messages),
+          })
+        : null,
+    [signIn, list, cache, outbox],
   );
   const { currentWorkspaceId, data } = useSyncExternalStore(
     (open ?? noOpen).subscribe,
@@ -128,6 +155,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     () => ({
       account,
       state,
+      outbox,
       workspaces,
       currentWorkspaceId,
       data,
@@ -136,7 +164,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => open?.setShowOnPhone(workspaceId, showOnPhone),
     }),
-    [account, state, workspaces, currentWorkspaceId, data, notices, list, open],
+    [account, state, outbox, workspaces, currentWorkspaceId, data, notices, list, open],
   );
   return <Context value={value}>{children}</Context>;
 }

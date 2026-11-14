@@ -27,14 +27,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// The direct lane through an Edit share link (ADR 0013), with a real owner
-// desktop, relay, share-web, and browser. A person opens the link in a
-// browser and edits the Collection's schema in the viewer; an agent given the
-// same link replaces its automations over MCP. Neither has an account. The
-// owner's disk gets both, and History names the link. Stop and restore ends
-// the link and puts both files back, Undo returns the content without the
-// access, and both the browser and the agent are refused after that.
-
 const OWNER_TOKEN = "test:e2e-link-owner";
 const OWNER_USER = "e2e-link-owner";
 const OWNER_EMAIL = "e2e-link-owner@dohc.test";

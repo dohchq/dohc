@@ -26,10 +26,6 @@ import {
   type HandlerOverrides,
 } from "./testing";
 
-// A shared view's Button press, through the real routes: the recipient's
-// named Edit grant records it, and only the workspace's running host is
-// offered it, as the relay-verified user's press.
-
 afterEach(closeTestStorages);
 
 const OWNER = "owner";
@@ -134,8 +130,6 @@ async function post(
     ),
   );
 }
-
-// Rows written straight into the relay's database, for the bounds.
 
 async function expectCode(response: Response, status: number, code: string): Promise<void> {
   expect(response.status, await response.clone().text()).toBe(status);

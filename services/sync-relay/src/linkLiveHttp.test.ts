@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createLinkLiveHttp } from "./linkLiveHttp";
 import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
+import type { SessionHostBlock } from "./linkRefusal";
 import { createLiveTickets } from "./liveTickets";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity";
 import {
@@ -43,7 +44,10 @@ afterEach(async () => {
   for (const close of cleanups.splice(0)) await close();
 });
 async function fixture(
-  sessionHostBlocked?: (document: { workspaceId: string; objectId: string }) => boolean,
+  sessionHostBlocked?: (document: {
+    workspaceId: string;
+    objectId: string;
+  }) => SessionHostBlock | undefined,
 ) {
   const f = await ticketFixture();
   cleanups.push(f.close);
@@ -243,21 +247,24 @@ it.each(["view"] as const)(
   },
 );
 
-it("explains a document the session host blocked as unavailable until the block lifts", async () => {
-  let blocked = true;
-  const asked: { workspaceId: string; objectId: string }[] = [];
-  const f = await fixture((document) => {
-    asked.push(document);
-    return blocked;
-  });
-  const response = await f.handle(request());
-  expect([response.status, await response.json()]).toEqual([
-    503,
-    linkRefusalBody("link_live_unavailable"),
-  ]);
-  expect(asked).toEqual([{ workspaceId: scope.workspaceId, objectId: binding.objectId }]);
-  const hidden = await f.handle(request({ discriminator, path: "private/a.md" }));
-  expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
-  blocked = false;
-  expect(await (await f.handle(request())).json()).toEqual({ objectId: binding.objectId });
-});
+it.each([
+  ["stopped", "link_live_unavailable"],
+  ["held", "link_live_stopped"],
+] as const)(
+  "explains a document the session host blocked (%s) as %s until the block lifts",
+  async (block, code) => {
+    let blocked: SessionHostBlock | undefined = block;
+    const asked: { workspaceId: string; objectId: string }[] = [];
+    const f = await fixture((document) => {
+      asked.push(document);
+      return blocked;
+    });
+    const response = await f.handle(request());
+    expect([response.status, await response.json()]).toEqual([503, linkRefusalBody(code)]);
+    expect(asked).toEqual([{ workspaceId: scope.workspaceId, objectId: binding.objectId }]);
+    const hidden = await f.handle(request({ discriminator, path: "private/a.md" }));
+    expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+    blocked = undefined;
+    expect(await (await f.handle(request())).json()).toEqual({ objectId: binding.objectId });
+  },
+);

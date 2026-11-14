@@ -24,7 +24,6 @@ fn assert_invalid_input(err: &DomainError, expected_reason: &str) {
     }
 }
 
-/// The refusal combined text must return for a conflict that touches bytes.
 #[track_caller]
 fn assert_combined_text_refused(err: &DomainError) {
     assert_invalid_input(err, BINARY_COMBINED_TEXT_REFUSAL);
@@ -162,7 +161,6 @@ fn incoming_text_snapshot(path: &str, text: &str) -> TextSnapshot {
     }
 }
 
-/// Keeping text writes a shared head even when the incoming side is binary.
 #[test]
 fn keep_current_on_binary_incoming_keeps_the_live_head() {
     let (_scratch, mut store) = open_store();
@@ -200,8 +198,6 @@ fn keep_current_on_binary_incoming_keeps_the_live_head() {
     );
 }
 
-/// A binary BASE is history, not a head. With text on both live sides, applying
-/// the incoming text clobbers no bytes, so it must go through.
 #[test]
 fn apply_incoming_over_a_binary_base_writes_the_incoming_text() {
     let (_scratch, mut store) = open_store();
@@ -289,7 +285,6 @@ fn apply_merged_over_a_binary_base_writes_the_combined_text() {
     assert!(result.binary_write.is_none());
 }
 
-/// A binary base does not prevent writing the kept text head.
 #[test]
 fn keep_current_with_binary_base_writes_the_kept_text() {
     let (_scratch, mut store) = open_store();
@@ -318,7 +313,6 @@ fn keep_current_with_binary_base_writes_the_kept_text() {
     assert!(result.write.is_some() && result.delete.is_none() && result.binary_write.is_none());
 }
 
-/// ApplyMerged must reject any binary side.
 #[test]
 fn apply_merged_with_binary_side_fails_closed() {
     let (_scratch, mut store) = open_store();
@@ -405,8 +399,6 @@ fn all_binary_resolve_over_an_absent_live_head_fails_closed() {
     assert_combined_text_refused(&err);
 }
 
-/// A binary side whose sha exists only in the text `blobs` table must still be
-/// rejected — the gate must check `binary_blobs`.
 #[test]
 fn binary_sha_only_in_text_blobs_table_is_rejected() {
     let (_scratch, mut store) = open_store();
@@ -439,7 +431,6 @@ fn binary_sha_only_in_text_blobs_table_is_rejected() {
     );
 }
 
-/// Empty-string sha reference is rejected.
 #[test]
 fn empty_binary_sha_is_rejected() {
     let (_scratch, mut store) = open_store();
@@ -459,7 +450,6 @@ fn empty_binary_sha_is_rejected() {
     );
 }
 
-/// Mismatched claimed sha must reject and leave no row behind.
 #[test]
 fn hydrate_mismatch_leaves_no_row() {
     let (_scratch, mut store) = open_store();
@@ -486,9 +476,6 @@ fn hydrate_mismatch_leaves_no_row() {
     assert_eq!(count, 0, "no rows may survive a rejected hydrate");
 }
 
-/// Double-hydrate is idempotent; an uppercase-hex claim of the correct bytes
-/// is accepted and canonicalized to the lowercase key (case-insensitive claim
-/// comparison, canonical lowercase addressing); wrong claims stay rejected.
 #[test]
 fn hydrate_idempotent_and_claim_canonicalized() {
     let (_scratch, mut store) = open_store();
@@ -530,8 +517,6 @@ fn hydrate_idempotent_and_claim_canonicalized() {
     assert_eq!(fetched, bytes);
 }
 
-/// Over-cap bytes are a typed error even with a correct sha claim, and empty
-/// bytes hydrate fine under the well-known empty-input sha.
 #[test]
 fn hydrate_size_bounds() {
     let (_scratch, mut store) = open_store();
@@ -558,8 +543,6 @@ fn hydrate_size_bounds() {
         .expect_err("over-cap bytes must be rejected");
     assert_eq!(err.code(), "blob-too-large");
 
-    // The size cap fires before the claim comparison: an over-cap buffer with
-    // a wrong claim is the size error, never hashed into an integrity error.
     let wrong_claim = hex_sha256(b"not the huge bytes");
     let err = store
         .write_with(&NoFaults, move |tx| {
@@ -569,10 +552,6 @@ fn hydrate_size_bounds() {
     assert_eq!(err.code(), "blob-too-large");
 }
 
-/// A pre-existing row under the same sha is never overwritten by a later
-/// hydrate — and if the canonical row was corrupted out-of-band, the
-/// deduplicating re-hydrate itself fails closed (no silent success against a
-/// rotted row), as does the read path.
 #[test]
 fn hydrate_fails_closed_when_existing_row_is_corrupt() {
     let (_scratch, mut store) = open_store();
@@ -589,8 +568,6 @@ fn hydrate_fails_closed_when_existing_row_is_corrupt() {
             Ok::<_, StorageError>(())
         })
         .expect("corrupt row");
-    // Re-hydrate with the true bytes: the dedup path re-verifies the existing
-    // row and must surface the corruption instead of reporting success.
     let sha_for_rehydrate = sha.clone();
     let bytes_for_rehydrate = bytes.to_vec();
     let err = store
@@ -607,9 +584,6 @@ fn hydrate_fails_closed_when_existing_row_is_corrupt() {
     assert_eq!(err.code(), "blob-integrity");
 }
 
-/// An absent text side that carries a text-blob reference (row corruption) is
-/// inconsistent durable state and must fail closed on load, not be silently
-/// reconstructed as an ordinary absent side.
 #[test]
 fn absent_text_side_with_blob_reference_fails_closed_on_read() {
     let (_scratch, mut store) = open_store();
@@ -661,8 +635,6 @@ fn absent_states_at_different_paths_do_not_match() {
     assert!(!live_state_matches_conflict_current(&live, &divergent));
 }
 
-/// A text side that gains a stray binary reference (row corruption) must fail
-/// closed on read, never mix columns.
 #[test]
 fn text_side_with_stray_binary_column_fails_closed_on_read() {
     let (_scratch, mut store) = open_store();
@@ -739,8 +711,6 @@ fn text_conflict_round_trip_unchanged() {
     assert!(loaded.incoming.binary_sha256.is_none());
 }
 
-/// A binary current side recorded against a path that holds no live head is
-/// stale, and combined text is refused for bytes outright.
 #[test]
 fn binary_current_over_an_absent_live_head_blocks_resolve() {
     let (_scratch, mut store) = open_store();
@@ -791,7 +761,6 @@ fn binary_current_over_an_absent_live_head_blocks_resolve() {
     assert_combined_text_refused(&err);
 }
 
-/// Binary side with a text snapshot attached is rejected.
 #[test]
 fn binary_side_with_text_snapshot_rejected() {
     let (_scratch, mut store) = open_store();
@@ -811,10 +780,6 @@ fn binary_side_with_text_snapshot_rejected() {
     assert_invalid_input(&err, "binary conflict side cannot carry a text snapshot");
 }
 
-/// Binary-side validation must run before the duplicate-id shortcut: an
-/// invalid/unhydrated binary side reusing an already-open conflict id is
-/// rejected fail-closed, never absorbed as an idempotent duplicate. Honest
-/// duplicates (valid hydrated sides) still no-op.
 #[test]
 fn duplicate_conflict_id_with_invalid_binary_side_rejected() {
     let (_scratch, mut store) = open_store();
@@ -868,7 +833,6 @@ fn duplicate_conflict_id_with_invalid_binary_side_rejected() {
     assert_invalid_input(&err, "binary conflict side is missing its blob reference");
 }
 
-/// Text side carrying a binary_sha256 is rejected at insert.
 #[test]
 fn text_side_with_binary_sha_rejected() {
     let (_scratch, mut store) = open_store();
@@ -931,9 +895,6 @@ fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
     assert_eq!(bin_sha.as_deref(), Some(binary_sha.as_str()));
 }
 
-/// M3 regression: the occupied-DESTINATION check on a move-resolve must also see
-/// a binary head. A text conflict that moves its head onto a destination now held
-/// by a binary head must report `TargetPathExists`, not clobber the binary head.
 #[test]
 fn text_move_resolve_onto_binary_destination_is_occupied_not_clobber() {
     let (_scratch, mut store) = open_store();

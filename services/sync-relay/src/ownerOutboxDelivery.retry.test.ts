@@ -129,7 +129,6 @@ function fixture(
         const fault = faults.acknowledge.shift(),
           receipt = (request.params as unknown as { receipts: LiveUpdateReceipt[] }).receipts[0]!;
         if (fault === "failed") throw new Error("Engine unavailable.");
-        // Only the head its owner asked to try again leaves quarantine, and its acceptance resumes the queue.
         if (native.state === "quarantined" && native.retryDeliveryId !== receipt.deliveryId)
           throw new Error("A quarantined owner outbox refuses acknowledgement.");
         Object.assign(native, { state: "active", quarantineReason: null, retryDeliveryId: null });
@@ -368,7 +367,7 @@ it("retries the retained owner head when a named submission advances its validat
   expect(f.receipts).toHaveLength(1);
   expect(f.applyThrough).toHaveBeenCalledTimes(1);
   expect(f.pending).toEqual([]);
-  expect(await f.run()).toEqual({ admittedEntries: 0, hasMore: false });
+  expect(await f.run()).toEqual({ admittedEntries: 0, hasMore: false, empty: true });
   expect(f.receipts).toHaveLength(1);
   expect(f.relay.journalRows().journal).toHaveLength(2);
 });
@@ -526,7 +525,6 @@ it("admits an outstanding Try again once, under its original delivery, after a c
     quarantineReason: "invalid-update",
     retryDeliveryId: f.entry.deliveryId,
   });
-  // The relay crashes with the refusal it received; the owner's request is still open.
   f.crash();
   const storage = f.restart(),
     commit = vi.spyOn(storage, "commitLiveUpdateJournal");
@@ -540,7 +538,7 @@ it("admits an outstanding Try again once, under its original delivery, after a c
   expect(f.native).toEqual({ state: "active", quarantineReason: null, retryDeliveryId: null });
   expect(f.receipts).toHaveLength(1);
   expect(f.pending).toEqual([]);
-  expect(await f.run()).toEqual({ admittedEntries: 0, hasMore: false });
+  expect(await f.run()).toEqual({ admittedEntries: 0, hasMore: false, empty: true });
   expect(commit).toHaveBeenCalledTimes(1);
 });
 
@@ -552,7 +550,11 @@ it.each(["failed", "lost"] as const)(
     f.native.retryDeliveryId = f.entry.deliveryId;
     f.faults.acknowledge.push(fault);
     await expect(f.run()).rejects.toThrow();
-    expect(await f.run()).toEqual({ admittedEntries: fault === "failed" ? 1 : 0, hasMore: false });
+    expect(await f.run()).toEqual(
+      fault === "failed"
+        ? { admittedEntries: 1, hasMore: false }
+        : { admittedEntries: 0, hasMore: false, empty: true },
+    );
     expect(new Set(f.commit.mock.calls.map(([input]) => input.metadata.deliveryId))).toEqual(
       new Set([f.entry.deliveryId]),
     );

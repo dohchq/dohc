@@ -504,7 +504,6 @@ describe("stop one workspace's sync", () => {
       expect.objectContaining({ message: "open failed" }),
     );
     expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBe("reopen");
-    // After a pause there is no sync to retry: the retry reopens.
     await expect(reopenWithoutSync(h.reopen, h.operation().workspace)).resolves.toEqual({
       reopened: true,
     });

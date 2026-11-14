@@ -827,9 +827,6 @@ fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
         "a malformed op loses its reason — the one with a coordinate, or the one whose only identity is its page position: {:?}",
         outcome.refusals
     );
-    // The op filed under its page position never shows the reader its origin
-    // id, so the numbers are all that separate an empty one from a small
-    // overrun or from a hundred kilobytes.
     let page_filed = &outcome.refusals[1].detail;
     assert!(
         page_filed.contains("it is empty"),
@@ -1386,8 +1383,6 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
         (outcome.fetched, outcome.applied, outcome.skipped),
         (2, 1, 1)
     );
-    // The cursor advances past the refused op. Without this the same page is
-    // fetched forever and nothing later in this share can ever arrive.
     assert_eq!(
         outcome.pending_cursor.cursor, 2,
         "the cursor stalls on the refused op and the share never moves"
@@ -1606,8 +1601,6 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
             .expect("binary blob presence"),
         "the refused snapshot itself must not persist"
     );
-    // One refusal, naming the blob that was actually dropped — not one refusal
-    // standing in for however many files went with it.
     assert_eq!(
         outcome
             .refusals
@@ -1630,11 +1623,6 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
     );
 }
 
-/// A received rename preserves the old path when its replacement is refused.
-/// Skipping per blob must not let the delete run alone: the old path would go
-/// while its replacement never arrived, which loses the file outright — worse
-/// than not renaming it and worse than the freeze this change removes.
-///
 #[test]
 fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
     let (_scratch, _path, mut engine) = open_store();
@@ -1948,7 +1936,6 @@ fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
         .strip_prefix(&head)
         .unwrap_or_else(|| panic!("the count must lead: {detail}"));
     let parts: Vec<&str> = body.split("; ").collect();
-    // The fixture is only about overflow if the record could not hold them all.
     assert!(
         parts.len() < refused_count,
         "the detail held every refusal, so this proves nothing about overflow"
@@ -2170,8 +2157,6 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
             "move the path check back below `share_blob` and the \
              refused path fetches its blob first"
         );
-        // The refusal NAMES the constraint and the file it cost, because the
-        // record is all the reader has once the cursor commits.
         assert_eq!(
             outcome
                 .refusals
@@ -2541,16 +2526,6 @@ fn share_view_chat_composes_paths_with_a_version() {
     }
 }
 
-// A share view's own sync identity, and the narrow lane term
-// that lets its file writes journal.
-//
-// A share view replicates through a SHARE, so it holds `share_view_cursors`
-// and none of the owner-lane tables. Before this it had no identity at all:
-// its file writes never journalled and every proposal refused before the
-// relay was contacted.
-
-/// The share-lane state a real share view holds after its first pull: a
-/// cursor for the share, and no owner-lane position of any kind.
 fn seed_share_view_cursor(engine: &mut EngineStore, share_id: &str) {
     engine
         .write_with(&NoFaults, |tx| {
@@ -2728,7 +2703,6 @@ fn local_lane_ops(engine: &EngineStore, kind: &str) -> Vec<ReplicationEnvelope> 
         .collect()
 }
 
-/// A real fold must save the choice in every lane. Only an owner can send its Y.Doc update.
 #[test]
 fn resolution_fold_journals_a_ydoc_update_only_in_the_owner_lane() {
     use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
@@ -2889,7 +2863,6 @@ fn journal_lane_conflict(
     .expect("validated conflict carrier")
 }
 
-/// Share cursors never enroll owner work. First owner contact must backfill a former share store.
 #[test]
 fn origination_and_conflict_outbox_wait_for_owner_contact_not_a_share_cursor() {
     use dohc_engine_collab::{

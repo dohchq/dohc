@@ -105,8 +105,6 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
         assert_eq!(updates, 0, "a malformed seed must never be journaled");
     }
 
-    // The genuine seed still lands afterward: the rejection left nothing that
-    // makes the object look like it already exists.
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 4).expect("reopen actor").actor;
     let appended = actor

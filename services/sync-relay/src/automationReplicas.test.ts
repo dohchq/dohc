@@ -2054,7 +2054,6 @@ describe("the automation replicas", () => {
 
     clock.ms += 1;
     await pass(WORKSPACE);
-    // The folder settled, so nothing in it publishes again, and the write says so.
     expect(outcome(raw, "stuck")).toEqual([
       "refused",
       "pending",

@@ -55,8 +55,6 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
   };
 }
 
-// The Explorer's own menu, which a Collection that can't open must never open
-// beside its Show in Files.
 function explorerMenu() {
   return vi.fn(async (_input: unknown): Promise<ExplorerMenuEntry[]> => [
     { kind: "item", label: "Rename", id: "rename" },

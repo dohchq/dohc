@@ -954,7 +954,7 @@ fn expected_relay_error(code: &str) -> RelayError {
         "presence_capacity" => RelayError::PresenceCapacity,
         "quota_exceeded" => RelayError::QuotaExceeded,
         "self_share" => RelayError::SelfShare,
-        "server_busy" => RelayError::HttpStatus(503),
+        "server_busy" => RelayError::ServerBusy,
         "settlement_proof_budget" => RelayError::SettlementProofBudget,
         "share_access_rate_limited" => RelayError::ShareAccessRateLimited,
         "share_op_rejected" => RelayError::ShareOperationRejected,
@@ -1306,9 +1306,6 @@ fn key_envelope_upload_rejects_an_oversized_ack_body() {
 
 #[test]
 fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
-    // The production transport must carry the refusal ingest writes, not
-    // replace it with an unreadable-response error that names no limit.
-    //
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Text);
@@ -1731,8 +1728,6 @@ fn hosted_feed_refusals_map_to_their_errors() {
     );
 }
 
-/// A hosted transport reaches only the hosted feed: every ordinary workspace,
-/// claim, key and share route refuses without a request.
 #[test]
 fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
     let requests = Arc::new(Mutex::new(Vec::new()));

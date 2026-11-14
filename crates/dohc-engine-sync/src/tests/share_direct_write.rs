@@ -492,7 +492,6 @@ fn direct_push_writes_a_schema_edit_and_send_changes_never_offers_it() {
         "a written file is not offered again"
     );
 
-    // A later edit is offered, based on what the direct lane wrote.
     journal_local_moment(
         &mut engine,
         &edit_moment("m-2", "object-schema", schema, "v2", "v3"),
@@ -826,6 +825,7 @@ fn only_a_failure_that_may_pass_keeps_the_plan() {
         (RelayError::ServerInternal, true),
         (RelayError::HttpStatus(429), true),
         (RelayError::HttpStatus(503), true),
+        (RelayError::ServerBusy, true),
         (RelayError::BlobReferenceMissing, true),
     ] {
         let (_scratch, _path, mut engine) = proposal_fixture(&["v1", "v2"]);

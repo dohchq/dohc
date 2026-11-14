@@ -1,7 +1,3 @@
-//! Merging a path a second time compares against what was last merged there,
-//! not the fork point: a change already in Main is never asked about again,
-//! and a change the version reverts reaches Main.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dohc_engine_domain::{
@@ -310,8 +306,6 @@ fn a_renamed_file_merges_by_path() {
     assert_eq!(main_text(&mut store, "new.md").as_deref(), Some("y"));
 }
 
-/// (i) An exact retry of a merge returns what it returned the first time and
-/// does not move the path's merge base back.
 #[test]
 fn a_replayed_merge_leaves_the_merge_base_alone() {
     let (_scratch, mut store) = open();
@@ -334,9 +328,6 @@ fn a_replayed_merge_leaves_the_merge_base_alone() {
     );
 }
 
-/// (k) A partial revert: lines A and B were added and merged, then the
-/// version removes B. The next merge removes B from Main and keeps Main's own
-/// edit to line 1.
 #[test]
 fn a_partly_reverted_change_reaches_main() {
     let (_scratch, mut store) = open();
@@ -354,9 +345,6 @@ fn a_partly_reverted_change_reaches_main() {
     );
 }
 
-/// Bytes through each branch: taken bytes are the next base, so Main's later
-/// bytes are left alone; a resolved conflict is not asked again; new bytes
-/// from the version conflict with Main's.
 #[test]
 fn binary_merges_compare_against_the_last_merged_bytes() {
     let (_scratch, mut store) = open();

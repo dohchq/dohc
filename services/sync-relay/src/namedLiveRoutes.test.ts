@@ -44,7 +44,8 @@ import {
 } from "./liveTickets.test-helper.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
+import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
+import type { SessionHostBlock } from "./linkRefusal";
 
 const exchangeKey = "test-exchange-key-".repeat(3),
   relayHost = "relay.example.test";
@@ -347,7 +348,10 @@ async function fixture(
       ? { ...native, binding: { ...current, selectorPaths: [current.currentPath] } }
       : native,
   );
-  const sessionHostBlocked = vi.fn((_document: { workspaceId: string; objectId: string }) => false);
+  const sessionHostBlocked = vi.fn(
+    (_document: { workspaceId: string; objectId: string }): SessionHostBlock | undefined =>
+      undefined,
+  );
   const actor = vi.fn(async (request: Request, workspaceId: string) => {
     if (owner || desktop) {
       const bearer = request.headers.get("authorization");
@@ -762,42 +766,55 @@ async function fixture(
   };
 }
 
-it.each([false, true])(
-  "refuses a ticket for a document the session host blocked until the block lifts; link=%s",
-  async (link) => {
+// A held document waits for its owner, so the page is told and stops asking. Other blocks say nothing new.
+it.each([
+  [false, "stopped"],
+  [true, "stopped"],
+  [false, "held"],
+  [true, "held"],
+] as const)(
+  "refuses a ticket for a document the session host blocked until the block lifts; link=%s, %s",
+  async (link, block) => {
     const f = await fixture(limits, link);
     const mint = vi.spyOn(f.tickets, "mint");
-    f.sessionHostBlocked.mockReturnValue(true);
+    f.sessionHostBlocked.mockReturnValue(block);
     const refused = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
       discriminator: f.discriminator,
       objectId: binding.objectId,
     });
     expect([refused.status, await refused.json()]).toEqual(
       link
-        ? [503, linkRefusalBody("link_live_unavailable")]
-        : [404, { ok: false, error: "not found" }],
+        ? [503, linkRefusalBody(block === "held" ? "link_live_stopped" : "link_live_unavailable")]
+        : [404, block === "held" ? NAMED_LIVE_STOPPED : { ok: false, error: "not found" }],
     );
     expect(f.sessionHostBlocked).toHaveBeenCalledWith({
       workspaceId: binding.workspaceId,
       objectId: binding.objectId,
     });
     expect(mint).not.toHaveBeenCalled();
-    if (link) {
-      const hidden = await f.post("/sync/live/link-tickets", {
-        discriminator: f.discriminator,
-        objectId: "hidden-object",
-      });
-      expect([hidden.status, await hidden.text()]).toEqual([
-        404,
-        '{"ok":false,"error":"not found"}',
-      ]);
-    }
-    f.sessionHostBlocked.mockReturnValue(false);
+    // A document the caller can't reach says nothing about its block.
+    const hidden = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
+      discriminator: f.discriminator,
+      objectId: "hidden-object",
+    });
+    expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+    // Nor does a real document the share no longer covers.
+    const select = f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?");
+    select.run(JSON.stringify({ paths: ["other.md"], versionId: null }));
+    const outside = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
+      discriminator: f.discriminator,
+      objectId: binding.objectId,
+    });
+    expect([outside.status, await outside.text()]).toEqual([
+      404,
+      '{"ok":false,"error":"not found"}',
+    ]);
+    select.run(JSON.stringify({ paths: [binding.currentPath], versionId: null }));
+    f.sessionHostBlocked.mockReturnValue(undefined);
     expect(await f.connect((await f.mint()).token).status).toBe(101);
   },
 );
 
-// Tabs that keep reconnecting fill a caller's share of tickets until those tickets expire.
 it.each([false, true])(
   "asks a link holder or agent to try again while its share of tickets is full; link=%s",
   async (link) => {
@@ -1022,7 +1039,6 @@ it("keeps a link socket through bearer refresh and closes it on revocation", asy
   ).toEqual({ link_session_id: old.sessionId });
 });
 
-/** Sends one ping and reports whether its pong or the socket's close came first. */
 async function pingOutcome(socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>) {
   const pong = once(socket.ws, "pong").then(
     () => "pong",
@@ -1091,8 +1107,6 @@ it.each<Record<string, string>>([
   },
 );
 
-// A connected agent opens the link's live documents through the same ticket
-// and socket routes, with its access token and the MCP address it signed in at.
 type LinkFixture = Awaited<ReturnType<typeof fixture>>;
 // The agent signed in nearly an hour ago: its token expires before a link holder's session (61 s).
 const agentExpiresAtMs = 2000;
@@ -2060,7 +2074,6 @@ describe("a desktop's opens while a host is away", () => {
       ).toEqual([200, 200, 200, 200]),
     );
     await vi.waitFor(() => expect(answers[other]).toBe(200));
-    // The desktop asks again for a refused note once its host is back.
     const again = refused.map((index) => open(notes[first.indexOf(index)]!));
     await vi.waitFor(() => expect(again.map((index) => answers[index])).toEqual([200, 200]));
   });

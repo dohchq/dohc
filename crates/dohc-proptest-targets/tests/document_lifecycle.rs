@@ -70,7 +70,6 @@ const NEIGHBOUR: Note = Note {
 struct Note {
     object_id: &'static str,
     path: &'static str,
-    /// The device whose edits reach this note through sync.
     peer: &'static str,
 }
 
@@ -80,11 +79,9 @@ impl Note {
     }
 }
 
-/// One step a person, a peer, or the host can take.
 #[derive(Clone, Debug)]
 enum Command {
-    /// Open the note, or resync the session that has it open.
-    Open,
+    OpenOrResync,
     /// The person types into the open session.
     LocalEdit,
     /// A peer's edit arrives through sync. It parks behind a live session.
@@ -112,7 +109,7 @@ enum Crash {
 
 fn command() -> impl Strategy<Value = Command> {
     prop_oneof![
-        3 => Just(Command::Open),
+        3 => Just(Command::OpenOrResync),
         3 => Just(Command::LocalEdit),
         3 => Just(Command::RemoteApply),
         2 => Just(Command::Settle),
@@ -124,7 +121,6 @@ fn command() -> impl Strategy<Value = Command> {
     ]
 }
 
-/// The person's view of an open note.
 struct Session {
     client: Ydoc,
     lineage: Option<String>,
@@ -193,7 +189,6 @@ fn utf16_len(doc: &Ydoc) -> u32 {
     u32::try_from(doc.plaintext_string().encode_utf16().count()).expect("length")
 }
 
-/// Which store the note lives in.
 #[derive(Clone, Copy, Debug)]
 enum Replica {
     /// A person's computer that joined the workspace its peers sync.
@@ -203,8 +198,6 @@ enum Replica {
     Hosted,
 }
 
-/// What the relay holds: every peer row in relay order, their blobs, and
-/// the scope it shows a hosted replica.
 #[derive(Clone, Default)]
 struct Feed {
     rows: Vec<ReplicationEnvelope>,
@@ -212,7 +205,6 @@ struct Feed {
     scope: Option<HostedScope>,
 }
 
-/// A fake relay, answering the engine's own pull client from a [`Feed`].
 #[derive(Clone)]
 struct Relay(Arc<Mutex<Feed>>);
 
@@ -262,7 +254,6 @@ impl Relay {
         lineage
     }
 
-    /// The rows after `cursor`, at most `limit`, for `object_id` if named.
     fn page(
         &self,
         cursor: i64,
@@ -371,9 +362,6 @@ impl RelayTransport for Relay {
     }
 }
 
-/// Pull every page the relay holds and commit each page's cursor, through
-/// the engine's own pull client. A live lease parks the note's updates.
-/// Answers the file changes the pages report, for the actor to write.
 fn pull(
     store: &mut EngineStore,
     relay: &Relay,
@@ -437,8 +425,6 @@ fn pull(
     }
 }
 
-/// The fixture every case starts from, built once per test thread and
-/// copied into each case's own workspace.
 struct Template {
     scratch: ScratchDir,
     feed: Feed,
@@ -533,8 +519,6 @@ impl Template {
 }
 
 impl Engine {
-    /// A fresh copy of the template, with its actor open. Answers the base
-    /// both notes replicated.
     fn new(replica: Replica) -> (Self, Vec<u8>) {
         let scratch = ScratchDir::new().expect("scratch");
         let copy = |template: &Template| {
@@ -578,7 +562,6 @@ impl Engine {
         std::fs::read_to_string(self.scratch.path().join(note.path)).ok()
     }
 
-    /// Copies a conflict left beside the notes.
     fn conflict_files(&self) -> Vec<String> {
         std::fs::read_dir(self.scratch.path().join("notes"))
             .expect("notes dir")
@@ -593,7 +576,6 @@ impl Engine {
             .collect()
     }
 
-    /// The note's applied Y.Doc as the store holds it.
     fn persisted_text(&self, note: Note) -> String {
         dohc_engine_collab::load_persisted(&self.probe, &note.key())
             .expect("load")
@@ -628,8 +610,6 @@ impl Engine {
         .expect("startup replay");
     }
 
-    /// Pull what the relay holds, as sync does, then write the files its
-    /// pages changed. A live session parks the note's updates.
     fn pull(&mut self, live: bool) {
         let (relay, replica) = (self.relay.clone(), self.replica);
         let changes = self.with_store(|store, now| {
@@ -648,7 +628,6 @@ impl Engine {
         .expect("pull materialization");
     }
 
-    /// Run `apply` on the store while the actor is closed, then reopen it.
     fn with_store<R>(&mut self, apply: impl FnOnce(&mut EngineStore, i64) -> R) -> R {
         self.supervisor.close(&self.db).expect("close actor");
         let now = self.tick();
@@ -767,7 +746,6 @@ impl Engine {
     }
 }
 
-/// One generated history, run step by step against the model.
 struct Run {
     engine: Engine,
     model: Model,
@@ -811,8 +789,6 @@ impl Run {
         }
     }
 
-    /// Parked peer edits enter the note when the engine drains them. Answers
-    /// whether any did.
     fn drain_parked(&mut self) -> bool {
         let drained = !self.model.parked.is_empty();
         for update in self.model.parked.drain(..) {
@@ -833,7 +809,7 @@ impl Run {
     fn step(&mut self, command: &Command) -> Result<(), TestCaseError> {
         self.log.push(format!("{command:?}"));
         match command {
-            Command::Open => self.open()?,
+            Command::OpenOrResync => self.open_or_resync()?,
             Command::LocalEdit => self.local_edit()?,
             Command::RemoteApply => self.remote_apply()?,
             Command::Settle => drop(self.settle()?),
@@ -844,7 +820,7 @@ impl Run {
         self.check_store()
     }
 
-    fn open(&mut self) -> Result<(), TestCaseError> {
+    fn open_or_resync(&mut self) -> Result<(), TestCaseError> {
         if let Some(mut session) = self.model.session.take() {
             let resynced = self.engine.resync(NOTE, &mut session);
             self.model.session = Some(session);
@@ -926,7 +902,6 @@ impl Run {
         self.check_file("pull")
     }
 
-    /// Answers whether the note settled.
     fn settle(&mut self) -> Result<bool, TestCaseError> {
         let Some(session) = self.model.session.as_ref() else {
             return Ok(false);
@@ -996,7 +971,6 @@ impl Run {
         };
         let faults = ScriptedFaults::crash_at(point);
         let injected: Arc<dyn FaultInjector> = faults.clone();
-        // Whether the engine must stop, and its answer.
         let (stops, answer) = match crash {
             Crash::DuringEdit => {
                 let (update, token) = self.next_edit().expect("session");
@@ -1109,8 +1083,6 @@ impl Run {
         Ok(())
     }
 
-    /// The store's note is the model's: no acknowledged edit lost, no parked
-    /// edit applied early, nothing added.
     fn check_store(&self) -> Result<(), TestCaseError> {
         let persisted = self.engine.persisted_text(NOTE);
         let expected = self.model.text.plaintext_string();
@@ -1144,15 +1116,13 @@ impl Run {
         })
     }
 
-    /// Bring the note to rest: open it, settle until current, close. The file
-    /// must then hold every acknowledged edit and every peer edit.
     fn finish(&mut self) -> Result<(), TestCaseError> {
         self.log.push("finish".into());
         if self.model.session.is_none() {
-            self.open()?;
+            self.open_or_resync()?;
         }
         if !self.settle()? {
-            self.open()?;
+            self.open_or_resync()?;
             let settled = self.settle()?;
             self.check(settled, || "a current session could not settle".into())?;
         }
@@ -1164,8 +1134,6 @@ impl Run {
         self.check(existed, || "the engine says the file never existed".into())
     }
 
-    /// Whatever state the note was left in, the neighbour still opens, takes
-    /// an edit, and settles to its file.
     fn neighbour_progresses(&mut self) -> Result<(), TestCaseError> {
         self.log.push("neighbour".into());
         let session = self
@@ -1230,7 +1198,6 @@ fn replay(replica: Replica, history: &[Command]) {
     }
 }
 
-/// Replay `history` on both replicas, and report every one that fails.
 fn replay_both(history: &[Command]) {
     let failures: Vec<String> = [Replica::Device, Replica::Hosted]
         .into_iter()
@@ -1243,12 +1210,13 @@ fn replay_both(history: &[Command]) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A settle after a drain must write every owed write. Writing only the
-/// newest leaves the file behind the note.
 #[test]
 fn a_settle_after_a_drain_writes_every_owed_edit() {
-    use Command::{Open, RemoteApply, Settle};
-    replay(Replica::Device, &[Open, RemoteApply, Settle, RemoteApply]);
+    use Command::{OpenOrResync, RemoteApply, Settle};
+    replay(
+        Replica::Device,
+        &[OpenOrResync, RemoteApply, Settle, RemoteApply],
+    );
 }
 
 /// A pull that writes the note's file must end its queued writes. Otherwise
@@ -1258,51 +1226,46 @@ fn a_pull_that_writes_the_file_ends_its_queued_writes() {
     replay(Replica::Device, &[Command::RemoteApply]);
 }
 
-/// A pull with no session writes the whole note and ends the writes that
-/// earlier drains left owed, so the next settle has nothing to replay.
 #[test]
 fn a_pull_with_no_session_ends_the_writes_drains_left_owed() {
-    use Command::{Close, CrashAndReopen, Open, RemoteApply};
+    use Command::{Close, CrashAndReopen, OpenOrResync, RemoteApply};
     let history = [
-        Open,
+        OpenOrResync,
         RemoteApply,
-        Open,
+        OpenOrResync,
         Close,
         RemoteApply,
-        Open,
+        OpenOrResync,
         CrashAndReopen(Crash::AfterSettleCommit),
     ];
     replay_both(&history);
 }
 
-/// The same, with a local edit the settle commits before the crash.
 #[test]
 fn a_settle_after_a_pull_with_no_session_commits_its_own_write() {
-    use Command::{Close, CrashAndReopen, LocalEdit, Open, RemoteApply};
+    use Command::{Close, CrashAndReopen, LocalEdit, OpenOrResync, RemoteApply};
     let history = [
-        Open,
+        OpenOrResync,
         RemoteApply,
-        Open,
+        OpenOrResync,
         Close,
         RemoteApply,
-        Open,
+        OpenOrResync,
         LocalEdit,
         CrashAndReopen(Crash::AfterSettleCommit),
     ];
     replay_both(&history);
 }
 
-/// Two drains leave two owed writes. A crash in the earlier one stops the
-/// settle.
 #[test]
 fn a_crash_in_an_earlier_owed_write_stops_the_settle() {
-    use Command::{CrashAndReopen, Open, RemoteApply};
+    use Command::{CrashAndReopen, OpenOrResync, RemoteApply};
     let history = [
-        Open,
+        OpenOrResync,
         RemoteApply,
-        Open,
+        OpenOrResync,
         RemoteApply,
-        Open,
+        OpenOrResync,
         CrashAndReopen(Crash::AfterSettleCommit),
     ];
     replay_both(&history);
@@ -1312,7 +1275,7 @@ fn a_crash_in_an_earlier_owed_write_stops_the_settle() {
 /// Generation seldom reaches this history.
 #[test]
 fn a_draining_close_writes_the_local_edit() {
-    use Command::{Close, LocalEdit, Open, RemoteApply};
-    let history = [Open, LocalEdit, RemoteApply, Close];
+    use Command::{Close, LocalEdit, OpenOrResync, RemoteApply};
+    let history = [OpenOrResync, LocalEdit, RemoteApply, Close];
     replay_both(&history);
 }

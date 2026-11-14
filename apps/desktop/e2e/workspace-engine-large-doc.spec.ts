@@ -13,18 +13,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// AUDIT-SILENTSAVE. Three dogfood computer-use journeys, driving the real app,
-// each watched a document read "Saved" in the editor while its .md on disk sat
-// at zero bytes — silent, total loss of what the user wrote. The trigger was
-// size: past the engine's 48 KiB in-band response cap the settle refused
-// pre-commit on every debounced attempt (journey 1's load-test.md held 131,442
-// typed/pasted bytes and the file never received one), and the refusal reached
-// nothing at all — no log, no UI, while a renderer-side timer kept flipping the
-// indicator to "Saved".
-//
-// This spec owns the user-visible contract at the only layer that can prove it:
-// the real app, a real engine, a real file on disk.
-
 const CHUNK = "The quick brown fox jumps over the lazy dog, repeatedly. ";
 // ~140 KiB: past both the 48 KiB in-band response cap and the 128 KiB capture
 // text cap, matching the 131,442 bytes journey 1 actually pasted. Under 128 KiB

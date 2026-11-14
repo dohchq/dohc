@@ -548,7 +548,6 @@ describe("LiveDocumentsDialog", () => {
     expect(h.makeCopy).toHaveBeenCalledExactlyOnceWith("ws-1", "docs/held.md");
     expect(copy.textContent).toBe("Making a copy…");
     expect((copy as HTMLButtonElement).disabled).toBe(true);
-    // Another row's copy waits too, so the first row's button can't come back while its copy runs.
     expect((other as HTMLButtonElement).disabled).toBe(true);
     await userEvent.click(other);
     expect(h.makeCopy).toHaveBeenCalledTimes(1);

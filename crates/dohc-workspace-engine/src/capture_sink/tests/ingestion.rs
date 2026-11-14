@@ -378,8 +378,6 @@ fn store_refused_name_settles_as_not_owned_instead_of_degrading() {
         ingest(&mut sink, "release..notes.md").expect("refused name settles"),
         IngestOutcome::NotOwned
     );
-    // Once the file is gone, a planned retire of the refused name is a
-    // clean no-op (the store can never have held a head for it).
     std::fs::remove_file(scratch.path().join("release..notes.md")).expect("delete");
     sink.retire("release..notes.md")
         .expect("nothing to retire under a refused name");

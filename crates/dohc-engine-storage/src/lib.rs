@@ -91,4 +91,4 @@ pub use materialize::{
 };
 pub use recovery::{PreparedRecovery, RecoveryError, open_for_recovery};
 pub use remote_changes::{count_remote_change_in_tx, remote_changes_applied_in};
-pub use store::{EngineStore, TxnOutcome};
+pub use store::{EngineStore, PagesChecked, TxnOutcome};

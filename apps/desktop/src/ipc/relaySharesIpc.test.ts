@@ -126,7 +126,8 @@ function harness() {
   );
   const saveOwnerLiveRecoveryCopy = vi.fn<Dependencies["saveOwnerLiveRecoveryCopy"]>(async () => ({
     copyPath: "notes/a (recovered).md",
-    packagePath: "notes/a (recovered).dohc-recovery.json",
+    packagePath: ".dohc/local/live-recovery/notes/a (recovered).dohc-recovery.json",
+    notInNote: 0,
     storedOn: "this-computer",
     keptEdits: "kept",
   }));
@@ -153,7 +154,6 @@ function harness() {
           ...(action === "release" ? { materialized: true } : {}),
         },
   );
-  // Each path holds the document "object", which the object ids name at "live.md".
   const liveDocument = vi.fn<Dependencies["liveDocument"]>(async (_workspace, target) => ({
     mainVersionId: "main",
     objectId: "objectId" in target ? target.objectId : "object",
@@ -729,7 +729,8 @@ describe("owner live document enrollment", () => {
         }),
       ).resolves.toEqual({
         copyPath: "notes/a (recovered).md",
-        packagePath: "notes/a (recovered).dohc-recovery.json",
+        packagePath: ".dohc/local/live-recovery/notes/a (recovered).dohc-recovery.json",
+        notInNote: 0,
         storedOn: "this-computer",
         keptEdits: "kept",
       });

@@ -295,8 +295,6 @@ impl Notes {
         publish_pushed_ops(&self.relay, WORKSPACE, &self.b_scratch);
     }
 
-    /// Quit A and open it again with a cold reader. Answers how long the open
-    /// took.
     async fn restart_a(&mut self, reader_state: ReaderState) -> Duration {
         self.sessions_a.clear();
         let (_, _, config) = cold_reader(&self.reader_root, &self.notes, reader_state);
@@ -447,8 +445,6 @@ async fn a_workspace_opens_after_a_restart_with_notes_waiting_for_their_files() 
     assert_restart_catches_up(2).await;
 }
 
-/// After a restart, the reader fails every note's check. One sync, with one
-/// stall at most, names each note in Notices and keeps every older file.
 async fn assert_reader_failure(reader_state: ReaderState) -> Notes {
     let mut notes = Notes::new(2, 0).await;
     let opened = notes.restart_a(reader_state).await;

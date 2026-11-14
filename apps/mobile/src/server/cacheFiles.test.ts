@@ -742,7 +742,6 @@ describe("wiping the files", () => {
 });
 
 describe("a restore that a delete overtakes", () => {
-  /** Files whose read the test answers; the cache's continuation then runs after anything the test does next. */
   function heldFiles() {
     let answer!: (views: readonly SavedView[]) => void;
     const read = new Promise<readonly SavedView[]>((done) => {
@@ -793,7 +792,6 @@ describe("a restore that a delete overtakes", () => {
       },
     };
     const cache = createReadCache(counted);
-    // A, then B, then A again: the second store for A waits on the first one's read.
     const first = cache.restore(SCOPE_A);
     const second = cache.restore(SCOPE_A);
     expect(reads).toBe(1);

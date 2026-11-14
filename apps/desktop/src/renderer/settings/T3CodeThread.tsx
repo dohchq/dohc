@@ -464,6 +464,9 @@ export function T3CodeThreadPicker(props: {
           role="radiogroup"
           aria-labelledby={threadLabel}
           data-testid="t3-code-threads"
+          // The list is about to be replaced by what the field now says. A
+          // thread picked from it in that moment would be dropped with it.
+          inert={typed.trim() !== query}
           onKeyDown={onKeyDown}
           className="flex max-h-44 flex-col overflow-y-auto rounded-lg border border-line bg-bg p-1"
         >
@@ -483,6 +486,60 @@ export function T3CodeThreadPicker(props: {
         </div>
         {props.error ? <FieldError id={errorId}>{props.error}</FieldError> : null}
       </div>
+    </>
+  );
+}
+
+/**
+ * The step that chooses a T3 Code thread: why dohc cannot connect to T3 Code,
+ * the ask that allows dohc there, or the thread picker. `onReady` says when a
+ * thread can be chosen.
+ */
+export function T3CodeChoice(props: {
+  picked: string | null;
+  onPick: (thread: T3CodeThreadChoice | null) => void;
+  error: string | null;
+  searchId: string;
+  onReady: (ready: boolean) => void;
+}) {
+  const access = useT3CodeAccess();
+  const { state } = access;
+  const ready = state !== undefined && state.canKeep && t3CodeAllowed(state);
+  const { onReady } = props;
+  useEffect(() => {
+    onReady(ready);
+    return () => onReady(false);
+  }, [onReady, ready]);
+  if (access.readError !== null)
+    return (
+      <RetryRow testId="t3-code-access-retry" onRetry={() => void access.retryRead()}>
+        {ipcErrorMessage(access.readError, "dohc could not check whether T3 Code allows it.")}
+      </RetryRow>
+    );
+  if (state === undefined)
+    return <SkeletonRows testId="t3-code-access-loading" label="Checking T3 Code" rows={2} />;
+  if (!state.canKeep)
+    return (
+      <p data-testid="t3-code-cannot-keep" className="m-0 text-[13px] text-danger">
+        {T3_CODE_CANNOT_KEEP}
+      </p>
+    );
+  if (!ready)
+    return (
+      // Marked so a dialog can start its focus on the ask.
+      <div data-t3-code-allow-step className="rounded-lg border border-line bg-bg px-3 py-3">
+        <T3CodeAllow access={access} />
+      </div>
+    );
+  return (
+    <>
+      <T3CodeThreadPicker
+        picked={props.picked}
+        onPick={props.onPick}
+        error={props.error}
+        searchId={props.searchId}
+      />
+      <T3CodeAllowAgain access={access} />
     </>
   );
 }

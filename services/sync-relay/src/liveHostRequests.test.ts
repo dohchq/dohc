@@ -4,6 +4,7 @@ import {
   type EngineClient,
 } from "@dohc/workspace-engine-client/daemon";
 import { HeldReadBusyError, heldReadLane, queueLiveHostRequests } from "./liveHostRequests.js";
+import { startRelayMainThreadTiming, stopRelayMainThreadTiming } from "./relayMainThreadTiming.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -59,7 +60,45 @@ function fixture(maxPending = 4, maxRetainedInputBytes = 1_000_000) {
   });
   return { client, invoke, seen, lifetime, retire };
 }
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  stopRelayMainThreadTiming();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+it("sums each engine method's wait in the line and the engine's time once a minute", async () => {
+  vi.useFakeTimers({
+    toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "performance"],
+  });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  startRelayMainThreadTiming();
+  const f = fixture(),
+    release = deferred<unknown>();
+  f.invoke.mockImplementationOnce(async () => release.promise);
+  const first = f.client.sendRequest(request(1));
+  const second = f.client.readNextLiveApplied(request(2), position, 100);
+  const leaving = new AbortController();
+  const third = f.client.sendRequest({ ...request(3), method: "sync.push" }, leaving.signal);
+  vi.advanceTimersByTime(40);
+  leaving.abort(new Error("left"));
+  await expect(third).rejects.toThrow("left");
+  release.resolve({ result: {} });
+  await first;
+  await second;
+  vi.advanceTimersByTime(60_000);
+  // The summary is printed as one JSON string.
+  expect(JSON.parse(log.mock.calls[0]?.[1] as string)).toMatchObject({
+    engine: {
+      "liveApplication.settle": {
+        count: 1,
+        waitMs: { p50: 0, max: 0 },
+        serveMs: { p50: 40, max: 40 },
+      },
+      readNextLiveApplied: { count: 1, waitMs: { p50: 40, max: 40 }, serveMs: { p50: 0 } },
+      "sync.push": { count: 0, waitMs: null, serveMs: null, leftWaiting: 1 },
+    },
+  });
+});
 
 it("alternates bounded reader and writer queues while retaining FIFO order within each", async () => {
   const f = fixture(),

@@ -250,7 +250,6 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
       updatedAtMs: 5,
     })),
   };
-  // Unused ports fail if a handler unexpectedly reaches them. Each configured method keeps the production signature.
   const store =
     persistedStore ??
     (new Proxy(storeMethods, {
@@ -2052,7 +2051,6 @@ describe("marking a question answered with a reply that saved", () => {
             resolvedByMessageId: input.resolvedByMessageId,
             chosenOption: "Monday",
           }),
-        // Read from the store, which answers whichever workspace the window shows.
         messageIds: async (thread) =>
           (await store.listMessages({ workspaceId: workspace.workspaceId, threadId: thread })).map(
             (message) => message.id,

@@ -18,7 +18,6 @@ function pageEditor() {
   return { editor, setIdentity: vi.fn<PageEditor["setIdentity"]>() };
 }
 
-// The shell renders the page's file under it once the file exists.
 function renderPage(held: { draft: string; body: string } = { draft: "", body: "" }) {
   const onLeaveTitle = vi.fn();
   const onHandedOff = vi.fn();

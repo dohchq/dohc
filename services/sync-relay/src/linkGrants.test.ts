@@ -1316,7 +1316,6 @@ describe("relay link grants", () => {
     expect(storage.getShareGrant(linkGrantId)).toMatchObject({ access: "edit", generation: 3 });
     expect(storage.getShareGrant("grant-dependent")).toMatchObject({ generation: 4 });
 
-    // Promote detaches one dependent permanently.
     expect(
       storage.promoteShareGrant({
         shareId: "share-existing",

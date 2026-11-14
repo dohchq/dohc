@@ -54,7 +54,6 @@ describe("presence transport (workspace-owned)", () => {
     const storage = await testStorage();
     const h = makeHandler(storage, new PresenceHub());
     await claimWorkspace(h, "owner", "w");
-    // A different user cannot see or publish presence in someone else's ws.
     const r = await h(post("intruder", "/sync/w/presence?topic=general", { clientId: "c" }));
     expect(r.status).toBe(404);
   });
@@ -141,17 +140,16 @@ describe("presence transport (workspace-owned)", () => {
 
     const claim = await h(post("owner", "/sync/workspaces", { workspaceId: "a\u0000b" }));
     expect(claim.status).toBe(400);
-    // …or addressed: workspace `a\0b` + topic `c` must not collide with
-    // workspace `a` + topic `b\0c` in the NUL-joined scope key.
-    const wsNul = await h(post("owner", "/sync/a%00b/presence?topic=c", { clientId: "x" }));
+    const workspaceScopeCollision = "/sync/a%00b/presence?topic=c";
+    const topicScopeCollision = "/sync/a/presence?topic=b%00c";
+    const wsNul = await h(post("owner", workspaceScopeCollision, { clientId: "x" }));
     expect(wsNul.status).toBe(400);
-    // A topic with a NUL is refused too (the request above proves the safe
-    // encoding path; this proves the raw body/query path)…
-    const topicNul = await h(post("owner", "/sync/a/presence?topic=b%00c", { clientId: "x" }));
+    const topicNul = await h(post("owner", topicScopeCollision, { clientId: "x" }));
     expect(topicNul.status).toBe(400);
-    // …and so is a clientId with a control character (entry keys are also
-    // NUL-joined).
-    const clientNul = await h(post("owner", "/sync/a/presence?topic=b", { clientId: "c\u0000d" }));
+    const clientEntryKeyWithNul = "c\u0000d";
+    const clientNul = await h(
+      post("owner", "/sync/a/presence?topic=b", { clientId: clientEntryKeyWithNul }),
+    );
     expect(clientNul.status).toBe(400);
     const clientCtl = await h(post("owner", "/sync/a/presence?topic=b", { clientId: "c\u0001d" }));
     expect(clientCtl.status).toBe(400);
@@ -207,7 +205,6 @@ describe("presence is never journaled (ephemeral invariant)", () => {
     const page = storage.fetchLogPage({ workspaceId: "w", sinceRelaySeq: 0, limit: 500 });
     expect(page.rows).toHaveLength(0);
 
-    // The entire presence state lives in-memory in the hub only.
     expect(presence.stats().entries).toBe(1);
     await h(post("owner", "/sync/w/presence?topic=general", { clientId: "c", leave: true }));
     expect(presence.stats().entries).toBe(0);
@@ -309,7 +306,6 @@ describe("presence over a share (cross-user, gated)", () => {
         }),
       ),
     );
-    // Guest parks a long-poll at the current version (authorized at park time).
     const parked = h(
       req(
         "guest",

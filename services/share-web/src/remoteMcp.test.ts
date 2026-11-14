@@ -7,7 +7,6 @@ import { asRecord } from "@dohc/workspace-core/records";
 
 const origin = "https://share.example.test";
 const secret = "A".repeat(43);
-// The link's MCP address. The sign-in itself, against the real relay, is in mcpSignIn.test.ts.
 const mcpPath = `/mcp/s/${secret}`,
   resource = origin + mcpPath;
 const challenge = `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp/s/${secret}"`;
@@ -955,7 +954,6 @@ it("describes an unfiltered link without claiming access to private workspace da
   );
 });
 
-// A personal agent's MCP address. Its sign-in, against the real relay, is in mcpPersonalSignIn.test.ts.
 const personalPath = "/mcp/agent/w/trip",
   personalResource = origin + personalPath;
 const personalChallenge = `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource${personalPath}"`;

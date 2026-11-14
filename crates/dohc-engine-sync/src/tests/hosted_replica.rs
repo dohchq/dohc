@@ -255,12 +255,6 @@ fn defer_update(
     }
 }
 
-/// A hosted replica records, with each op it retains and each Y.Doc update
-/// it defers, the feed it arrived on: the trusted namespace, its epoch and
-/// stream, and a relay position from 1. Work no namespace names, or with no
-/// relay position, is retained nowhere, and retaining it fails rather than
-/// stopping there quietly. A later configuration never relabels what is
-/// queued, and a restart reads the same feed back.
 #[test]
 fn hosted_deferrals_keep_the_feed_they_arrived_on() {
     let (_scratch, path, mut store) = hosted_store();
@@ -466,9 +460,6 @@ fn a_hosted_replica_writes_no_chat_and_its_journal_keeps_one_counter() {
     );
 }
 
-/// Every kind the session host does not write is refused before it takes a
-/// sequence, through both journal paths; every kind it writes, for a document
-/// it hosts, takes the next one from the counter.
 #[test]
 fn a_hosted_replica_journals_only_its_documents_live_work() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -530,6 +521,12 @@ fn a_hosted_replica_journals_only_its_documents_live_work() {
     assert_eq!(last_outbound_seq(&store), 4);
 }
 
+struct ShareBeforePullResponse {
+    pull_count: usize,
+    object_id: String,
+    path: String,
+}
+
 /// The relay's scoped feed, in memory. It serves `workspace.init` and the
 /// rows of shared documents with their original coordinates, withholds every
 /// other row, and examines `raw_rows_per_page` rows per page as the relay
@@ -543,8 +540,7 @@ struct HostedFeed {
     revision: AtomicUsize,
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
     raw_rows_per_page: AtomicUsize,
-    /// Shares a document just before answering the pull with this count.
-    share_at_pull: Mutex<Option<(usize, String, String)>>,
+    share_before_pull_response: Mutex<Option<ShareBeforePullResponse>>,
     pulls: Mutex<Vec<HostedPullRequest>>,
     pushes: Mutex<Vec<PushRequest>>,
     /// Documents whose new host ops the relay refuses, each kept as a refusal at its coordinate.
@@ -565,7 +561,7 @@ impl HostedFeed {
             revision: AtomicUsize::new(0),
             blobs: Mutex::new(BTreeMap::new()),
             raw_rows_per_page: AtomicUsize::new(usize::MAX),
-            share_at_pull: Mutex::new(None),
+            share_before_pull_response: Mutex::new(None),
             pulls: Mutex::new(Vec::new()),
             pushes: Mutex::new(Vec::new()),
             refusing: Mutex::new(BTreeSet::new()),
@@ -675,8 +671,6 @@ impl HostedFeed {
         ));
     }
 
-    /// A rename of `object_id`, holding `text`, from `from` to `to`. Its
-    /// before side is the object's own head, last written by `before_moment_id`.
     #[allow(clippy::too_many_arguments)]
     fn rename(
         &self,
@@ -745,15 +739,18 @@ impl RelayTransport for HostedFeed {
             pulls.len()
         };
         let due = {
-            let mut share_at = self.share_at_pull.lock().unwrap();
-            if share_at.as_ref().is_some_and(|(at, ..)| *at == count) {
+            let mut share_at = self.share_before_pull_response.lock().unwrap();
+            if share_at
+                .as_ref()
+                .is_some_and(|share| share.pull_count == count)
+            {
                 share_at.take()
             } else {
                 None
             }
         };
-        if let Some((_, object_id, path)) = due {
-            self.share(&object_id, &path);
+        if let Some(share) = due {
+            self.share(&share.object_id, &share.path);
         }
         let shared = self.shared.lock().unwrap().clone();
         let scope = HostedScope {
@@ -1515,9 +1512,6 @@ fn hydrated(store: &mut EngineStore, texts: &[String]) {
         .unwrap();
 }
 
-/// Retain the feed's rows from relay position `from` on, as a pass that held
-/// them behind a live editor did, and commit the main cursor past them. The
-/// editor has since closed.
 fn retain_behind_closed_editor(
     client: &RelaySyncClient<HostedFeed>,
     store: &mut EngineStore,
@@ -1540,8 +1534,6 @@ fn retain_behind_closed_editor(
         .unwrap();
 }
 
-/// A conflict child of `hosted-object` whose `conflict.resolve` parent the
-/// feed withholds, with the resolved text already local.
 fn withheld_conflict(
     store: &mut EngineStore,
 ) -> (ReplicationEnvelope, ReplicationEnvelope, String) {
@@ -1647,8 +1639,6 @@ fn assert_conflict_child_hold_parity(
     let client = RelaySyncClient::new(feed);
     sync(&client, store);
 
-    // The child waits for its parent; a later edit of its document waits
-    // behind it, though an edit of another document from the same origin does not.
     let later_text = "edited after the resolution";
     let later_sha = dohc_engine_storage::hex_sha256(later_text.as_bytes());
     let feed = client.transport();
@@ -1921,7 +1911,6 @@ fn recorded_refusals(store: &EngineStore) -> Vec<(String, i64, String, String)> 
         .unwrap()
 }
 
-/// Rolls back the first transaction that ends after the relay answered another push.
 struct RollBackAfterPush<'a> {
     feed: &'a HostedFeed,
     pushes: usize,
@@ -1977,8 +1966,6 @@ fn a_refused_hosted_write_keeps_its_coordinate_and_a_crashed_push_retries_to_the
         "a refusal commits with its push cursor or not at all"
     );
 
-    // The retry gets the same decisions, and the transaction recording them
-    // fails after writing them: it keeps neither them nor the cursor.
     let rollback = RollBackAfterPush {
         feed: client.transport(),
         pushes: client.transport().pushes.lock().unwrap().len(),
@@ -2169,7 +2156,6 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
         Err(RelayError::InvalidResponse)
     );
 
-    // Recording takes only this hosted replica's own journaled ops.
     let (_scratch, _path, mut ordinary) = open_store();
     let refused = refusal(0, "ydoc.update", "outside-hosted-documents");
     assert!(matches!(
@@ -2535,8 +2521,6 @@ fn a_departed_document_is_reported_until_its_file_is_forgotten() {
     assert!(departed(&store).is_empty());
 }
 
-/// Serve a Y.Doc delta of `object_id` at `path` on a lineage the feed never
-/// sends a base for, so the replica defers it. Answers its blob.
 fn baseless_ydoc_delta(feed: &HostedFeed, object_id: &str, path: &str) -> String {
     let ydoc = dohc_engine_collab::Ydoc::wire();
     ydoc.plaintext_insert(0, "waits for a base");
@@ -2560,7 +2544,6 @@ fn baseless_ydoc_delta(feed: &HostedFeed, object_id: &str, path: &str) -> String
     sha
 }
 
-/// Outbox bytes of `object_id` the host accepted and has not delivered.
 fn pending_outbox(store: &mut EngineStore, object_id: &str) {
     store
         .write_with(&NoFaults, |tx| {
@@ -2878,11 +2861,6 @@ fn a_document_at_another_spelling_of_a_held_path_is_held_until_the_path_frees() 
     }
 }
 
-/// A trade of spellings stops at any one apply, before that apply commits,
-/// and the host restarts. It still ends with both documents ready at their
-/// new paths, their text intact and each change applied once, and no
-/// document is ready at a spelling of another's head at any commit or after
-/// the restart.
 #[test]
 fn a_trade_of_spellings_stopped_at_any_apply_resumes_after_a_restart() {
     let mut crashes = 0;
@@ -3210,10 +3188,6 @@ fn a_document_that_returns_at_another_path_is_held_without_looping() {
     assert_eq!(paths(&store).0, [("doc-b".to_owned(), "b.md".to_owned())]);
 }
 
-/// Parking: a return stops at its unparking, before it commits or after it
-/// commits but before its pass does, and the host restarts. Either way the
-/// return finishes once: its head comes back, the pass names its file, and
-/// nothing applies twice.
 #[test]
 fn a_return_interrupted_at_its_unparking_finishes_once_after_a_restart() {
     for unparked in [false, true] {
@@ -3260,8 +3234,6 @@ fn a_return_interrupted_at_its_unparking_finishes_once_after_a_restart() {
     }
 }
 
-/// Parking: a parked document is no longer hosted. The replica refuses
-/// to write for it before it takes a sequence.
 #[test]
 fn a_write_for_a_parked_document_is_refused() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -3290,10 +3262,6 @@ fn a_write_for_a_parked_document_is_refused() {
     assert_eq!(last_outbound_seq(&store), before);
 }
 
-/// Deferred input through the whole retirement: a Y.Doc update for `doc-b`
-/// arrives before its base and waits. `doc-b` leaves and parks with it, and
-/// its adopted activation then releases and keeps it. Once `doc-b` returns,
-/// the base its return fetches drains the update, and nothing applies twice.
 #[test]
 fn deferred_input_survives_parking_and_release_and_drains_after_the_return() {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
@@ -3328,8 +3296,6 @@ fn deferred_input_survives_parking_and_release_and_drains_after_the_return() {
     let deferred = "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE object_id='doc-b'";
     assert_eq!(count(&store, deferred), 1, "the update waits for its base");
 
-    // The adopted activation that holds `doc-b`, with its binding and the
-    // accepted history its adoption ended at.
     let lineage = dohc_engine_storage::hex_sha256(b"activation lineage");
     let binding = LiveObjectBinding {
         workspace_id: "ws".into(),
@@ -3452,11 +3418,6 @@ fn restores(store: &EngineStore) -> String {
         .unwrap()
 }
 
-/// Parking: retirement unlinked a document's restores from the settlements
-/// that resumed them and deleted both, so a restore made before it left could
-/// not be reconstructed. Parking keeps the restores, their links and their
-/// proposal bytes through a restart and the return, and the document reads
-/// the same restore generation after it.
 #[test]
 fn a_restore_made_before_parking_survives_the_return() {
     let (_scratch, path, mut store, client) = departing_b();
@@ -3888,8 +3849,6 @@ fn establish_lineage(store: &mut EngineStore, object_id: &str) {
     .unwrap();
 }
 
-/// A released hold for a document no hosted row holds stores nothing and
-/// says so, so no drain queues later updates behind it.
 #[test]
 fn a_released_hold_for_a_document_the_replica_does_not_host_stores_nothing() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -3908,7 +3867,6 @@ fn a_released_hold_for_a_document_the_replica_does_not_host_stores_nothing() {
     assert_eq!(read_hosted_replica(&store, "ws").unwrap().unwrap(), before);
 }
 
-/// What this connection has written, to show a probe wrote nothing.
 fn total_changes(store: &EngineStore) -> u64 {
     store
         .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
@@ -4050,8 +4008,6 @@ fn ready_bound_richdoc_b() -> (
     (scratch, path, store, client, base, echo, lineage)
 }
 
-/// Queue `kind` `update` of `doc-b` on `lineage`, as `peer`'s `seq` at
-/// relay position `relay_seq`, as a drain leaves one queued.
 fn queue_b(
     store: &mut EngineStore,
     seq: i64,

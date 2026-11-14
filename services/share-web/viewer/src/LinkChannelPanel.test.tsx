@@ -192,7 +192,6 @@ it("shows an agent that joined with the link with the agent mark, then the link 
     node.getAttribute("aria-label"),
   );
   expect(marks).toEqual(["Agent", "Link holder"]);
-  // The same mark as any other agent's, with no square of its own.
   expect(posted.querySelector(".chat-agent-mark")?.childElementCount).toBe(0);
   expect(posted.querySelector(".chat-agent-mark")?.className).toBe("chat-agent-mark");
 });

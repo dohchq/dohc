@@ -93,7 +93,6 @@ const view = (state: ChatWakeView["state"]): ChatWakeView => ({
 });
 const waiting: WaitingChatWake = { ...view("waiting"), state: "waiting", candidate };
 
-/** Each read answers a page the test queued, or parks until its consumer stops. */
 function fakeRelay() {
   const reads: string[] = [];
   const aborted: string[] = [];
@@ -160,9 +159,7 @@ function fakeRelay() {
     claims,
     confirms,
     client,
-    /** Resolves once `count` reads have parked. */
     untilReads: (count: number) => until(() => reads.length, count),
-    /** Resolves once `count` parked reads have ended. */
     untilAborted: (count: number) => until(() => aborted.length, count),
     winClaims: () => {
       wins = true;
@@ -207,7 +204,6 @@ function memoryIntents(rows: ChatWakeIntent[] = []) {
   return { state, store };
 }
 
-/** A workspace where the wake's message, thread, and agent all allow it. */
 function readyWorkspace(over: Partial<ChatWakeWorkspace> = {}): ChatWakeWorkspace {
   return {
     current: () => true,
@@ -229,7 +225,6 @@ function readyWorkspace(over: Partial<ChatWakeWorkspace> = {}): ChatWakeWorkspac
   };
 }
 
-/** Records each publish and withdrawal, and whether that account's reader had stopped by then. */
 function fakeRoster(relay: ReturnType<typeof fakeRelay>) {
   const calls: Array<{ kind: "reconcile" | "withdraw"; scope: string; readerStopped: boolean }> =
     [];
@@ -267,7 +262,6 @@ function fakeRoster(relay: ReturnType<typeof fakeRelay>) {
         : new Promise<void>((resolve) => {
             watchers.push({ at, resolve });
           }),
-    /** Withdrawals from now on never answer, as when the server hangs. */
     hangWithdrawals: () => {
       withdrawal = new Promise<void>(() => undefined);
     },
@@ -279,7 +273,6 @@ function setup(over: Partial<ChatWakeLifetimeDeps> = {}, rows: ChatWakeIntent[] 
   const intents = memoryIntents(rows);
   const roster = fakeRoster(relay);
   const deps: ChatWakeLifetimeDeps = {
-    on: true,
     intents: intents.store,
     roster: roster.roster,
     client: vi.fn(relay.client),
@@ -303,19 +296,6 @@ const NOTHING_NEW = { applied: false, recovered: false } as const;
 const APPLIED = { applied: true, recovered: false } as const;
 
 describe("the chat wake lifetime", () => {
-  it("starts nothing while chat wakes are off", async () => {
-    const w = setup({ on: false });
-    w.lifetime.credentialsChanged(session("A"), true);
-    w.lifetime.start();
-    // The start transition has run.
-    await turn();
-    expect(w.deps.client).not.toHaveBeenCalled();
-    expect(w.intents.state.lists).toBe(0);
-    await w.lifetime.runnersChanged();
-    await w.lifetime.stop();
-    expect(w.roster.calls).toEqual([]);
-  });
-
   it("reads only from startup, with no window or focus, and once per snapshot", async () => {
     const w = setup();
     const a = session("A");
@@ -325,7 +305,6 @@ describe("the chat wake lifetime", () => {
     expect(w.deps.client).not.toHaveBeenCalled();
     w.lifetime.start();
     await w.relay.untilReads(1);
-    // The same snapshot again changes nothing.
     w.lifetime.credentialsChanged(a, true);
     w.lifetime.start();
     await turn();
@@ -342,7 +321,6 @@ describe("the chat wake lifetime", () => {
     const a = session("A");
     w.lifetime.credentialsChanged(a, true);
     w.lifetime.start();
-    // A's recovery is inside the intent file.
     await w.intents.state.listEntered.promise;
     expect(w.deps.client).toHaveBeenCalledExactlyOnceWith(a);
     const b = session("B");
@@ -433,7 +411,6 @@ describe("the chat wake lifetime", () => {
     // The wake came before its message: it asked for one pull and waits.
     await w.relay.untilReads(1);
     expect(syncs).toBe(1);
-    // That pull came back empty: nothing to check again, so no second pull.
     await w.lifetime.pulled(NOTHING_NEW);
     expect(syncs).toBe(1);
     // Reaching the relay again is worth another look.
@@ -558,7 +535,6 @@ describe("rows a person sees", () => {
     w.lifetime.credentialsChanged(session("A"), true);
     w.lifetime.start();
     await w.relay.untilReads(1);
-    // No synced workspace yet, so no row anywhere.
     expect(shown).not.toHaveBeenCalled();
     workspaces = ["ws"];
     await w.lifetime.pulled(APPLIED);
@@ -592,7 +568,6 @@ describe("rows a person sees", () => {
     await w.lifetime.pulled(APPLIED);
     expect(report).toHaveBeenCalledTimes(2);
     expect(report).toHaveBeenLastCalledWith("ws", "parked", intentOf("won"));
-    // Shown now, so a later pass doesn't show it again.
     await w.lifetime.pulled(APPLIED);
     expect(report).toHaveBeenCalledTimes(2);
     workspace = readyWorkspace();
@@ -670,7 +645,6 @@ describe("publishing and withdrawing this computer's agents", () => {
     await w.roster.untilCalls(2);
     expect(w.roster.calls).toEqual([reconcile("A"), withdraw("A")]);
     expect(w.relay.aborted).toEqual(["A"]);
-    // The withdrawal never answers, and the next account still starts.
     w.lifetime.credentialsChanged(session("B"), true);
     await w.relay.untilReads(2);
     await w.roster.untilCalls(3);

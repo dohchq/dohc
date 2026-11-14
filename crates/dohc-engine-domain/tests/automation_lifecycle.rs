@@ -1,10 +1,3 @@
-//! Added and removed records (ADR 0008): reconcile claims a record whose file
-//! a moment on this computer brought into its Collection or took out of it,
-//! once per automation, keyed by that moment. A moment synced from another
-//! computer, a moment older than the subscription or the Collection, a merge
-//! replaying another version's change, and every binding change with no such
-//! moment (frontmatter breaking and healing) claim nothing.
-
 use dohc_engine_domain::{
     AutomationChangeKind, AutomationClaim, AutomationFactValue, AutomationSubscription,
     AutomationTrigger, CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion,
@@ -116,7 +109,6 @@ fn moment_order(store: &EngineStore, moment_id: &str) -> i64 {
         .expect("moment order")
 }
 
-/// One reconcile pass of main and its lifecycle claims, in one transaction.
 fn reconcile(store: &mut EngineStore, now_ms: i64) -> Vec<AutomationClaim> {
     reconcile_version(store, MAIN, now_ms)
 }
@@ -208,9 +200,6 @@ fn a_record_added_and_removed_on_this_computer_claims_once_each() {
         "a second pass adds nothing"
     );
 
-    // Breaking the frontmatter unbinds the record, but its file never left
-    // the Collection: no removal. Healing it binds the record again under
-    // the same creating moment: no second addition.
     write(
         &mut store,
         "tasks/alpha.md",
@@ -315,8 +304,6 @@ fn served_facts(
     served
 }
 
-/// A record moved out of its Collection is removed by the move, even when
-/// the moved file is edited before reconcile runs.
 #[test]
 fn a_record_moved_out_of_its_collection_is_removed_by_the_rename() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -409,9 +396,6 @@ fn a_synced_or_older_moment_claims_nothing() {
     );
 }
 
-/// A record an automation creates declares the automation as its author, so
-/// the writing automation never claims its own creation and a creation at
-/// the chain depth cap records a stop instead of running.
 #[test]
 fn an_automation_authored_creation_keeps_the_self_skip_and_the_depth_cap() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -471,8 +455,6 @@ fn an_automation_authored_creation_keeps_the_self_skip_and_the_depth_cap() {
     );
 }
 
-/// Expiring run history keeps an added claim's key, so a record whose
-/// binding comes back later is not added twice.
 #[test]
 fn a_pruned_added_claim_keeps_its_key() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -559,8 +541,6 @@ fn a_pruned_added_claim_keeps_its_key() {
     );
 }
 
-/// A record made on a branch is added there, once. Merging it into main
-/// replays that change: main binds the record and claims nothing more.
 #[test]
 fn a_record_merged_from_a_branch_is_added_once() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -635,9 +615,6 @@ fn a_record_merged_from_a_branch_is_added_once() {
     assert_eq!(bound, 1, "main did bind the merged record");
 }
 
-/// A folder that becomes a Collection around its files adds none of them,
-/// whether its schema is created or renamed in from a sibling file; a file
-/// created in it afterwards is added.
 #[test]
 fn a_collection_made_around_existing_files_adds_none_of_them() {
     for renamed_in in [false, true] {
@@ -778,9 +755,6 @@ fn a_refused_import_leaves_the_moment_local() {
     );
 }
 
-/// A record bound with only its `id` is added with no values. Its first
-/// field write is a change that every automation hears, including one that
-/// also wants added records, so none misses the first values.
 #[test]
 fn a_record_added_with_only_its_id_claims_its_first_values_as_a_change() {
     let scratch = ScratchDir::new().expect("scratch");

@@ -228,8 +228,6 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     expect(secretChange).toMatchObject({ status: "modified", protected: true });
     expect(secretChange?.currentText).toBeUndefined();
     expect(secretChange?.incomingText).toBeUndefined();
-    // The comparison the assertions above read was answered by the engine's
-    // protected comparison, not by a text diff of a plaintext row.
     expect(requests.map((request) => request.method)).toContain(VERSIONED_METHOD.secretsCompare);
     // Absence claim: `currentText`/`incomingText` are the fields a text change
     // carries, so this catches a protected change routed as text.

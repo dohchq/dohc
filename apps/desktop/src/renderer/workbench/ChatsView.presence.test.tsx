@@ -15,9 +15,6 @@ import type { DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent } from "../../testing/agentSettings";
 import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
 
-// Presence in the Chats surface: gated by collaboration, calm, and dormant
-// for solo.
-
 type TestChatsViewProps = Omit<Parameters<typeof ProductionChatsView>[0], "workspaces"> & {
   workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
 };
@@ -100,7 +97,6 @@ const bridgeMock = {
   createChatChannel: vi.fn(),
   startChannelThread: vi.fn(),
   setChatReaction: vi.fn(),
-  // DM presence: the DM surface loads through syncDms.
   syncDms: vi.fn(),
   acceptDm: vi.fn(),
   declineDm: vi.fn(),

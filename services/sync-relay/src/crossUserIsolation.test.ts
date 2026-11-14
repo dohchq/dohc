@@ -26,8 +26,6 @@ import {
 
 afterEach(closeTestStorages);
 
-// A shared PresenceHub can be injected so a test can assert the hub holds the
-// ephemeral state the durable tables never see.
 function handler(storage: SyncRelayStorage, presence?: PresenceHub): SyncRelayHandler {
   return testHandler(storage, { presence, nowMs: () => 4242 });
 }
@@ -428,7 +426,6 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
     expect(forgedReaction.status).toBe(403);
     expect((await json(forgedReaction)).code).toBe("authorship_mismatch");
 
-    // Nothing from either rejected batch was admitted.
     const page = await json(await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`)));
     expect(JSON.stringify(page)).not.toContain("SENTINEL-FORGED-MESSAGE");
 
@@ -839,16 +836,12 @@ describe("MU-C5 · presence is never journaled to any durable table", () => {
       }),
     );
 
-    // The state is live in-memory in the hub only.
     expect(presence.stats().entries).toBe(2);
 
-    // The durable log holds the moment but NO presence op.
     const page = storage.fetchLogPage({ workspaceId: WORKSPACE, sinceRelaySeq: 0, limit: 500 });
     expect(page.rows.length).toBeGreaterThan(0);
     expect(page.rows.some((row) => row.opKind.startsWith("presence"))).toBe(false);
 
-    // Exhaustive: scan every durable table for the presence sentinel. Presence
-    // is purely ephemeral, so it must appear in none of them.
     const raw = inspectDatabase(dbPath, { readOnly: true });
     try {
       const tables = raw

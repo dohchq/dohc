@@ -538,7 +538,8 @@ async fn full_cycle(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelop
     }
 }
 
-async fn settle_for_cycle(actor: &ActorHandle, root: std::path::PathBuf) {
+/// Settles the document and returns its moment, which no sweep has sent yet.
+async fn settle_doc(actor: &ActorHandle, root: std::path::PathBuf) -> String {
     use rusqlite::OptionalExtension;
     let (claim,head)=actor.run(|store,_| {
         let claim=read_marker(store,&key())?.unwrap().lineage_claim_id;
@@ -566,11 +567,16 @@ async fn settle_for_cycle(actor: &ActorHandle, root: std::path::PathBuf) {
         .settled()
         .unwrap();
     assert!(settled.materialized);
+    settled.moment_id
+}
+
+async fn settle_for_cycle(actor: &ActorHandle, root: std::path::PathBuf) {
+    let moment_id = settle_doc(actor, root).await;
     actor
         .run(move |store, _| {
             store.write_with(&NoFaults, |tx| {
-                let published: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND imported=0 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?2)",rusqlite::params![WORKSPACE,settled.moment_id],|row|row.get(0)).map_err(|error| dohc_engine_sync::SyncError::Storage(StorageError::persist_public(error)))?;
-                if !published { dohc_engine_sync::journal_moment_append_in_tx(tx, WORKSPACE, &settled.moment_id)?; }
+                let published: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND imported=0 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?2)",rusqlite::params![WORKSPACE,moment_id],|row|row.get(0)).map_err(|error| dohc_engine_sync::SyncError::Storage(StorageError::persist_public(error)))?;
+                if !published { dohc_engine_sync::journal_moment_append_in_tx(tx, WORKSPACE, &moment_id)?; }
                 Ok::<_,dohc_engine_sync::SyncError>(())
             })?;
             Ok(())
@@ -628,4 +634,82 @@ async fn cursor_committed_crash_invalidates_writer_cache() {
     let after = append(&actor, producer.plaintext_insert(101, "c")).await;
     assert_eq!(after.misses, before.misses + 1);
     supervisor.close(&path).unwrap();
+}
+
+/// The read names exactly the new note the sync pass skips for its open
+/// editing session, and the pass sends exactly that note once it is left.
+/// The note waits either to claim its lineage or, once the session claimed
+/// it, to send the settled file.
+#[tokio::test]
+async fn first_exports_held_open_names_what_the_pass_sends_once_the_note_is_left() {
+    for claimed_live in [false, true] {
+        let (scratch, path, producer) = document_fixture(true, false, 4);
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&path, 1000).unwrap().actor;
+        let leases = LeaseRegistry::default();
+        let held = || actor.first_exports_held_open(WORKSPACE.into(), leases.clone());
+        let pass = || {
+            actor.relay_with_io(
+                false,
+                RelayOperation::CommitCursor {
+                    workspace_id: WORKSPACE.into(),
+                    cursor: cycle_cursor(),
+                    now_ms: 2100,
+                },
+                leases.clone(),
+                CancellationToken::new(),
+                None,
+                |_, _| async { panic!("cursor I/O") },
+            )
+        };
+        let sent = || {
+            actor.run(|store, _| {
+                Ok(store.read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM replication_log WHERE op_kind='moment.append' \
+                         AND json_extract(payload_json,'$.objectId')='doc'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(StorageError::persist_public)
+                })?)
+            })
+        };
+
+        // The note is open before the workspace's first pass, so no pass has
+        // claimed its lineage.
+        let session = leases.acquire(&key()).unwrap();
+        pass().await.unwrap();
+        if claimed_live {
+            let (claim, _) = actor
+                .ydoc_originate_live_lineage(key(), 1500, CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(claim.is_some());
+        }
+        append(&actor, producer.plaintext_insert(4, "b")).await;
+        settle_doc(&actor, scratch.path().to_owned()).await;
+
+        assert_eq!(held().await.unwrap(), ["doc.md"], "{claimed_live}");
+        pass().await.unwrap();
+        assert_eq!(
+            sent().await.unwrap(),
+            0,
+            "the pass skips the open note: {claimed_live}"
+        );
+        assert_eq!(held().await.unwrap(), ["doc.md"], "{claimed_live}");
+
+        drop(session);
+        assert!(held().await.unwrap().is_empty(), "{claimed_live}");
+        pass().await.unwrap();
+        assert_eq!(
+            sent().await.unwrap(),
+            1,
+            "the pass sends the left note: {claimed_live}"
+        );
+        // Once its first file record is sent, opening the note again holds nothing.
+        let _session = leases.acquire(&key()).unwrap();
+        assert!(held().await.unwrap().is_empty(), "{claimed_live}");
+        supervisor.close(&path).unwrap();
+    }
 }

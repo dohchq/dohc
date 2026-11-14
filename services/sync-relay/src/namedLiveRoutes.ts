@@ -29,6 +29,7 @@ import type { createLiveTickets } from "./liveTickets.js";
 import {
   liveBrowserActor,
   type LiveBrowserContext,
+  type LiveTicketScope,
   type PersonalLiveContext,
 } from "./liveBrowserContext.js";
 import { type LinkAuthorityResolver, type PersonalAuthority } from "./linkAuthority.js";
@@ -52,7 +53,13 @@ import type { createLiveMembershipRegistry, LiveMembershipSession } from "./live
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { authorizeLinkShareAction } from "./shareAuthorization";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
-import { linkRefusal } from "./linkRefusal";
+import {
+  linkRefusal,
+  namedLiveStoppedRefusal,
+  sessionHostRefusal,
+  type SessionHostBlock,
+} from "./linkRefusal";
+import { personalLiveRefusal } from "./personalLiveDocumentRoutes";
 import { accountDisplayName } from "./accountDisplayName";
 import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot";
 import { liveEditors } from "./liveEditors.js";
@@ -145,7 +152,10 @@ type BrowserRouteOptions = LiveRouteOptions & {
   tickets: ReturnType<typeof createLiveTickets>;
   membership?: Pick<ReturnType<typeof createLiveMembershipRegistry>, "join">;
   /** Whether the session host cannot continue the document until its owner or operator acts. */
-  sessionHostBlocked?: (document: { workspaceId: string; objectId: string }) => boolean;
+  sessionHostBlocked?: (document: {
+    workspaceId: string;
+    objectId: string;
+  }) => SessionHostBlock | undefined;
 };
 type OwnerRouteOptions = LiveRouteOptions & { kind: "owner"; resolveActor: ResolveActor };
 /**
@@ -162,7 +172,10 @@ type PersonalRouteOptions = LiveRouteOptions & {
   limiter: TokenBucketLimiter;
   /** Whether the self-hosted live host is the configured host, the only one that hosts documents for agents. */
   supported(): boolean;
-  sessionHostBlocked?: (document: { workspaceId: string; objectId: string }) => boolean;
+  sessionHostBlocked?: (document: {
+    workspaceId: string;
+    objectId: string;
+  }) => SessionHostBlock | undefined;
 };
 export function createNamedLiveRoutes(options: BrowserRouteOptions) {
   return createLiveRoutes(options);
@@ -258,6 +271,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
     accountId,
     name: (await accountDisplayName(options.lookupUserDisplayName, accountId)) ?? "Unnamed",
   });
+
+  // Whether the caller's scope reaches a current binding of the document, as a ticket for it needs.
+  const reaches = (scope: LiveTicketScope, objectId: string) =>
+    storage.resolveLiveObjectHostBinding(scope, objectId).kind === "current";
 
   let closed = false,
     pendingRequests = 0;
@@ -363,19 +380,18 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           check();
           if (!options.limiter.allow(authority.callerKey, Date.now()))
             throw relayError("link_read_rate_limited");
-          if (
-            !options.supported() ||
-            sessionHostBlocked?.({
-              workspaceId: workspaceId as string,
-              objectId: objectId as string,
-            })
-          )
-            return refusal();
-          const minted = await options.tickets.mint(
-            { objectId },
-            personalLiveContext(authority, workspaceId as string),
-            signal,
-          );
+          if (!options.supported()) return refusal();
+          const context = personalLiveContext(authority, workspaceId as string);
+          const block = sessionHostBlocked?.({
+            workspaceId: workspaceId as string,
+            objectId: objectId as string,
+          });
+          // A held document the agent reaches gives the reason its open gives. Anything else reads as not found.
+          if (block)
+            return block === "held" && reaches(context, objectId as string)
+              ? personalLiveRefusal("live-edit-unadmitted")
+              : refusal();
+          const minted = await options.tickets.mint({ objectId }, context, signal);
           signal.throwIfAborted();
           check();
           return minted
@@ -428,10 +444,17 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
               ? linkRefusal("link_live_unavailable")
               : refusal();
         }
-        if (
-          sessionHostBlocked?.({ workspaceId: context.workspaceId, objectId: objectId as string })
-        )
-          return context.kind === "link" ? linkRefusal("link_live_unavailable") : refusal();
+        const block = sessionHostBlocked?.({
+          workspaceId: context.workspaceId,
+          objectId: objectId as string,
+        });
+        // A link holder's reach was checked above. An invited editor learns why only for a document they reach.
+        if (block)
+          return context.kind === "link"
+            ? sessionHostRefusal(block)
+            : block === "held" && reaches(context, objectId as string)
+              ? namedLiveStoppedRefusal()
+              : refusal();
         const minted = await options.tickets.mint({ objectId }, context, signal);
         signal.throwIfAborted();
         check();

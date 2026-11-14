@@ -3,8 +3,6 @@ import { type NetworkShareProbe, onNetworkShare } from "./networkShare";
 
 const HOME = "/Users/ada";
 
-// The Mac mini's mount listing, plus shares, one of them inside Documents,
-// and an autofs folder.
 const MOUNTS = `/dev/disk3s3s1 on / (apfs, sealed, local, read-only, journaled)
 devfs on /dev (devfs, local, nobrowse)
 /dev/disk3s1 on /System/Volumes/Data (apfs, local, journaled, nobrowse, protect, root data)
@@ -15,8 +13,6 @@ nas.local:/export/home/ada on /System/Volumes/Data/home/ada (nfs, nodev, nosuid,
 //ada@nas.local/Team on /Users/ada/Documents/Team (smbfs, nodev, nosuid, mounted by ada)
 `;
 
-// A computer whose links and volumes the test names. Every other path
-// resolves to itself.
 function computer(
   options: {
     platform?: NodeJS.Platform;

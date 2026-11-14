@@ -428,12 +428,8 @@ describe("the document open's capture-chain hold", () => {
     const root = await createTestScratch("dohc-ydoc-deadline-");
     await write(root, "note.md", "hello\n");
     const loopback = new VersionedLoopbackEngine();
-    // A daemon that takes the lease and then cannot get its reply out. It is
-    // stateful on purpose: the busy refusal is a consequence of the first open
-    // landing, not a canned answer, so a fake that never took the session
-    // could not produce it either.
     let leaseHeld = false;
-    const client = {
+    const daemonWithBlockedOpenReply = {
       close: () => undefined,
       onEvent: () => () => undefined,
       async sendRequest(request: Request): Promise<Response> {
@@ -467,7 +463,9 @@ describe("the document open's capture-chain hold", () => {
         return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
       },
     };
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => daemonWithBlockedOpenReply,
+    });
     const engine = createWorkspaceEngineCapture({
       workspaceId: WORKSPACE_ID,
       rootPath: root,
@@ -677,7 +675,6 @@ describe("the document open's capture-chain hold", () => {
             applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
             close: async () => {
               closes += 1;
-              // The refusal release: the budget stopped waiting for it.
               if (closes === 1) {
                 throw new EngineWorkspaceRetryDeadlineError(
                   WORKSPACE_ID,
@@ -785,8 +782,6 @@ describe("the document open's capture-chain hold", () => {
           applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async (closeOptions?: { settle?: boolean; settleOnRefusal?: boolean }) => {
             closeCalls.push({ ...closeOptions });
-            // The daemon keeps refusing: the lineage is dirty and the file it
-            // would settle over is still uncaptured.
             throw new DaemonRefusalError(
               {
                 code: "INVALID_PARAMS",
@@ -815,8 +810,6 @@ describe("the document open's capture-chain hold", () => {
       ).toBeInstanceOf(YDocUncapturedArtifactError);
       expect(evicts).toBe(1);
 
-      // "Try again" binds a fresh session rather than discharging a retained
-      // orphan, and answers the same honest refusal.
       const retry = await engine
         .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
         .catch((error: unknown) => error);

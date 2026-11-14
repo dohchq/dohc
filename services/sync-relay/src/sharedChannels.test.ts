@@ -21,12 +21,6 @@ import {
   testStorage,
 } from "./testing";
 
-// Shared channels: the route-level adversarial suite for the bidirectional
-// chat grant: the member append route, the chat branch of the fail-closed
-// share filter, read-write vs read-only enforcement, and revocation.
-// Throughout: server-derived identity, fail-closed filters, byte-identical
-// generic 404s for every unauthorized probe.
-
 afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
@@ -1310,7 +1304,6 @@ describe("shared channels (MU-C4)", () => {
       ),
     );
     expect(response.status).toBe(404);
-    // Nothing landed in the owner's bucket — the transaction rolled back.
     const ownerLog = await json(
       await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)),
     );

@@ -614,7 +614,7 @@ const LISTED_CAPABILITIES = {
   ),
   "agent.thread.connect": capability(
     "Connect one of your agents to its own thread in another tool.",
-    { ipc: ["readyAgentThread"] },
+    { ipc: ["readyAgentThread", "changeAgentThread"] },
   ),
   "agent.thread.lines.read": capability(
     "Read what your agents' threads are doing with the messages dohc forwarded.",
@@ -622,6 +622,17 @@ const LISTED_CAPABILITIES = {
   ),
   "agent.thread.open": capability("Open one of your agents' threads in its own tool.", {
     ipc: ["openAgentThread"],
+  }),
+  "agent.thread.question.answer": capability(
+    "Answer a question one of your agents' threads asks you in its own tool.",
+    { ipc: ["answerAgentThreadQuestion"] },
+  ),
+  "agent.thread.question.read": capability(
+    "Read a question one of your agents' threads asks you in its own tool.",
+    { ipc: ["readAgentThreadQuestion"] },
+  ),
+  "agent.thread.read": capability("Read which thread one of your agents is connected to.", {
+    ipc: ["readAgentThread"],
   }),
   "agent.thread.t3code.allow": capability("Allow dohc in T3 Code on this computer.", {
     ipc: ["allowDohcInT3Code", "cancelAllowDohcInT3Code"],

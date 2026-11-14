@@ -1,6 +1,3 @@
-//! A capture released without adopting in one relay namespace, beside the
-//! document's activation in another.
-
 use super::*;
 
 const ELSEWHERE: &str = "other";

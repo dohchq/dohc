@@ -1,4 +1,5 @@
 import { liveConnectionLimitMessage } from "@dohc/live-session-contract/live-connection";
+import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
@@ -14,7 +15,13 @@ export type NamedDocumentSession = ReturnType<
 >;
 const OPENING = ["authorizing", "connecting", "syncing"];
 // A disconnected page reconnects by itself and sends a pending change again, except for these reasons.
-const NO_AUTOMATIC_RETRY = ["authority-unavailable", "access-removed", "link-full", "paused"];
+const NO_AUTOMATIC_RETRY = [
+  "authority-unavailable",
+  "access-removed",
+  "link-full",
+  "paused",
+  "live-stopped",
+];
 // Trying again can't change these, so the page offers no Try again.
 const FINAL = ["access-removed", "link-full"];
 /** Editing stopped with a change the page will not send again by itself. */
@@ -51,6 +58,7 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
     return "This link cannot take more people. Ask the owner for a new link.";
   if (state.reason === "authority-unavailable")
     return "dohc could not open the file for editing. Try again.";
+  if (state.reason === "live-stopped") return LINK_REFUSALS.link_live_stopped.error;
   if (state.reason === "host-unavailable")
     return "The server could not open the file for editing. dohc keeps trying.";
   return "Editing paused. Check your connection, then retry.";
@@ -119,6 +127,7 @@ export function NamedDocumentEditor({
         <button className="handoff-button secondary" onClick={() => void session.reconnect()}>
           {state.reason === "authority-unavailable" ||
           state.reason === "host-unavailable" ||
+          state.reason === "live-stopped" ||
           liveConnectionLimitMessage(state.reason)
             ? "Try again"
             : "Retry connection"}

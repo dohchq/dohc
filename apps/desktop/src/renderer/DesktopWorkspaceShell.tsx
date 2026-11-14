@@ -3730,28 +3730,44 @@ export function DesktopWorkspaceShell(props: {
         .then(
           (saved) => {
             if (workspaceIdRef.current !== id) return;
-            const opened = saved.copyPath ?? saved.packagePath;
-            const slash = saved.packagePath.lastIndexOf("/");
-            const folder = slash < 0 ? "the workspace folder" : saved.packagePath.slice(0, slash);
             const kept =
               saved.keptEdits === "copied"
                 ? " The server may now release your kept edits."
                 : saved.keptEdits === "kept"
                   ? ` Your kept edits stay ${saved.storedOn === "server" ? "on the server" : "on this computer"}.`
                   : "";
+            const copy = saved.copyPath;
+            if (copy === null) {
+              // The package is in .dohc/local, which dohc does not open as a
+              // file, so the row stays to say where it is and copy its path.
+              // Unless dohc still keeps the edits, the package is their only
+              // record, so it is not called a copy.
+              const them = saved.keptEdits === "kept" ? "A copy of them is" : "They are";
+              showWarningNotice(
+                `dohc could not make a readable copy of your kept edits for ${path}. ${them} saved on this computer, in the file below.${kept}`,
+                [saved.packagePath],
+              );
+              return;
+            }
+            const slash = copy.lastIndexOf("/");
+            const folder = slash < 0 ? "the workspace folder" : copy.slice(0, slash);
+            const listed =
+              saved.notInNote === 0
+                ? ""
+                : saved.notInNote === 1
+                  ? " 1 edit didn't fit in the note and is listed at the end."
+                  : ` ${saved.notInNote} edits didn't fit in the note and are listed at the end.`;
             showSuccessNotice(
-              saved.copyPath
-                ? `Saved a recovery copy of ${path} in ${folder}.${kept}`
-                : `Saved your kept edits for ${path} as a recovery package in ${folder}. dohc could not make a readable copy.${kept}`,
+              `Saved a recovery copy of ${path} in ${folder}.${listed}${kept}`,
               undefined,
               undefined,
               {
                 label: "Open",
                 run: () => {
-                  if (workspaceIdRef.current === id) openFile(opened);
+                  if (workspaceIdRef.current === id) openFile(copy);
                 },
               },
-              { to: "file", path: opened },
+              { to: "file", path: copy },
             );
           },
           (error: unknown) => {
@@ -3765,7 +3781,7 @@ export function DesktopWorkspaceShell(props: {
       recoverySaves.current.set(key, saving);
       return saving;
     };
-  }, [openFile, showSuccessNotice, reportShellError]);
+  }, [openFile, showSuccessNotice, showWarningNotice, reportShellError]);
   // A held file can't go live again, so Live documents offers a copy beside
   // it. Opening the copy starts its live editing.
   const liveCopies = useRef(new Map<string, Promise<void>>());
@@ -8275,6 +8291,7 @@ export function DesktopWorkspaceShell(props: {
                                   reportError: reportShellError,
                                   focus: sharingFocus,
                                   onFocused: clearSharingFocus,
+                                  notSentWhileOpen: syncStatus?.notSentWhileOpen ?? [],
                                 }}
                                 selectedAppRoot={selectedAppRoot}
                                 openAppTab={openAppTab}
@@ -9813,6 +9830,7 @@ export function DesktopWorkspaceShell(props: {
                                 disconnectedAgents={disconnectedLinkAgents}
                                 accessContext={accessContext}
                                 server={cloudStatus?.workspaceServerUrl ?? null}
+                                notSentWhileOpen={syncStatus?.notSentWhileOpen ?? []}
                                 onOpenSharing={(target) => {
                                   setSharingFocus(target);
                                   mutateWb((state) => ({

@@ -755,8 +755,6 @@ describe("a page this computer owns live", () => {
 });
 
 describe("agent move and delete admission", () => {
-  // Runs the admission inside a stand-in for the capture seam and fails the
-  // test if anything is recorded or the disk is touched.
   async function refusingFixture() {
     const f = await fixture();
     const engine: Omit<AuthoredPathChanges, "policy"> = {

@@ -51,17 +51,16 @@ function setup(
       left = left.filter((messageId) => messageId > input.upTo.messageId);
     },
     getThread: async () => ({ thread: { id: "thread-a", title: "Hello" }, messageCount: 4 }),
-    // What was posted in the chat thread after the forwarded message.
     listMessagesPage: async () => ({ messages: replies, nextAfterMessageOrder: null }),
   } as unknown as Chats;
   const replies: Array<{ authorAgentId?: string }> = [];
-  // What the tool says the thread is doing.
   const tool: { state: T3CodeThreadState } = {
     state: {
       title: "Chief",
       working: true,
       activeRunId: null,
       waitingOnPerson: false,
+      questionId: null,
       closed: false,
       runs: [],
     },
@@ -246,7 +245,6 @@ describe("agent threads", () => {
     agentThreads.settingsChanged();
     await vi.waitFor(() => expect(forget).toHaveBeenCalledTimes(1));
 
-    // Nothing more to drop while no agent has a thread.
     agentThreads.settingsChanged();
     await settled();
     expect(forget).toHaveBeenCalledTimes(1);
@@ -337,6 +335,7 @@ describe("agent threads", () => {
           state: "working",
           sinceMs: 9_000,
           forwardedAtMs: 9_000,
+          questionId: null,
         },
       ]),
     );
@@ -355,7 +354,6 @@ describe("agent threads", () => {
     ]);
     expect(lineChanges).toContain(WORKSPACE);
 
-    // The agent posts in the chat thread: the write takes the line away.
     replies.push({ authorAgentId: "chief" });
     signalChatWrite(WORKSPACE);
     await vi.waitFor(() => expect(agentThreads.lines(WORKSPACE)).toEqual([]));
@@ -422,6 +420,60 @@ describe("agent threads", () => {
     expect(order).toEqual(["sent message", "read m1"]);
   });
 
+  it("readies another thread for an agent with its introduction, and sets nothing aside", async () => {
+    const { agentThreads, order, sent, forward } = started(setup({ chief }, ["m1", "m2"]));
+    const next = { id: "chief", name: "Chief", thread: otherThread("t3-thread-2") };
+
+    await agentThreads.change(WORKSPACE, next);
+
+    // What still waits for the agent is left to go to the thread it is saved with.
+    expect(order).toEqual(["sent intro"]);
+    expect(sent[0]).toMatchObject({ threadId: "t3-thread-2", how: "line" });
+    expect(sent[0]!.message).toContain('their agent "Chief"');
+
+    const refused = new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
+    forward.mockRejectedValueOnce(refused);
+    await expect(agentThreads.change(WORKSPACE, next)).rejects.toBe(refused);
+    await expect(agentThreads.change("ws-gone", next)).rejects.toThrow(
+      "no longer has this workspace",
+    );
+  });
+
+  it("keeps no line for a thread the agent left while the tool took a message for it", async () => {
+    const { agentThreads, forward, save, rows, tool, order } = started(setup({ chief }));
+    tool.state = {
+      ...tool.state,
+      runs: [
+        { id: "run-1", state: "working", requestedAtMs: 100, startedAtMs: 200, endedAtMs: null },
+      ],
+    };
+    // The tool holds the message for the first thread until the test lets it go.
+    let taken!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      taken = resolve;
+    });
+    forward.mockImplementationOnce(async () => {
+      await holding;
+      return { runId: "run-1" };
+    });
+    agentThreads.watch(WORKSPACE);
+    await vi.waitFor(() => expect(forward).toHaveBeenCalledTimes(1));
+
+    // The person points the agent at another thread, and then the tool answers.
+    save({ chief: { ...chief, thread: otherThread("t3-thread-2") } });
+    agentThreads.settingsChanged();
+    await settled();
+    taken();
+
+    // The first thread has the message, so it is read and goes to no other thread.
+    await vi.waitFor(() => expect(order).toEqual(["read m1"]));
+    await settled();
+    // The chat shows no line for work in a thread the agent no longer has.
+    expect(agentThreads.lines(WORKSPACE)).toEqual([]);
+    await vi.waitFor(() => expect(rows()).toEqual([]));
+    expect(forward).toHaveBeenCalledTimes(1);
+  });
+
   it("forgets a workspace's lines when the workspace leaves this computer", async () => {
     const { agentThreads, tool, rows } = started(setup({ chief }));
     tool.state = {
@@ -469,7 +521,6 @@ describe("forwardProblemWords", () => {
     ).toBe(
       "Messages for Chief are waiting. dohc is not allowed in T3 Code. Open the agent in Settings to allow dohc.",
     );
-    // An error dohc did not word for a person stays out of the notice.
     expect(forwardProblemWords(null, new Error("EACCES: /secret/path"))).toBe(
       "Messages for your agents are waiting. dohc could not give them to the agent's thread. dohc tries again by itself.",
     );

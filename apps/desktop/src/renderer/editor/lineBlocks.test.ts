@@ -318,7 +318,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("Intro\n| --- |\n    matched\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("A | B\n--- | --- | ---\n1 | 2\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("A | B | C\n--- | ---\n1 | 2\n\nAfter", 3).index).toBe(0);
-    // When they do agree it is a table, and a table row is not prose.
     expect(blockForLine("A | B | C\n--- | --- | ---\n1 | 2\n\nAfter", 5).index).toBe(1);
     expect(blockForLine("| A |\n| --- |\n| r |\n    matched\n\nAfter", 4).index).toBe(1);
   });
@@ -421,7 +420,9 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("-\titem\n\n  para\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("-    item\n  para\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("- item\n  para\n\nAfter", 2).index).toBe(0);
-    // The active item sets the column, so a wider later item moves it.
+  });
+
+  it("moves the continuation column when a later list item has a wider marker", () => {
     expect(blockForLine("- a\n\n-    b\n\n  para\n\nAfter", 5).index).toBe(1);
   });
 
@@ -551,15 +552,17 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("> intro\nmore text\n\nAfter", 2).index).toBe(0);
   });
 
+  it("ends a callout when stripping a quote marker and optional space exposes a heading", () => {
+    expect(blockForLine("> [!note]\n> # T\nMatched\n\nAfter", 3).index).toBe(1);
+    expect(blockForLine("> [!note]\n># T\nMatched\n\nAfter", 3).index).toBe(1);
+  });
+
   it("strips the quote prefix the tokenizer strips, and no more", () => {
     // One space after `>`, never a tab: `>\t# T` keeps its tab, which four
     // columns in is code rather than a heading, so the callout reads on.
     expect(blockForLine("> [!note]\n>\t# T\nMatched\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("> [!note]\n>\t- item\nMatched\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("> [!note]\n> \t# T\nMatched\n\nAfter", 3).index).toBe(0);
-    // A space after `>` is stripped, so these DO break.
-    expect(blockForLine("> [!note]\n> # T\nMatched\n\nAfter", 3).index).toBe(1);
-    expect(blockForLine("> [!note]\n># T\nMatched\n\nAfter", 3).index).toBe(1);
     // Spaces before `>` up to three keep it a quoted line; a tab does not,
     // so that line is unquoted content the callout absorbs.
     expect(blockForLine("> [!note]\n   > # T\nMatched\n\nAfter", 3).index).toBe(1);
@@ -610,7 +613,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("Intro\n\n   | A |\n   | --- |\n   | r |\n\nAfter", 7).index).toBe(2);
     expect(blockForLine("Intro\n\n   [a]: https://e.com\n    code\n\nAfter", 4).index).toBe(2);
     expect(blockForLine("Intro\n\n\t[a]: https://e.com\n    code\n\nAfter", 4).index).toBe(1);
-    // The kinds guarded earlier stay guarded: a tab makes each of these code.
     for (const marker of ["# H", "- item", "1. item", "> q", "---"]) {
       expect(blockForLine(`Intro\n\n\t${marker}\n\nAfter`, 5).index).toBe(2);
     }

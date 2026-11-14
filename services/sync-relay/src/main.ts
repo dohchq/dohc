@@ -70,6 +70,7 @@ import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
 import { readOwnerAdmissionConfig, startOwnerAdmission } from "./ownerAdmissionConfig";
 import { liveValidation } from "./liveValidation.js";
+import { startRelayMainThreadTiming } from "./relayMainThreadTiming.js";
 import { readRelayDeviceDeliveryConfig } from "./deviceLiveHostConfig";
 import { parseDeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { startPublicationOperator } from "./appPublicationOperator";
@@ -917,6 +918,7 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 // more arrive or any host lists them. Settled phone writes become tombstones,
 // and chat wakes end and go, on the same schedule.
 const AUTOMATION_PRESS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+startRelayMainThreadTiming();
 setInterval(() => {
   try {
     storage.purgeExpiredShareRemovals(Date.now());
@@ -1123,10 +1125,12 @@ const selfHost = selfHostedLive
     })
   : undefined;
 const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
-// Browsers are told live editing is unavailable while the self-hosted session host cannot continue the document.
+// Browsers are told why live editing stopped while the self-hosted session host cannot continue the document.
 const sessionHostBlocked = selfHost
   ? (document: { workspaceId: string; objectId: string }) =>
-      storage.getLiveHostControl()?.configuredMode === "service" && selfHost.stopped(document)
+      storage.getLiveHostControl()?.configuredMode === "service"
+        ? selfHost.sessionBlock(document)
+        : undefined
   : undefined;
 if (selfHost && deployment)
   serviceEnrollment = createServiceHostEnrollmentRoutes({

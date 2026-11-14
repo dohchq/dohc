@@ -22,9 +22,6 @@ import { SitePreviewPage } from "./SitePreviewPage";
 configure({ asyncUtilTimeout: 10_000 });
 vi.setConfig({ testTimeout: 20_000 });
 
-// An app's tab and its pinned panel, side by side in one window, against
-// main's real preview lifecycle.
-
 const app: SitePackageInfo = {
   root: "report",
   title: "Report",

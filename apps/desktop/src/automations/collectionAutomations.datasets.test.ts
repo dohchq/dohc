@@ -409,7 +409,6 @@ describe("Collection automations on a dataset", () => {
     const trash = async () => {
       throw new Error("A dataset keeps no trash.");
     };
-    // First, what Undo will do. Nothing is saved or sent yet.
     const asked = await f.executor.undo(
       { automationId: AUTOMATION, claimId, deletes: null },
       trash,

@@ -3,6 +3,7 @@ import {
   type EngineClient,
 } from "@dohc/workspace-engine-client/daemon";
 import { liveHostSignal } from "./liveHostSignal.js";
+import { recordEngineRequest } from "./relayMainThreadTiming.js";
 
 type Kind = "read" | "write";
 type Pending = { kind: Kind; start(): void; cancel(reason: unknown): void };
@@ -102,6 +103,7 @@ export function queueLiveHostRequests(
 
   function run(
     kind: Kind,
+    name: string,
     caller: AbortSignal | undefined,
     input: unknown[],
     work: () => Promise<unknown>,
@@ -127,6 +129,7 @@ export function queueLiveHostRequests(
         }
       };
       let timer: ReturnType<typeof setTimeout>;
+      const queuedAt = performance.now();
       const clean = () => {
         clearTimeout(timer);
         caller?.removeEventListener("abort", aborted);
@@ -138,10 +141,12 @@ export function queueLiveHostRequests(
           if (index >= 0) queue.splice(index, 1);
           clean();
           releaseInput();
+          recordEngineRequest(name, performance.now() - queuedAt, null);
           reject(reason);
         },
         start() {
           clean();
+          const startedAt = performance.now();
           // Keep the caller's input reservation until the real response settles.
           // Forwarding cancellation here could free the local slot before the peer.
           void (async () => {
@@ -156,6 +161,7 @@ export function queueLiveHostRequests(
                 options.retire(error);
               reject(error);
             } finally {
+              recordEngineRequest(name, startedAt - queuedAt, performance.now() - startedAt);
               releaseInput();
               active = false;
               pump();
@@ -207,7 +213,12 @@ export function queueLiveHostRequests(
                 property === "openLiveAppliedSync" || property === "readNextLiveApplied"
                   ? "read"
                   : "write";
-              return run(kind, caller, args.slice(0, index), () => method(...args));
+              // Times are summed by engine method, which names no note or workspace.
+              const name =
+                property === "sendRequest"
+                  ? String((args[0] as { method?: unknown } | undefined)?.method)
+                  : String(property);
+              return run(kind, name, caller, args.slice(0, index), () => method(...args));
             };
       methods.set(property, wrapped);
       return wrapped;

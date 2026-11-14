@@ -1,5 +1,3 @@
-//! Chat authority, local privacy, feed visibility, and durable dispatch traces.
-
 use dohc_engine_domain::chats::MAX_REPORTED_AGENT_CHARS;
 use dohc_engine_domain::{
     BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind, ChatChannelKind,
@@ -289,7 +287,6 @@ fn a_chat_lane_thread_stays_out_of_the_post_list_and_the_feed() {
         vec!["post-1"]
     );
 
-    // The lane rides the wire so a replica keeps the line out of its feed too.
     let payload: String = store
         .read_with(|conn| {
             conn.query_row(
@@ -482,7 +479,6 @@ fn posting_commenting_and_reacting_follow_the_thread_implicitly() {
         .expect("react");
     assert_eq!(follows(&chats, "user-cy"), vec!["post-1"]);
 
-    // An agent's reply follows nobody; a local-only author has no feed owner.
     let mut agent = send_msg("post-1", "agent-msg", None, "On it.", 50);
     agent.author_kind = ChatActorKind::Agent;
     agent.author_user_id = Some("user-ada".to_owned());
@@ -513,7 +509,6 @@ fn posting_commenting_and_reacting_follow_the_thread_implicitly() {
         .expect("comment again");
     assert!(follows(&chats, "user-bob").is_empty());
 
-    // The follow rides the wire so the person's other devices agree.
     let journaled: i64 = store
         .read_with(|conn| {
             conn.query_row(
@@ -800,8 +795,6 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         "Stamp the finish date\nStamp the finish date (automation)\nDone @ana"
     );
 
-    // Other computers get the author kind, the person, and the chain depth,
-    // never the automation.
     let payloads: Vec<serde_json::Value> = store
         .read_with(|conn| {
             let mut stmt = conn
@@ -1638,7 +1631,6 @@ fn an_owner_mark_publishes_a_coordinate_stored_without_a_record_once() {
     assert_eq!(account_mark(&store, "t1"), Some((20, "m1".to_owned())));
 }
 
-/// The coordinates the log's account read records name, oldest first.
 fn published_thread_reads(store: &EngineStore) -> Vec<(i64, String)> {
     store
         .read_with(|conn| {
@@ -1794,6 +1786,18 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
+    let follow_ops = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.follow.set'",
+                    [WS],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("follow op count")
+    };
     let mut chats = LinkedChatStore::new(&mut store);
     chats
         .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
@@ -1805,6 +1809,9 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
         )
         .expect("thread");
 
+    let implicit_poster_follow_ops = follow_ops(&store);
+    assert_eq!(implicit_poster_follow_ops, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
     let signed_out = chats
         .set_follow(
             &SetFollow {
@@ -1820,21 +1827,7 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
         )
         .expect("signed-out follow is durable");
     assert_eq!(signed_out.state, FollowState::Following);
-    let follow_ops = |store: &EngineStore| {
-        store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM replication_log \
-                     WHERE workspace_id = ?1 AND op_kind = 'chat.follow.set'",
-                    [WS],
-                    |row| row.get::<_, i64>(0),
-                )
-            })
-            .expect("follow op count")
-    };
-    // One: the poster's implicit follow of t1. The signed-out follow above
-    // journaled nothing.
-    assert_eq!(follow_ops(&store), 1);
+    assert_eq!(follow_ops(&store), implicit_poster_follow_ops);
 
     let mut chats = LinkedChatStore::new(&mut store);
     let mismatch = chats
@@ -2120,7 +2113,6 @@ fn bookmark_generation_cas_stale_worker_loses() {
     let b2 = chats.save_bookmark(&save(31), &NO_FAULTS).expect("resave");
     assert_eq!(b2.generation, 2);
 
-    // A stale worker finishing generation 1 loses: no row matches → applied=false.
     let stale = chats
         .mark_bookmark_ready(WS, "owner", &b1.bookmark_id, 1, 40, None, None, &NO_FAULTS)
         .expect("stale ready");
@@ -2199,7 +2191,6 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
             .is_none()
     );
 
-    // Complete A → the running row leaves 'running'; B becomes claimable.
     chats
         .complete_dispatch(WS, "run-A", 0, 26, &NO_FAULTS)
         .expect("complete A");

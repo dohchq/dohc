@@ -2341,6 +2341,23 @@ impl ActorHandle {
         .await
     }
 
+    /// The paths whose first file record waits only for an open editing
+    /// session to end.
+    pub async fn first_exports_held_open(
+        &self,
+        workspace_id: String,
+        leases: LeaseRegistry,
+    ) -> Result<Vec<String>, RuntimeError> {
+        self.run(move |store, _cache| {
+            store
+                .read_with(|conn| {
+                    dohc_engine_sync::first_exports_held_open_in(conn, &workspace_id, &leases)
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     /// How many changes that did not originate on this computer the engine
     /// has applied to the workspace; 0 before the first.
     pub async fn remote_changes_applied(&self, workspace_id: String) -> Result<i64, RuntimeError> {

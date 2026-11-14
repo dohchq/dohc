@@ -882,7 +882,6 @@ test(
   async () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-job-drain-"));
     const descendantPid = join(root, "descendant.pid");
-    // A relay that leaves a descendant holding its output, then exits: the job owner is left draining output.
     const relay = join(root, "relay.mjs");
     writeFileSync(
       relay,

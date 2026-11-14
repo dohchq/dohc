@@ -625,12 +625,6 @@ fn fence_and_cancel(
     *cancelled
 }
 
-/// A service host's update is held for a bootstrapped live note, and the
-/// owner's feed never reaches it. A restore fence decides it in its
-/// own transaction: the update is refused as on arrival, its bytes are kept,
-/// and the fence commits. A fence refused for another reason first decides
-/// nothing. With nothing deciding there, the same fence commits and leaves
-/// the update held.
 #[test]
 fn a_restore_fence_decides_what_the_owner_holds() {
     use dohc_engine_collab::live_update_application::{
@@ -824,14 +818,6 @@ fn a_restore_fence_decides_what_the_owner_holds() {
     }
 }
 
-/// The source settles, fences a restore, cancels it, accepts its next update
-/// at the new generation and settles that too, with no successor. That
-/// update's audit record carries the cancellation that explains its
-/// generation step. A fresh passive replica given the baseline, the control
-/// record and the update, then the audit and both settlements, matches the
-/// source after a restart and keeps the exact control record. The update
-/// without its control record refuses, and so does the audit record with its
-/// cancellation removed or altered.
 #[test]
 fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
     use dohc_engine_collab::live_update_application::passive::ReplicaRestoreCancellation;
@@ -1039,10 +1025,6 @@ fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
     }
 }
 
-/// A lineage its source bootstrapped and audited is adopted by an owner on a
-/// hosted store, which fences a restore under its adoption, cancels it, and
-/// accepts the next update. The update's record exports with the adoption
-/// and a fresh passive replica imports it after the source's event zero.
 #[test]
 #[ignore = "adoption republishes event zero instead of continuing the audited origin"]
 fn an_audited_sources_adopted_owner_exports_and_imports_its_cancelled_restore() {
@@ -1178,11 +1160,6 @@ fn an_audited_sources_adopted_owner_exports_and_imports_its_cancelled_restore() 
     assert_eq!(generations(&replica), generations(&f.store));
 }
 
-/// A bootstrap lineage accepts an update, fences and cancels two restores
-/// without settling, then accepts an update at the third generation. Its
-/// settlement covers both updates across the cancellations and keeps the
-/// bootstrap's anchor; no restore settles and no successor adopts. With the
-/// earlier cancellation missing or altered, the same settlement refuses.
 #[test]
 fn a_settlement_interval_crosses_cancelled_restores_only_through_their_evidence() {
     for case in ["kept", "missing", "altered"] {

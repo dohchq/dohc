@@ -17,6 +17,7 @@ import {
   readStream,
   readThread,
   type ChatGroup,
+  type ChatMessage,
   type ChatThread,
   type FeedAnswer,
   type FeedChanges,
@@ -82,6 +83,8 @@ export interface View<T> {
   affectedBy(changes: FeedChanges, known: Known, value: T | null): boolean;
   /** What the view shows after a read, from what it showed before and what the read answered. */
   carry?(previous: T | null, next: T): T;
+  /** The messages a value shows, so the outbox can tell which of its saved writes a read now shows. */
+  messages?(value: T): readonly ChatMessage[];
 }
 
 export const views = {
@@ -101,6 +104,7 @@ export const views = {
     return {
       id: `stream:${groupId}`,
       read: (client, workspaceId, signal) => readStream(client, workspaceId, groupId, signal),
+      messages: (value) => (value.kind === "stream" ? value.items.map((item) => item.message) : []),
       affectedBy(changes, known, value) {
         if (changes.chats === undefined) return false;
         if (changes.chats.length === 0 || known.chats === null) return true;
@@ -120,6 +124,7 @@ export const views = {
     return {
       id: `thread:${threadId}`,
       read: (client, workspaceId, signal) => readThread(client, workspaceId, threadId, signal),
+      messages: (value) => (value.kind === "thread" ? value.messages : []),
       affectedBy: (changes) =>
         changes.chats !== undefined &&
         (changes.chats.length === 0 || changes.chats.includes(threadId)),
@@ -390,6 +395,8 @@ export function createWorkspaceData(options: {
   readonly onGone?: () => void;
   /** Try again on a store that has gone: the account opens the workspace in a new store. */
   readonly reopen?: () => void;
+  /** A read from the server that still counts showed these messages. */
+  readonly onMessages?: (messages: readonly ChatMessage[]) => void;
 }): WorkspaceData {
   const { signIn, workspaceId, cache } = options;
   const holdMs = options.holdMs ?? FEED_HOLD_MS;
@@ -504,6 +511,7 @@ export function createWorkspaceData(options: {
           : answer.value;
         cache.set(scope, { view: target.view, value, cursor: answer.cursor, stale: false });
         set(target, { value, loading: false, problem: null, failures: target.state.failures });
+        if (target.view.messages) options.onMessages?.(target.view.messages(value));
         follow(from === null ? answer.cursor : laterCursor(answer.cursor, from));
       },
       (error: unknown) => {

@@ -205,17 +205,14 @@ fn generated_ts_share_version_id_rule_matches_the_rust_twin() {
 #[test]
 fn generated_ts_share_access_rule_matches_the_rust_twin() {
     let fixture = fixture();
-    // The level SET, not just the parse rule: each value the TypeScript side
-    // offers must name a distinct Rust variant, in the same order. A level
-    // added on one side only cannot pass this.
-    let parsed: Vec<Option<ShareAccess>> = fixture
+    let typescript_levels_as_rust_variants: Vec<Option<ShareAccess>> = fixture
         .share_access
         .values
         .iter()
         .map(|value| ShareAccess::parse(value))
         .collect();
     assert_eq!(
-        parsed,
+        typescript_levels_as_rust_variants,
         vec![
             Some(ShareAccess::View),
             Some(ShareAccess::Comment),

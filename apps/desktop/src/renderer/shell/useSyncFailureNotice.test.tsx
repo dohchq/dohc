@@ -233,8 +233,6 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()[0]!.details).toEqual([["Detail", "RelayUnreachableError: attempt 3"]]);
   });
 
-  // A reconnect retry can change the cause without counting an attempt, and
-  // the row must not keep the old message and detail.
   it("refiles the row when a reconnect retry changes the cause, without a toast", () => {
     const view = renderNotice({
       failure: { cause: "unknown", detail: "RelayError: first", sinceMs: 100, attempts: 1 },
@@ -256,8 +254,6 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()).toEqual([]);
   });
 
-  // A retry answered after the shell unmounted must not change what the next
-  // mount reads, here by bringing back a dismissed row.
   it("ignores a retry that answers after the shell unmounted", async () => {
     let answer: ((status: SyncStatusResult) => void) | null = null;
     const retryCloudSync = vi.fn(

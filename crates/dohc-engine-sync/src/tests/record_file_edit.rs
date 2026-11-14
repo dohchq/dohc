@@ -49,8 +49,6 @@ fn md(markdown: &str) -> String {
     projected(&richdoc(markdown))
 }
 
-/// A device that saves files and never opens the record, so it holds no
-/// lineage.
 fn device(origin: &str) -> (ScratchDir, EngineStore) {
     let (scratch, _path, mut a) = open_store();
     VersionedTextStore::new(&mut a)
@@ -266,7 +264,6 @@ fn b_types(b: &mut EngineStore, cache: &mut WriterDocCache, doc: &Ydoc, typing: 
     }
 }
 
-/// Another device's Y.Doc base for Apollo, which claims B's lineage.
 fn device_c_base(b: &mut EngineStore, doc: &Ydoc) -> String {
     let sha = b
         .put_binary_blob(&doc.encode_full_state())
@@ -544,8 +541,6 @@ fn b_opens_lossy(b: &mut EngineStore, typing: &[&str]) -> Ydoc {
     doc
 }
 
-/// Each resolution of a lossy note's conflict keeps the recovery copy of
-/// B's typing, after a restart too.
 #[test]
 fn lossy_record_file_edit_conflicts_keep_the_recovery_through_each_resolution() {
     let flown = md(FLOWN);
@@ -606,9 +601,6 @@ fn a_moves_apollo(a: &mut EngineStore) -> ReplicationEnvelope {
     })
 }
 
-/// Each resolution of a move conflict leaves the record at one path, on a
-/// lineage only B holds and on one another device claimed. History keeps
-/// both sides' bytes, after a restart too.
 #[test]
 fn resolved_record_file_move_conflicts_leave_one_path() {
     let planned = md(PLANNED);
@@ -704,8 +696,6 @@ fn resolved_record_file_move_conflicts_leave_one_path() {
     }
 }
 
-/// Typing added after the conflict opened is on neither side. Choosing A's
-/// file keeps it as a recovery copy naming its typist, after a restart too.
 #[test]
 fn typing_after_a_record_conflict_opens_outlives_the_resolution() {
     let (planned, flown) = (md(PLANNED), md(FLOWN));
@@ -749,9 +739,6 @@ fn typing_after_a_record_conflict_opens_outlives_the_resolution() {
     assert!(authors.contains("typist"), "{authors}");
 }
 
-/// A file waiting for an open conflict waits alone. Pulls retain it, apply
-/// more unrelated work than one pass fetches, and move the cursor. After the
-/// person resolves and B restarts, the next pull applies the retained file.
 #[test]
 fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
     let (planned, flown) = (md(PLANNED), md(FLOWN));
@@ -923,8 +910,6 @@ fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
                 .as_deref(),
             Some(claim.as_str())
         );
-        // The replica keeps editing. Its projection moves the Y.Doc's side
-        // of the conflict and never replaces A's file.
         let delta = replica.richdoc_append_paragraph(NOTES);
         let delta_sha = b.put_binary_blob(&delta).expect("delta blob");
         let mut update = envelope(
@@ -956,9 +941,6 @@ fn record_file_edit_conflicts_survive_restart_and_redelivery_once() {
     }
 }
 
-/// Each resolution keeps its choice after a restart, on a lineage only B
-/// holds and on one another device claimed. A later file that builds on the
-/// choice comes in. Any other later file meets the choice.
 #[test]
 fn resolved_record_file_edit_conflicts_keep_the_choice_after_restart() {
     let (planned, flown) = (md(PLANNED), md(FLOWN));
@@ -1042,8 +1024,6 @@ fn resolved_record_file_edit_conflicts_keep_the_choice_after_restart() {
     }
 }
 
-/// A claimed record that never met a conflict takes a save from its head. The
-/// claimed lineage gives way, and a late edit to it becomes a recovery copy.
 #[test]
 fn a_save_from_the_head_of_a_claimed_record_comes_in() {
     let (planned, flown) = (md(PLANNED), md(FLOWN));
@@ -1098,8 +1078,6 @@ fn a_save_from_the_head_of_a_claimed_record_comes_in() {
     assert!(open_conflicts(&b).is_empty());
 }
 
-/// A claimed record that a device here applies live edits to keeps its lineage
-/// and meets a save from its head in a conflict.
 #[test]
 fn a_save_from_the_head_meets_a_record_bound_to_live_editing() {
     let (planned, flown) = (md(PLANNED), md(FLOWN));
@@ -1169,8 +1147,6 @@ fn record_file_edit_held_by_a_live_session_converges_after_it_closes() {
     assert!(open_conflicts(&b).is_empty());
 }
 
-/// Each open conflict's waiting version, as object, origin and sequence, in
-/// the order the conflicts opened.
 fn waiting(b: &EngineStore) -> Vec<(String, String, i64)> {
     let ids: Vec<String> = b
         .read_with(|conn| {
@@ -1214,7 +1190,6 @@ fn from_origin(op: &ReplicationEnvelope, origin: &str, seq: i64) -> ReplicationE
     op
 }
 
-/// B retains `ops` unapplied, as a pull does with work held behind them.
 fn b_retains(b: &mut EngineStore, ops: &[ReplicationEnvelope], texts: &[&str]) {
     hydrate(b, texts);
     let identity = read_sync_identity(b, "ws")
@@ -1224,8 +1199,6 @@ fn b_retains(b: &mut EngineStore, ops: &[ReplicationEnvelope], texts: &[&str]) {
     crate::deferred::retain(b, &identity, None, &ops, &NoFaults).expect("retain");
 }
 
-/// Retained saves of another file, or of the same file on another version,
-/// never wait behind the conflict.
 #[test]
 fn saves_of_another_file_or_version_are_not_waiting_versions() {
     let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
@@ -1249,8 +1222,6 @@ fn saves_of_another_file_or_version_are_not_waiting_versions() {
     assert!(waiting(&b).is_empty());
 }
 
-/// Only an origin's first retained save can wait behind a conflict. A save
-/// for the conflict's file behind other retained work waits on that work.
 #[test]
 fn only_the_first_retained_save_of_an_origin_is_a_waiting_version() {
     let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
@@ -1291,7 +1262,6 @@ fn only_the_first_retained_save_of_an_origin_is_a_waiting_version() {
     );
 }
 
-/// A retained row its origin already applied waits for nothing.
 #[test]
 fn an_applied_retained_save_is_not_a_waiting_version() {
     let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();

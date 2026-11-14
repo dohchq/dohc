@@ -59,8 +59,6 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    // The premise: the renderer's own read said engine-ON, and the decision
-    // has not landed.
     await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     await user.click(screen.getByTestId("activity-history"));
@@ -70,12 +68,9 @@ describe("history page", () => {
       await Promise.resolve();
     });
     expect(bridge.listHistory).not.toHaveBeenCalled();
-    // And the rail claims nothing while it knows nothing: a placeholder here
-    // would name a cause main has not established.
     expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
 
-    // The decision lands, and it is the failure. Now the rail may speak.
     await act(async () => {
       decided = true;
       decision.resolve(FAILED_HISTORY_STATUS);
@@ -157,7 +152,7 @@ describe("history page", () => {
   // must never paint there. The E2E switch spec covers this only as a smoke
   // test against the real app; here A's answer is held until B has painted.
   it("keeps a history answer workspace A asked for out of workspace B", async () => {
-    const A_CONTROL = "A_CONTROL wrote the A plan";
+    const A_VISIBLE_BEFORE_SWITCH = "A_CONTROL wrote the A plan";
     const A_STALE = "A_STALE answered after the switch";
     const B_ONLY = "B_ONLY wrote the B note";
     const heldA = deferred<TimelinePage>();
@@ -168,7 +163,7 @@ describe("history page", () => {
       if (selected === OTHER_WORKSPACE.workspaceId) {
         return historyPage([historyMoment("m-b", B_ONLY)], "main", OTHER_WORKSPACE.workspaceId);
       }
-      return holdA ? heldA.promise : historyPage([historyMoment("m-a", A_CONTROL)]);
+      return holdA ? heldA.promise : historyPage([historyMoment("m-a", A_VISIBLE_BEFORE_SWITCH)]);
     });
     const shell = (workspace: Workspace) => (
       <DesktopWorkspaceShell
@@ -183,12 +178,9 @@ describe("history page", () => {
     const user = userEvent.setup();
     const view = render(shell(WORKSPACE));
 
-    // A's answers paint in A: the control that makes the absence below mean
-    // something.
     await user.click(screen.getByTestId("activity-history"));
-    expect(await screen.findByText(A_CONTROL)).toBeTruthy();
+    expect(await screen.findByText(A_VISIBLE_BEFORE_SWITCH)).toBeTruthy();
 
-    // A asks again, and that answer is held.
     holdA = true;
     const readsBeforeHold = bridge.listHistory.mock.calls.length;
     act(() => {
@@ -209,9 +201,8 @@ describe("history page", () => {
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     await user.click(screen.getByTestId("activity-history"));
     expect(await screen.findByText(B_ONLY)).toBeTruthy();
-    expect(screen.queryByText(A_CONTROL)).toBeNull();
+    expect(screen.queryByText(A_VISIBLE_BEFORE_SWITCH)).toBeNull();
 
-    // Only now does A's held answer land, and the renderer consumes it.
     await act(async () => {
       heldA.resolve(historyPage([historyMoment("m-a-stale", A_STALE)]));
       await heldA.promise;
@@ -219,7 +210,7 @@ describe("history page", () => {
     await act(async () => {});
 
     expect(screen.queryByText(A_STALE)).toBeNull();
-    expect(screen.queryByText(A_CONTROL)).toBeNull();
+    expect(screen.queryByText(A_VISIBLE_BEFORE_SWITCH)).toBeNull();
     expect(screen.getByText(B_ONLY)).toBeTruthy();
     expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
   });
@@ -376,7 +367,6 @@ describe("history page", () => {
     const tab = screen.getByTestId("tab-dohc://moment-diff/m-1");
     expect(tab.textContent).toContain("Diff: plan.md");
 
-    // A committed refresh hides the change while its tab is open.
     broken = true;
     act(() => {
       bridge.emitWorkspaceActivity();
@@ -384,7 +374,6 @@ describe("history page", () => {
     expect(await screen.findByTestId("engine-diff-hidden")).toBeTruthy();
     await waitFor(() => expect(tab.textContent).toContain("History change"));
 
-    // Try again reopens the tab, which reads the change again and finds it hidden.
     const readsBefore = bridge.readEngineMoment.mock.calls.length;
     await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
     await waitFor(() =>
@@ -449,9 +438,6 @@ describe("history page", () => {
     await waitFor(() => expect(loadMore.hasAttribute("disabled")).toBe(false));
   });
 
-  // A version switch changes which timeline is true, so it is a boundary: an
-  // answer describing the version the user left must never paint the one they
-  // are now on, however the newest-answer race would otherwise resolve.
   it("never paints the version the user left over the one they switched to", async () => {
     const first = deferred<TimelinePage>();
     const staleRefresh = deferred<TimelinePage>();
@@ -508,7 +494,6 @@ describe("history page", () => {
     });
     expect(await screen.findByText("Wrote the note in the draft")).toBeTruthy();
 
-    // A refresh and a pagination are both in flight when the user leaves.
     act(() => {
       bridge.emitWorkspaceActivity();
     });
@@ -530,7 +515,6 @@ describe("history page", () => {
       await Promise.resolve();
     });
 
-    // Both answers from the version the user left arrive too late to matter.
     await act(async () => {
       staleRefresh.resolve(
         historyPage([historyMoment("m-stale", "Edited the note in the draft")], "draft-1"),
@@ -633,7 +617,6 @@ describe("history page", () => {
       await Promise.resolve();
     });
 
-    // The superseded early refresh answers last. It paints nothing.
     await act(async () => {
       earlyRefresh.resolve(historyPage([historyMoment("m-early", "Back on main")], "main"));
       await earlyRefresh.promise;
@@ -683,8 +666,6 @@ describe("history page", () => {
     });
     await waitFor(() => expect(failNextRead).toBe(false));
 
-    // The page renders, so History's own retry is not on screen. The banner
-    // names the lane and carries the only way back.
     const banner = await screen.findByTestId("workspace-shell-error");
     expect(banner.textContent).toContain("dohc could not refresh sync status.");
     expect(screen.queryByTestId("history-load-failed")).toBeNull();
@@ -699,7 +680,6 @@ describe("history page", () => {
     );
     expect(screen.getByTestId("workspace-shell-error-retry")).toBeTruthy();
 
-    // The workspace moved on while the lane was stale.
     nextStatus = syncingStatus;
     await user.click(screen.getByTestId("workspace-shell-error-retry"));
 

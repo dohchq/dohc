@@ -1339,7 +1339,6 @@ fn later_restore_generation_installs_the_host_checkpoint_and_quarantines_unsent_
     let key = key(&observed.binding).unwrap();
     let next = next_generation(&observed);
     let input = successor_input(&store, &next, host.clone());
-    // Preparation only captured: the old generation is still the observed one.
     assert_eq!(
         store
             .read_with(|conn| super::super::draft::descriptor_for_key_in(conn, &key))

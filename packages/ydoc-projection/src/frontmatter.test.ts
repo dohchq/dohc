@@ -49,9 +49,6 @@ function received(markdown: string): Y.Doc {
   return doc;
 }
 
-// Every value kind the canonical writer keeps: maps and arrays with a
-// `__proto__` or `constructor` key, exact integers, and a literal key spelled
-// like the integer's marker, in shared Y types or as Yjs Any.
 const MOVED_BLOCK = [
   "---",
   "deep:",

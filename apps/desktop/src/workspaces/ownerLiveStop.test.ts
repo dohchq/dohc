@@ -166,8 +166,10 @@ it("does not retire a Stop cancelled before its document transition runs", async
   expect(retire).not.toHaveBeenCalled();
 });
 
+// Proves: a release the daemon refuses with a reason it retries leaves the Stop
+// waiting, so the desktop neither reports it finished nor reports it failed.
 it.each(["owner-stop-conflict", "owner-stop-restore-pending"])(
-  "keeps the requested row after the daemon refuses release with %s",
+  "keeps the requested row waiting after the daemon refuses release with %s",
   async (message) => {
     const row = {
       binding: {
@@ -189,6 +191,8 @@ it.each(["owner-stop-conflict", "owner-stop-restore-pending"])(
         throw new EngineRequestError(1, { code: "CONFLICT", message, retry: "immediate" });
       }),
     } as unknown as EngineClient;
+    const onComplete = vi.fn(),
+      onError = vi.fn();
     await expect(
       reconcileOwnerLiveStops({
         client,
@@ -197,11 +201,15 @@ it.each(["owner-stop-conflict", "owner-stop-restore-pending"])(
         signal: new AbortController().signal,
         assertCurrent() {},
         retire: async () => 0,
+        onComplete,
+        onError,
       }),
     ).resolves.toBeUndefined();
     expect(
       await client.ownerYDocStopList({ id: 0, workspace: "handle", deadlineMs: 30_000 }),
     ).toEqual([withDocument(row)]);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   },
 );
 

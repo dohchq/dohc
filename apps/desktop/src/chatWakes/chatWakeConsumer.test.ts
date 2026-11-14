@@ -35,10 +35,6 @@ import {
 } from "./chatWakeIntents";
 import { currentChatWakeAgent } from "./chatWakeAgent";
 
-// The relay and the computer are fakes; the intent file is real. Every wait
-// is on a barrier the test controls: the relay's next parked read, a gate, or
-// a resume pass.
-
 const SCOPE = "https://dohc.test#https://relay.test#ana";
 const WAKE = `wake-${"a".repeat(32)}`;
 const OTHER_WAKE = `wake-${"b".repeat(32)}`;
@@ -282,7 +278,6 @@ function memoryIntents(): ChatWakeIntents & {
   return store;
 }
 
-/** A backoff on the (fake) timer clock that ends early when the consumer stops. */
 const timerSleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -1121,7 +1116,6 @@ describe("local checks", () => {
         "plan.md",
       ]),
     ).toBe("visible");
-    // Only a deleted file reads other threads' hints.
     expect(
       chatWakeThreadVisibility(
         thread("notes.md"),
@@ -1189,7 +1183,6 @@ describe("fix round 1", () => {
         confirms: [...w.relay.calls.confirms],
       };
 
-      // Folder syncs keep failing: recovery reads the row, can't save it again, and takes no next step.
       await consumer.resume();
       await consumer.resume();
       expect(w.relay.calls.claims).toEqual(sent.claims);

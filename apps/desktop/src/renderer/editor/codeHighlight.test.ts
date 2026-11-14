@@ -103,10 +103,6 @@ describe("computeCodeHighlightRanges", () => {
   });
 });
 
-// --- integration: real ProseMirror EditorState + schema, mirroring the
-// setNodeMarkup transaction shape codeBlockChrome.tsx's language <select>
-// dispatches on change ---
-
 function stateWithCodeBlock(language: string, text: string): EditorState {
   const schema = getDohcProseMirrorSchema();
   const doc = PMNode.fromJSON(schema, {

@@ -154,8 +154,6 @@ describe("planJoinedCommit", () => {
   it("evicts nothing for a response that is not the newest for the lane", () => {
     const order = emptyJoinedLaneOrder();
     let cache = commit(order, [], 5, ["wire-a", "wire-b"]);
-    // An older response names a narrower scope. It does not speak for what the
-    // view shows, so wire-b stays.
     cache = commit(order, cache, 4, ["wire-c"], { newestForLane: false });
     expect(cache.map((entry) => entry.channelWireId).sort()).toEqual([
       "wire-a",

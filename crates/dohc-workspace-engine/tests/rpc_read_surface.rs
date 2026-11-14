@@ -116,8 +116,6 @@ async fn secret_state_probe_tracks_workspace_wide_protected_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     let scratch = ScratchDir::new().expect("scratch");
-    // Pre-open disk content: the startup baseline captures text, binary and
-    // a secret before the first read RPC ever runs.
     write_file(scratch.path(), "notes/a.md", b"captured text");
     write_file(scratch.path(), "notes/big.md", &vec![b'x'; 64 * 1024]);
     write_file(
@@ -558,9 +556,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         .await
         .expect("close");
 
-    // A BRAND-NEW workspace: nothing captured, nothing versioned, no key.
-    // versions.active answers null when neither active nor main resolves;
-    // keyless materialize still answers null when no secret state exists.
     let fresh = ScratchDir::new().expect("fresh scratch");
     let opened = call_with_busy_retry(
         &transport,

@@ -31,9 +31,6 @@ async function newCollectionFromFileMenu(desktop: Desktop): Promise<void> {
   });
 }
 
-// New record starts a row in place, with the editor of its first field,
-// Name, open. Enter saves the record, whose file takes that name, and no
-// file tab opens.
 async function newRecordNamed(page: Page, name: string): Promise<void> {
   await page.getByTestId("collection-new-record").click();
   const input = page.locator("[data-cell-editor] input");
@@ -52,9 +49,6 @@ function fieldCell(row: Locator, fieldIndex: number): Locator {
   return row.locator('[role="gridcell"]').nth(fieldIndex + 1);
 }
 
-// Inline edit of a plain-input cell (text, number, url, a typed person id):
-// click the cell's display button, type into the editor, commit with Enter,
-// then wait for the settled value to come back from the index.
 async function editInputCell(row: Locator, fieldIndex: number, value: string): Promise<void> {
   const cell = fieldCell(row, fieldIndex);
   await cell.getByRole("button").click();
@@ -243,9 +237,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       timeout: 30_000,
     });
 
-    // The first record comes before the schema takes shape. Its file is
-    // named Web.md for the name it starts with, and keeps that name when
-    // the walkthrough renames the record in its cell below.
     await newRecordNamed(page, "Web");
     await expect(recordRows(page)).toHaveCount(1, { timeout: 30_000 });
     await expect(page.getByTestId(editorTabTestId("projects/Web.md"))).toHaveCount(0);

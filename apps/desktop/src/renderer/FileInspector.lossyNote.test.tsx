@@ -87,7 +87,6 @@ const HELD = {
 };
 const EMPTY_UPDATE = new Uint8Array([0, 0]);
 
-// What `edit` changes in the engine's document, as main forwards it.
 function change(doc: Y.Doc, edit: () => void): Uint8Array {
   const before = Y.encodeStateVector(doc);
   edit();
@@ -469,8 +468,6 @@ describe("Edit anyway", () => {
     expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
   }
 
-  // The person accepts Edit anyway and types, which sends the converting save.
-  // `reread` is what the file holds when the note reads it again.
   async function editAnyway(reread = OUTSIDE) {
     const bridge = bridgeFor([
       { text: LOSSY, contentHash: sha(LOSSY) },
@@ -566,8 +563,6 @@ describe("Edit anyway", () => {
       );
     });
 
-    // The note hides Edit anyway while consent holds, so it shows again only
-    // once the note asks again.
     await screen.findByTestId("lossy-note-edit-anyway");
     expect(screen.getByTestId("lossy-note-notice")).toBeTruthy();
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
