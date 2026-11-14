@@ -425,6 +425,7 @@ it("passes a link holder's post through as a link post with no account, and refu
     bodyTooLarge: false,
     lane: "posts",
     parentMessageId: null,
+    startsPost: false,
   });
 
   const forged = {
@@ -441,22 +442,30 @@ it("passes a link holder's post through as a link post with no account, and refu
     bodyTooLarge: false,
     lane: "posts",
     parentMessageId: null,
+    startsPost: false,
   };
-  const web = createNamedRecipientChatClient({
-    relayUrl: "http://relay.test",
-    publicOrigin: origin,
-    exchangeKey,
-    limits,
-    fetchRelay: async () =>
-      Response.json({
-        shareId: "share",
-        channelWireId: "wire",
-        messages: [forged],
-        nextCursor: 9,
-        olderCursor: null,
-      }),
-  });
-  expect((await web(request())).status).toBe(404);
+  const answering = (message: unknown) =>
+    createNamedRecipientChatClient({
+      relayUrl: "http://relay.test",
+      publicOrigin: origin,
+      exchangeKey,
+      limits,
+      fetchRelay: async () =>
+        Response.json({
+          shareId: "share",
+          channelWireId: "wire",
+          messages: [message],
+          nextCursor: 9,
+          olderCursor: null,
+        }),
+    });
+  expect((await answering(forged)(request())).status).toBe(404);
+  // Only a post starts one.
+  const human = { ...forged, authorKind: "human", authorUserId: "alice" };
+  expect((await answering(human)(request())).status).toBe(200);
+  expect((await answering({ ...human, lane: "chat", startsPost: true })(request())).status).toBe(
+    404,
+  );
 });
 
 it("isolates a full account follow pool from another account's lists, history and posts", async () => {

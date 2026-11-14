@@ -66,10 +66,15 @@ export interface NamedChatMessage {
   bodyTooLarge: boolean;
 }
 
-/** A named reader's message names its lane, and a chat reply names the message it answers. */
+/**
+ * A named reader's message names its lane, and a chat reply names the message it answers.
+ * `startsPost` marks a post's first message, so a reader whose page holds only a post's later replies
+ * does not show one of them as the post. A chat message never starts one.
+ */
 export type ThreadedChatMessage = NamedChatMessage & {
   lane: "posts" | "chat";
   parentMessageId: string | null;
+  startsPost: boolean;
 };
 
 /** A message in a follow of every Group a workspace share reaches names its Group. */
@@ -79,9 +84,15 @@ function threaded(
   message: NamedChatMessage,
   payload: unknown,
   lane: "posts" | "chat",
+  startsPost: boolean,
 ): ThreadedChatMessage {
   const parent = (payload as { parentMessageId?: unknown }).parentMessageId;
-  return { ...message, lane, parentMessageId: typeof parent === "string" ? parent : null };
+  return {
+    ...message,
+    lane,
+    parentMessageId: typeof parent === "string" ? parent : null,
+    startsPost: lane === "posts" && startsPost,
+  };
 }
 
 const linkId = (value: unknown): value is string =>
@@ -585,7 +596,7 @@ export function createNamedRecipientChat(options: {
             boundedJson({
               shareId,
               ...place,
-              message: draft && threaded(draft, payload, threadLane),
+              message: draft && threaded(draft, payload, threadLane, createThread),
             });
             return options.transport(
               new Request(request.url, {
@@ -617,7 +628,16 @@ export function createNamedRecipientChat(options: {
           return json({
             shareId,
             ...place,
-            message: message && threaded(message, stored, threadLane),
+            message:
+              message &&
+              threaded(
+                message,
+                stored,
+                threadLane,
+                message !== null &&
+                  storage.findThreadFirstMessageId(share.workspaceId, message.threadId) ===
+                    message.messageId,
+              ),
           });
         }
         return json(
@@ -699,7 +719,10 @@ function commentsOn(
 export async function readSharedChannelPage<Message extends { relaySeq: number }>(input: {
   storage: Pick<
     SyncRelayStorage,
-    "fetchChatMessages" | "fetchChannelMessages" | "findThreadCreateLane"
+    | "fetchChatMessages"
+    | "fetchChannelMessages"
+    | "findThreadCreateLane"
+    | "findThreadFirstMessageId"
   >;
   resolver: ChatShareThreadResolver;
   selector: AnyShareSelector;
@@ -749,6 +772,16 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
       lanes.set(threadId, lane);
       return lane;
     };
+    const firsts = new Map<string, string | undefined>();
+    const startsPost = (message: NamedChatMessage, lane: "posts" | "chat") => {
+      if (lane !== "posts") return false;
+      if (!firsts.has(message.threadId))
+        firsts.set(
+          message.threadId,
+          input.storage.findThreadFirstMessageId(input.workspaceId, message.threadId),
+        );
+      return firsts.get(message.threadId) === message.messageId;
+    };
     for (const row of result.rows) {
       if (row.settlementAdmission?.status === "refused") continue;
       const decision = filterOpForShare(
@@ -766,10 +799,12 @@ export async function readSharedChannelPage<Message extends { relaySeq: number }
         : null;
       if (!read) continue;
       // A file's Comments are posts.
+      const lane = comments ? "posts" : laneOf(read.threadId);
       const message = threaded(
         read,
         decision.allowed ? decision.payload : {},
-        comments ? "posts" : laneOf(read.threadId),
+        lane,
+        startsPost(read, lane),
       );
       if (comments) {
         if (comments.onFile(message.threadId)) messages.push(message);

@@ -17,7 +17,7 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 const MESSAGE_KEYS =
-  "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,lane,linkAgent,messageId,parentMessageId,relaySeq,threadId";
+  "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,lane,linkAgent,messageId,parentMessageId,relaySeq,startsPost,threadId";
 
 /** A message in a follow of every Group a workspace share reaches also names its Group. */
 function groupMessage(value: unknown): boolean {
@@ -33,6 +33,7 @@ function message(value: unknown): boolean {
     (value.lane === "posts" || value.lane === "chat") &&
     (value.parentMessageId === null ||
       (typeof value.parentMessageId === "string" && value.lane === "chat")) &&
+    (value.startsPost === false || (value.startsPost === true && value.lane === "posts")) &&
     (value.authorUserId === null || typeof value.authorUserId === "string") &&
     ((value.bodyTooLarge === true && value.body === null) ||
       (value.bodyTooLarge === false && typeof value.body === "string")) &&

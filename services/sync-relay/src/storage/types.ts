@@ -2051,6 +2051,7 @@ export interface SyncRelayStorage {
   /** Each channel's earliest create, in log order: its wire id and its name. */
   listChannelCreates(workspaceId: string): { channelWireId: string; name: string; type: "posts" | "chat" | "both" }[];
   findThreadCreateLane(workspaceId: string, threadId: string): "posts" | "chat" | undefined;
+  findThreadFirstMessageId(workspaceId: string, threadId: string): string | undefined;
   findChannelChatThread(workspaceId: string, channelWireId: string): string | null;
   // The file a thread is about, as claimed by the earliest
   // chat.thread.create for this threadId. Earliest-wins for the same reason

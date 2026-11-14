@@ -135,11 +135,11 @@ it("lists every Group and follows them all in one request, each message naming i
   ]);
   const follow = await f.chat(`messages?shareId=${f.shareId}&since=0`);
   expect(follow.status, await follow.clone().text()).toBe(200);
-  const page = await follow.json() as { messages: Array<{ body: string; channelWireId: string; threadId: string; lane: string; parentMessageId: string | null }>; channelWireId?: string };
+  const page = await follow.json() as { messages: Array<{ body: string; channelWireId: string; threadId: string; lane: string; parentMessageId: string | null; startsPost: boolean }>; channelWireId?: string };
   expect(page.channelWireId).toBeUndefined();
-  expect(page.messages.map(({ body, channelWireId, lane, parentMessageId }) => ({ body, channelWireId, lane, parentMessageId }))).toEqual([
-    { body: "Plans start here", channelWireId: "wire-plans", lane: "posts", parentMessageId: null },
-    { body: "Bring snacks", channelWireId: "wire-food", lane: "posts", parentMessageId: null },
+  expect(page.messages.map(({ body, channelWireId, lane, parentMessageId, startsPost }) => ({ body, channelWireId, lane, parentMessageId, startsPost }))).toEqual([
+    { body: "Plans start here", channelWireId: "wire-plans", lane: "posts", parentMessageId: null, startsPost: true },
+    { body: "Bring snacks", channelWireId: "wire-food", lane: "posts", parentMessageId: null, startsPost: true },
   ]);
   const posted = await f.chat("messages", "sam", { method: "POST", body: JSON.stringify({ shareId: f.shareId, channelWireId: "wire-food", id: "post-1",
     lane: "posts", body: "Count me in", authorKind: "human" }) });
@@ -148,7 +148,7 @@ it("lists every Group and follows them all in one request, each message naming i
   const replied = await f.chat("messages", "sam", { method: "POST", body: JSON.stringify({ shareId: f.shareId, channelWireId: "wire-food", id: "post-2",
     threadId: page.messages[1]!.threadId, body: "Crisps", authorKind: "human" }) });
   expect(replied.status, await replied.clone().text()).toBe(200);
-  expect((await replied.json() as { message: unknown }).message).toMatchObject({ threadId: page.messages[1]!.threadId, lane: "posts", parentMessageId: null });
+  expect((await replied.json() as { message: unknown }).message).toMatchObject({ threadId: page.messages[1]!.threadId, lane: "posts", parentMessageId: null, startsPost: false });
 });
 
 it("reads one Group's history for a member, newest first, with the cursor that follows every Group", async () => {

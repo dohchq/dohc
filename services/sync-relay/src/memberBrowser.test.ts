@@ -302,12 +302,12 @@ describe("a member's Chats in a browser", () => {
     const started = await send({ id: "p-1", lane: "posts", body: "new post" });
     expect(started.status, await started.clone().text()).toBe(200);
     const post = (await json(started)).message as { threadId: string };
-    expect(post).toMatchObject({ lane: "posts", parentMessageId: null });
+    expect(post).toMatchObject({ lane: "posts", parentMessageId: null, startsPost: true });
     expect(post.threadId).not.toBe("t-team");
 
     const replied = await send({ id: "p-2", threadId: "t-team", body: "a reply" });
     expect(replied.status, await replied.clone().text()).toBe(200);
-    expect((await json(replied)).message).toMatchObject({ threadId: "t-team", lane: "posts", parentMessageId: null, body: "a reply" });
+    expect((await json(replied)).message).toMatchObject({ threadId: "t-team", lane: "posts", parentMessageId: null, body: "a reply", startsPost: false });
 
     // The Group's chat is one conversation: a new chat message joins it, and a reply names the message it answers.
     const chatted = await send({ id: "p-3", lane: "chat", body: "I am" });
@@ -325,6 +325,27 @@ describe("a member's Chats in a browser", () => {
     expect((await send({ id: "x-parent", threadId: "t-team", parentMessageId: "msg-team", body: "x" })).status).toBe(400);
     expect((await send({ id: "x-lane", lane: "feed", body: "x" })).status).toBe(400);
     expect((await send({ id: "x-both", threadId: "t-team", lane: "posts", body: "x" })).status).toBe(400);
+  });
+
+  // A page ends wherever its limit falls, so a post's replies can arrive a page before the message that starts it.
+  it("names the message that starts each post, on whichever page it falls", async () => {
+    const { h, storage } = await seed();
+    await ownerAppend(h, [message("msg-team-reply", "t-team", "a reply"),
+      laneThread("t-team-chat", GROUP), message("msg-chat", "t-team-chat", "anyone free?")]);
+    const ana = await member(h, storage, "ana");
+    const pages: Array<Array<Record<string, unknown>>> = [];
+    let before = "";
+    do {
+      const page = await json(await chat(h, `messages?shareId=${ana.shareId}&channelWireId=${GROUP}&limit=1${before}`, "ana"));
+      pages.push(page.messages as Array<Record<string, unknown>>);
+      before = page.olderCursor === null ? "" : `&before=${String(page.olderCursor)}`;
+    } while (before);
+    expect(pages.map(page => page.map(item => [item.messageId, item.startsPost]))).toEqual([
+      [["msg-chat", false]], [["msg-team-reply", false]], [["msg-team", true]]]);
+    // A follow of every Group names it too.
+    const followed = await json(await chat(h, `messages?shareId=${ana.shareId}&since=0&limit=50`, "ana"));
+    expect((followed.messages as Array<Record<string, unknown>>).map(item => [item.messageId, item.startsPost])).toEqual([
+      ["msg-team", true], ["msg-team-reply", false], ["msg-chat", false]]);
   });
 
   it("starts only the lanes a Group's type has, and the first chat message starts its conversation", async () => {

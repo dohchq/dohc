@@ -261,6 +261,21 @@ export function findThreadCreateLane(
   return undefined;
 }
 
+/**
+ * The message that starts a thread: its earliest admitted message. The push
+ * index holds each thread's messages, so this reads one thread, not the log.
+ */
+export function findThreadFirstMessageId(storage: StorageContext, workspaceId: string, threadId: string): string | undefined {
+  const row = storage.db.prepare(
+    `SELECT json_extract(payload_json, '$.messageId') AS message_id FROM sync_relay_log INDEXED BY idx_push_message_identity
+     WHERE workspace_id = ? AND json_extract(payload_json, '$.threadId') = ?
+       AND op_kind = 'chat.message.append' AND json_valid(payload_json)
+       AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json, '$.status') IS NOT 'refused')
+     ORDER BY relay_seq LIMIT 1`,
+  ).get(workspaceId, threadId);
+  return typeof row?.message_id === "string" ? row.message_id : undefined;
+}
+
 /** A Group's chat: the earliest chat-lane thread bound to it, or null before anyone chats. */
 export function findChannelChatThread(
   storage: StorageContext,

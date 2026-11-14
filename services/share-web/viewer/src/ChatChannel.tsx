@@ -180,9 +180,13 @@ function threadView(
     for (const message of messages)
       if ((message.lane ?? "posts") === "posts")
         threads.set(message.threadId, [...(threads.get(message.threadId) ?? []), message]);
+    // History loads newest first, so once a post's first message has loaded, so have all its replies.
+    // Until then the post belongs above Load earlier messages.
     for (const [threadId, thread] of threads) {
-      shown.push(thread[0]!);
-      replies.set(thread[0]!.relaySeq, {
+      const post = thread.find((message) => message.startsPost);
+      if (!post) continue;
+      shown.push(post);
+      replies.set(post.relaySeq, {
         count: thread.length - 1,
         open: () => onOpen({ threadId, rootId: null }),
       });

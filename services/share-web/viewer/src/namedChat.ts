@@ -42,9 +42,13 @@ export interface NamedChatMessage {
   body: string | null;
   /** A link author that is an agent, signed in with the link. */
   linkAgent: boolean;
-  /** A named reader's message names its lane, and a chat reply names the message it answers. */
+  /**
+   * A named reader's message names its lane, and a chat reply names the message it answers.
+   * `startsPost` marks the message that starts a post, which can load a page after the post's replies.
+   */
   lane?: "posts" | "chat";
   parentMessageId?: string | null;
+  startsPost?: boolean;
 }
 
 /**
@@ -148,7 +152,8 @@ export function chatMessage(value: unknown): NamedChatMessage {
     (value.lane !== undefined && value.lane !== "posts" && value.lane !== "chat") ||
     (value.parentMessageId !== undefined &&
       value.parentMessageId !== null &&
-      (typeof value.parentMessageId !== "string" || value.lane !== "chat"))
+      (typeof value.parentMessageId !== "string" || value.lane !== "chat")) ||
+    (value.lane !== undefined && typeof value.startsPost !== "boolean")
   )
     throw invalid();
   return {
@@ -167,6 +172,7 @@ export function chatMessage(value: unknown): NamedChatMessage {
       : {
           lane: value.lane,
           parentMessageId: typeof value.parentMessageId === "string" ? value.parentMessageId : null,
+          startsPost: value.startsPost === true,
         }),
   };
 }

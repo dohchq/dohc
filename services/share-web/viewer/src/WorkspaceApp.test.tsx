@@ -23,10 +23,12 @@ const FILES = [
   {path: "welcome/readme.md", objectId: "object-readme", blobSha256: "c".repeat(64), contentKind: "text"},
 ];
 const TEXT: Record<string, string> = {["a".repeat(64)]: "Leave at nine.", ["b".repeat(64)]: "Fuel and food.", ["c".repeat(64)]: "Welcome."};
-const chat = (relaySeq: number, body: string, author = "ana", thread: {threadId?: string; lane?: "posts" | "chat"; parentMessageId?: string | null} = {}) => ({
+// A post's later messages pass `startsPost: false`; the relay marks only the message that starts a post.
+const chat = (relaySeq: number, body: string, author = "ana",
+  thread: {threadId?: string; lane?: "posts" | "chat"; parentMessageId?: string | null; startsPost?: boolean} = {}) => ({
   relaySeq, messageId: `m${relaySeq}`, threadId: thread.threadId ?? `t${relaySeq}`, authorUserId: author,
   authorDisplayName: author === "ana" ? "Ana" : "Sam", authorKind: "human", linkAgent: false, authorOwnerDisplayName: null, createdAtMs: relaySeq * 1000, body, bodyTooLarge: false,
-  lane: thread.lane ?? "posts", parentMessageId: thread.parentMessageId ?? null});
+  lane: thread.lane ?? "posts", parentMessageId: thread.parentMessageId ?? null, startsPost: thread.startsPost ?? (thread.lane ?? "posts") === "posts"});
 type Held = {path: string; url: URL; signal: AbortSignal; answer(value: unknown, status?: number): void};
 
 let container: HTMLDivElement, root: Root, held: Held[], posts: Record<string, unknown>[], narrow: boolean;
@@ -49,7 +51,7 @@ afterEach(async () => {
 });
 
 function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wire: string; name: string; type?: "posts" | "chat" | "both"}>; files?: typeof FILES; member?: boolean;
-  groupsFail?: number; history?: Record<string, unknown[]>; postFails?: {status: number; code: string}; openHeld?: boolean} = {}) {
+  groupsFail?: number; history?: Record<string, unknown[]>; older?: Record<string, unknown[]>; postFails?: {status: number; code: string}; openHeld?: boolean} = {}) {
   let signedIn = options.signedIn ?? true, groupsFail = options.groupsFail ?? 0;
   const files = options.files ?? FILES;
   // A test can change the level while the page is open; the next read of the workspace's meta carries it.
@@ -90,7 +92,7 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
       const place = typeof body.path === "string" ? {path: body.path} : {channelWireId: body.channelWireId};
       const threadId = typeof body.threadId === "string" ? body.threadId : undefined, parentMessageId = typeof body.parentMessageId === "string" ? body.parentMessageId : null;
       return jsonResponse({shareId: "share", ...place, message: chat(39 + posts.length, String(body.body), "sam",
-        {threadId, parentMessageId, lane: body.lane === "chat" || parentMessageId || threadId === "t-chat" ? "chat" : "posts"})});
+        {threadId, parentMessageId, lane: body.lane === "chat" || parentMessageId || threadId === "t-chat" ? "chat" : "posts", startsPost: threadId === undefined && body.lane !== "chat"})});
     }
     // A file's Comments, by the file's path.
     const path = url.searchParams.get("path");
@@ -101,9 +103,11 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
     }
     if (url.pathname === "/api/named-chat/messages" && url.searchParams.has("since")) return hold("chat", url, signal);
     if (url.pathname === "/api/named-chat/messages") {
-      const wire = url.searchParams.get("channelWireId");
-      return jsonResponse({shareId: "share", channelWireId: wire, nextCursor: 20, olderCursor: null,
-        messages: options.history?.[wire ?? ""] ?? (wire === "wire-plans" ? [chat(3, "Plans start here")] : [chat(5, "Bring snacks")])});
+      const wire = url.searchParams.get("channelWireId") ?? "", older = options.older?.[wire];
+      // A Group with an older page names its cursor, and that page has none.
+      if (url.searchParams.has("before")) return jsonResponse({shareId: "share", channelWireId: wire, nextCursor: 20, olderCursor: null, messages: older ?? []});
+      return jsonResponse({shareId: "share", channelWireId: wire, nextCursor: 20, olderCursor: older ? 2 : null,
+        messages: options.history?.[wire] ?? (wire === "wire-plans" ? [chat(3, "Plans start here")] : [chat(5, "Bring snacks")])});
     }
     throw Error(`Unexpected request ${url.pathname}`);
   });
@@ -253,7 +257,7 @@ const listed = () => [...groupPanel().querySelectorAll(".chat-list > .chat-messa
 
 it("shows a Posts Group's posts with their reply counts, and replies in a post's thread", async () => {
   server({groups: [{wire: "wire-plans", name: "plans", type: "posts"}], history: {"wire-plans": [
-    chat(3, "Plans start here", "ana", {threadId: "t-plan"}), chat(4, "Agreed", "sam", {threadId: "t-plan"}), chat(6, "Train or car?", "ana", {threadId: "t-ride"}),
+    chat(3, "Plans start here", "ana", {threadId: "t-plan"}), chat(4, "Agreed", "sam", {threadId: "t-plan", startsPost: false}), chat(6, "Train or car?", "ana", {threadId: "t-ride"}),
   ]}});
   await render(); await opened();
   expect(listed()).toEqual(["Plans start here", "Train or car?"]);
@@ -280,7 +284,7 @@ it("shows a Posts Group's posts with their reply counts, and replies in a post's
 
 it("shows a reply count at View only where a post has replies, and still opens that thread", async () => {
   server({level: "view", groups: [{wire: "wire-plans", name: "plans", type: "posts"}], history: {"wire-plans": [
-    chat(3, "Plans start here", "ana", {threadId: "t-plan"}), chat(4, "Agreed", "ana", {threadId: "t-plan"}), chat(6, "Train or car?", "ana", {threadId: "t-ride"}),
+    chat(3, "Plans start here", "ana", {threadId: "t-plan"}), chat(4, "Agreed", "ana", {threadId: "t-plan", startsPost: false}), chat(6, "Train or car?", "ana", {threadId: "t-ride"}),
   ]}});
   await render(); await opened();
   expect(listed()).toEqual(["Plans start here", "Train or car?"]);
@@ -290,6 +294,26 @@ it("shows a reply count at View only where a post has replies, and still opens t
   await click("1 reply");
   await settle(() => listed().includes("Agreed"));
   expect(groupPanel().querySelector('textarea[name="body"]')).toBeNull();
+});
+
+// History arrives a page at a time, newest first, so a post's replies can arrive a page before the message that starts it.
+it("shows a post only once the message that starts it loads, with all its replies", async () => {
+  server({groups: [{wire: "wire-plans", name: "plans", type: "posts"}],
+    history: {"wire-plans": [chat(8, "Agreed", "sam", {threadId: "t-plan", startsPost: false}), chat(9, "Train or car?", "ana", {threadId: "t-ride"}),
+      chat(10, "Me too", "ana", {threadId: "t-plan", startsPost: false})]},
+    older: {"wire-plans": [chat(3, "Plans start here", "ana", {threadId: "t-plan"})]}});
+  await render();
+  await settle(() => listed().includes("Train or car?") && following("chat").length === 1);
+  // A reply is not the post it answers.
+  expect(listed()).toEqual(["Train or car?"]);
+  expect([...groupPanel().querySelectorAll(".chat-replies")].map(node => node.textContent)).toEqual(["Reply"]);
+  await click("Load earlier messages");
+  await settle(() => listed().includes("Plans start here"));
+  expect(listed()).toEqual(["Plans start here", "Train or car?"]);
+  expect([...groupPanel().querySelectorAll(".chat-replies")].map(node => node.textContent)).toEqual(["2 replies", "Reply"]);
+  await click("2 replies");
+  await settle(() => listed().includes("Agreed"));
+  expect(listed()).toEqual(["Plans start here", "Agreed", "Me too"]);
 });
 
 it("shows a Chat Group as one conversation, and answers a message in its thread", async () => {
