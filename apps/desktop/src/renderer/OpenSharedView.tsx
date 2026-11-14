@@ -416,6 +416,7 @@ export function OpenSharedView(
             folder={folder ? displayPath(folder) : null}
             placeholder="Choose an empty folder"
             testId="open-share-choose-folder"
+            disabled={opening}
             onClick={() => void chooseFolder()}
           />
         )}

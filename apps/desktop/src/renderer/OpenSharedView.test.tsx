@@ -527,6 +527,8 @@ describe("opening a membership", () => {
       shareCode: share.shareCode,
       rootPath: "/home/sam/dohc/Community",
     });
+    // The folder it opens into is settled until the open ends.
+    expect(screen.getByTestId<HTMLButtonElement>("open-share-choose-folder").disabled).toBe(true);
     // Another share's pull says nothing here.
     act(() => progress!({ workspaceId: "w", shareId: "other", files: 9 }));
     expect(screen.queryByTestId("open-share-progress")).toBeNull();

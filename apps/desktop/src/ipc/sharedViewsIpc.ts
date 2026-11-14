@@ -257,7 +257,7 @@ export function registerSharedViewsIpcHandlers<
       }
       // fetch rejects with a TypeError when no answer arrives.
       if (error instanceof TypeError) {
-        throw new Error(`dohc could not reach ${new URL(credentials.relayUrl).host}. Check your connection.`);
+        throw new Error("dohc could not reach the server. Check your connection.");
       }
       throw error;
     }
