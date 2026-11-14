@@ -1183,7 +1183,7 @@ export function createOutbox(options: {
 }
 
 /** The relay stores a reaction's emoji trimmed and in NFC. */
-const emojiKey = (emoji: string) => emoji.trim().normalize("NFC");
+export const emojiKey = (emoji: string) => emoji.trim().normalize("NFC");
 
 /** Whether a read shows a saved record's result: its message by ID, its answer resolved, or its reaction as sent. */
 function shows(record: OutboxRecord, shown: ReadonlyMap<string, ChatMessage>): boolean {

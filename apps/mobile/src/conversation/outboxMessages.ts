@@ -12,13 +12,20 @@ export interface OutboxScope {
   readonly accountId: string;
 }
 
-/** A post or message only this phone has, in the stream it was written to. */
+/**
+ * A post, message or reply only this phone has, where it was written. `reply`: in a thread, or in a stream under the
+ * outbox post or send it waits for.
+ */
 export interface LocalRow {
   /** The message the write makes, as the server will name it. */
   readonly messageId: string;
-  readonly lane: "posts" | "chat";
+  readonly lane: "posts" | "chat" | "reply";
   readonly title?: string;
   readonly mark: LocalMark;
+  /** A post or send a reply can wait for: neither refused nor missing. */
+  readonly replyable: boolean;
+  /** The thread a saved write's result names, where a reply to it goes, or null while none is known. */
+  readonly threadId: string | null;
 }
 
 const owned = (record: OutboxRecord, scope: OutboxScope) =>
@@ -51,10 +58,37 @@ export const localMark = (record: OutboxRecord): LocalMark => ({
   body: bodyOf(record),
 });
 
+/** The row of a record whose message a read doesn't show yet, or null. */
+function row(
+  record: OutboxRecord,
+  lane: LocalRow["lane"],
+  shown: ReadonlySet<string>,
+): LocalRow | null {
+  const messageId = messageOf(record);
+  if (messageId === null || shown.has(messageId)) return null;
+  const { write } = record;
+  const mark = localMark(record);
+  return {
+    messageId,
+    lane,
+    ...(write.operation === "post" && write.args.title ? { title: write.args.title } : {}),
+    mark,
+    replyable:
+      (write.operation === "post" || write.operation === "send") &&
+      mark.state.kind !== "refused" &&
+      mark.state.kind !== "missing",
+    threadId: record.result?.kind === "saved" ? record.result.threadId : null,
+  };
+}
+
+const here = (record: OutboxRecord, scope: OutboxScope & { readonly workspaceId: string }) =>
+  owned(record, scope) && record.workspaceId === scope.workspaceId;
+
 /**
- * The account's posts and messages to one stream that its reads don't show yet, oldest first. `shown` holds the IDs of
- * the messages the stream's read shows: a record whose message is among them is the server's row now, even before the
- * outbox hands it off, so the message never shows twice.
+ * The account's posts and messages to one stream that its reads don't show yet, oldest first, each followed by the
+ * replies that wait for it to name its thread. `shown` holds the IDs of the messages the stream's read shows: a record
+ * whose message is among them is the server's row now, even before the outbox hands it off, so the message never
+ * shows twice. A reply moves to its thread once the outbox gives it one.
  */
 export function streamRows(
   state: OutboxState,
@@ -62,32 +96,59 @@ export function streamRows(
   streamId: string,
   shown: ReadonlySet<string>,
 ): LocalRow[] {
+  const parents = new Set<string>();
   return state.records.flatMap((record): LocalRow[] => {
-    if (!owned(record, scope) || record.workspaceId !== scope.workspaceId) return [];
+    if (!here(record, scope)) return [];
     const { write } = record;
-    const lane =
-      write.operation === "send" && write.args.streamId === streamId
-        ? "chat"
-        : write.operation === "post" && write.args.groupId === streamId
-          ? "posts"
-          : null;
-    const messageId = messageOf(record);
-    if (lane === null || messageId === null || shown.has(messageId)) return [];
-    return [
-      {
-        messageId,
-        lane,
-        ...(write.operation === "post" && write.args.title ? { title: write.args.title } : {}),
-        mark: localMark(record),
-      },
-    ];
+    if (
+      (write.operation === "send" && write.args.streamId === streamId) ||
+      (write.operation === "post" && write.args.groupId === streamId)
+    ) {
+      parents.add(record.operationId);
+      const local = row(record, write.operation === "send" ? "chat" : "posts", shown);
+      return local ? [local] : [];
+    }
+    // Records are in sequence order, so a reply comes after the post or send it waits for.
+    if (
+      write.operation === "reply" &&
+      write.args.threadId === null &&
+      record.dependsOn !== null &&
+      parents.has(record.dependsOn)
+    ) {
+      const local = row(record, "reply", shown);
+      return local ? [local] : [];
+    }
+    return [];
   });
 }
 
-/** A record in Messages on this phone, with the stream it was written to when it names one. */
+/** The account's replies in one thread that its read doesn't show yet, oldest first. */
+export function threadRows(
+  state: OutboxState,
+  scope: OutboxScope & { readonly workspaceId: string },
+  threadId: string,
+  shown: ReadonlySet<string>,
+): LocalRow[] {
+  return state.records.flatMap((record): LocalRow[] => {
+    if (
+      !here(record, scope) ||
+      record.write.operation !== "reply" ||
+      record.write.args.threadId !== threadId
+    )
+      return [];
+    const local = row(record, "reply", shown);
+    return local ? [local] : [];
+  });
+}
+
+/**
+ * A record in Messages on this phone, with the stream it was written to when it names one, or for a reply or a
+ * reaction, the thread it waits in once that's known.
+ */
 export interface RecoveryRow {
   readonly workspaceId: string;
   readonly streamId: string | null;
+  readonly threadId: string | null;
   readonly mark: LocalMark;
 }
 
@@ -108,7 +169,9 @@ export function recoveryRows(
         : write.operation === "post"
           ? write.args.groupId
           : null;
-    return [{ workspaceId: record.workspaceId, streamId, mark: localMark(record) }];
+    const threadId =
+      streamId === null && record.target?.kind === "thread" ? record.target.id : null;
+    return [{ workspaceId: record.workspaceId, streamId, threadId, mark: localMark(record) }];
   });
   return { rows, unreadable: state.unreadable };
 }

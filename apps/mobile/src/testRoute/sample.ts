@@ -11,6 +11,8 @@ export function openTestRoute(router: ReturnType<typeof useRouter>) {
     router.push({ pathname: "/chat/[id]", params: { id: "c-packing", name: "packing-list.md" } });
   if (route === "chat-agent")
     router.push({ pathname: "/chat/[id]", params: { id: "a-scout", name: "Scout" } });
+  if (route === "chat-thread")
+    router.push({ pathname: "/chat/[id]", params: { id: "thread-porto", thread: "1" } });
   if (route === "notices") router.navigate("/notices");
   if (route === "home") router.navigate("/home");
   if (route === "sharing") router.push("/sharing");

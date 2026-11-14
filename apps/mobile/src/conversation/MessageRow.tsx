@@ -1,8 +1,16 @@
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 import { useRouter } from "expo-router";
-import { memo, useEffect, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Reply, SmilePlus, X } from "lucide-react-native";
+import { memo, useEffect, useRef, useState } from "react";
+import {
+  AccessibilityInfo,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  type ViewInstance,
+} from "react-native";
 import Animated, {
   useAnimatedStyle,
   useReducedMotion,
@@ -10,29 +18,37 @@ import Animated, {
   withRepeat,
   withTiming,
 } from "react-native-reanimated";
+import { confirmWords } from "@dohc/interface-words/confirmations";
 import { chatWords } from "@dohc/interface-words/notices";
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import { AgentMark } from "../AgentMark";
 import { ActionPill } from "../notices/ActionPill";
 import { sampleBuild } from "../sampleBuild";
 import { useTheme, type Theme } from "../theme";
-import type { Author, LocalMark, Message, Segment } from "./types";
-import type { LocalActions } from "./useOutbox";
+import type { Author, LocalMark, Message, Reaction, ReactionMark, Segment } from "./types";
+import type { LocalActions, ReactActions } from "./useOutbox";
 
 // One message, as in Slack: an author line starts a group; follow-ups from the same author within a few minutes don't repeat it.
+// Where writes are on, a message the server has offers its reactions, Add reaction and Reply; one only this phone has
+// offers Reply when a reply can wait for it.
 export const MessageRow = memo(function MessageRow({
   message,
   continued,
   afterExtras,
   onOpenReplies,
   actions,
+  react,
+  onReply,
 }: {
   message: Message;
   continued: boolean;
   afterExtras: boolean;
   onOpenReplies?(message: Message): void;
-  /** What a message only this phone has offers. */
+  /** What a message only this phone has offers, and a reaction it keeps. */
   actions?: LocalActions;
+  /** Reactions, where writes are on. */
+  react?: ReactActions;
+  onReply?(message: Message): void;
 }) {
   const theme = useTheme();
   const paddingTop = continued ? (afterExtras ? 12 : 8) : 14;
@@ -80,34 +96,27 @@ export const MessageRow = memo(function MessageRow({
             theme={theme}
           />
         ) : null}
-        {message.reactions ? (
+        {message.local === undefined && message.threadId && react ? (
+          <MessageActions
+            message={message}
+            react={react}
+            blocked={actions?.blocked ?? false}
+            {...(onReply ? { onReply } : {})}
+            theme={theme}
+          />
+        ) : message.reactions ? (
           <View style={styles.reactions}>
             {message.reactions.map((reaction) => (
-              <Pressable
-                key={reaction.emoji}
-                hitSlop={{ top: 9, bottom: 9 }}
-                accessibilityRole="button"
-                accessibilityLabel={`${reaction.emoji} ${reaction.count}${reaction.mine ? ", yours" : ""}`}
-                style={[
-                  styles.reaction,
-                  {
-                    backgroundColor: reaction.mine ? theme.mine : theme.reaction,
-                    borderColor: reaction.mine ? theme.accent : theme.reactionLine,
-                  },
-                ]}
-              >
-                <Text style={styles.emoji}>{reaction.emoji}</Text>
-                <Text
-                  style={[
-                    styles.reactionCount,
-                    { color: reaction.mine ? theme.accent : theme.ink },
-                  ]}
-                >
-                  {reaction.count}
-                </Text>
-              </Pressable>
+              <ReactionChip key={reaction.emoji} reaction={reaction} theme={theme} />
             ))}
           </View>
+        ) : message.replyable && onReply ? (
+          <View style={styles.reactions}>
+            <ReplyButton onPress={() => onReply(message)} theme={theme} />
+          </View>
+        ) : null}
+        {message.reactionMarks?.length && actions ? (
+          <ReactionFooter marks={message.reactionMarks} actions={actions} theme={theme} />
         ) : null}
         {message.replies ? (
           <Pressable
@@ -211,6 +220,242 @@ function LocalFooter({
           />
         ) : null}
       </View>
+    </View>
+  );
+}
+
+/** The desktop's reaction choices (apps/desktop/src/renderer/workbench/chatMessages.tsx). */
+const REACTION_CHOICES = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
+
+/** One emoji's reactions. A button where it can change; dashed while this phone's reaction with it isn't settled. */
+function ReactionChip({
+  reaction,
+  onPress,
+  disabled = false,
+  theme,
+}: {
+  reaction: Reaction;
+  onPress?(): void;
+  disabled?: boolean;
+  theme: Theme;
+}) {
+  const mine = reaction.mine === true;
+  const pending = reaction.pending === true;
+  const style = [
+    styles.reaction,
+    {
+      backgroundColor: mine ? theme.mine : theme.reaction,
+      borderColor: mine ? theme.accent : theme.reactionLine,
+    },
+    pending && styles.pending,
+  ];
+  const content = (
+    <>
+      <Text style={styles.emoji}>{reaction.emoji}</Text>
+      <Text style={[styles.reactionCount, { color: mine ? theme.accent : theme.ink }]}>
+        {reaction.count}
+      </Text>
+    </>
+  );
+  const label = chatWords.reaction(reaction.emoji, reaction.count, mine);
+  if (!onPress)
+    return (
+      <View style={style} accessible accessibilityLabel={label}>
+        {content}
+      </View>
+    );
+  return (
+    <Pressable
+      hitSlop={{ top: 9, bottom: 9, left: 2, right: 2 }}
+      disabled={disabled}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ selected: mine, busy: pending, disabled }}
+      style={style}
+    >
+      {content}
+    </Pressable>
+  );
+}
+
+function ReplyButton({ onPress, theme }: { onPress(): void; theme: Theme }) {
+  return (
+    <Pressable
+      hitSlop={{ top: 9, bottom: 9, left: 4, right: 4 }}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={chatWords.reply}
+      style={[styles.reaction, styles.tool, { borderColor: theme.reactionLine }]}
+    >
+      <SymbolView
+        name="arrowshape.turn.up.left"
+        size={14}
+        weight="medium"
+        tintColor={theme.muted}
+        fallback={<Reply size={15} color={theme.muted} strokeWidth={2} />}
+      />
+    </Pressable>
+  );
+}
+
+/**
+ * Under a message the server has: its reactions, Add reaction and Reply. Add reaction opens the choices under it, and
+ * a choice or Cancel closes them and puts focus back on Add reaction. While a reaction of this phone's to the message
+ * isn't settled, or while writes wait, its reactions take no tap.
+ */
+function MessageActions({
+  message,
+  react,
+  blocked,
+  onReply,
+  theme,
+}: {
+  message: Message;
+  react: ReactActions;
+  blocked: boolean;
+  onReply?(message: Message): void;
+  theme: Theme;
+}) {
+  const [picking, setPicking] = useState(false);
+  const opener = useRef<ViewInstance>(null);
+  const disabled = blocked || message.reactionsBusy === true;
+  const problem = react.problems.get(message.id);
+  const close = () => {
+    setPicking(false);
+    requestAnimationFrame(() => {
+      if (opener.current) AccessibilityInfo.sendAccessibilityEvent(opener.current, "focus");
+    });
+  };
+  return (
+    <>
+      <View style={styles.reactions}>
+        {(message.reactions ?? []).map((reaction) => (
+          <ReactionChip
+            key={reaction.emoji}
+            reaction={reaction}
+            disabled={disabled}
+            onPress={() => react.react(message, reaction.emoji)}
+            theme={theme}
+          />
+        ))}
+        <Pressable
+          ref={opener}
+          hitSlop={{ top: 9, bottom: 9, left: 4, right: 4 }}
+          disabled={disabled}
+          onPress={() => setPicking((open) => !open)}
+          accessibilityRole="button"
+          accessibilityLabel={chatWords.addReaction}
+          accessibilityState={{ disabled, expanded: picking }}
+          style={[styles.reaction, styles.tool, { borderColor: theme.reactionLine }]}
+        >
+          <SymbolView
+            name="face.smiling"
+            size={15}
+            weight="medium"
+            tintColor={disabled ? theme.subtle : theme.muted}
+            fallback={
+              <SmilePlus size={15} color={disabled ? theme.subtle : theme.muted} strokeWidth={2} />
+            }
+          />
+        </Pressable>
+        {onReply ? <ReplyButton onPress={() => onReply(message)} theme={theme} /> : null}
+      </View>
+      {picking ? (
+        <View style={styles.picker}>
+          {REACTION_CHOICES.map((emoji) => (
+            <Pressable
+              key={emoji}
+              disabled={disabled}
+              onPress={() => {
+                react.react(message, emoji);
+                close();
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={emoji}
+              accessibilityState={{
+                disabled,
+                selected: message.reactions?.some((each) => each.emoji === emoji && each.mine),
+              }}
+              style={({ pressed }) => [
+                styles.choice,
+                { backgroundColor: pressed ? theme.panel2 : "transparent" },
+              ]}
+            >
+              <Text style={styles.choiceEmoji}>{emoji}</Text>
+            </Pressable>
+          ))}
+          <Pressable
+            onPress={close}
+            accessibilityRole="button"
+            accessibilityLabel={confirmWords.cancel}
+            style={styles.choice}
+          >
+            <SymbolView
+              name="xmark"
+              size={14}
+              weight="semibold"
+              tintColor={theme.muted}
+              fallback={<X size={16} color={theme.muted} strokeWidth={2.5} />}
+            />
+          </Pressable>
+        </View>
+      ) : null}
+      {problem ? (
+        <Text style={[styles.localText, { color: theme.danger }]} accessibilityRole="alert">
+          {problem}
+        </Text>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * The reactions this phone keeps for a message that need the person. A withheld one has Send and Discard; one the
+ * server refused, or whose message it can't find, has Discard, and its reaction shows as the server has it.
+ */
+function ReactionFooter({
+  marks,
+  actions,
+  theme,
+}: {
+  marks: readonly ReactionMark[];
+  actions: LocalActions;
+  theme: Theme;
+}) {
+  return (
+    <View style={styles.local}>
+      {marks.map(({ emoji, mark }) => {
+        const problem = actions.problems.get(mark.operationId);
+        return (
+          <View key={mark.operationId} style={styles.local}>
+            <Text style={[styles.localText, { color: theme.danger }]}>
+              {mark.state.kind === "withheld"
+                ? chatWords.reactionNotSent(emoji)
+                : chatWords.reactionRefused(emoji)}
+            </Text>
+            {problem ? (
+              <Text style={[styles.localText, { color: theme.danger }]} accessibilityRole="alert">
+                {problem}
+              </Text>
+            ) : null}
+            <View style={styles.localActions}>
+              {mark.state.kind === "withheld" ? (
+                <ActionPill
+                  label={chatWords.send}
+                  disabled={actions.blocked}
+                  onPress={() => actions.send(mark)}
+                />
+              ) : null}
+              <ActionPill
+                label={chatWords.discard}
+                disabled={actions.blocked}
+                onPress={() => actions.discardReaction(mark)}
+              />
+            </View>
+          </View>
+        );
+      })}
     </View>
   );
 }
@@ -394,6 +639,19 @@ const styles = StyleSheet.create({
   },
   emoji: { fontSize: 14 },
   reactionCount: { fontSize: 13, fontWeight: "600", fontVariant: ["tabular-nums"] },
+  /** Not settled: the border dashes, beside the button's busy state. */
+  pending: { borderStyle: "dashed" },
+  /** Add reaction and Reply: as wide as the touch needs, with no count. */
+  tool: { minWidth: 36, justifyContent: "center" },
+  picker: { flexDirection: "row", flexWrap: "wrap", gap: 2, marginTop: 4 },
+  choice: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  choiceEmoji: { fontSize: 22 },
   replies: {
     flexDirection: "row",
     alignItems: "center",

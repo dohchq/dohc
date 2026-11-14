@@ -38,9 +38,13 @@ describe("a conversation's outbox messages", () => {
         messageId: "message-1",
         lane: "chat",
         mark: { operationId: "op-1", state: { kind: "waiting" }, attempted: false, body: "Hi" },
+        replyable: true,
+        threadId: null,
       },
       you,
     );
+    // A reply to it waits for the outbox's record, and names the message it will make.
+    expect(mine.replyable).toEqual({ operationId: "op-1", messageId: "message-1", threadId: null });
     const items = conversationItems(
       [serverMessage(entry("m1", "human", "You", 0), null, ["#000000"])],
       at,

@@ -23,7 +23,13 @@ import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/sample";
 import { phoneWrites } from "../server/phoneWrites";
 import { views, type ViewState } from "../server/workspaceData";
-import type { ChatGroupKind, ChatThread, GroupStream, MissingChat } from "../server/workspaceReads";
+import type {
+  ChatGroupKind,
+  ChatMessage,
+  ChatThread,
+  GroupStream,
+  MissingChat,
+} from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
 import {
   EmptyLine,
@@ -34,10 +40,20 @@ import {
 } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { Composer, ComposerProblem, outboxProblem } from "./Composer";
-import { blockedBy, chatWrite, createWriteScope, lanesOf, type Lanes } from "./conversationWrites";
+import {
+  blockedBy,
+  chatWrite,
+  createWriteScope,
+  lanesOf,
+  replyWrite,
+  type Lanes,
+  type ReplyTarget,
+} from "./conversationWrites";
 import { MessageRow } from "./MessageRow";
-import { streamRows } from "./outboxMessages";
+import { streamRows, threadRows } from "./outboxMessages";
+import { confirmedReactions, reactionRecords, withReactions } from "./reactions";
 import { markShown, markShownPosts, shownMessages } from "./readMarks";
+import type { ReplyTo } from "./ReplyContext";
 import {
   conversationItems,
   localMessage,
@@ -49,7 +65,9 @@ import {
   useConversationWrites,
   useLocalActions,
   useOutboxState,
+  useReact,
   type LocalActions,
+  type ReactActions,
 } from "./useOutbox";
 
 // A chat or thread opened from a Notice names its workspace, says it's a thread, and may name a message to open at.
@@ -62,23 +80,48 @@ export function ServerConversation() {
     thread,
     workspace,
     message,
+    reply,
   } = useLocalSearchParams<{
     id: string;
     name?: string;
     thread?: string;
     workspace?: string;
     message?: string;
+    /** A thread opened to reply to one of its messages. */
+    reply?: string;
   }>();
   const { data } = useAccount();
   if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewhereChat />;
-  if (thread === "1" || id.startsWith("thread-"))
-    return <Thread threadId={id} messageId={message ?? null} />;
   // Writes are off unless the build turns them on (src/server/phoneWrites.ts): the chat stays read-only, as it was.
+  if (thread === "1" || id.startsWith("thread-"))
+    return phoneWrites ? (
+      <WritableThread threadId={id} messageId={message ?? null} replyId={reply ?? null} />
+    ) : (
+      <Thread threadId={id} messageId={message ?? null} />
+    );
   return phoneWrites ? (
     <WritableStream groupId={id} name={name ?? ""} />
   ) : (
     <Stream groupId={id} name={name ?? ""} />
   );
+}
+
+/** Opens a thread in the open workspace, at a message, to reply to it when one is named. */
+function openThread(
+  router: ReturnType<typeof useRouter>,
+  workspaceId: string | null,
+  threadId: string,
+  at: { readonly message?: string; readonly reply?: string } = {},
+) {
+  router.push({
+    pathname: "/chat/[id]",
+    params: {
+      id: threadId,
+      thread: "1",
+      ...(workspaceId === null ? {} : { workspace: workspaceId }),
+      ...at,
+    },
+  });
 }
 
 /** A chat whose workspace is no longer the one open, as when another device hid it. */
@@ -91,39 +134,35 @@ function ElsewhereChat() {
   );
 }
 
-/** What a stream adds where phone writes are on: its outbox rows, their actions, and the composer. */
-interface StreamWrites {
-  /** The messages only this phone has, given the IDs the stream's read shows. */
+/** What a stream or thread adds where phone writes are on: outbox rows, reactions, Reply, and the composer. */
+interface ScreenWrites {
+  /** The messages only this phone has, given the IDs the screen's read shows. */
   local(shown: ReadonlySet<string>): readonly Message[];
+  /** A message the server has, with this phone's reactions over the server's. */
+  message(entry: ChatMessage, base: Message): Message;
   readonly actions: LocalActions;
-  /** Null until the server says which lanes the stream takes, or its read fails. */
+  readonly react: ReactActions;
+  /** Reply on a message. In a stream, `post` says it's a post, whose thread is its own. */
+  reply(message: Message, post: boolean): void;
+  /** Null until the server says which lanes a stream takes, or its read fails. */
   readonly composer:
     | ((onLayoutHeight: (height: number) => void, title: string) => ReactNode)
     | null;
 }
 
-// A stream where phone writes are on. Its posts and messages go through the account's outbox, and each answer lands
-// only while the screen still shows the same sign-in, workspace store and chat, so a slow enqueue can't clear another
-// chat's draft or paint its rows, and a Discard confirmed after a change deletes nothing.
-function WritableStream({ groupId, name }: { groupId: string; name: string }) {
+/**
+ * The write plumbing a stream and a thread share. Every answer lands only while the screen still shows the same
+ * sign-in, workspace store and chat or thread, so a slow enqueue can't clear another draft or paint its rows, and a
+ * Discard confirmed after a change deletes nothing.
+ */
+function useScreenWrites(target: string) {
   const signIn = useSignIn();
   const { data, outbox } = useAccount();
-  const lanesView = useMemo(() => views.lanes(groupId), [groupId]);
-  const { state: lanesState, retry: retryLanes } = useView(lanesView);
-  const context = lanesState.value;
-  const lanes = useMemo<Lanes | null>(
-    () => (context?.kind === "lanes" ? lanesOf(context) : null),
-    [context],
-  );
-  const problemText = useProblemText();
   const state = useOutboxState(outbox);
-  // The screen's store and chat, from the commit that shows them until another replaces them or the screen closes, so a
-  // controller made for them stops asking, and stays stopped if they return.
+  // The screen's store and target, from the commit that shows them until another replaces them or the screen closes,
+  // so a controller made for them stops asking, and stays stopped if they return.
   const [scope] = useState(createWriteScope);
-  const activation = useMemo(
-    () => (data ? { store: data, target: groupId } : null),
-    [data, groupId],
-  );
+  const activation = useMemo(() => (data ? { store: data, target } : null), [data, target]);
   useLayoutEffect(() => (activation ? scope.show(activation) : undefined), [scope, activation]);
   const isCurrent = useCallback(
     () => signIn.isCurrent() && activation !== null && scope.shows(activation),
@@ -133,6 +172,7 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
   const blocked = state ? blockedBy(state, phoneWrites) : "loading";
   const actions = useLocalActions(writes, blocked !== null);
   const workspaceId = data?.workspaceId ?? null;
+  const react = useReact(writes, workspaceId);
   const you = useMemo<Author>(
     () => ({
       id: "local:you",
@@ -142,17 +182,126 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     }),
     [signIn],
   );
+  const rowScope = useMemo(
+    () =>
+      workspaceId === null
+        ? null
+        : { origin: signIn.origin, accountId: signIn.userId, workspaceId },
+    [signIn, workspaceId],
+  );
+  const reactionsByMessage = useMemo(
+    () => (state && rowScope ? reactionRecords(state, rowScope) : null),
+    [state, rowScope],
+  );
+  // A message this phone has no reaction for keeps its object while the outbox changes, so its row doesn't draw again.
+  const [plain] = useState(() => new WeakMap<Message, Message>());
+  const message = useCallback(
+    (entry: ChatMessage, base: Message) => {
+      const records = reactionsByMessage?.get(entry.id);
+      if (records)
+        return withReactions(base, confirmedReactions(entry.reactions, signIn.userId), records);
+      const kept = plain.get(base);
+      if (kept) return kept;
+      const made = withReactions(base, confirmedReactions(entry.reactions, signIn.userId));
+      plain.set(base, made);
+      return made;
+    },
+    [signIn, reactionsByMessage, plain],
+  );
+  const problem = useMemo(
+    () => outboxProblem(state, blocked, () => outbox.wake()),
+    [state, blocked, outbox],
+  );
+  return {
+    state,
+    writes,
+    blocked,
+    actions,
+    react,
+    workspaceId,
+    you,
+    rowScope,
+    message,
+    problem,
+    // Keyed by the workspace store, which is one sign-in's, and the target, so a draft never carries elsewhere.
+    composerKey: `${data?.instance ?? 0}:${target}`,
+  };
+}
+
+/** A reply chosen in a stream: to an outbox post or send whose thread isn't known yet. */
+interface StreamReply {
+  readonly target: ReplyTarget;
+  readonly to: ReplyTo;
+}
+
+const excerptOf = (message: Message) =>
+  message.body
+    .map((segment) => ("text" in segment ? segment.text : `@${segment.mention}`))
+    .join("");
+
+// A stream where phone writes are on. Its posts and messages go through the account's outbox. Reply on a message the
+// server has opens its thread; on a post or send still in the outbox, the composer replies to it here, and the reply
+// waits for the thread that write will name.
+function WritableStream({ groupId, name }: { groupId: string; name: string }) {
+  const router = useRouter();
+  const lanesView = useMemo(() => views.lanes(groupId), [groupId]);
+  const { state: lanesState, retry: retryLanes } = useView(lanesView);
+  const context = lanesState.value;
+  const lanes = useMemo<Lanes | null>(
+    () => (context?.kind === "lanes" ? lanesOf(context) : null),
+    [context],
+  );
+  const problemText = useProblemText();
+  const {
+    state,
+    writes,
+    blocked,
+    actions,
+    react,
+    workspaceId,
+    you,
+    rowScope,
+    message,
+    problem: outboxProblemNow,
+    composerKey,
+  } = useScreenWrites(groupId);
+  const [replyTo, setReplyTo] = useState<StreamReply | null>(null);
   const local = useCallback(
     (shown: ReadonlySet<string>) =>
-      state && workspaceId
-        ? streamRows(
-            state,
-            { origin: signIn.origin, accountId: signIn.userId, workspaceId },
-            groupId,
-            shown,
-          ).map((row) => localMessage(row, you))
+      state && rowScope
+        ? streamRows(state, rowScope, groupId, shown).map((row) => localMessage(row, you))
         : [],
-    [state, workspaceId, signIn, groupId, you],
+    [state, rowScope, groupId, you],
+  );
+  const reply = useCallback(
+    (entry: Message, post: boolean) => {
+      const parent = entry.replyable;
+      if (entry.local) {
+        if (!parent) return;
+        // Saved, with its thread named: the reply goes there, so it opens there.
+        if (parent.threadId !== null)
+          openThread(router, workspaceId, parent.threadId, { reply: parent.messageId });
+        else
+          setReplyTo({
+            target: {
+              kind: "outbox",
+              operationId: parent.operationId,
+              messageId: parent.messageId,
+            },
+            to: { name: entry.author.name, excerpt: excerptOf(entry) },
+          });
+        return;
+      }
+      if (!entry.threadId) return;
+      // A post's thread is its own, so a reply to it goes at the top. A chat message's goes under it.
+      openThread(
+        router,
+        workspaceId,
+        entry.threadId,
+        post ? {} : { message: entry.id, reply: entry.id },
+      );
+    },
+    [router, workspaceId],
   );
   // A failed read of the lanes shows in the composer's place, with its cause and Try again, and keeps the composer when
   // it has lanes already. The outbox's own problem comes first.
@@ -166,25 +315,34 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
         : null,
     [lanesState.problem, problemText, retryLanes],
   );
-  const problem = useMemo(
-    () => outboxProblem(state, blocked, () => outbox.wake()) ?? lanesProblem,
-    [state, blocked, outbox, lanesProblem],
-  );
-  const composerKey = `${data?.instance ?? 0}:${groupId}`;
+  const problem = outboxProblemNow ?? lanesProblem;
   const submit = useCallback(
-    (kind: "send" | "post", body: string, title: string) => {
+    async (kind: "send" | "post" | "reply", body: string, title: string) => {
+      if (workspaceId === null) return { kind: "blocked" as const };
+      if (kind === "reply") {
+        const chosen = replyTo;
+        const next = chosen && replyWrite(chosen.target, body);
+        if (!next) return { kind: "blocked" as const };
+        const outcome = await writes.submit(workspaceId, next.write, next.dependsOn);
+        // Kept, or its post or send can't take it any more: the reply context goes, unless another was chosen.
+        if (
+          outcome.kind === "kept" ||
+          outcome.kind === "withheld" ||
+          outcome.kind === "parent-gone"
+        )
+          setReplyTo((current) => (current === chosen ? null : current));
+        return outcome;
+      }
       const write = chatWrite(
         kind === "send" ? { kind, streamId: groupId } : { kind, groupId },
         body,
         title,
       );
-      return write && workspaceId
-        ? writes.submit(workspaceId, write)
-        : Promise.resolve({ kind: "blocked" as const });
+      return write ? writes.submit(workspaceId, write) : { kind: "blocked" as const };
     },
-    [writes, workspaceId, groupId],
+    [writes, workspaceId, groupId, replyTo],
   );
-  // Keyed by the workspace store, which is one sign-in's, and the chat, so a draft never carries to another destination.
+  const cancelReply = useCallback(() => setReplyTo(null), []);
   const composer = useMemo(
     () =>
       lanes && (lanes.post || lanes.send)
@@ -195,6 +353,9 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
               lanes={lanes}
               blocked={blocked}
               problem={problem}
+              replies={replyTo !== null}
+              replyTo={replyTo?.to ?? null}
+              onCancelReply={cancelReply}
               onSubmit={submit}
               onLayoutHeight={onLayoutHeight}
             />
@@ -208,14 +369,103 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
               />
             )
           : null,
-    [lanes, blocked, problem, submit, lanesProblem, composerKey],
+    [lanes, blocked, problem, replyTo, cancelReply, submit, lanesProblem, composerKey],
   );
-  const streamWrites = useMemo<StreamWrites>(
-    () => ({ local, actions, composer }),
-    [local, actions, composer],
+  const streamWrites = useMemo<ScreenWrites>(
+    () => ({ local, message, actions, react, reply, composer }),
+    [local, message, actions, react, reply, composer],
   );
   return <Stream groupId={groupId} name={name} writes={streamWrites} />;
 }
+
+// A thread where phone writes are on: every message in its composer is a reply. Reply on a message names it above the
+// field, and the reply goes under it; with none chosen, it goes at the top of the thread. A thread opened to reply to
+// a message starts with it chosen, once the read shows it.
+function WritableThread({
+  threadId,
+  messageId,
+  replyId,
+}: {
+  threadId: string;
+  messageId: string | null;
+  replyId: string | null;
+}) {
+  const {
+    state,
+    writes,
+    blocked,
+    actions,
+    react,
+    workspaceId,
+    you,
+    rowScope,
+    message,
+    problem,
+    composerKey,
+  } = useScreenWrites(threadId);
+  const view = useMemo(() => views.thread(threadId), [threadId]);
+  const value = useView(view).state.value;
+  const thread = value?.kind === "thread" ? value : null;
+  const [chosen, setChosen] = useState<string | null>(replyId);
+  // Only a message the read shows is named and replied under: one it doesn't is never guessed at.
+  const parent = useMemo(() => {
+    const entry = chosen === null ? undefined : thread?.messages.find((each) => each.id === chosen);
+    return entry
+      ? { id: entry.id, to: { name: entry.authorName, excerpt: entry.body } satisfies ReplyTo }
+      : null;
+  }, [chosen, thread]);
+  const local = useCallback(
+    (shown: ReadonlySet<string>) =>
+      state && rowScope
+        ? threadRows(state, rowScope, threadId, shown).map((row) => localMessage(row, you))
+        : [],
+    [state, rowScope, threadId, you],
+  );
+  const reply = useCallback((entry: Message) => {
+    if (!entry.local) setChosen(entry.id);
+  }, []);
+  const submit = useCallback(
+    async (_kind: "send" | "post" | "reply", body: string) => {
+      const next = replyWrite(
+        { kind: "thread", threadId, parentMessageId: parent?.id ?? null },
+        body,
+      );
+      if (!next || workspaceId === null) return { kind: "blocked" as const };
+      const outcome = await writes.submit(workspaceId, next.write);
+      const answered = parent?.id ?? null;
+      if (outcome.kind === "kept" || outcome.kind === "withheld")
+        setChosen((current) => (current === answered ? null : current));
+      return outcome;
+    },
+    [writes, workspaceId, threadId, parent],
+  );
+  const cancelReply = useCallback(() => setChosen(null), []);
+  const composer = useMemo(
+    () => (onLayoutHeight: (height: number) => void) => (
+      <Composer
+        key={composerKey}
+        placeholder={chatWords.reply}
+        lanes={REPLY_LANES}
+        blocked={blocked}
+        problem={problem}
+        replies
+        replyTo={parent?.to ?? null}
+        onCancelReply={cancelReply}
+        onSubmit={submit}
+        onLayoutHeight={onLayoutHeight}
+      />
+    ),
+    [composerKey, blocked, problem, parent, cancelReply, submit],
+  );
+  const threadWrites = useMemo<ScreenWrites>(
+    () => ({ local, message, actions, react, reply, composer }),
+    [local, message, actions, react, reply, composer],
+  );
+  return <Thread threadId={threadId} messageId={messageId} writes={threadWrites} />;
+}
+
+/** A thread takes replies, and never a post. */
+const REPLY_LANES: Lanes = { post: false, send: true };
 
 function Stream({
   groupId,
@@ -224,7 +474,7 @@ function Stream({
 }: {
   groupId: string;
   name: string;
-  writes?: StreamWrites;
+  writes?: ScreenWrites;
 }) {
   const view = useMemo(() => views.stream(groupId), [groupId]);
   const { state, retry } = useView(view);
@@ -242,7 +492,7 @@ function Stream({
     markShown(data, lane("chat"), visible);
     markShownPosts(data, lane("posts"), unreadThreadIds, visible);
   }, [data, stream, unreadThreadIds, visible]);
-  const messages = useMemo(
+  const bases = useMemo(
     () =>
       stream?.items.map((item) =>
         serverMessage(
@@ -255,6 +505,17 @@ function Stream({
       ) ?? null,
     [stream],
   );
+  const decorate = writes?.message;
+  const messages = useMemo(
+    () =>
+      bases && stream && decorate
+        ? bases.map((base, index) => {
+            const item = stream.items[index];
+            return item ? decorate(item.message, base) : base;
+          })
+        : bases,
+    [bases, stream, decorate],
+  );
   const local = useMemo(
     () =>
       writes && stream
@@ -262,16 +523,28 @@ function Stream({
         : undefined,
     [writes, stream],
   );
+  const posts = useMemo(
+    () =>
+      new Set(stream?.items.filter((item) => item.lane === "posts").map((item) => item.message.id)),
+    [stream],
+  );
+  const reply = writes?.reply;
+  const onReply = useMemo(
+    () => reply && ((message: Message) => reply(message, posts.has(message.id))),
+    [reply, posts],
+  );
   return (
     <Conversation
       title={chatTitle(kindOf(stream?.groupKind ?? "group"), stream?.name ?? name)}
       state={state}
       messages={messages}
       retry={retry}
-      {...(writes
+      {...(writes && onReply
         ? {
             local: local ?? [],
             actions: writes.actions,
+            react: writes.react,
+            onReply,
             composer: writes.composer,
           }
         : {})}
@@ -279,7 +552,15 @@ function Stream({
   );
 }
 
-function Thread({ threadId, messageId }: { threadId: string; messageId: string | null }) {
+function Thread({
+  threadId,
+  messageId,
+  writes,
+}: {
+  threadId: string;
+  messageId: string | null;
+  writes?: ScreenWrites;
+}) {
   const view = useMemo(() => views.thread(threadId), [threadId]);
   const { state, retry } = useView(view);
   const thread = state.value?.kind === "thread" ? state.value : null;
@@ -299,10 +580,30 @@ function Thread({ threadId, messageId }: { threadId: string; messageId: string |
       markShown(data, thread ? shownMessages(thread.messages, messageId, onScreen) : null, visible),
     [data, thread, messageId, onScreen, visible],
   );
-  const messages = useMemo(
+  const bases = useMemo(
     () => thread?.messages.map((entry) => serverMessage(entry, null, workspaceMarkFills)) ?? null,
     [thread],
   );
+  const decorate = writes?.message;
+  const messages = useMemo(
+    () =>
+      bases && thread && decorate
+        ? bases.map((base, index) => {
+            const entry = thread.messages[index];
+            return entry ? decorate(entry, base) : base;
+          })
+        : bases,
+    [bases, thread, decorate],
+  );
+  const local = useMemo(
+    () =>
+      writes && thread
+        ? writes.local(new Set(thread.messages.map((entry) => entry.id)))
+        : undefined,
+    [writes, thread],
+  );
+  const reply = writes?.reply;
+  const onReply = useMemo(() => reply && ((message: Message) => reply(message, false)), [reply]);
   return (
     <Conversation
       title={thread?.title || workspaceWords.thread}
@@ -311,6 +612,15 @@ function Thread({ threadId, messageId }: { threadId: string; messageId: string |
       retry={retry}
       anchor={messageId}
       {...(messageId === null ? {} : { onShown: addOnScreen })}
+      {...(writes && onReply
+        ? {
+            local: local ?? [],
+            actions: writes.actions,
+            react: writes.react,
+            onReply,
+            composer: writes.composer,
+          }
+        : {})}
     />
   );
 }
@@ -324,6 +634,8 @@ function Conversation({
   onShown,
   local,
   actions,
+  react,
+  onReply,
   composer,
 }: {
   title: string;
@@ -337,11 +649,15 @@ function Conversation({
   /** Where writes are on: the messages only this phone has, after the server's. */
   local?: readonly Message[];
   actions?: LocalActions;
+  react?: ReactActions;
+  onReply?: (message: Message) => void;
   /** Where writes are on: the composer, or null until the server says which lanes the chat takes. */
-  composer?: StreamWrites["composer"];
+  composer?: ScreenWrites["composer"];
 }) {
   const theme = useTheme();
   const router = useRouter();
+  const { data } = useAccount();
+  const workspaceId = data?.workspaceId ?? null;
   const problemText = useProblemText();
   const kept = useKeptContentProblem(state.problem, retry);
   const [composerHeight, setComposerHeight] = useState(90);
@@ -356,10 +672,9 @@ function Conversation({
       : items.findIndex((item) => item.type !== "day" && item.message.id === anchor);
   const openReplies = useCallback(
     (entry: Message) => {
-      if (entry.threadId)
-        router.push({ pathname: "/chat/[id]", params: { id: entry.threadId, thread: "1" } });
+      if (entry.threadId) openThread(router, workspaceId, entry.threadId);
     },
-    [router],
+    [router, workspaceId],
   );
   const onViewableItemsChanged = useMemo(
     () =>
@@ -384,6 +699,8 @@ function Conversation({
         afterExtras={item.afterExtras}
         onOpenReplies={openReplies}
         {...(actions ? { actions } : {})}
+        {...(react ? { react } : {})}
+        {...(onReply ? { onReply } : {})}
       />
     );
   const gap = useWorkspaceGap();

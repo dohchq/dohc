@@ -52,15 +52,25 @@ export function OutboxRecovery() {
         : undefined;
     return found ? workspaceName(found) : null;
   };
-  // In the open workspace only, so opening never switches the workspace under another screen.
-  const open = (row: RecoveryRow) =>
-    row.streamId !== null && row.workspaceId === currentWorkspaceId
-      ? () =>
-          router.push({
-            pathname: "/chat/[id]",
-            params: { id: row.streamId ?? "", workspace: row.workspaceId },
-          })
-      : null;
+  // In the open workspace only, so opening never switches the workspace under another screen. A reply or reaction
+  // opens its thread, once the outbox knows it.
+  const open = (row: RecoveryRow) => {
+    if (row.workspaceId !== currentWorkspaceId) return null;
+    const { streamId, threadId } = row;
+    if (streamId !== null)
+      return () =>
+        router.push({
+          pathname: "/chat/[id]",
+          params: { id: streamId, workspace: row.workspaceId },
+        });
+    if (threadId !== null)
+      return () =>
+        router.push({
+          pathname: "/chat/[id]",
+          params: { id: threadId, thread: "1", workspace: row.workspaceId },
+        });
+    return null;
+  };
   const empty = state?.status === "ready" && rows.length === 0 && unreadable.length === 0;
 
   return (

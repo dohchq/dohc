@@ -59,8 +59,8 @@ export function serverMessage(
 }
 
 /**
- * A post or message only this phone has, by `you`. Its ID is the one the server will give it, so the row keeps its
- * place when a read brings the server's. It has no time of its own: its state shows in the time's place.
+ * A post, message or reply only this phone has, by `you`. Its ID is the one the server will give it, so the row keeps
+ * its place when a read brings the server's. It has no time of its own: its state shows in the time's place.
  */
 export function localMessage(row: LocalRow, you: Author): Message {
   return {
@@ -71,6 +71,15 @@ export function localMessage(row: LocalRow, you: Author): Message {
     ...(row.title ? { title: row.title } : {}),
     body: [{ text: row.mark.body }],
     local: row.mark,
+    ...(row.replyable
+      ? {
+          replyable: {
+            operationId: row.mark.operationId,
+            messageId: row.messageId,
+            threadId: row.threadId,
+          },
+        }
+      : {}),
   };
 }
 

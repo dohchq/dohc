@@ -17,6 +17,7 @@ import {
   createWriteScope,
   fieldChanged,
   lanesOf,
+  replyWrite,
   type Draft,
   type WriteActivation,
   type WriteOutbox,
@@ -562,3 +563,253 @@ describe("a write scope", () => {
     expect(scope.shows(a)).toBe(false);
   });
 });
+
+type Enqueued = Parameters<WriteOutbox["enqueue"]>[0];
+type Kept = Awaited<ReturnType<WriteOutbox["enqueue"]>>;
+
+/** A fake outbox that keeps every enqueue's input, and answers each as `answer` says. */
+function recordingOutbox(
+  state: OutboxState = READY,
+  answer: () => Promise<Kept> = async () => ({}) as Kept,
+) {
+  const inputs: Enqueued[] = [];
+  const { outbox, asked } = fakeOutbox(state, (input) => {
+    inputs.push(input);
+    return answer();
+  });
+  return { outbox, asked, inputs };
+}
+
+const react = (messageId: string, state: "added" | "removed" = "added"): ChatWrite => ({
+  operation: "react",
+  args: { messageId, emoji: "👍", state },
+});
+
+describe("a reply's write", () => {
+  it("goes at the top of a thread without a parent, and under one when chosen", () => {
+    expect(
+      replyWrite({ kind: "thread", threadId: "thread-1", parentMessageId: null }, "Top"),
+    ).toEqual({ write: { operation: "reply", args: { threadId: "thread-1", body: "Top" } } });
+    expect(
+      replyWrite({ kind: "thread", threadId: "thread-1", parentMessageId: "m-2" }, "Under"),
+    ).toEqual({
+      write: {
+        operation: "reply",
+        args: { threadId: "thread-1", body: "Under", parentMessageId: "m-2" },
+      },
+    });
+  });
+
+  it("to an outbox post or send names no thread, and waits for that record", () => {
+    expect(
+      replyWrite({ kind: "outbox", operationId: "op-1", messageId: "message-1" }, "Soon"),
+    ).toEqual({
+      write: {
+        operation: "reply",
+        args: { threadId: null, body: "Soon", parentMessageId: "message-1" },
+      },
+      dependsOn: "op-1",
+    });
+  });
+
+  it("makes nothing of spaces alone, and never answers a question", () => {
+    expect(replyWrite({ kind: "thread", threadId: "t", parentMessageId: null }, " \n ")).toBeNull();
+    const reply = replyWrite({ kind: "thread", threadId: "t", parentMessageId: "q" }, "Hi");
+    expect(reply?.write.operation === "reply" && reply.write.args.resolves).toBeUndefined();
+  });
+
+  it("passes its record to wait for to the outbox", async () => {
+    const { outbox, inputs } = recordingOutbox();
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    const reply = replyWrite({ kind: "outbox", operationId: "op-1", messageId: "message-1" }, "Hi");
+    if (!reply) throw new Error("no reply");
+    expect(await writes.submit("ws-1", reply.write, reply.dependsOn)).toEqual({ kind: "kept" });
+    expect(inputs).toEqual([{ workspaceId: "ws-1", write: reply.write, dependsOn: "op-1" }]);
+  });
+
+  it("is sent in the thread the outbox post or send names once it's saved", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", "/sync/ws-1/ops/send", SAVED);
+    server.on(
+      "POST",
+      "/sync/ws-1/ops/reply",
+      ops({ ok: true, state: "saved", threadId: "thread-s" }),
+    );
+    const outbox = launch(disk, server);
+    await ready(outbox);
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.submit("ws-1", send("Parent"))).toEqual({ kind: "kept" });
+    const parent = outbox.state().records[0];
+    if (!parent?.messageId) throw new Error("no parent");
+    const reply = replyWrite(
+      { kind: "outbox", operationId: parent.operationId, messageId: parent.messageId },
+      "Child",
+    );
+    if (!reply) throw new Error("no reply");
+    expect(await writes.submit("ws-1", reply.write, reply.dependsOn)).toEqual({ kind: "kept" });
+    await vi.waitFor(() => expect(requests(server, "reply")).toHaveLength(1));
+    expect(requests(server, "reply")[0]).toMatchObject({
+      threadId: "thread-s",
+      parentMessageId: parent.messageId,
+      body: "Child",
+    });
+  });
+
+  it("can't wait for a post or send the server refused, and keeps the text", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on(
+      "POST",
+      "/sync/ws-1/ops/send",
+      ops({ ok: false, refusal: "refused", reason: "Couldn't send" }),
+    );
+    const outbox = launch(disk, server);
+    await ready(outbox);
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    await writes.submit("ws-1", send("Parent"));
+    await vi.waitFor(() => expect(outbox.state().records[0]?.stage).toBe("refused"));
+    const parent = outbox.state().records[0];
+    if (!parent?.messageId) throw new Error("no parent");
+    const reply = replyWrite(
+      { kind: "outbox", operationId: parent.operationId, messageId: parent.messageId },
+      "Child",
+    );
+    if (!reply) throw new Error("no reply");
+    expect(await writes.submit("ws-1", reply.write, reply.dependsOn)).toEqual({
+      kind: "parent-gone",
+    });
+    expect(outbox.state().records).toHaveLength(1);
+  });
+});
+
+describe("a reaction", () => {
+  const target = { messageId: "m-1", threadId: "thread-1" };
+
+  it("reaches no outbox while phone writes are off", async () => {
+    const { outbox, asked } = recordingOutbox();
+    const writes = createConversationWrites({
+      outbox,
+      enabled: phoneWrites,
+      isCurrent: () => true,
+    });
+    expect(await writes.react("ws-1", target, "👍", "added")).toEqual({ kind: "blocked" });
+    expect(asked).toEqual([]);
+  });
+
+  it("asks nothing while a Sign out's delete is owed, or for a screen no longer shown", async () => {
+    const owed = recordingOutbox({ ...READY, deletion: "owed" });
+    expect(
+      await createConversationWrites({
+        outbox: owed.outbox,
+        enabled: true,
+        isCurrent: () => true,
+      }).react("ws-1", target, "👍", "added"),
+    ).toEqual({ kind: "blocked" });
+    const gone = recordingOutbox();
+    expect(
+      await createConversationWrites({
+        outbox: gone.outbox,
+        enabled: true,
+        isCurrent: () => false,
+      }).react("ws-1", target, "👍", "added"),
+    ).toEqual({ kind: "stale" });
+    expect([...owed.asked, ...gone.asked]).toEqual([]);
+  });
+
+  it("asks for the state it should end in, in its message's thread", async () => {
+    const { outbox, inputs } = recordingOutbox();
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.react("ws-1", target, "👍", "removed")).toEqual({ kind: "kept" });
+    expect(inputs).toEqual([
+      { workspaceId: "ws-1", write: react("m-1", "removed"), thread: "thread-1" },
+    ]);
+  });
+
+  it("takes one at a time per message, while the first is being kept", async () => {
+    const held = deferred<Kept>();
+    const { outbox, inputs } = recordingOutbox(READY, () => held.promise);
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    const first = writes.react("ws-1", target, "👍", "added");
+    expect(await writes.react("ws-1", target, "👍", "removed")).toEqual({ kind: "blocked" });
+    // Another message's reaction doesn't wait for it.
+    const other = writes.react("ws-1", { ...target, messageId: "m-2" }, "👍", "added");
+    held.resolve({} as Kept);
+    expect(await first).toEqual({ kind: "kept" });
+    expect(await other).toEqual({ kind: "kept" });
+    expect(inputs.map((input) => input.write)).toEqual([react("m-1"), react("m-2")]);
+  });
+
+  it("takes none while the outbox has one for the message unsettled, a stalled one included", async () => {
+    for (const fields of [
+      { stage: "queued" as const },
+      { stage: "queued" as const, withheld: true },
+      { stage: "sending" as const, attempted: true },
+      { stage: "stalled" as const, attempted: true },
+    ]) {
+      const waiting = { ...outboxRecord(react("m-1")), ...fields };
+      const { outbox, asked } = recordingOutbox({ ...READY, records: [waiting] });
+      const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+      expect(await writes.react("ws-1", target, "👍", "removed")).toEqual({ kind: "blocked" });
+      expect(asked).toEqual([]);
+    }
+  });
+
+  it("takes another once the last is settled", async () => {
+    const saved = {
+      ...outboxRecord(react("m-1")),
+      stage: "saved" as const,
+      result: { kind: "saved" as const, threadId: null, messageId: null },
+    };
+    const { outbox, inputs } = recordingOutbox({ ...READY, records: [saved] });
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.react("ws-1", target, "👍", "removed")).toEqual({ kind: "kept" });
+    expect(inputs).toHaveLength(1);
+  });
+
+  it("says the outbox may keep it withheld, so its Send retries that one", async () => {
+    const { outbox } = recordingOutbox(READY, () =>
+      Promise.reject(new OutboxError("indeterminate", "op-9")),
+    );
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.react("ws-1", target, "👍", "added")).toEqual({ kind: "withheld" });
+  });
+});
+
+describe("a reply's clear", () => {
+  it("leaves New post as it was", () => {
+    const draft: Draft = {
+      text: "A",
+      textRevision: 5,
+      title: "",
+      titleRevision: 0,
+      chosen: "post",
+      chosenRevision: 1,
+    };
+    const accepted = { text: "", revision: 6, cleared: 1, refused: 0 };
+    expect(fieldChanged(draft, accepted, { revision: 5, token: 1 }, null)).toMatchObject({
+      text: "",
+      chosen: "post",
+    });
+  });
+});
+
+/** An outbox record of this account, for a fake outbox's state. */
+function outboxRecord(write: ChatWrite): OutboxState["records"][number] {
+  return {
+    origin: ORIGIN,
+    accountId: "u-1",
+    workspaceId: "ws-1",
+    operationId: "op-r",
+    messageId: null,
+    sequence: 1,
+    dependsOn: null,
+    target: { kind: "thread", id: "thread-1" },
+    write,
+    stage: "queued",
+    attempted: false,
+    withheld: false,
+    pendingSinceMs: null,
+    result: null,
+  };
+}
