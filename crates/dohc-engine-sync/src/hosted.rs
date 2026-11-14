@@ -174,7 +174,6 @@ pub(crate) fn record_unmaterialized_in_tx(
     Ok(())
 }
 
-/// The longest refusal reason a hosted push response may carry.
 const MAX_PUSH_REFUSAL_REASON_BYTES: usize = 256;
 
 /// Check the relay's refusals of a pushed batch: only a hosted push has any,
@@ -962,7 +961,6 @@ const LIVE_EDIT_UNADMITTED: &str = "hosted-live-edit-unadmitted";
 const HELD_COLUMNS: &str = "held_reason,held_path,held_by,held_conflict_id,\
     released_hold_binding_json,released_hold_continuation,released_hold_binding_stale";
 
-/// A `hosted_documents` row's [`HELD_COLUMNS`].
 struct HeldColumns {
     reason: Option<String>,
     held_path: Option<String>,
@@ -974,7 +972,6 @@ struct HeldColumns {
 }
 
 impl HeldColumns {
-    /// The columns `row` holds from index `at`.
     fn read(row: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Self> {
         Ok(Self {
             reason: row.get(at)?,

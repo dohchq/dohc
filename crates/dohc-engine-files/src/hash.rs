@@ -48,7 +48,6 @@ pub(crate) type PostHashProbe = Arc<dyn Fn(&str) -> Option<std::io::ErrorKind> +
 /// The result of hashing one input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HashOutcome {
-    /// Hashed to completion.
     Hashed {
         sha256: String,
         bytes: u64,
@@ -344,7 +343,6 @@ fn worker_main(
     gauge: &PoolGauge,
     config: WorkerConfig,
 ) {
-    // One reusable buffer per worker — the bounded read buffer.
     let mut buffer = vec![0u8; config.read_buffer_bytes];
     loop {
         // Hold the receiver lock only to take one job, never across the hash.

@@ -29,7 +29,6 @@ use tokio::sync::mpsc::{self, OwnedPermit};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-/// Bound on the actor's command queue.
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Physical capacity: the data bound plus one reserved slot for `Close`, so

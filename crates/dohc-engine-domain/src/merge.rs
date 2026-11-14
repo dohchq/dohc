@@ -579,7 +579,6 @@ impl VersionedTextStore<'_> {
     }
 }
 
-/// One file of one side of a version comparison.
 struct CompareSideRow {
     path: String,
     kind: String,

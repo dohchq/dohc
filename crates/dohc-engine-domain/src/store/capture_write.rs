@@ -24,8 +24,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::borrow::Cow;
 
 impl<'a> VersionedTextStore<'a> {
-    // --------------------------------------------------------------------- writes
-
     /// Write text and its history in one storage transaction.
     ///
     /// Creates an object for a new path or updates the existing path's object.
@@ -102,10 +100,6 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)
     }
 }
-
-// ============================================================================
-// Free helpers (SQL over a borrowed connection/transaction).
-// ============================================================================
 
 /// Input for text persistence with borrowed identifiers and metadata.
 ///
@@ -989,7 +983,6 @@ where
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
-    // Frame extended with summary/correlation; see `capture_ingest_in_tx`.
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
     let (correlation_kind, correlation) =
         hash_optional_text_fields(input.metadata_correlation_id.as_deref());

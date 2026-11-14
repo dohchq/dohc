@@ -1571,7 +1571,6 @@ fn content_parity_conflict(candidate: &WireStructure, established: &ClockIdentit
         if candidate.tombstone_covers(client, clock) {
             return !candidate.delete_set_covers(client, clock);
         }
-        // The candidate does not claim this clock at all: nothing to compare.
         false
     })
 }
@@ -2414,8 +2413,6 @@ fn scan_content(
         BLOCK_ITEM_FORMAT_REF_NUMBER => {
             let key = safe_read_string(decoder)?.to_owned();
             let value = safe_read_json(decoder)?;
-            // Canonicalize (key, value) together: a length-prefixed key, then
-            // the tagged, variant-preserving Any payload.
             let mut canonical = (key.len() as u64).to_be_bytes().to_vec();
             canonical.extend_from_slice(key.as_bytes());
             append_canonical_any(&mut canonical, &value);
@@ -2881,7 +2878,6 @@ mod tests {
         let producer = Ydoc::wire();
         let candidate = producer.plaintext_insert(0, "hello");
 
-        // Sanity: without injection the gate returns normally (accepts).
         assert!(validate_replay_parity(&base, &candidate).is_ok());
 
         let escaped = with_armed_gate(|| {
@@ -3416,7 +3412,6 @@ mod tests {
             0x04, b't', b'e', b's', b't', // root name
             0x01, // ContentAny len = 1 value
         ];
-        // MAX_ANY_DEPTH + 100 nested length-1 arrays, then a terminal Null.
         for _ in 0..(MAX_ANY_DEPTH + 100) {
             bytes.push(117); // Any::Array
             bytes.push(0x01); // len = 1

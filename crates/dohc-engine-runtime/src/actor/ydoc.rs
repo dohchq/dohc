@@ -5298,7 +5298,6 @@ mod scene_seed_transaction_tests {
             &NoFaults,
         )
         .expect("seed scene");
-        // Every returned job id must name a job that actually exists.
         for job_id in &jobs {
             assert!(
                 store

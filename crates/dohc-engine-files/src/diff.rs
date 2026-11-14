@@ -354,7 +354,6 @@ mod tests {
     // assertion is load-bearing, not tautological.
     #[test]
     fn seeded_bug_is_caught_by_the_golden() {
-        // changed.md is edited in place: same size (5), different content hash.
         let prior = manifest(&[("same.md", 5, "hSAME"), ("changed.md", 5, "hOLD")]);
         let current = ScanListing {
             files: vec![entry("same.md", 5, "hSAME"), entry("changed.md", 5, "hNEW")],
@@ -363,7 +362,6 @@ mod tests {
         };
 
         let golden = diff_core(&prior, &current, is_unchanged, usize::MAX).expect("diff");
-        // Real predicate: same.md unchanged, changed.md changed (hash differs).
         assert_eq!(
             golden
                 .changed

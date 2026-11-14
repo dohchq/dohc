@@ -176,8 +176,6 @@ fn not_own_host(o: &str) -> String {
     )
 }
 
-/// Whether `key`'s queued row at (`origin_id`, `origin_seq`) is one the
-/// owner holds ([`owner_held`]).
 fn owner_held_row(
     conn: &Connection,
     key: &DocKey,
@@ -3218,7 +3216,6 @@ pub fn prepare_local_ydoc_lineage_in_tx(
 /// What capture does with its prepared lineage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureLineage {
-    /// Fold the captured file into the lineage as ever.
     Fold,
     /// The file holds the bytes capture last recorded, over a released
     /// chain's tail: keep the lineage as it is and write nothing.
@@ -3398,7 +3395,6 @@ fn hold_archived_lineage(
     )?))
 }
 
-/// What released protection decides for a synced row.
 enum ReleasedDecision {
     /// No released tail protects the head's lineage.
     Unprotected,
@@ -9551,7 +9547,6 @@ fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncErr
         DomainError::InvalidText { .. }
         | DomainError::InvalidPath { .. }
         | DomainError::InvalidInput { .. } => SyncError::InvalidInput { reason },
-        // Everything else is a hard failure.
         hard => map_domain_hard_error(hard),
     }
 }

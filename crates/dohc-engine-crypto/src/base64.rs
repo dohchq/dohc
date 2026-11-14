@@ -174,7 +174,6 @@ mod tests {
         let canonical = encode_standard(b"hello world");
         let noisy = format!(" {canonical} \n\t");
         assert_eq!(forgiving_decode(&noisy), b"hello world");
-        // Interleaved junk chars are skipped, not decoded.
         let interleaved: String = canonical.chars().flat_map(|c| [c, '#']).collect();
         assert_eq!(forgiving_decode(&interleaved), b"hello world");
     }
@@ -192,7 +191,6 @@ mod tests {
         assert_eq!(forgiving_decode("AB==CD"), vec![0u8]);
         assert_eq!(forgiving_decode("AA=A"), vec![0u8]);
         assert_eq!(forgiving_decode("A=A=A"), Vec::<u8>::new());
-        // A normal trailing pad still decodes the leading group.
         assert_eq!(forgiving_decode("AA=="), vec![0u8]);
     }
 
@@ -201,11 +199,8 @@ mod tests {
         let bytes = [0xde, 0xad, 0xbe, 0xef];
         let encoded = encode_standard(&bytes);
         assert_eq!(strict_decode_exact(&encoded, 4).unwrap(), bytes);
-        // Wrong expected length rejected.
         assert!(strict_decode_exact(&encoded, 3).is_err());
-        // Non-canonical (whitespace) rejected by the strict guard.
         assert!(strict_decode_exact(&format!(" {encoded}"), 4).is_err());
-        // Invalid alphabet rejected.
         assert!(strict_decode_exact("!!!!", 3).is_err());
     }
 }

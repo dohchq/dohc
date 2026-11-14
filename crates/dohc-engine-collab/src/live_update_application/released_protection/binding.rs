@@ -103,7 +103,6 @@ impl UnprovenCommitment {
     }
 }
 
-/// The version of a [`ContributionArtifact`]'s encoding.
 const ARTIFACT_VERSION: i64 = 1;
 
 /// Contributions, or binding tails, a [`ContributionArtifact`] encodes
@@ -380,7 +379,6 @@ impl<'a> Capped<'a> {
         Ok(())
     }
 
-    /// Append `value`'s canonical JSON.
     fn value(&mut self, value: &Value) -> Result<(), ApplicationError> {
         let mut unit = std::mem::take(&mut self.unit);
         unit.clear();
@@ -648,7 +646,6 @@ impl ReleasedLineageBinding {
         value
     }
 
-    /// [`Self::to_json`] without its tails.
     fn untailed_json(&self) -> Value {
         let incoming = &self.incoming;
         serde_json::json!({

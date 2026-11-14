@@ -156,8 +156,6 @@ impl<'a> VersionedTextStore<'a> {
         VersionedTextStore { store }
     }
 
-    // ----------------------------------------------------------------- bootstrap
-
     /// Ensure the workspace's `main` version exists, returning it. Idempotent:
     /// a repeat call returns the existing main version (`ensureWorkspaceRow`
     /// posture — `versions-ensure-main-version`).
@@ -209,8 +207,6 @@ impl<'a> VersionedTextStore<'a> {
             row.transpose()
         })
     }
-
-    // -------------------------------------------------------------------- reads
 
     /// Resolve the stable object currently bound to a version-local path.
     pub fn object_id_for_path(
@@ -968,8 +964,6 @@ impl<'a> VersionedTextStore<'a> {
             .read_with(|conn| get_active_version_in(conn, workspace_id))
     }
 
-    // -------------------------------------------------------------- named version
-
     /// Validate a named-version request without mutating the store.
     ///
     /// Returns the existing version for an exact idempotent replay. Callers
@@ -1159,8 +1153,6 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)
     }
 
-    // ---------------------------------------------------------------- restore
-
     /// Set the workspace's active version (the restore primitive). Both the
     /// restored version and the previously-active one keep all their rows — the
     /// conflict invariant that restore preserves both sides (`versions-set-active-version`).
@@ -1187,8 +1179,6 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)?;
         Ok(record)
     }
-
-    // --------------------------------------------------------------- internals
 
     fn require_version(
         &self,

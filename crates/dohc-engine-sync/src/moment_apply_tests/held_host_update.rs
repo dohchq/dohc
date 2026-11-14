@@ -514,7 +514,6 @@ fn a_deferred_stop_refuses_a_host_update_at_once_and_queues_nothing() {
     assert!(!text.contains("held at the Stop") && !text.contains("after the Stop"));
 }
 
-/// The owner installs `owner.observed` as its binding.
 fn bind(
     owner: &mut RestoreOwner,
 ) -> Result<(), dohc_engine_collab::owner_outbox::OwnerOutboxError> {

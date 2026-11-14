@@ -2320,7 +2320,6 @@ mod tests {
         settle_queued_interruption(false).await;
     }
 
-    /// The bootstrap fixture's baseline and its projected Markdown.
     fn fixture_baseline() -> (Vec<u8>, String) {
         let vectors: Value = serde_json::from_str(include_str!(
             "../../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"

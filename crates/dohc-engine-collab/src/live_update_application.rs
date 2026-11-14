@@ -5352,7 +5352,6 @@ mod tests {
         ack(apply(store, cache, handle, update));
     }
 
-    /// The server account's person and that person's agent.
     fn account_with_agent() -> Vec<LiveAuthorEntry> {
         vec![
             account_person(),

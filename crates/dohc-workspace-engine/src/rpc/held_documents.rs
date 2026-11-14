@@ -61,11 +61,9 @@ struct HeldDocumentParams {
 enum HeldStream {
     /// Preserved Markdown the answer leaves out.
     Markdown,
-    /// The contribution artifact.
     Contributions,
 }
 
-/// The longest object ID a request names.
 const MAX_OBJECT_ID_BYTES: usize = 512;
 
 /// The most a serialized held-document answer holds, below the relay's
@@ -560,8 +558,6 @@ mod tests {
             .output_guard
             .expect("the live host guards its answer");
         assert!(answered.is_current());
-        // Another workspace's ID, a workspace the host did not attach, and a
-        // handle that names nothing.
         assert_eq!(
             code(
                 service
@@ -902,7 +898,6 @@ mod tests {
         }
     }
 
-    /// The hold of `binding`'s document, as its row names it.
     fn held_by(binding: &ReleasedLineageBinding) -> HeldDocument {
         HeldDocument {
             object_id: binding.object_id.clone(),
@@ -1160,7 +1155,6 @@ mod tests {
                 row("malformed-authorship", "invalid-evidence", 1, 1, 0),
             ]
         );
-        // Room for the totals alone lists no example.
         let (answer, _) =
             inspection_answer(7, &inspected, response_encoded_bytes(7, &outline)).unwrap();
         assert_eq!(answer, outline);

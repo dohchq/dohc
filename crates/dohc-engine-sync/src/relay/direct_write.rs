@@ -448,7 +448,6 @@ struct PlannedWrite {
     result: Option<DirectWriteResult>,
 }
 
-/// One push's recorded plan.
 struct DirectWritePlan {
     writes: Vec<PlannedWrite>,
     /// Where the lane has read through once every write is answered.
@@ -797,7 +796,6 @@ fn plan_direct_writes<'a>(
         if name != COLLECTION_SCHEMA_FILE || net.change.based_on_path.is_some() {
             continue;
         }
-        // The grant covers the folder the new Collection goes in.
         let Some((parent, _)) = folder.rsplit_once('/') else {
             continue;
         };
@@ -946,8 +944,6 @@ fn folder_holds_document_schema(
     }).map_err(local)
 }
 
-/// A change's content length: the one its moment states, or the stored
-/// blob's.
 fn byte_length(store: &EngineStore, change: &ShareProposalChange) -> Result<i64, RelayError> {
     if let Some(length) = change.after_byte_length {
         return Ok(length);

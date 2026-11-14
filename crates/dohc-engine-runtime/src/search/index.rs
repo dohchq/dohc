@@ -65,7 +65,6 @@ fn chat_message_text(display_name: &str, author_kind: &str, body: &str) -> Strin
     chat_message_search_text(display_name, author_kind, body)
 }
 
-/// Delete a file's FTS row by its exact key.
 fn delete_file_index_row(
     conn: &Connection,
     workspace_id: &str,
@@ -81,7 +80,6 @@ fn delete_file_index_row(
     Ok(())
 }
 
-/// Insert a file's FTS row.
 fn insert_file_index_row(
     conn: &Connection,
     workspace_id: &str,
@@ -285,7 +283,6 @@ fn upsert_thread_header_search_index(
     Ok(())
 }
 
-/// Upsert a chat message's FTS row (`upsertChatMessageSearchIndex`).
 fn upsert_chat_message_search_index(
     conn: &Connection,
     workspace_id: &str,
@@ -433,7 +430,6 @@ fn rebuild_chat_index_for_workspace(
             upsert_thread_header_search_index(conn, workspace_id, &thread_id, &display)?;
         }
     }
-    // Message rows: ORDER BY thread_id, message_order.
     {
         let mut stmt = conn.prepare(
             "SELECT thread_id, message_id, author_kind, author_display_name, body \

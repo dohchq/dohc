@@ -1545,7 +1545,6 @@ impl CaptureDriver {
     }
 }
 
-/// One incarnation of the files layer.
 struct FilesLayer {
     files: FilesActor,
     watcher: crate::file_observation::CaptureWatch,
@@ -3139,7 +3138,6 @@ struct CaptureThreadOutcome {
     /// Automation claims the ordinary file captures committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
     pending_placement_paths: Vec<CapturePlacementPath>,
-    /// The provenance the pass recorded with.
     provenance: CaptureProvenance,
     /// The rules the pass's capture read.
     rules: PolicyState,
@@ -3177,7 +3175,6 @@ fn startup_provenance(
     }
 }
 
-/// Record a live pass as a rescan unless it already has a label.
 fn record_as_rescan(provenance: &mut CaptureProvenance) {
     if provenance.summary.is_none() {
         provenance.summary = Some(RESCAN_SUMMARY.to_owned());

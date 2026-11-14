@@ -115,8 +115,6 @@ pub(super) fn record_message_triggers(
 }
 
 impl<'a> LinkedChatStore<'a> {
-    // ------------------------------------------------------------- dispatch
-
     /// Enqueue a durable dispatch trigger for a message (`recordDispatchTrigger`
     /// posture): idempotent per `(workspace, trigger_message_id, agent_id)`.
     pub fn enqueue_dispatch(
@@ -217,7 +215,6 @@ impl<'a> LinkedChatStore<'a> {
                     "Agent run id is already in use.",
                 ));
             }
-            // Single-writer guard: a run already running means no new claim.
             let open_running: i64 = tx
                 .query_row(
                     "SELECT COUNT(*) FROM chat_dispatch_ledger \

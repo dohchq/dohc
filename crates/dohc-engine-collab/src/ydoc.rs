@@ -3185,7 +3185,6 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
             output.push_str(line);
             continue;
         }
-        // Include checkboxes and compact child markers in the syntax prefix.
         let mut prefix = indent;
         if marker {
             let mut width = marker_width;
@@ -4979,8 +4978,6 @@ fn snap_utf16(s: &str, idx: u32) -> u32 {
     units
 }
 
-// ---- canonical content JSON (ported from the spike harness `main.rs`) -------
-
 fn content_json(doc: &Doc) -> Value {
     let mut roots = BTreeMap::new();
     // Read each declared root through its typed accessor (defining the kind
@@ -5668,8 +5665,6 @@ fn base64_encode(bytes: &[u8]) -> String {
     }
     out
 }
-
-// ---- markdown projection helpers -------------------------------------------
 
 type ProjectionResult<T> = Result<T, CollabError>;
 
@@ -7002,7 +6997,6 @@ fn written_as_references(
     Ok(written.into_string())
 }
 
-/// The bytes `written_as_references` writes for `text[from..to]`.
 fn written_as_references_len(text: &str, from: usize, to: usize, highlighted: bool) -> usize {
     written_references(text, from, to, highlighted)
         .map(|piece| match piece {
@@ -8152,8 +8146,6 @@ fn render_inline(
         };
         let in_span =
             |from: usize, to: usize| span.is_some_and(|(start, end)| from < end && start < to);
-        // The stretches written as literal parts: those that hold a newline,
-        // `&`, `<`, or `>`.
         let mut stretches = Vec::new();
         let mut offset = 0usize;
         for (part_index, (text, ranges)) in texts.iter().zip(&empty_links).enumerate() {
@@ -9822,7 +9814,6 @@ mod projection_tests {
                     (".", Attrs::new()),
                 ],
             );
-            // A line of spaces whose newline starts the next, unmarked run.
             push_runs(
                 &mut txn,
                 &seventh,
@@ -10159,8 +10150,6 @@ mod projection_tests {
         remote
             .apply(&source.encode_full_state())
             .expect("valid update");
-        // A highlighted link whose line starts with `=` keeps its source
-        // spelling, `&` too, with each `=` written as `\=`, in one part.
         INLINE_PARTS_MATERIALIZED.with(|count| count.set(0));
         assert_eq!(
             remote.project_richdoc().unwrap(),
@@ -10622,7 +10611,6 @@ mod projection_tests {
             "a &copy; b\n",
             "1. one\n7. two\n",
             "1. a\n3. b\n",
-            // A cell's `<br>`, however it is spelled.
             "| a |\n|---|\n| x &lt;br&gt; y |\n",
             // A tag without attributes and another name stays text.
             "a <x> b </x-y>\n",
@@ -11065,8 +11053,6 @@ mod owner_source_public_limits {
 #[cfg(test)]
 mod fence_projection_tests {
     use super::*;
-    /// The fold before fences were found in one pass, reduced to the lines
-    /// the test alphabet holds: blanks, paragraphs and fences.
     fn forward_scan_blocks<'src>(lines: &[&'src str]) -> Vec<MdBlock<'src>> {
         let mut blocks = Vec::new();
         let mut index = 0;

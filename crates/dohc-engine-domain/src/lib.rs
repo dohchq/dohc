@@ -205,7 +205,6 @@ pub use store::{
     HistoryPageRead,
 };
 
-// Re-export the storage surface a domain caller needs on the common path.
 pub use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
 
 /// The secret domain's ciphertext shape and plaintext/ciphertext size cap.

@@ -139,7 +139,6 @@ pub fn get_binary_blob(conn: &Connection, sha256: &str) -> Result<Option<Vec<u8>
         return Ok(None);
     };
 
-    // Two independent integrity checks: the recorded length and the re-hash.
     if byte_length as usize != bytes.len() || bytes.len() > MAX_BLOB_BYTES {
         return Err(StorageError::BlobIntegrity {
             sha256: sha256.to_owned(),

@@ -35,7 +35,6 @@ pub fn media_type_for_path(rel_path: &str) -> &'static str {
 /// still stored as binary. `TEXT_EXTENSIONS` in
 /// `packages/workspace-fs/src/metadata.ts` is the same list.
 const TEXT_EXTENSIONS: &[&str] = &[
-    // Data and documents.
     "json",
     "geojson",
     "json5",
@@ -47,7 +46,6 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "md",
     "markdown",
     "txt",
-    // Code.
     "ts",
     "tsx",
     "cts",
@@ -106,7 +104,6 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "psm1",
     "bat",
     "cmd",
-    // Configuration.
     "toml",
     "yaml",
     "yml",

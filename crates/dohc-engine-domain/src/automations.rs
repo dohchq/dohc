@@ -854,7 +854,6 @@ struct GroupWatch<'a> {
     floor_ms: i64,
 }
 
-/// What deciding one message for one subscription came to.
 enum GroupDecision {
     /// Not for this subscription, or decided before.
     Passed,
@@ -1528,7 +1527,6 @@ fn insert_group_row(
 /// The largest generation a JSON number carries exactly.
 const MAX_SAFE_GENERATION: i64 = 9_007_199_254_740_991;
 
-/// A handover within its bounds, naming Collection automations and messages.
 fn validate_group_handover(handover: &AutomationGroupHandover) -> Result<(), DomainError> {
     let invalid = || DomainError::InvalidInput {
         reason: "A Group handover is outside its bounds.",
@@ -1673,7 +1671,6 @@ fn fact_value(json: Option<&str>, whole: bool) -> Option<AutomationFactValue> {
     })
 }
 
-/// One field of a change, as the bounded facts read it.
 struct FieldChange<'a> {
     field_name: &'a str,
     history_id: Option<i64>,
@@ -1756,7 +1753,6 @@ fn wants_changed_fields(
         .any(|change| field_names.contains(&change.field_name)))
 }
 
-/// One subscription as the claim paths read it.
 struct SubscriptionRow {
     automation_id: String,
     prefix: String,
@@ -2047,7 +2043,6 @@ struct LifecycleMoment {
     author_json: Option<String>,
 }
 
-/// One of an object's moments, as the lifecycle walks read them.
 struct ObjectMoment {
     moment: LifecycleMoment,
     path: String,

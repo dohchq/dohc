@@ -423,7 +423,6 @@ impl Job {
         }
     }
 
-    /// A new waiter for this job of `tails`.
     fn join(self: &Arc<Self>, tails: &Arc<Shared>) -> Validation {
         let mut outcome = lock(&self.outcome);
         let waiter = outcome.next_waiter;

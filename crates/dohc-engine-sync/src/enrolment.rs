@@ -2309,7 +2309,6 @@ mod tests {
                 .iter()
                 .any(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
         );
-        // Store and authorize the asset without changing the scene's document or moment.
         let sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
         VersionedTextStore::new(&mut store)
             .write_binary(
