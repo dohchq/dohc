@@ -104,7 +104,8 @@ export function rustPartitionFilters(assigned) {
     const split = id.indexOf(" ");
     if (split < 1 || split === id.length - 1) throw new Error(`Invalid Rust test ID: ${id}`);
     const clause = `(binary_id(=${escape(id.slice(0, split))}) & test(=${escape(id.slice(split + 1))}))`;
-    // Linux limits each argument to 128 KiB, including its terminating NUL.
+    // Linux limits one argument to 128 KiB; 32 KiB chunks stay well under it and under the
+    // shared limit on all arguments together.
     if (Buffer.byteLength(clause) >= 32 * 1024)
       throw new Error(`Rust test filter is too long: ${id}`);
     if (expression && Buffer.byteLength(expression) + 3 + Buffer.byteLength(clause) >= 32 * 1024) {

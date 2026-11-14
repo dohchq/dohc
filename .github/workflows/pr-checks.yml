@@ -284,14 +284,14 @@ jobs:
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-nextest@0.9.143
-      - name: Archive compiler confinement test binaries
-        run: cargo nextest archive --locked --package dohc-compiler-owner --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --zstd-level=-1
+      - name: Build compiler confinement tests
+        run: cargo nextest run --locked --package dohc-compiler-owner --no-run
       - name: Compiler and relay confinement
         run: |
           set -euo pipefail
           mkdir -p .agent-artifacts/confinement
           compiler() {
-            env -u DOHC_CONFINEMENT_SUITES cargo nextest run --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --workspace-remap "$PWD" --retries=0 --no-tests=fail
+            env -u DOHC_CONFINEMENT_SUITES cargo nextest run --locked --package dohc-compiler-owner --retries=0 --no-tests=fail
             report="$PWD/.agent-artifacts/confinement/compiler.tap"
             DOHC_CONFINEMENT_SUITES=only pnpm --filter @dohc/desktop exec node --test --test-concurrency=1 \
               --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$report" \

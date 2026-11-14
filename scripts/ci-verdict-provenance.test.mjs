@@ -691,10 +691,8 @@ test("shared preparation runs confinement after publishing worker artifacts", ()
     prepare.steps.findIndex((step) => step.uses?.startsWith("taiki-e/install-action@")) >
       preparedUpload,
   );
-  assert.ok(
-    prepare.steps.findIndex((step) => step.name === "Archive compiler confinement test binaries") >
-      preparedUpload,
-  );
+  const build = prepare.steps.findIndex((step) => step.name === "Build compiler confinement tests");
+  assert.ok(build > preparedUpload);
   assert.ok(
     preparedUpload > prepare.steps.findIndex((step) => step.name === "Pack prepared artifacts"),
   );
@@ -702,12 +700,9 @@ test("shared preparation runs confinement after publishing worker artifacts", ()
   assert.ok(
     !prepare.steps.some((step) => step.with?.name === "compiler-tests-${{ github.run_attempt }}"),
   );
-  const archive = prepare.steps.find(
-    (step) => step.name === "Archive compiler confinement test binaries",
-  ).run;
-  assert.match(
-    archive,
-    /cargo nextest archive --locked --package dohc-compiler-owner --archive-file/u,
+  assert.equal(
+    prepare.steps[build].run,
+    "cargo nextest run --locked --package dohc-compiler-owner --no-run",
   );
   assert.doesNotMatch(
     prepare.steps.find((step) => step.name === "Pack prepared artifacts").run,
@@ -716,10 +711,7 @@ test("shared preparation runs confinement after publishing worker artifacts", ()
   const confinement = prepare.steps.findIndex(
     (step) => step.name === "Compiler and relay confinement",
   );
-  assert.ok(
-    confinement >
-      prepare.steps.findIndex((step) => step.name === "Archive compiler confinement test binaries"),
-  );
+  assert.ok(confinement > build);
   for (const kind of ["compiler", "relay"]) {
     const upload = prepare.steps.findIndex(
       (step) => step.with?.name === `verification-confinement-${kind}-\${{ github.run_attempt }}`,
@@ -731,7 +723,7 @@ test("shared preparation runs confinement after publishing worker artifacts", ()
   const compiler = prepare.steps[confinement].run;
   assert.match(
     compiler,
-    /env -u DOHC_CONFINEMENT_SUITES cargo nextest run --archive-file .*compiler-tests\.tar\.zst --workspace-remap "\$PWD" --retries=0 --no-tests=fail/,
+    /env -u DOHC_CONFINEMENT_SUITES cargo nextest run --locked --package dohc-compiler-owner --retries=0 --no-tests=fail/,
   );
   assert.match(
     compiler,
