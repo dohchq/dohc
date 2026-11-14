@@ -11,7 +11,9 @@ import {
   blockedBy,
   chatWrite,
   clearSent,
+  closePost,
   createConversationWrites,
+  createWriteScope,
   lanesOf,
   type Draft,
   type WriteOutbox,
@@ -357,35 +359,99 @@ describe("a screen no longer shown", () => {
   });
 });
 
-describe("clearSent", () => {
-  const sent: Draft = { text: "A", title: "Plan", chosen: "post" };
+describe("a sent draft", () => {
+  const sent: Draft = {
+    text: "A",
+    textRevision: 5,
+    title: "Plan",
+    titleRevision: 2,
+    chosen: "post",
+    chosenRevision: 1,
+  };
+  // What the native field reports when it clears the body sent: its next revision.
+  const fieldCleared = (draft: Draft): Draft => ({
+    ...draft,
+    text: "",
+    textRevision: sent.textRevision + 1,
+  });
+  const keptAndCleared = (current: Draft) =>
+    closePost(fieldCleared(clearSent(current, sent)), sent);
 
-  it("empties the title and closes New post when nothing changed meanwhile", () => {
-    expect(clearSent(sent, sent)).toEqual({ text: "A", title: "", chosen: "send" });
+  it("empties the title, then closes New post once the field clears, when nothing changed meanwhile", () => {
+    const kept = clearSent(sent, sent);
+    expect(kept).toEqual({ ...sent, title: "" });
+    expect(closePost(fieldCleared(kept), sent)).toMatchObject({
+      text: "",
+      title: "",
+      chosen: "send",
+    });
   });
 
-  it("keeps a newer body a post, without the title sent", () => {
-    expect(clearSent({ ...sent, text: "B" }, sent)).toEqual({
-      text: "B",
-      title: "",
-      chosen: "post",
-    });
+  it("keeps a newer body a post, without the title sent, as the field keeps the body", () => {
+    const current = { ...sent, text: "B", textRevision: 6 };
+    expect(clearSent(current, sent)).toEqual({ ...current, title: "" });
   });
 
   it("keeps a newer title, and New post with it", () => {
-    expect(clearSent({ ...sent, title: "Later" }, sent)).toEqual({
-      text: "A",
-      title: "Later",
-      chosen: "post",
-    });
+    const current = { ...sent, title: "Later", titleRevision: 3 };
+    expect(keptAndCleared(current)).toMatchObject({ title: "Later", chosen: "post" });
+  });
+
+  it("keeps a title edited away and back, and New post with it", () => {
+    const current = { ...sent, titleRevision: 4 };
+    expect(keptAndCleared(current)).toMatchObject({ title: "Plan", chosen: "post" });
+  });
+
+  it("keeps New post when it was closed and chosen again", () => {
+    const current = { ...sent, chosenRevision: 3 };
+    expect(keptAndCleared(current)).toMatchObject({ title: "", chosen: "post" });
   });
 
   it("keeps New post chosen after a message was sent", () => {
-    const message: Draft = { text: "A", title: "", chosen: "send" };
-    expect(clearSent({ ...message, chosen: "post" }, message)).toEqual({
-      text: "A",
-      title: "",
+    const message: Draft = { ...sent, title: "", chosen: "send" };
+    const current = { ...message, chosen: "post" as const, chosenRevision: 2 };
+    expect(closePost(fieldCleared(clearSent(current, message)), message)).toMatchObject({
       chosen: "post",
     });
+  });
+});
+
+describe("a write scope", () => {
+  it("stops a controller made for another chat in the same store", async () => {
+    const { outbox, asked } = fakeOutbox(READY);
+    const scope = createWriteScope();
+    const store = {};
+    const leave = scope.show(store, "group-a");
+    const forA = createConversationWrites({
+      outbox,
+      enabled: true,
+      isCurrent: () => scope.shows(store, "group-a"),
+    });
+    const confirmation = deferred<boolean>();
+    const pending = confirmation.promise.then(() =>
+      forA.discard({ kind: "record", operationId: "op-1" }),
+    );
+    leave();
+    scope.show(store, "group-b");
+    confirmation.resolve(true);
+    expect(await pending).toEqual({ kind: "stale" });
+    expect(asked).toEqual([]);
+    expect(scope.shows(store, "group-b")).toBe(true);
+  });
+
+  it("keeps a newer chat shown when an older one's end comes late", () => {
+    const scope = createWriteScope();
+    const store = {};
+    const leaveA = scope.show(store, "group-a");
+    scope.show(store, "group-b");
+    leaveA();
+    expect(scope.shows(store, "group-b")).toBe(true);
+  });
+
+  it("shows nothing once the screen closes", () => {
+    const scope = createWriteScope();
+    const store = {};
+    scope.show(store, "group-a")();
+    expect(scope.shows(store, "group-a")).toBe(false);
   });
 });

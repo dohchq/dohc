@@ -58,27 +58,64 @@ export function chatWrite(destination: Destination, body: string, title = ""): C
   };
 }
 
-/** What the composer holds: the body, a post's title, and whether New post is chosen. */
+/**
+ * What the composer holds: the body, a post's title, and whether New post is chosen. Each has a revision that every
+ * edit raises, so an edit away and back still counts as an edit. The body's is the native field's.
+ */
 export interface Draft {
   readonly text: string;
+  readonly textRevision: number;
   readonly title: string;
+  readonly titleRevision: number;
   readonly chosen: "send" | "post";
+  readonly chosenRevision: number;
 }
 
-export const EMPTY_DRAFT: Draft = { text: "", title: "", chosen: "send" };
+export const EMPTY_DRAFT: Draft = {
+  text: "",
+  textRevision: 0,
+  title: "",
+  titleRevision: 0,
+  chosen: "send",
+  chosenRevision: 0,
+};
 
 /**
- * The draft once the outbox keeps `sent`. The title clears if it is still the one sent. New post closes only when nothing
- * changed meanwhile, so a newer body or title typed during the enqueue stays a post. The native field clears the body
- * itself, only if it still holds the text sent.
+ * The draft once the outbox keeps `sent`: the title clears if nobody edited it since. The native field clears the body
+ * itself, only if nobody edited it since, and New post closes once it has (`closePost`).
  */
 export function clearSent(current: Draft, sent: Draft): Draft {
-  const unchanged =
-    current.text === sent.text && current.title === sent.title && current.chosen === sent.chosen;
+  return current.titleRevision === sent.titleRevision ? { ...current, title: "" } : current;
+}
+
+/**
+ * The draft once the native field cleared the body of `sent`. New post closes only when its title and choice weren't
+ * edited meanwhile either, so a post being written during the enqueue stays a post.
+ */
+export function closePost(current: Draft, sent: Draft): Draft {
+  return current.titleRevision === sent.titleRevision &&
+    current.chosenRevision === sent.chosenRevision
+    ? { ...current, chosen: "send" }
+    : current;
+}
+
+/**
+ * The workspace store and chat a screen shows, which its write controllers check before each step. A controller made
+ * for another store or chat, or one kept past the screen's close, asks nothing.
+ */
+export function createWriteScope() {
+  let shown: { readonly store: object; readonly target: string } | null = null;
   return {
-    text: current.text,
-    title: current.title === sent.title ? "" : current.title,
-    chosen: unchanged ? "send" : current.chosen,
+    /** Shows `store` and `target` until the function returned, or the next `show`. */
+    show(store: object, target: string): () => void {
+      const scope = { store, target };
+      shown = scope;
+      return () => {
+        if (shown === scope) shown = null;
+      };
+    },
+    shows: (store: object, target: string) =>
+      shown !== null && shown.store === store && shown.target === target,
   };
 }
 

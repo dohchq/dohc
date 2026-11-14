@@ -1,9 +1,9 @@
 import ExpoModulesCore
 import UIKit
 
-/// A request to clear the field if it still holds `text`. Each new `token` asks once.
+/// A request to clear the field if its text has not changed since `revision`. Each new `token` asks once.
 struct ClearRequest: Record {
-  @Field var text: String = ""
+  @Field var revision: Int = 0
   @Field var token: Int = 0
 }
 
@@ -40,6 +40,8 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
   let textView = UITextView()
   private let placeholder = UILabel()
   private var clearToken = 0
+  /// Counts every change to the text, the field's own clears included, so an edit away and back still counts.
+  private var revision = 0
   private var reportedHeight: CGFloat = 0
   let onChangeText = EventDispatcher()
   let onContentHeight = EventDispatcher()
@@ -73,13 +75,13 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     placeholder.textColor = color
   }
 
-  /// Clears the field only if it still holds the text that was sent, so text typed meanwhile stays.
+  /// Clears the field only if its text has not changed since it was sent, so text typed meanwhile stays.
   func clear(if request: ClearRequest) {
     guard request.token != clearToken else { return }
     clearToken = request.token
-    guard textView.markedTextRange == nil, textView.text == request.text else { return }
+    guard textView.markedTextRange == nil, revision == request.revision else { return }
     textView.text = ""
-    changed()
+    changed(cleared: request.token)
   }
 
   override func layoutSubviews() {
@@ -101,9 +103,11 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     changed()
   }
 
-  private func changed() {
+  /// `cleared` is the token of the request whose clear made this change, or 0 for an edit.
+  private func changed(cleared: Int = 0) {
+    revision += 1
     placeholder.isHidden = !textView.text.isEmpty
-    onChangeText(["text": textView.text ?? ""])
+    onChangeText(["text": textView.text ?? "", "revision": revision, "cleared": cleared])
     reportHeight()
   }
 

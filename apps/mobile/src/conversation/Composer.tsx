@@ -14,6 +14,7 @@ import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
 import {
   clearSent,
+  closePost,
   EMPTY_DRAFT,
   type Blocked,
   type Draft,
@@ -53,10 +54,11 @@ export function outboxProblem(
 }
 
 // The conversation's composer, docked to the keyboard: a native multiline field, with Send, and New post in a Group
-// that takes posts. A post adds an optional title. The text clears only once the outbox keeps it, and only the text that
-// was sent, so anything typed meanwhile stays, and a newer post stays a post (`clearSent`). Text the outbox couldn't keep
-// stays in the field, with the failure and Try again above it. Return is a new line; sending is the button. The screen
-// gives each workspace store and chat its own composer, so a draft never reaches another destination.
+// that takes posts. A post adds an optional title. The text clears only once the outbox keeps it, and only if nobody
+// edited it meanwhile, by revision, so anything typed meanwhile stays, and a newer post stays a post (`clearSent`,
+// `closePost`). Text the outbox couldn't keep stays in the field, with the failure and Try again above it. Return is a
+// new line; sending is the button. The screen gives each workspace store and chat its own composer, so a draft never
+// reaches another destination.
 export function Composer({
   placeholder,
   lanes,
@@ -74,12 +76,19 @@ export function Composer({
 }) {
   const theme = useTheme();
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
-  const edit = (change: Partial<Draft>) => setDraft((current) => ({ ...current, ...change }));
+  const editTitle = (title: string) =>
+    setDraft((current) => ({ ...current, title, titleRevision: current.titleRevision + 1 }));
+  const choose = (chosen: Draft["chosen"]) =>
+    setDraft((current) => ({ ...current, chosen, chosenRevision: current.chosenRevision + 1 }));
   const { text, title } = draft;
   // A stream that takes only posts is always writing one.
   const mode = lanes.send ? draft.chosen : "post";
   const [height, setHeight] = useState(FIELD_MIN);
-  const [clear, setClear] = useState<ClearRequest>({ text: "", token: 0 });
+  // The last clear asked of the field, and the draft it was for. Token 0 asks nothing.
+  const [clear, setClear] = useState<{ readonly request: ClearRequest; readonly sent: Draft }>({
+    request: { revision: 0, token: 0 },
+    sent: EMPTY_DRAFT,
+  });
   const [submitting, setSubmitting] = useState(false);
   const [notKept, setNotKept] = useState(false);
   const ready = text.trim().length > 0 && blocked === null && !submitting;
@@ -92,7 +101,10 @@ export function Composer({
     setSubmitting(false);
     if (outcome.kind === "kept" || outcome.kind === "withheld") {
       setNotKept(false);
-      setClear((previous) => ({ text: sent.text, token: previous.token + 1 }));
+      setClear((previous) => ({
+        request: { revision: sent.textRevision, token: previous.request.token + 1 },
+        sent,
+      }));
       setDraft((current) => clearSent(current, sent));
       if (outcome.kind === "kept") void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } else if (outcome.kind === "not-kept") {
@@ -116,7 +128,7 @@ export function Composer({
         <View style={styles.postHead}>
           <TextInput
             value={title}
-            onChangeText={(next) => edit({ title: next })}
+            onChangeText={editTitle}
             placeholder={chatWords.title}
             placeholderTextColor={theme.subtle}
             accessibilityLabel={chatWords.title}
@@ -128,7 +140,7 @@ export function Composer({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={confirmWords.cancel}
-              onPress={() => edit({ chosen: "send" })}
+              onPress={() => choose("send")}
               style={styles.round}
             >
               <SymbolView
@@ -147,7 +159,7 @@ export function Composer({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={chatWords.newPost}
-            onPress={() => edit({ chosen: "post" })}
+            onPress={() => choose("post")}
             style={styles.round}
           >
             <SymbolView
@@ -168,8 +180,15 @@ export function Composer({
             editable
             textColor={theme.ink}
             placeholderColor={theme.subtle}
-            clearIf={clear}
-            onChangeText={(event) => edit({ text: event.nativeEvent.text })}
+            clearIf={clear.request}
+            onChangeText={({ nativeEvent: change }) =>
+              setDraft((current) => {
+                const typed = { ...current, text: change.text, textRevision: change.revision };
+                return change.cleared !== 0 && change.cleared === clear.request.token
+                  ? closePost(typed, clear.sent)
+                  : typed;
+              })
+            }
             onContentHeight={(event) => setHeight(event.nativeEvent.height)}
             style={{ height: Math.min(Math.max(height, FIELD_MIN), FIELD_MAX) }}
           />

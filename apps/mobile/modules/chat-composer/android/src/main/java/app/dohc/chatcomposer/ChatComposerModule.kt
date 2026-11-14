@@ -20,9 +20,9 @@ import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
 import kotlin.math.ceil
 
-/** A request to clear the field if it still holds `text`. Each new `token` asks once. */
+/** A request to clear the field if its text has not changed since `revision`. Each new `token` asks once. */
 class ClearRequest : Record {
-  @Field val text: String = ""
+  @Field val revision: Int = 0
   @Field val token: Int = 0
 }
 
@@ -38,7 +38,7 @@ class ChatComposerModule : Module() {
       Prop("placeholderColor") { view: ChatComposerView, value: String ->
         parse(value)?.let { view.field.setHintTextColor(it) }
       }
-      Prop("clearIf") { view: ChatComposerView, value: ClearRequest -> view.clearIf(value.text, value.token) }
+      Prop("clearIf") { view: ChatComposerView, value: ClearRequest -> view.clearIf(value.revision, value.token) }
     }
   }
 }
@@ -57,6 +57,10 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
   /** The field's accessible name, which stays when the hint goes. */
   var label: String = ""
   private var clearToken = 0
+  /** Counts every change to the text, the field's own clears included, so an edit away and back still counts. */
+  private var revision = 0
+  /** The token of the request whose clear is changing the text, or 0 for an edit. */
+  private var clearing = 0
   private var reportedHeight = 0f
   private val onChangeText by EventDispatcher()
   private val onContentHeight by EventDispatcher()
@@ -82,7 +86,10 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
       override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) = Unit
       override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = Unit
       override fun afterTextChanged(text: Editable?) {
-        onChangeText(mapOf("text" to (text?.toString() ?: "")))
+        revision += 1
+        onChangeText(
+          mapOf("text" to (text?.toString() ?: ""), "revision" to revision, "cleared" to clearing),
+        )
         field.post { reportHeight() }
       }
     })
@@ -93,11 +100,15 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
     field.isEnabled = editable
   }
 
-  /** Clears the field only if it still holds the text that was sent, so text typed meanwhile stays. */
-  fun clearIf(text: String, token: Int) {
+  /** Clears the field only if its text has not changed since it was sent, at `sent`, so text typed meanwhile stays. */
+  fun clearIf(sent: Int, token: Int) {
     if (token == clearToken) return
     clearToken = token
-    if (field.text.toString() == text) field.setText("")
+    if (sent != revision) return
+    // setText reports the change through the watcher before it returns.
+    clearing = token
+    field.setText("")
+    clearing = 0
   }
 
   override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {

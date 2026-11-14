@@ -10,8 +10,8 @@ import { Stack, useIsFocused, useLocalSearchParams, useRouter } from "expo-route
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
-  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
@@ -22,7 +22,7 @@ import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/sample";
 import { phoneWrites } from "../server/phoneWrites";
-import { views, type ViewState, type WorkspaceData } from "../server/workspaceData";
+import { views, type ViewState } from "../server/workspaceData";
 import type { ChatGroupKind, ChatThread, GroupStream, MissingChat } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
 import {
@@ -34,7 +34,7 @@ import {
 } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { Composer, ComposerProblem, outboxProblem } from "./Composer";
-import { blockedBy, chatWrite, lanesOf, type Lanes } from "./conversationWrites";
+import { blockedBy, chatWrite, createWriteScope, lanesOf, type Lanes } from "./conversationWrites";
 import { MessageRow } from "./MessageRow";
 import { streamRows } from "./outboxMessages";
 import { markShown, markShownPosts, shownMessages } from "./readMarks";
@@ -103,8 +103,8 @@ interface StreamWrites {
 }
 
 // A stream where phone writes are on. Its posts and messages go through the account's outbox, and each answer lands
-// only while the screen still shows the same sign-in and workspace store, so a slow enqueue can't clear another
-// workspace's draft or paint its rows.
+// only while the screen still shows the same sign-in, workspace store and chat, so a slow enqueue can't clear another
+// chat's draft or paint its rows, and a Discard confirmed after a change deletes nothing.
 function WritableStream({ groupId, name }: { groupId: string; name: string }) {
   const signIn = useSignIn();
   const { data, outbox } = useAccount();
@@ -117,17 +117,13 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
   );
   const problemText = useProblemText();
   const state = useOutboxState(outbox);
-  // The screen's store, until another replaces it or the screen closes, so a controller made for it stops asking.
-  const live = useRef<WorkspaceData | null>(data);
-  useEffect(() => {
-    live.current = data;
-    return () => {
-      live.current = null;
-    };
-  }, [data]);
+  // The screen's store and chat, from the commit that shows them until another replaces them or the screen closes, so a
+  // controller made for them stops asking.
+  const [scope] = useState(createWriteScope);
+  useLayoutEffect(() => (data ? scope.show(data, groupId) : undefined), [scope, data, groupId]);
   const isCurrent = useCallback(
-    () => signIn.isCurrent() && data !== null && live.current === data,
-    [signIn, data],
+    () => signIn.isCurrent() && data !== null && scope.shows(data, groupId),
+    [signIn, scope, data, groupId],
   );
   const writes = useConversationWrites(outbox, phoneWrites, isCurrent);
   const blocked = state ? blockedBy(state, phoneWrites) : "loading";
