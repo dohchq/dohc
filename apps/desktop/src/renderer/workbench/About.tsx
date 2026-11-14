@@ -415,6 +415,12 @@ export function useSectionRead<View>(key: string, identity: string, notices: Abo
         setState({ key, view });
         notices.report({ identity, message, cause, retry });
       },
+      // A read a newer one replaced still fills a section that shows
+      // nothing yet, so files that keep changing never keep it loading.
+      fill(view: View) {
+        if (currentKey.current !== key) return;
+        setState((shown) => (shown.key === key && shown.view !== LOADING ? shown : { key, view }));
+      },
     };
   }, [identity, key, notices]);
   const cancel = useCallback(() => {
@@ -547,7 +553,16 @@ export function AboutLinks(props: {
             subject: { path },
             ...(cursor ? { cursor } : {}),
           });
-          if (!request.current()) return;
+          if (!request.current()) {
+            if (!kept)
+              request.fill({
+                status: "ready",
+                rows: page?.entries ?? [],
+                next: page?.nextCursor ?? null,
+                gathering: 0,
+              });
+            return;
+          }
           rows = rows.concat(page?.entries ?? []);
           building ||= page?.indexBuilding ?? false;
           cursor = page?.nextCursor ?? undefined;
@@ -601,7 +616,16 @@ export function AboutLinks(props: {
             subject: { path },
             ...(cursor ? { cursor } : {}),
           });
-          if (!request.current()) return;
+          if (!request.current()) {
+            if (!from.after && !from.again)
+              request.fill({
+                status: "ready",
+                rows: page?.entries ?? [],
+                next: page?.nextCursor ?? null,
+                gathering: 0,
+              });
+            return;
+          }
           for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
           cursor = page?.nextCursor ?? undefined;
         } while (cursor && rows.size < (from.again?.rows.length ?? 0));

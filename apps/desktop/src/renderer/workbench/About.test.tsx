@@ -642,6 +642,50 @@ describe("About Links", () => {
     ]);
   });
 
+  // A joined workspace's pull changes its files again and again while it
+  // lands, each time before the read from the start answers. A read the next
+  // one replaced still fills the lists while they show nothing, so they never
+  // stay loading while answers arrive.
+  it("shows a replaced first read's rows while nothing is shown, until the newer read lands", async () => {
+    const first = deferred<LinksPage>(), second = deferred<LinksPage>();
+    const firstChats = deferred<NonNullable<ChatFileMentionsPage>>(), secondChats = deferred<NonNullable<ChatFileMentionsPage>>();
+    bridgeMock.linksIn.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    bridgeMock.chatFileMentionsPage.mockReturnValueOnce(firstChats.promise).mockReturnValueOnce(secondChats.promise);
+    const view = render(<Links chats revision={0} />);
+    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(1));
+    view.rerender(<Links chats revision={1} />);
+    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      first.resolve(linksPage([link("notes/alpha.md", 2)]));
+      firstChats.resolve(chatPage([chatLink("one")]));
+    });
+    expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/alpha.md"]);
+    expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(1);
+
+    await act(async () => {
+      second.resolve(linksPage([link("notes/alpha.md", 2), link("notes/beta.md", 5)]));
+      secondChats.resolve(chatPage([chatLink("one"), chatLink("two")]));
+    });
+    expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/alpha.md", "notes/beta.md"]);
+    expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(2);
+  });
+
+  it("keeps the newer read's rows when a replaced read answers after it", async () => {
+    const first = deferred<LinksPage>(), second = deferred<LinksPage>();
+    bridgeMock.linksIn.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const view = render(<Links revision={0} />);
+    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(1));
+    view.rerender(<Links revision={1} />);
+    await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2));
+
+    await act(async () => second.resolve(linksPage([link("notes/beta.md", 5)])));
+    expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/beta.md"]);
+    await act(async () => first.resolve(linksPage([link("notes/removed.md", 3)])));
+    expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/beta.md"]);
+  });
+
   it("asks for one page however often Show more is pressed while that page is read", async () => {
     bridgeMock.linksIn.mockResolvedValueOnce(
       linksPage([link("notes/alpha.md", 2)], { nextCursor: "after-alpha" }),
