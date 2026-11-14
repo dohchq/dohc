@@ -605,7 +605,8 @@ export function ChatsView(props: {
   // or an agent's chat. postingClosed, at View or once the membership ended,
   // shows in place of every composer. createsGroups shows New group, for an
   // admin; the relay decides either way.
-  joinedWorkspace?: { postingClosed?: string; createsGroups: boolean };
+  // ended: the membership ended, so its Groups count no unread messages.
+  joinedWorkspace?: { postingClosed?: string; createsGroups: boolean; ended?: boolean };
   // Ephemeral presence/typing transport, present only under collaboration.
   collaboration?: ChatPresenceCollaboration | null;
   // Where this view lives: the side panel (default) or a full editor tab.
@@ -5822,7 +5823,7 @@ export function ChatsView(props: {
       .filter((channel) => archivedIds.has(channel.id))
       .map((channel) => ({
         key: channel.id,
-        unread: channel.unreadCount,
+        unread: groupUnread(channel),
         row: groupRow(channel, true),
       })),
     ...dms
@@ -5840,6 +5841,9 @@ export function ChatsView(props: {
   ];
   const archivedUnread = archivedRows.reduce((sum, entry) => sum + entry.unread, 0);
 
+  function groupUnread(channel: ChatChannelRecord): number {
+    return props.joinedWorkspace?.ended ? 0 : channel.unreadCount;
+  }
   function groupRow(channel: ChatChannelRecord, archived: boolean) {
     const joined = joinedFor(channel);
     const grants = channel.wireId ? (grantedByWire.get(channel.wireId) ?? []) : [];
@@ -5848,7 +5852,8 @@ export function ChatsView(props: {
       : grants.length > 0
         ? `Shared with ${grants.length}`
         : null;
-    const unread = channel.unreadCount > 0;
+    const unreadCount = groupUnread(channel),
+      unread = unreadCount > 0;
     return (
       <li key={channel.id}>
         <ShareRowMark shareId={groupShareId(channel)} report={reportRow} />
@@ -5895,14 +5900,10 @@ export function ChatsView(props: {
                 </span>
               ) : null}
               {archived ? (
-                <UnreadPill
-                  count={channel.unreadCount}
-                  tone="quiet"
-                  testId="chats-channel-unread"
-                />
+                <UnreadPill count={unreadCount} tone="quiet" testId="chats-channel-unread" />
               ) : unread ? (
                 <span data-testid="chats-channel-unread" className="sr-only">
-                  {channel.unreadCount} unread
+                  {unreadCount} unread
                 </span>
               ) : null}
             </>

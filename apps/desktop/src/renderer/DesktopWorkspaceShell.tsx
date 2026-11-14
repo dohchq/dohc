@@ -3515,6 +3515,7 @@ export function DesktopWorkspaceShell(props: {
         joinedWorkspace: {
           ...(membershipPostingClosed ? { postingClosed: membershipPostingClosed } : {}),
           createsGroups: !shareViewEnded && membershipRole === "admin",
+          ...(shareViewEnded ? { ended: true } : {}),
         },
       }
     : {};
@@ -8693,7 +8694,7 @@ export function DesktopWorkspaceShell(props: {
                                             activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                                             tabLabels={tabLabels}
                                             tabGlyphs={chatEditors.glyphs}
-                                            tabUnread={chatEditors.unread}
+                                            tabUnread={membershipView && shareViewEnded ? undefined : chatEditors.unread}
                                             files={fileEntries}
                                             recoveryPaths={recoveryPaths}
                                             groupNumber={groupIndex + 1}

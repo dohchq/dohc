@@ -1435,7 +1435,10 @@ function AccessRowView(props: { row: AccessRow }) {
       </span>
       {row.status !== "active" ? (
         <span className="shrink-0 text-[11px] text-muted">
-          {row.status === "damaged" ? "damaged" : "ended"}
+          {row.selector?.kind === "workspace" && row.selector.role
+            ? `${ROLE_WORDS[row.selector.role]} · `
+            : ""}
+          {row.status === "damaged" ? "Damaged" : "Ended"}
         </span>
       ) : level ? (
         <span className="shrink-0 text-[11px] text-muted">Can {level.label.toLowerCase()}</span>
@@ -1566,8 +1569,11 @@ function MemberPeopleList(props: { view: WorkspaceMembersView }) {
                   kind="human"
                   size="strip"
                 />
-                <span className="min-w-0 flex-1 truncate text-ink">{name}</span>
-                {self ? <span className="shrink-0 text-[11px] text-subtle">You</span> : null}
+                {/* "You" sits beside the name, as on the Members page, so the role reads on its own. */}
+                <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                  <span className="min-w-0 truncate text-ink">{name}</span>
+                  {self ? <span className="shrink-0 text-[11px] text-subtle">You</span> : null}
+                </span>
                 <span className="shrink-0 text-[11px] text-muted">{ROLE_WORDS[person.role]}</span>
               </div>
             </li>

@@ -230,6 +230,14 @@ describe("ChatsView channels", () => {
     await screen.findByTestId("chats-channels-heading");
     expect(screen.queryByTestId("chats-new-channel")).toBeNull();
   });
+
+  it("counts no unread messages in a Group the person can no longer reach once the membership ended", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ name: "Launch team", unreadCount: 3 })], fileThreads: [] });
+    renderView(vi.fn(), vi.fn(), { joinedWorkspace: { postingClosed: "Your membership ended.", createsGroups: false, ended: true } });
+    const row = await screen.findByTestId("chats-channel");
+    expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
+    expect(row.textContent).not.toContain("3");
+  });
 });
 
 describe("ChatsView panel navigator unread badges", () => {
