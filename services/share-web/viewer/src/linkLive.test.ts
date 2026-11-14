@@ -314,7 +314,7 @@ it("takes the host's early state for a link's file before the page asks for a ti
         },
         limits.provider.frames.receive,
       );
-      return new Response(bytes, {
+      return new Response(bytes as Uint8Array<ArrayBuffer>, {
         headers: {
           "content-type": "application/octet-stream",
           "x-dohc-live-object-id": "document",
