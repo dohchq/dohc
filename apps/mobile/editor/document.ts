@@ -41,6 +41,9 @@ export function mountDocument(page: PageConfig) {
   root.className = "page";
   // Text sizes are in rem, so Dynamic Type scales the whole page from here.
   document.documentElement.style.setProperty("--text-scale", String(page.textScale));
+  // A status-bar tap, from the app's page host: the page scrolls in this element, not the document.
+  (window as Window & { __dohcScrollToTop?: () => void }).__dohcScrollToTop = () =>
+    root.scrollTo({ top: 0, behavior: "instant" });
   // A large file shows only its start as text, as the desktop's truncated view does: no title or properties.
   if (page.icon && !page.large) root.append(element("div", "icon", page.icon));
   if (!page.large) root.append(element("h1", "title", page.title));
