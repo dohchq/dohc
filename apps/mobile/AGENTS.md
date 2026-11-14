@@ -31,7 +31,7 @@ The app shows its sample data only in a sample build: a development build, or on
 Any other build signs in to a server first (`src/account/Connect.tsx`), then reads the open workspace from it: Home, Chats, a chat and a page (`src/server/workspaceData.ts`). It reads and marks the account's Notices.
 Search shows "Not built yet".
 
-Phone writes are off by default, so a signed-in build stays read-only (`src/server/phoneWrites.ts`).
+Phone writes are off by default, so a signed-in build stays read-only (`src/server/phoneWrites.ts`). Off, the outbox sends nothing, not even records an earlier build kept.
 Keep every write control behind `phoneWrites`: the composer, New post, and Send and Discard on outbox messages.
 A build made with `EXPO_PUBLIC_DOHC_PHONE_WRITES=1` turns writes on.
 Then a chat's stream has the composer, and Settings links to Messages on this phone (`src/conversation/OutboxRecovery.tsx`).

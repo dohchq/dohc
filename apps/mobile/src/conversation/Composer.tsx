@@ -3,7 +3,8 @@ import { confirmWords } from "@dohc/interface-words/confirmations";
 import { chatWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
-import { useState } from "react";
+import { ArrowUp, SquarePen, X } from "lucide-react-native";
+import { useState, type ReactNode } from "react";
 import { AccessibilityInfo, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -11,7 +12,14 @@ import { ChatComposerField, type ClearRequest } from "../../modules/chat-compose
 import { ProblemLine } from "../account/ProblemLine";
 import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
-import type { Blocked, Lanes, SubmitOutcome } from "./conversationWrites";
+import {
+  clearSent,
+  EMPTY_DRAFT,
+  type Blocked,
+  type Draft,
+  type Lanes,
+  type SubmitOutcome,
+} from "./conversationWrites";
 
 /** The field's height: one line at the least, and about five at the body size before it scrolls inside itself. */
 const FIELD_MIN = 44;
@@ -46,8 +54,9 @@ export function outboxProblem(
 
 // The conversation's composer, docked to the keyboard: a native multiline field, with Send, and New post in a Group
 // that takes posts. A post adds an optional title. The text clears only once the outbox keeps it, and only the text that
-// was sent, so anything typed meanwhile stays. Text the outbox couldn't keep stays in the field, with the failure and
-// Try again above it. Return is a new line; sending is the button.
+// was sent, so anything typed meanwhile stays, and a newer post stays a post (`clearSent`). Text the outbox couldn't keep
+// stays in the field, with the failure and Try again above it. Return is a new line; sending is the button. The screen
+// gives each workspace store and chat its own composer, so a draft never reaches another destination.
 export function Composer({
   placeholder,
   lanes,
@@ -64,12 +73,11 @@ export function Composer({
   onLayoutHeight(height: number): void;
 }) {
   const theme = useTheme();
-  const insets = useSafeAreaInsets();
-  const [chosen, setChosen] = useState<"send" | "post">("send");
+  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+  const edit = (change: Partial<Draft>) => setDraft((current) => ({ ...current, ...change }));
+  const { text, title } = draft;
   // A stream that takes only posts is always writing one.
-  const mode = lanes.send ? chosen : "post";
-  const [text, setText] = useState("");
-  const [title, setTitle] = useState("");
+  const mode = lanes.send ? draft.chosen : "post";
   const [height, setHeight] = useState(FIELD_MIN);
   const [clear, setClear] = useState<ClearRequest>({ text: "", token: 0 });
   const [submitting, setSubmitting] = useState(false);
@@ -78,16 +86,14 @@ export function Composer({
 
   async function submit() {
     if (!ready) return;
-    const sent = text;
-    const sentTitle = title;
+    const sent = draft;
     setSubmitting(true);
-    const outcome = await onSubmit(mode, sent, sentTitle);
+    const outcome = await onSubmit(mode, sent.text, sent.title);
     setSubmitting(false);
     if (outcome.kind === "kept" || outcome.kind === "withheld") {
       setNotKept(false);
-      setClear((previous) => ({ text: sent, token: previous.token + 1 }));
-      setTitle((current) => (current === sentTitle ? "" : current));
-      if (mode === "post") setChosen("send");
+      setClear((previous) => ({ text: sent.text, token: previous.token + 1 }));
+      setDraft((current) => clearSent(current, sent));
       if (outcome.kind === "kept") void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } else if (outcome.kind === "not-kept") {
       setNotKept(true);
@@ -96,6 +102,126 @@ export function Composer({
   }
 
   const label = mode === "post" ? chatWords.post : chatWords.sendMessage;
+  return (
+    <Dock onLayoutHeight={onLayoutHeight}>
+      {problem ? (
+        problem.retry ? (
+          <ProblemLine text={problem.text} onRetry={problem.retry} />
+        ) : (
+          <Text style={[styles.problem, { color: theme.muted }]}>{problem.text}</Text>
+        )
+      ) : null}
+      {notKept ? <ProblemLine text={chatWords.notKept} onRetry={() => void submit()} /> : null}
+      {mode === "post" ? (
+        <View style={styles.postHead}>
+          <TextInput
+            value={title}
+            onChangeText={(next) => edit({ title: next })}
+            placeholder={chatWords.title}
+            placeholderTextColor={theme.subtle}
+            accessibilityLabel={chatWords.title}
+            maxLength={TITLE_MAX}
+            returnKeyType="next"
+            style={[styles.title, { color: theme.ink, borderBottomColor: theme.line }]}
+          />
+          {lanes.send ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={confirmWords.cancel}
+              onPress={() => edit({ chosen: "send" })}
+              style={styles.round}
+            >
+              <SymbolView
+                name="xmark"
+                size={16}
+                weight="semibold"
+                tintColor={theme.muted}
+                fallback={<X size={18} color={theme.muted} strokeWidth={2.5} />}
+              />
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+      <View style={styles.row}>
+        {lanes.post && mode === "send" ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={chatWords.newPost}
+            onPress={() => edit({ chosen: "post" })}
+            style={styles.round}
+          >
+            <SymbolView
+              name="square.and.pencil"
+              size={20}
+              weight="medium"
+              tintColor={theme.muted}
+              fallback={<SquarePen size={20} color={theme.muted} strokeWidth={2} />}
+            />
+          </Pressable>
+        ) : null}
+        <View
+          style={[styles.field, { backgroundColor: theme.field, borderColor: theme.fieldLine }]}
+        >
+          <ChatComposerField
+            placeholder={placeholder}
+            fieldLabel={placeholder}
+            editable
+            textColor={theme.ink}
+            placeholderColor={theme.subtle}
+            clearIf={clear}
+            onChangeText={(event) => edit({ text: event.nativeEvent.text })}
+            onContentHeight={(event) => setHeight(event.nativeEvent.height)}
+            style={{ height: Math.min(Math.max(height, FIELD_MIN), FIELD_MAX) }}
+          />
+        </View>
+        <Pressable
+          disabled={!ready}
+          accessibilityRole="button"
+          accessibilityLabel={label}
+          accessibilityState={{ disabled: !ready, busy: submitting }}
+          onPress={() => void submit()}
+          style={[styles.round, ready && { backgroundColor: theme.accent }]}
+        >
+          <SymbolView
+            name="arrow.up"
+            size={18}
+            weight="bold"
+            tintColor={ready ? theme.bg : theme.subtle}
+            fallback={
+              <ArrowUp size={20} color={ready ? theme.bg : theme.subtle} strokeWidth={2.5} />
+            }
+          />
+        </Pressable>
+      </View>
+    </Dock>
+  );
+}
+
+/** A problem in the composer's place, docked as the composer is, when the chat can't show one, with Try again. */
+export function ComposerProblem({
+  problem,
+  onLayoutHeight,
+}: {
+  problem: Required<OutboxProblem>;
+  onLayoutHeight(height: number): void;
+}) {
+  return (
+    <Dock onLayoutHeight={onLayoutHeight}>
+      <ProblemLine text={problem.text} onRetry={problem.retry} />
+    </Dock>
+  );
+}
+
+/** The bar at the screen's bottom that rides the keyboard, reporting its height so the list's end clears it. */
+function Dock({
+  onLayoutHeight,
+  children,
+}: {
+  onLayoutHeight(height: number): void;
+  children: ReactNode;
+}) {
+  const theme = useTheme();
+  const insets = useSafeAreaInsets();
   return (
     <KeyboardStickyView offset={{ closed: 0, opened: insets.bottom - 6 }} style={styles.sticky}>
       <View
@@ -109,95 +235,7 @@ export function Composer({
           },
         ]}
       >
-        {problem ? (
-          problem.retry ? (
-            <ProblemLine text={problem.text} onRetry={problem.retry} />
-          ) : (
-            <Text style={[styles.problem, { color: theme.muted }]}>{problem.text}</Text>
-          )
-        ) : null}
-        {notKept ? <ProblemLine text={chatWords.notKept} onRetry={() => void submit()} /> : null}
-        {mode === "post" ? (
-          <View style={styles.postHead}>
-            <TextInput
-              value={title}
-              onChangeText={setTitle}
-              placeholder={chatWords.title}
-              placeholderTextColor={theme.subtle}
-              accessibilityLabel={chatWords.title}
-              maxLength={TITLE_MAX}
-              returnKeyType="next"
-              style={[styles.title, { color: theme.ink, borderBottomColor: theme.line }]}
-            />
-            {lanes.send ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={confirmWords.cancel}
-                onPress={() => setChosen("send")}
-                style={styles.round}
-              >
-                <SymbolView
-                  name="xmark"
-                  size={16}
-                  weight="semibold"
-                  tintColor={theme.muted}
-                  fallback={null}
-                />
-              </Pressable>
-            ) : null}
-          </View>
-        ) : null}
-        <View style={styles.row}>
-          {lanes.post && mode === "send" ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={chatWords.newPost}
-              onPress={() => setChosen("post")}
-              style={styles.round}
-            >
-              <SymbolView
-                name="square.and.pencil"
-                size={20}
-                weight="medium"
-                tintColor={theme.muted}
-                fallback={null}
-              />
-            </Pressable>
-          ) : null}
-          <View
-            style={[styles.field, { backgroundColor: theme.field, borderColor: theme.fieldLine }]}
-          >
-            <ChatComposerField
-              placeholder={placeholder}
-              fieldLabel={placeholder}
-              editable
-              textColor={theme.ink}
-              placeholderColor={theme.subtle}
-              clearIf={clear}
-              onChangeText={(event) => {
-                setText(event.nativeEvent.text);
-              }}
-              onContentHeight={(event) => setHeight(event.nativeEvent.height)}
-              style={{ height: Math.min(Math.max(height, FIELD_MIN), FIELD_MAX) }}
-            />
-          </View>
-          <Pressable
-            disabled={!ready}
-            accessibilityRole="button"
-            accessibilityLabel={label}
-            accessibilityState={{ disabled: !ready, busy: submitting }}
-            onPress={() => void submit()}
-            style={[styles.round, ready && { backgroundColor: theme.accent }]}
-          >
-            <SymbolView
-              name="arrow.up"
-              size={18}
-              weight="bold"
-              tintColor={ready ? theme.bg : theme.subtle}
-              fallback={null}
-            />
-          </Pressable>
-        </View>
+        {children}
       </View>
     </KeyboardStickyView>
   );

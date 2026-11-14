@@ -33,7 +33,7 @@ import {
   useWorkspaceGap,
 } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
-import { Composer, outboxProblem } from "./Composer";
+import { Composer, ComposerProblem, outboxProblem } from "./Composer";
 import { blockedBy, chatWrite, lanesOf, type Lanes } from "./conversationWrites";
 import { MessageRow } from "./MessageRow";
 import { streamRows } from "./outboxMessages";
@@ -96,7 +96,7 @@ interface StreamWrites {
   /** The messages only this phone has, given the IDs the stream's read shows. */
   local(shown: ReadonlySet<string>): readonly Message[];
   readonly actions: LocalActions;
-  /** Null until the server says which lanes the stream takes. */
+  /** Null until the server says which lanes the stream takes, or its read fails. */
   readonly composer:
     | ((onLayoutHeight: (height: number) => void, title: string) => ReactNode)
     | null;
@@ -109,15 +109,21 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
   const signIn = useSignIn();
   const { data, outbox } = useAccount();
   const lanesView = useMemo(() => views.lanes(groupId), [groupId]);
-  const context = useView(lanesView).state.value;
+  const { state: lanesState, retry: retryLanes } = useView(lanesView);
+  const context = lanesState.value;
   const lanes = useMemo<Lanes | null>(
     () => (context?.kind === "lanes" ? lanesOf(context) : null),
     [context],
   );
+  const problemText = useProblemText();
   const state = useOutboxState(outbox);
+  // The screen's store, until another replaces it or the screen closes, so a controller made for it stops asking.
   const live = useRef<WorkspaceData | null>(data);
   useEffect(() => {
     live.current = data;
+    return () => {
+      live.current = null;
+    };
   }, [data]);
   const isCurrent = useCallback(
     () => signIn.isCurrent() && data !== null && live.current === data,
@@ -148,10 +154,23 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
         : [],
     [state, workspaceId, signIn, groupId, you],
   );
-  const problem = useMemo(
-    () => outboxProblem(state, blocked, () => outbox.wake()),
-    [state, blocked, outbox],
+  // A failed read of the lanes shows in the composer's place, with its cause and Try again, and keeps the composer when
+  // it has lanes already. The outbox's own problem comes first.
+  const lanesProblem = useMemo(
+    () =>
+      lanesState.problem
+        ? {
+            text: `${chatWords.lanesFailed} ${problemText(lanesState.problem)}`,
+            retry: retryLanes,
+          }
+        : null,
+    [lanesState.problem, problemText, retryLanes],
   );
+  const problem = useMemo(
+    () => outboxProblem(state, blocked, () => outbox.wake()) ?? lanesProblem,
+    [state, blocked, outbox, lanesProblem],
+  );
+  const composerKey = `${data?.instance ?? 0}:${groupId}`;
   const submit = useCallback(
     (kind: "send" | "post", body: string, title: string) => {
       const write = chatWrite(
@@ -165,11 +184,13 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     },
     [writes, workspaceId, groupId],
   );
+  // Keyed by the workspace store, which is one sign-in's, and the chat, so a draft never carries to another destination.
   const composer = useMemo(
     () =>
       lanes && (lanes.post || lanes.send)
         ? (onLayoutHeight: (height: number) => void, title: string) => (
             <Composer
+              key={composerKey}
               placeholder={chatWords.messageTo(title)}
               lanes={lanes}
               blocked={blocked}
@@ -178,8 +199,16 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
               onLayoutHeight={onLayoutHeight}
             />
           )
-        : null,
-    [lanes, blocked, problem, submit],
+        : lanesProblem
+          ? (onLayoutHeight: (height: number) => void) => (
+              <ComposerProblem
+                key={composerKey}
+                problem={lanesProblem}
+                onLayoutHeight={onLayoutHeight}
+              />
+            )
+          : null,
+    [lanes, blocked, problem, submit, lanesProblem, composerKey],
   );
   const streamWrites = useMemo<StreamWrites>(
     () => ({ local, actions, composer }),

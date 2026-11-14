@@ -53,6 +53,8 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     textView.textContainerInset = UIEdgeInsets(top: 11, left: 0, bottom: 11, right: 0)
     textView.textContainer.lineFragmentPadding = 0
     textView.returnKeyType = .default
+    // A status-bar tap scrolls the conversation, as React Native's own text view leaves it to.
+    textView.scrollsToTop = false
     textView.delegate = self
     placeholder.font = font
     placeholder.adjustsFontForContentSizeCategory = true

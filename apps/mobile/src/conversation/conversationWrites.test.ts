@@ -10,8 +10,10 @@ import { deferred, testServer, type Answer } from "../server/testServer";
 import {
   blockedBy,
   chatWrite,
+  clearSent,
   createConversationWrites,
   lanesOf,
+  type Draft,
   type WriteOutbox,
 } from "./conversationWrites";
 
@@ -325,5 +327,65 @@ describe("Discard", () => {
       kind: "discarded",
     });
     expect(asked).toEqual(["discard"]);
+  });
+
+  it("deletes nothing when the workspace changes while its confirmation is open", async () => {
+    const { outbox, asked } = fakeOutbox(READY);
+    let current = true;
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => current });
+    const confirmation = deferred<boolean>();
+    const pending = confirmation.promise.then(() =>
+      writes.discard({ kind: "record", operationId: "op-1" }),
+    );
+    current = false;
+    confirmation.resolve(true);
+    expect(await pending).toEqual({ kind: "stale" });
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("a screen no longer shown", () => {
+  it("asks the outbox nothing", async () => {
+    const { outbox, asked } = fakeOutbox(READY, () => Promise.reject(new Error("never")));
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => false });
+    expect(await writes.submit("ws-1", send("Hi"))).toEqual({ kind: "stale" });
+    expect(await writes.retry("op-1")).toEqual({ kind: "stale" });
+    expect(await writes.discard({ kind: "record", operationId: "op-1" })).toEqual({
+      kind: "stale",
+    });
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("clearSent", () => {
+  const sent: Draft = { text: "A", title: "Plan", chosen: "post" };
+
+  it("empties the title and closes New post when nothing changed meanwhile", () => {
+    expect(clearSent(sent, sent)).toEqual({ text: "A", title: "", chosen: "send" });
+  });
+
+  it("keeps a newer body a post, without the title sent", () => {
+    expect(clearSent({ ...sent, text: "B" }, sent)).toEqual({
+      text: "B",
+      title: "",
+      chosen: "post",
+    });
+  });
+
+  it("keeps a newer title, and New post with it", () => {
+    expect(clearSent({ ...sent, title: "Later" }, sent)).toEqual({
+      text: "A",
+      title: "Later",
+      chosen: "post",
+    });
+  });
+
+  it("keeps New post chosen after a message was sent", () => {
+    const message: Draft = { text: "A", title: "", chosen: "send" };
+    expect(clearSent({ ...message, chosen: "post" }, message)).toEqual({
+      text: "A",
+      title: "",
+      chosen: "post",
+    });
   });
 });

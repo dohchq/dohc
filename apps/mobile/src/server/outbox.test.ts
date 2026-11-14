@@ -160,6 +160,7 @@ function launch(
   server?: Server,
   options: {
     files?: DurableFiles;
+    sends?: boolean;
     now?: () => number;
     stalledAfterMs?: number;
     stalledRetryMs?: number;
@@ -1149,6 +1150,33 @@ describe("account isolation", () => {
       accountId: "u-1",
       origin: a.origin,
     });
+    stop();
+  });
+});
+
+describe("with sending off", () => {
+  it("reads a record an earlier build kept, sends nothing at sign-in or wake, and still deletes it at Sign out", async () => {
+    const disk = durableDisk();
+    placeRecord(disk, 1, {
+      operationId: "op-a",
+      write: send("Kept"),
+      target: { kind: "stream", id: "dm-1" },
+    });
+    const server = testServer();
+    server.on("POST", path("send"), SAVED("thread-1", "message-a"));
+    const { outbox, account, stop } = launch(disk, server, { sends: false });
+    await ready(outbox);
+    expect(record(outbox, 1)).toMatchObject({ operationId: "op-a", stage: "queued" });
+    outbox.wake();
+    account.signIn(server);
+    outbox.wake();
+    await settled();
+    expect(server.calls).toHaveLength(0);
+
+    await account.signOut();
+    expect(outbox.state()).toMatchObject({ status: "ready", deletion: "none", records: [] });
+    expect(disk.names()).toEqual([]);
+    expect(server.calls).toHaveLength(0);
     stop();
   });
 });

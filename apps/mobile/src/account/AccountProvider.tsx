@@ -21,6 +21,7 @@ import {
 } from "../server/noticeStore";
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
 import { createOutbox, type Outbox, type OutboxState } from "../server/outbox";
+import { phoneWrites } from "../server/phoneWrites";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
 import {
   createWorkspaceList,
@@ -75,8 +76,11 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // write's result hands it off. An app-state change tries again whatever failed, and asks again at once. Only where its
 // Sign out delete stands reaches the screen, so the rest of its changes render nothing.
 export function AccountProvider({ children }: { children: ReactNode }) {
-  // Sign out deletes the outbox: the sign-in ends, and its token goes, once that delete can't be lost.
-  const [outbox] = useState(() => createOutbox({ files: createDurableFiles(nativeDurableFile()) }));
+  // Sign out deletes the outbox: the sign-in ends, and its token goes, once that delete can't be lost. With phone writes
+  // off it sends nothing, not even records an earlier build kept.
+  const [outbox] = useState(() =>
+    createOutbox({ files: createDurableFiles(nativeDurableFile()), sends: phoneWrites }),
+  );
   const [account] = useState(() =>
     createAccount({ store: secureSignInStore, fetch, onSignOut: (leave) => outbox.signOut(leave) }),
   );

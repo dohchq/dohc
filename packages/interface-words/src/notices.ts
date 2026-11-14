@@ -83,6 +83,8 @@ export const chatWords = {
   /** Enqueue failed and nothing was kept: the text stays in the composer. */
   notKept: "dohc could not keep this message on your phone.",
   unlockToSend: "Unlock this phone to send messages",
+  /** The read of which messages a chat takes failed, so the composer can't show. */
+  lanesFailed: "dohc could not read what you can send in this chat.",
   outboxUnreadable: "dohc could not read messages waiting on this phone.",
   /** A record in the outbox that can't be read: nothing of its text, chat or workspace is known. */
   unreadableMessage: "This message could not be read",

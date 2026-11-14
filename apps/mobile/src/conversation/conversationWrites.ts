@@ -4,7 +4,7 @@ import { OutboxError, type DiscardTarget, type Outbox, type OutboxState } from "
 // What a conversation's write controls do, apart from how they look. The outbox is the only thing that keeps or sends a
 // write: this checks the gate, makes the write the route takes, keeps one attempt of each kind from running twice, and
 // says what the screen should do with its text once the outbox answers. A screen whose account or workspace changed
-// while the outbox worked does nothing with the answer.
+// asks the outbox nothing, and does nothing with an answer that comes after the change.
 
 /** What a conversation's controls need of the outbox. The sample build gives one that keeps its records in memory. */
 export type WriteOutbox = Pick<
@@ -58,6 +58,30 @@ export function chatWrite(destination: Destination, body: string, title = ""): C
   };
 }
 
+/** What the composer holds: the body, a post's title, and whether New post is chosen. */
+export interface Draft {
+  readonly text: string;
+  readonly title: string;
+  readonly chosen: "send" | "post";
+}
+
+export const EMPTY_DRAFT: Draft = { text: "", title: "", chosen: "send" };
+
+/**
+ * The draft once the outbox keeps `sent`. The title clears if it is still the one sent. New post closes only when nothing
+ * changed meanwhile, so a newer body or title typed during the enqueue stays a post. The native field clears the body
+ * itself, only if it still holds the text sent.
+ */
+export function clearSent(current: Draft, sent: Draft): Draft {
+  const unchanged =
+    current.text === sent.text && current.title === sent.title && current.chosen === sent.chosen;
+  return {
+    text: current.text,
+    title: current.title === sent.title ? "" : current.title,
+    chosen: unchanged ? "send" : current.chosen,
+  };
+}
+
 /**
  * What became of a submit. `kept`: the outbox keeps it, so the composer clears the text it sent. `withheld`: the outbox
  * may keep it, withheld under `operationId`, and its row offers Send, so the composer clears that text too and never
@@ -99,9 +123,14 @@ export function createConversationWrites(options: {
   const { outbox, enabled, isCurrent } = options;
   // One submit at a time, and one Send or Discard at a time per record, so a second tap does nothing.
   const running = new Set<string>();
-  async function once<T>(key: string, blocked: T, run: (outbox: WriteOutbox) => Promise<T>) {
+  // Checked when the action runs, so Discard's confirmation answered after a workspace change asks nothing.
+  async function once<T>(
+    key: string,
+    run: (outbox: WriteOutbox) => Promise<T>,
+  ): Promise<T | { readonly kind: "blocked" } | { readonly kind: "stale" }> {
     if (!enabled || !outbox || running.has(key) || blockedBy(outbox.state(), enabled) !== null)
-      return blocked;
+      return { kind: "blocked" };
+    if (!isCurrent()) return { kind: "stale" };
     running.add(key);
     try {
       return await run(outbox);
@@ -112,7 +141,7 @@ export function createConversationWrites(options: {
 
   return {
     submit: (workspaceId, write) =>
-      once<SubmitOutcome>("submit", { kind: "blocked" }, async (box) => {
+      once<SubmitOutcome>("submit", async (box) => {
         try {
           await box.enqueue({ workspaceId, write });
           return isCurrent() ? { kind: "kept" } : { kind: "stale" };
@@ -126,7 +155,7 @@ export function createConversationWrites(options: {
       }),
 
     retry: (operationId) =>
-      once<RetryOutcome>(`record:${operationId}`, { kind: "blocked" }, async (box) => {
+      once<RetryOutcome>(`record:${operationId}`, async (box) => {
         try {
           await box.retryEnqueue(operationId);
           return { kind: isCurrent() ? "kept" : "stale" };
@@ -141,7 +170,6 @@ export function createConversationWrites(options: {
     discard: (target) =>
       once<DiscardOutcome>(
         target.kind === "record" ? `record:${target.operationId}` : `unreadable:${target.handle}`,
-        { kind: "blocked" },
         async (box) => {
           try {
             await box.discard(target);
