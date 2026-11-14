@@ -23,7 +23,7 @@ interface MembersDependencies<Workspace, Credentials> {
   sharesChanged(workspaceId: string): void;
 }
 
-export const JOINED_BY_ANOTHER_ACCOUNT = "Sign in to the account that joined this workspace.";
+export const JOINED_BY_ANOTHER_ACCOUNT = "Sign in with the account the owner invited.";
 
 /** Whether these credentials are the account that joined this workspace, on the relay it joined through. */
 export function joinedByAccount(

@@ -365,8 +365,8 @@ function MembersGateView(props: {
 // dohc keeps the joined account's id, not its email, so it can name only the account signed in now.
 export function joinedByAnother(email: string | null): string {
   return email
-    ? `This computer is signed in as ${email}, not the account that joined this workspace.`
-    : "This computer is signed in to a different account than the one that joined this workspace.";
+    ? `This computer is signed in as ${email}, not the account the owner invited.`
+    : "This computer is signed in to a different account than the one the owner invited.";
 }
 
 function GateState(props: {

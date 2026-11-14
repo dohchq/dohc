@@ -6,11 +6,11 @@ describe("a joined workspace's refresh failure", () => {
     const error = Object.assign(new Error("Sign in to the account that received this share."), { errorKind: "unauthorized" });
     expect(membershipRefreshFailure({ workspaceName: "Lisbon trip", signedInEmail: "bo@test", error })).toEqual({
       title: "dohc could not refresh Lisbon trip",
-      message: "This computer is signed in as bo@test, not the account that joined this workspace. dohc does not record that account's email.",
+      message: "This computer is signed in as bo@test, not the account the owner invited. dohc does not record that account's email.",
       switchAccount: true,
     });
     expect(membershipRefreshFailure({ workspaceName: "Lisbon trip", signedInEmail: null, error })).toMatchObject({
-      message: "This computer is signed in to a different account than the one that joined this workspace. dohc does not record that account's email.",
+      message: "This computer is signed in to a different account than the one the owner invited. dohc does not record that account's email.",
     });
   });
 

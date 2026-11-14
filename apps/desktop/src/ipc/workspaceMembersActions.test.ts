@@ -239,11 +239,11 @@ describe("workspace members actions", () => {
     it("refuses with the account check's reason", async () => {
       const h = joined();
       h.joinedRemote.mockRejectedValueOnce(
-        new Error("Sign in to the account that joined this workspace."),
+        new Error("Sign in with the account the owner invited."),
       );
       await expect(
         h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }),
-      ).rejects.toThrow("Sign in to the account that joined this workspace.");
+      ).rejects.toThrow("Sign in with the account the owner invited.");
       expect(h.relay).not.toHaveBeenCalled();
     });
   });
@@ -506,7 +506,7 @@ describe("an admin's New group in a joined workspace", () => {
   ] as const)("refuses before the relay when %s (%s)", async (credentials, _why) => {
     const g = group(credentials);
     await expect(g.create(membership, { name: "Team" })).rejects.toThrow(
-      "Sign in to the account that joined this workspace.",
+      "Sign in with the account the owner invited.",
     );
     expect(g.relay).not.toHaveBeenCalled();
   });

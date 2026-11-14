@@ -545,7 +545,7 @@ it("says the membership ended and shows none of the workspace once the member is
 it("refuses an account that is not a member, names it, and offers Switch account", async () => {
   server({member: false}); await render();
   await settle(() => text().includes("dohc could not open this workspace with this account."));
-  expect(container.querySelector(".state-message p")?.textContent).toBe("You're signed in as Sam Rivera. Sign in with the account the owner invited.");
+  expect(container.querySelector(".state-message p")?.textContent).toBe("This browser is signed in as Sam Rivera, not the account the owner invited.");
   await click("Switch account");
   await settle(() => text().includes("Sign in to open this workspace"));
 });

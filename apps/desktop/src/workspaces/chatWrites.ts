@@ -359,7 +359,7 @@ export function createChatWrites(dependencies: {
       workspace.shareView &&
       (authorUserId === undefined || workspace.shareView.recipientUserId !== authorUserId)
     ) {
-      throw new Error("Sign in to the account that joined this workspace.");
+      throw new Error("Sign in with the account the owner invited.");
     }
     if (currentCredentialGeneration() !== generation) throw new Error(SESSION_CHANGED);
     return authorUserId;

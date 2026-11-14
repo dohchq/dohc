@@ -309,7 +309,7 @@ describe("Members page", () => {
       expect(gate.dataset.reason).toBe("other-account");
       // dohc keeps only the joined account's id, so it names the account signed in now and says it cannot name the other.
       expect(gate.textContent).toBe(
-        "This computer is signed in as bo@test, not the account that joined this workspace. dohc does not record that account's email.Switch account",
+        "This computer is signed in as bo@test, not the account the owner invited. dohc does not record that account's email.Switch account",
       );
       expect(within(gate).queryByRole("button", { name: "Try again" })).toBeNull();
       await userEvent.click(within(gate).getByRole("button", { name: "Switch account" }));
