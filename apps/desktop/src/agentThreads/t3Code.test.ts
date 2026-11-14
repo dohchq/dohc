@@ -17,6 +17,7 @@ import {
   t3CodeOriginOnThisComputer,
 } from "./t3Code";
 import { T3CodeSignInNotKept, createT3CodeSignInStore } from "./t3CodeSignInStore";
+import { AgentThreadAnswers } from "../ipc/bridgeContract";
 import { browser, startFakeT3Code } from "../testing/fakeT3Code";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -613,6 +614,23 @@ describe("T3 Code's thread tools", () => {
       status: "open",
       questions: [{ id: words }],
     });
+    // Every id dohc shows a question under comes through the answer's own check.
+    const ids = [words, "constructor", "toString", "hasOwnProperty"];
+    expect(
+      Object.keys(AgentThreadAnswers.parse(Object.fromEntries(ids.map((id) => [id, "yes"])))),
+    ).toEqual(ids);
+    // The one id an answer cannot be keyed by: such a box is answered in T3 Code.
+    t3.tools.t3_pending_request = () => ({
+      requestId: "q-1",
+      questions: [{ id: "__proto__", header: "", question: "?", options: [] }],
+    });
+    await expect(readT3CodeQuestion(session, asked)).rejects.toMatchObject({
+      problem: "unexpected",
+    });
+    expect(
+      Object.keys(AgentThreadAnswers.parse(Object.fromEntries([["__proto__", "yes"]]))),
+    ).toEqual([]);
+
     // A box too large to lay out at once is not shown.
     t3.tools.t3_pending_request = () => ({
       requestId: "q-1",

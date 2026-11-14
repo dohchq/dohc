@@ -768,8 +768,14 @@ const QuestionRead = z.object({
   questions: z
     .array(
       z.object({
-        // Some providers name a question by its own words, so its id may be as long.
-        id: z.string().min(1).max(20_000),
+        // Some providers name a question by its own words, so its id may be as
+        // long. The answers travel as a record keyed by this id, and a record
+        // cannot carry the key "__proto__", so a box with that id is not shown.
+        id: z
+          .string()
+          .min(1)
+          .max(20_000)
+          .refine((id) => id !== "__proto__"),
         header: z.string().max(500),
         question: z.string().max(20_000),
         options: z
