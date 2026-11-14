@@ -281,6 +281,7 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .link-page .named-body-editor .ProseMirror { min-height: 240px; overflow-wrap: anywhere; padding: 0; outline: none; caret-color: var(--viewer-ink); white-space: pre-wrap; }
 .edit-alert { margin: 0 0 16px; color: var(--viewer-danger); }
 .link-page .edit-notice { position: absolute; top: 48px; right: 12px; z-index: 15; display: flex; width: 360px; max-width: calc(100% - 24px); align-items: flex-start; gap: 12px; border: 1px solid var(--viewer-line); border-radius: 12px; padding: 12px; background: var(--viewer-panel); box-shadow: var(--viewer-shadow); color: var(--viewer-muted); font-size: 12px; }
+.edit-notice { text-wrap: pretty; }
 .edit-notice p { margin: 0; }
 .edit-notice .edit-notice-title { color: var(--viewer-ink); font-size: 13px; font-weight: 600; }
 .removed-text-quote { margin: 8px 0 0; border-left: 2px solid var(--viewer-line-strong); padding-left: 8px; color: var(--viewer-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
