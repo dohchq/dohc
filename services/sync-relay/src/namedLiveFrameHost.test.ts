@@ -659,6 +659,7 @@ it("logs a slow or unsuccessful submission with cut ids, timings and a fixed wor
   // The clock stands still inside each step, so every step's time is 0; no loop sampler runs here.
   const steps = {
     checkMs: 0,
+    queueMs: 0,
     waitMs: 0,
     queryMs: 0,
     verifyMs: 0,
@@ -731,7 +732,7 @@ it("refuses an applied payload only after reading its size without retaining bud
   expect(budget.usage()).toBe(0);
 });
 
-it("reads one cut when one slot frees for three waiting submissions", async () => {
+it("reads one cut when one slot frees for three waiting submissions of one note", async () => {
   const f = await setup(64);
   journal(f);
   const read = vi.mocked(f.storage.readLiveUpdateJournalCut);
@@ -769,7 +770,8 @@ it("reads one cut when one slot frees for three waiting submissions", async () =
       };
       waiters.add(wake);
       signal?.addEventListener("abort", abort, { once: true });
-      if (waiters.size === 3) waiting.resolve();
+      // The other two wait in the note's queue, not for a slot.
+      if (waiters.size === 1) waiting.resolve();
     });
   }
   const caller = new AbortController();
@@ -865,4 +867,96 @@ it.each(["cancellation"])("releases validation bytes and the person slot on %s",
   expect(released).not.toBeNull();
   released?.();
   expect(vi.getTimerCount()).toBe(0);
+});
+
+function captureWith(
+  f: Awaited<ReturnType<typeof setup>>,
+  validate: CapacityLiveAdmissionValidator,
+  deadlineMs = f.native.deadlineMs,
+) {
+  const capture = captureNamedLiveFrameHost({
+    ticket: f.capture.ticket,
+    actor: liveBrowserActor(scope),
+    storage: f.storage,
+    native: { ...f.native, deadlineMs },
+    bounds: f.bounds,
+    validate,
+  });
+  cleanup.push(async () => capture.close());
+  return capture;
+}
+const submitOn = (capture: ReturnType<typeof captureWith>, signal = new AbortController().signal) =>
+  capture.submit(
+    { deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes },
+    signal,
+  );
+const passes: CapacityLiveAdmissionValidator = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  return { kind: "refused", reason: "invalid-update", source: "candidate" };
+};
+/** A check that runs until its save gives up. */
+const hangs: CapacityLiveAdmissionValidator = (_input, signal) =>
+  new Promise((_resolve, reject) => {
+    signal!.throwIfAborted();
+    signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+  });
+
+it("checks each of three saves of one note once, where checks side by side are thrown away by each commit", async () => {
+  const f = await setup(64),
+    commit = journal(f),
+    accept = commit.getMockImplementation()!;
+  const read = vi.mocked(f.storage.readLiveUpdateJournalCut),
+    first = read({ document: binding });
+  if (first.kind !== "cut") throw new Error("No cut.");
+  // Each commit moves the note's cut; a save checked against an older cut is answered retry.
+  let highWater = 0;
+  read.mockImplementation(() => ({ kind: "cut", cut: { ...first.cut, highWater } }));
+  commit.mockImplementation((input) => {
+    if (input.cutToken.highWater !== highWater)
+      return { result: { kind: "retry", reason: "admission-unavailable" }, admitted: null };
+    highWater++;
+    return accept(input);
+  });
+  const validate = vi.fn(passes);
+  const captures = Array.from({ length: 3 }, () => captureWith(f, validate));
+  expect(await Promise.all(captures.map((capture) => submitOn(capture)))).toEqual(
+    Array.from({ length: 3 }, () => ({ result: "success", ack })),
+  );
+  expect(validate).toHaveBeenCalledTimes(3);
+  expect(commit).toHaveBeenCalledTimes(3);
+});
+
+it("lets a save queued behind a hung check answer retry at its own deadline, and the next save in once the hung one gives up", async () => {
+  const f = await setup(64);
+  journal(f);
+  const head = vi.fn(hangs),
+    queued = vi.fn(passes),
+    next = vi.fn(passes);
+  const hung = submitOn(captureWith(f, head, 300));
+  await vi.waitFor(() => expect(head).toHaveBeenCalledOnce());
+  // Its deadline passes first, while the hung check still holds the note.
+  expect(await submitOn(captureWith(f, queued, 50))).toEqual({
+    result: "retry",
+    reason: "admission-unavailable",
+  });
+  expect(queued).not.toHaveBeenCalled();
+  const after = submitOn(captureWith(f, next));
+  expect(await hung).toEqual({ result: "retry", reason: "admission-unavailable" });
+  expect(await after).toEqual({ result: "success", ack });
+  expect(next).toHaveBeenCalledOnce();
+});
+
+it("lets the next save of a note in when the editor whose check holds it disconnects", async () => {
+  const f = await setup(64);
+  journal(f);
+  const head = vi.fn(hangs),
+    next = vi.fn(passes);
+  const editor = captureWith(f, head);
+  const held = submitOn(editor);
+  await vi.waitFor(() => expect(head).toHaveBeenCalledOnce());
+  const after = submitOn(captureWith(f, next));
+  editor.close();
+  await expect(held).rejects.toThrow("capture closed");
+  expect(await after).toEqual({ result: "success", ack });
+  expect(next).toHaveBeenCalledOnce();
 });
