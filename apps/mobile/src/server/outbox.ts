@@ -101,7 +101,7 @@ interface OutboxRecord {
   readonly result: OutboxResult | null;
 }
 
-interface OutboxState {
+export interface OutboxState {
   /**
    * `locked`: iOS hasn't been unlocked since the phone started, so the records can't be read yet. `failed`: reading
    * them, or finishing a Sign out's delete, failed. Both try again at the next `wake`.
