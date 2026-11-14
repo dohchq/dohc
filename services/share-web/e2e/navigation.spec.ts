@@ -95,13 +95,13 @@ test("keeps authored navigation inert until the user follows an allowed link", a
     await internalLink.click();
     expect(page.url()).toBe(viewerUrl);
     await expect(page.locator("article.markdown")).toContainText(NEXT_FILE_MARKER);
-    await expect(navigation.getByRole("button", { name: "next.md", exact: true })).toHaveClass(
+    await expect(navigation.getByRole("treeitem", { name: "next.md", exact: true })).toHaveClass(
       /\bselected\b/u,
     );
     await expectAttackSentinelsUnchanged(page);
     expect(probe.requests).toEqual([]);
 
-    await navigation.getByRole("button", { name: "navigation.md", exact: true }).click();
+    await navigation.getByRole("treeitem", { name: "navigation.md", exact: true }).click();
     const externalLink = page
       .locator("article.markdown")
       .getByRole("link", { name: "Open external probe" });

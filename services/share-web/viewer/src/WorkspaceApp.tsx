@@ -1,6 +1,6 @@
 import {lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent} from "react";
 import type {Ended} from "./ChatChannel";
-import {DohcMark, Icon, fileIcon} from "./icons";
+import {DohcMark} from "./icons";
 import {MemberChats, MemberComments, useMemberListing} from "./MemberChats";
 import {memberSession} from "./memberWorkspace";
 import {filesFromAccumulator, isMarkdown, type FileAccumulator, type SharedFile, type ViewMeta} from "./model";
@@ -8,7 +8,7 @@ import {accountUser, namedRequest} from "./namedRecipient";
 import {NamedSignIn, signInErrorMessage} from "./NamedSignIn";
 import {RETRY_INITIAL_MS, RETRY_MAX_MS} from "./retry";
 import {
-  EpochFloorChangedError, FileView, Folder, fileTitle, fileTree, loadCurrentState, loadLog, loadMeta, MAX_LOG_PAGES, Opening, StatePage,
+  EpochFloorChangedError, FileTree, FileView, fileTitle, fileTree, loadCurrentState, loadLog, loadMeta, MAX_LOG_PAGES, Opening, StatePage,
   useNarrow, VersionMismatchError, VIEW_LOG_HOLD_MS, ViewResponseError, waitForRetry,
 } from "./viewFiles";
 import "./workspace.css";
@@ -202,13 +202,8 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   return <div className="viewer link-page workspace-page" data-tab={shownTab ?? undefined}>
     <nav id="workspace-files" aria-label="Workspace files" {...panel("files")}>
       <div className="workspace-title"><span className="bar-mark"><DohcMark/></span><h1 className="workspace-name">{name}</h1></div>
-      {files.files.length ? <ul className="tree">
-        {tree.folders.map(folder => <Folder key={folder.path} node={folder} selected={selected?.path ?? ""} onSelect={file => choose(file.path)}/>)}
-        {tree.files.map(file => <li key={file.path}>
-          <button className={selected?.path === file.path ? "file selected" : "file"} type="button" aria-current={selected?.path === file.path ? "page" : undefined}
-            onClick={() => choose(file.path)}><Icon name={fileIcon(file.path)}/><span>{file.path}</span></button>
-        </li>)}
-      </ul> : <p className="workspace-empty">No files in this workspace yet.</p>}
+      {files.files.length ? <FileTree tree={tree} label="Workspace files" selected={selected?.path ?? ""} onSelect={file => choose(file.path)}/>
+        : <p className="workspace-empty">No files in this workspace yet.</p>}
       <div className="workspace-account">
         <span title={account.name}>{account.name}</span>
         <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={signOut}>{signingOut ? "Signing out…" : "Sign out"}</button>

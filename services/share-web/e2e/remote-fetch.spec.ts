@@ -145,7 +145,7 @@ test("blocks remote media and cross-origin connection egress", async ({
     const viewerUrl = page.url();
     const remoteFileButton = page
       .getByRole("navigation", { name: "Shared files" })
-      .getByRole("button", { name: "remote.md", exact: true });
+      .getByRole("treeitem", { name: "remote.md", exact: true });
     await expect(remoteFileButton).toBeVisible();
     await remoteFileButton.click();
     await expect(page.locator("article.markdown")).toContainText(

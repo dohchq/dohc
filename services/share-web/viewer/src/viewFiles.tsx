@@ -4,6 +4,7 @@ import {
   Component,
   lazy,
   Suspense,
+  type KeyboardEvent,
   type ReactNode,
   useEffect,
   useMemo,
@@ -492,40 +493,104 @@ export function fileTree(files: SharedFile[]): FolderNode {
   return complete(root);
 }
 
-export function Folder(props: {
-  node: FolderNode;
+type TreeRow = {path: string; level: number; parent: string | null} & ({folder: FolderNode} | {file: SharedFile});
+
+function treeRows(node: FolderNode, closed: ReadonlySet<string>, level = 1, parent: string | null = null): TreeRow[] {
+  return [
+    ...node.folders.flatMap((folder): TreeRow[] => [
+      {path: folder.path, level, parent, folder},
+      ...(closed.has(folder.path) ? [] : treeRows(folder, closed, level + 1, folder.path)),
+    ]),
+    ...node.files.map((file): TreeRow => ({path: file.path, level, parent, file})),
+  ];
+}
+
+/**
+ * Shared files as a WAI-ARIA tree. One item takes Tab. Up and Down move, Right
+ * opens a folder or enters it, Left closes it or goes to its folder, Home and
+ * End jump, and Enter opens a file.
+ */
+export function FileTree(props: {
+  tree: FolderNode;
+  label: string;
   selected: string;
   onSelect: (file: SharedFile) => void;
 }) {
-  const [open, setOpen] = useState(true);
-  return (
-    <li>
-      <button aria-expanded={open} className="folder" type="button" onClick={() => setOpen((value) => !value)}>
-        <Icon name={open ? "chevron-down" : "chevron-right"} size={14} />
-        <Icon name="folder" />
-        <span>{props.node.name}</span>
+  const [closed, setClosed] = useState<ReadonlySet<string>>(() => new Set());
+  const [focused, setFocused] = useState<string | null>(null);
+  const items = useRef(new Map<string, HTMLButtonElement>());
+  const rows = useMemo(() => treeRows(props.tree, closed), [props.tree, closed]);
+  const tabbable = rows.find((row) => row.path === focused)?.path
+    ?? rows.find((row) => row.path === props.selected)?.path ?? rows[0]?.path;
+  const fold = (path: string, open: boolean) => setClosed((value) => {
+    const next = new Set(value);
+    if (open) next.delete(path); else next.add(path);
+    return next;
+  });
+  const keyDown = (event: KeyboardEvent, row: TreeRow) => {
+    const at = rows.indexOf(row), open = "folder" in row && !closed.has(row.path);
+    let target: TreeRow | undefined;
+    switch (event.key) {
+      case "ArrowDown": target = rows[at + 1]; break;
+      case "ArrowUp": target = rows[at - 1]; break;
+      case "Home": target = rows[0]; break;
+      case "End": target = rows.at(-1); break;
+      case "ArrowRight":
+        if ("folder" in row && !open) fold(row.path, true);
+        else if (open && rows[at + 1]?.parent === row.path) target = rows[at + 1];
+        break;
+      case "ArrowLeft":
+        if (open) fold(row.path, false);
+        else target = rows.find((item) => item.path === row.parent);
+        break;
+      // Handled here, so the button does not also click.
+      case "Enter":
+        if ("file" in row) props.onSelect(row.file); else fold(row.path, !open);
+        break;
+      default: return;
+    }
+    event.preventDefault();
+    if (target) items.current.get(target.path)?.focus();
+  };
+  const item = (row: TreeRow) => {
+    const open = "folder" in row && !closed.has(row.path), selected = props.selected === row.path;
+    return (
+      <button
+        ref={(node) => {if (node) items.current.set(row.path, node); else items.current.delete(row.path);}}
+        role="treeitem"
+        aria-level={row.level}
+        aria-expanded={"folder" in row ? open : undefined}
+        aria-selected={"file" in row ? selected : undefined}
+        aria-current={selected ? "page" : undefined}
+        className={"folder" in row ? "folder" : selected ? "file selected" : "file"}
+        tabIndex={row.path === tabbable ? 0 : -1}
+        type="button"
+        onFocus={() => setFocused(row.path)}
+        onKeyDown={(event) => keyDown(event, row)}
+        onClick={() => "file" in row ? props.onSelect(row.file) : fold(row.path, !open)}
+      >
+        {"folder" in row ? <>
+          <Icon name={open ? "chevron-down" : "chevron-right"} size={14} />
+          <Icon name="folder" />
+          <span>{row.folder.name}</span>
+        </> : <>
+          <Icon name={fileIcon(row.file.path)} />
+          <span>{row.file.path.split("/").at(-1)}</span>
+        </>}
       </button>
-      {open ? (
-        <ul>
-          {props.node.folders.map((folder) => (
-            <Folder key={folder.path} {...props} node={folder} />
-          ))}
-          {props.node.files.map((file) => (
-            <li key={file.path}>
-              <button
-                className={props.selected === file.path ? "file selected" : "file"}
-                type="button"
-                onClick={() => props.onSelect(file)}
-              >
-                <Icon name={fileIcon(file.path)} />
-                <span>{file.path.split("/").at(-1)}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </li>
-  );
+    );
+  };
+  const byPath = new Map(rows.map((row) => [row.path, row]));
+  const children = (node: FolderNode): ReactNode => <>
+    {node.folders.map((folder) => (
+      <li key={folder.path} role="none">
+        {item(byPath.get(folder.path)!)}
+        {closed.has(folder.path) ? null : <ul role="group">{children(folder)}</ul>}
+      </li>
+    ))}
+    {node.files.map((file) => <li key={file.path} role="none">{item(byPath.get(file.path)!)}</li>)}
+  </>;
+  return <ul className="tree" role="tree" aria-label={props.label}>{children(props.tree)}</ul>;
 }
 
 export function FileView(props: {

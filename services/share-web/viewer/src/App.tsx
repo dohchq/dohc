@@ -21,8 +21,8 @@ import {
 import {
   EMPTY_PICTURE,
   EpochFloorChangedError,
+  FileTree,
   FileView,
-  Folder,
   MAX_LOG_PAGES,
   Opening,
   RetryExhaustedError,
@@ -812,28 +812,7 @@ export function App() {
     <div className={editing ? "viewer link-page editing" : "viewer link-page"}>
       {several && !editing ? (
         <nav id="shared-files" aria-label="Shared files" hidden={!filesShown}>
-          <ul className="tree">
-            {tree.folders.map((folder) => (
-              <Folder
-                key={folder.path}
-                node={folder}
-                selected={selected?.path ?? ""}
-                onSelect={(file) => selectFile(file.path)}
-              />
-            ))}
-            {tree.files.map((file) => (
-              <li key={file.path}>
-                <button
-                  className={selected?.path === file.path ? "file selected" : "file"}
-                  type="button"
-                  onClick={() => selectFile(file.path)}
-                >
-                  <Icon name={fileIcon(file.path)} />
-                  <span>{file.path}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
+          <FileTree tree={tree} label="Shared files" selected={selected?.path ?? ""} onSelect={(file) => selectFile(file.path)} />
         </nav>
       ) : null}
       {filesShown && narrow ? (

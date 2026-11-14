@@ -143,7 +143,7 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
     const files = page.getByRole("navigation", { name: "Workspace files" });
     await expect(files.getByRole("heading", { level: 1 })).toHaveText("Lisbon trip");
     await expect(page.getByText("Land at 10:40, then the metro to Baixa-Chiado.")).toBeVisible();
-    await files.getByRole("button", { name: "packing.md" }).click();
+    await files.getByRole("treeitem", { name: "packing.md" }).click();
     await expect(page.getByText("Walking shoes.")).toBeVisible();
 
     const chats = page.getByRole("region", { name: "Chats" });
@@ -161,17 +161,17 @@ test("a member reads a page, comments on it and posts in a Group in the browser 
     expect(payloads.find(op => op.opKind === "chat.thread.create" && op.threadId === posted!.threadId)).toMatchObject({ channelWireId: "wire-planning" });
 
     // The owner's overwrite of the open page and next file reach the browser without a reload; the other Group counts its message.
-    await files.getByRole("button", { name: "itinerary.md" }).click();
+    await files.getByRole("treeitem", { name: "itinerary.md" }).click();
     await write("trip/itinerary.md", "# Itinerary\n\nLand at 10:40, then the 11:15 train to Sintra.");
     await expect(page.getByText("Land at 10:40, then the 11:15 train to Sintra.")).toBeVisible();
     await write("trip/budget.md", "# Budget\n\nHotel 780, flights 640.");
-    await files.getByRole("button", { name: "budget.md" }).click();
+    await files.getByRole("treeitem", { name: "budget.md" }).click();
     await expect(page.getByText("Hotel 780, flights 640.")).toBeVisible();
     await append([message("wire-food", "food-1", "Cervejaria Ramiro on Friday?")]);
     await expect(chats.getByRole("button", { name: "All Groups" })).toContainText("1");
 
     // Sam comments on the itinerary. The owner's desktop reads a thread on that file, written by Sam.
-    await files.getByRole("button", { name: "itinerary.md" }).click();
+    await files.getByRole("treeitem", { name: "itinerary.md" }).click();
     await page.getByRole("tab", { name: "Comments" }).click();
     const comments = page.getByRole("region", { name: "Comments" });
     await expect(comments.getByText("No comments yet.")).toBeVisible();

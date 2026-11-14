@@ -134,6 +134,37 @@ it("shows the workspace's tree and a page's settled text at View, and its Groups
   expect(vi.mocked(openMemberPage)).not.toHaveBeenCalled();
 });
 
+it("moves through the file tree with the arrow keys, folds a folder, and opens a file with Enter", async () => {
+  server({level: "view"}); await render(); await opened();
+  const tree = container.querySelector<HTMLElement>('[role="tree"]')!;
+  expect(tree.getAttribute("aria-label")).toBe("Workspace files");
+  const items = () => [...tree.querySelectorAll<HTMLElement>('[role="treeitem"]')];
+  const named = (name: string) => items().find(node => node.textContent === name)!;
+  // One item takes Tab: the open file.
+  expect(items().filter(node => node.tabIndex === 0)).toEqual([named("plan.md")]);
+  expect(named("plan.md").getAttribute("aria-selected")).toBe("true");
+  expect(named("trip").getAttribute("aria-level")).toBe("1");
+  expect(named("plan.md").getAttribute("aria-level")).toBe("2");
+  const press = async (key: string) => act(async () => {
+    (document.activeElement as HTMLElement).dispatchEvent(new KeyboardEvent("keydown", {key, bubbles: true, cancelable: true}));
+  });
+  named("plan.md").focus();
+  await press("ArrowDown"); expect(document.activeElement).toBe(named("to-pack.md"));
+  await press("ArrowDown"); expect(document.activeElement).toBe(named("welcome"));
+  await press("ArrowLeft"); expect(named("welcome").getAttribute("aria-expanded")).toBe("false");
+  expect(items().map(node => node.textContent)).toEqual(["trip", "plan.md", "to-pack.md", "welcome"]);
+  await press("ArrowRight"); expect(named("welcome").getAttribute("aria-expanded")).toBe("true");
+  await press("ArrowRight"); expect(document.activeElement).toBe(named("readme.md"));
+  await press("ArrowLeft"); expect(document.activeElement).toBe(named("welcome"));
+  await press("Home"); expect(document.activeElement).toBe(named("trip"));
+  await press("End"); expect(document.activeElement).toBe(named("readme.md"));
+  await press("ArrowUp"); expect(document.activeElement).toBe(named("welcome"));
+  await press("ArrowDown"); await press("Enter");
+  await settle(() => text().includes("Welcome."));
+  expect(named("readme.md").getAttribute("aria-selected")).toBe("true");
+  expect(items().filter(node => node.tabIndex === 0)).toEqual([named("readme.md")]);
+});
+
 it("posts in a Group at Comment, counts another Group's new messages, and opens it from the list", async () => {
   server({level: "comment"}); await render(); await opened();
   expect(following("chat")[0]!.url.searchParams.get("channelWireId")).toBeNull();

@@ -132,7 +132,7 @@ test("@members-browser-live a member at Edit types in a page in the browser and 
       await sam.getByLabel("Password", { exact: true }).fill(memberAccount.password);
       await signIn.click();
     }
-    await files.getByRole("button", { name: "plan.md" }).click();
+    await files.getByRole("treeitem", { name: "plan.md" }).click();
     const browserEditor = sam.getByRole("textbox", { name: "Shared file editor", exact: true });
     await expect(browserEditor).toHaveAttribute("contenteditable", "true", { timeout: 180_000 });
     await expect(browserEditor).toContainText("The member writes here.");
