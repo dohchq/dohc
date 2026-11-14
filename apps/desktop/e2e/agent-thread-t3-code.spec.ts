@@ -104,9 +104,9 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
   };
   // What the thread's runs are doing, newest first, as the test sets them.
   let runs: Array<{ runId: string; status: string; completedAt: string | null }> = [];
-  t3.tools.t3_thread_read = () => ({
+  t3.tools.t3_thread_read = (args) => ({
     thread: {
-      title: "Chief of Staff: dohc",
+      title: THREADS.find((thread) => thread.threadId === args.threadId)?.title ?? "",
       activeRunId: runs.find((run) => run.status === "running")?.runId ?? null,
       pendingRequestCount: waiting,
       archived: false,
@@ -310,6 +310,41 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     await expect(line).toContainText("Finished without replying here");
     await shoot(page, page, "t3-code-g-silent");
     expect(sends()).toHaveLength(3);
+
+    // The person points the agent at another thread, from the agent's page.
+    await page.getByTestId(activityPin("settings")).click();
+    await page.getByTestId(settingsNavPin("agents")).click();
+    await expect(section).toBeVisible();
+    if ((await agentPage.count()) === 0) await row.click();
+    await expect(agentPage.getByTestId("agent-page-thread-title")).toContainText(
+      "Chief of Staff: dohc",
+    );
+    await agentPage.getByTestId("agent-page-thread-change").click();
+    const change = page.getByTestId("agent-thread-change-dialog");
+    // The thread the agent has is no change.
+    await change.locator('[data-testid="t3-code-thread"][data-thread-id="t-chief"]').click();
+    await expect(change.getByTestId("agent-thread-change-confirm")).toBeDisabled();
+    await change.locator('[data-testid="t3-code-thread"][data-thread-id="t-issues"]').click();
+    await shoot(page, page, "t3-code-j-change");
+    await change.getByTestId("agent-thread-change-confirm").click();
+    await expect(change).toHaveCount(0);
+    // The new thread got dohc's introduction, and the page names it.
+    expect(sends()).toHaveLength(4);
+    expect(sends()[3]!.args.threadId).toBe("t-issues");
+    expect(String(sends()[3]!.args.message)).toContain('as their agent "Chief"');
+    await expect(agentPage.getByTestId("agent-page-thread-title")).toContainText(
+      "Issue owner: triage",
+    );
+    await shoot(page, dialog, "t3-code-k-changed");
+    await page.getByRole("button", { name: "Close settings" }).click();
+    await expect(dialog).toHaveCount(0);
+    // The line of the thread the agent left is gone, and the next message goes to the new one.
+    await expect(line).toHaveCount(0);
+    await page.getByTestId("chats-lane-composer").fill("And the Windows build?");
+    await page.getByTestId("chats-lane-composer").press("Enter");
+    await expect.poll(() => sends().length, { timeout: 30_000 }).toBe(5);
+    expect(sends()[4]!.args.threadId).toBe("t-issues");
+    expect(String(sends()[4]!.args.message)).toContain("And the Windows build?");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
     await t3.close();

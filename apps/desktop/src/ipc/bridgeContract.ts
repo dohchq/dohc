@@ -8322,7 +8322,7 @@ export const agentThreadOperations = {
     payload: z.strictObject({ workspaceId: z.string().min(1), agentId: AgentId }),
     result: z.strictObject({
       title: z.string(),
-      // The thread was archived or settled in its tool, so it takes no more work.
+      // The thread was archived or settled in its tool.
       closed: z.boolean(),
     }),
     guard: "active-workspace",
