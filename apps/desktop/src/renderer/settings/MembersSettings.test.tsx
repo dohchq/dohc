@@ -311,6 +311,8 @@ describe("Members page", () => {
       expect(gate.textContent).toBe(
         "This computer is signed in as bo@test, not the account the owner invited.Switch account",
       );
+      // The cause is an account, not the connection.
+      expect(gate.querySelector("svg")?.getAttribute("class")).toContain("lucide-user");
       expect(within(gate).queryByRole("button", { name: "Try again" })).toBeNull();
       await userEvent.click(within(gate).getByRole("button", { name: "Switch account" }));
       expect(props.onOpenSync).toHaveBeenCalled();

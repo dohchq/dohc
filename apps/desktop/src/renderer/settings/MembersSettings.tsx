@@ -18,6 +18,7 @@ import {
   Search,
   ShieldCheck,
   ShieldOff,
+  User,
   UserMinus,
   UserX,
 } from "lucide-react";
@@ -354,12 +355,10 @@ function MembersGateView(props: {
                 ? { label: "Sign in again", run: cloud.onSignInAgain }
                 : sync;
       return (
-        <GateState reason={gate.kind} icon={CloudOff} action={{ ...next, primary: true }}>
-          {gate.kind === "other-account" && gate.joined ? (
-            joinedByAnother(gate.joined.email)
-          ) : (
-            "Sync this workspace with your server to see who is in it."
-          )}
+        <GateState reason={gate.kind} icon={gate.kind === "other-account" && gate.joined ? User : CloudOff} action={{ ...next, primary: true }}>
+          {gate.kind === "other-account" && gate.joined
+            ? joinedByAnother(gate.joined.email)
+            : "Sync this workspace with your server to see who is in it."}
         </GateState>
       );
     }
