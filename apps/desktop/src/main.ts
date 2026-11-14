@@ -7425,7 +7425,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     ) {
       throw new SharedDocumentWaitingError({
         state: "failed",
-        message: "dohc could not open this document for editing. Check the share's Edit access.",
+        message: "dohc could not open this page for editing. Check the share's Edit access.",
       });
     }
     const identity = (value: ShareViewIdentity | undefined) =>
