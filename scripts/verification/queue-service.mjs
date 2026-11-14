@@ -311,9 +311,7 @@ export function trustCheckFailure(outcome, receipt, gates, previous, { disk, mem
     .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   const step = receipt?.failure?.cause ?? "";
   const log = receipt?.steps?.find((row) => row.name === step)?.log;
-  const error = log
-    ? (receipt?.error ?? "").replaceAll(log, "<step log>")
-    : receipt?.error ?? "";
+  const error = log ? (receipt?.error ?? "").replaceAll(log, "<step log>") : (receipt?.error ?? "");
   const selected = receipt?.gates ?? gates;
   const signature =
     failed.length || error

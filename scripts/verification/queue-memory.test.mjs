@@ -38,10 +38,14 @@ test("only consecutive matching low-memory failures corroborate a check", () => 
     { ...receipt, failure: { kind: "check", cause: "repository" } },
     { ...receipt, failed: [{ step: "rust", test: "another test" }] },
     { ...receipt, gates: { js: true, rust: true } },
-  ]) assert.equal(classify(changed, first).outcome, "environment");
+  ])
+    assert.equal(classify(changed, first).outcome, "environment");
   const named = { ...receipt, failed: [{ step: "rust", test: "one" }] };
   const namedFirst = classify(named);
-  assert.equal(classify({ ...named, failed: [{ step: "rust", test: "two" }] }, namedFirst).outcome, "environment");
+  assert.equal(
+    classify({ ...named, failed: [{ step: "rust", test: "two" }] }, namedFirst).outcome,
+    "environment",
+  );
   assert.equal(classify(receipt, first, low, { js: true, rust: true }).outcome, "environment");
   for (const outcome of ["passed", "cancelled"]) {
     // Even a retained signature cannot match across the immediately previous attempt.
@@ -52,14 +56,27 @@ test("only consecutive matching low-memory failures corroborate a check", () => 
   const empty = { failure: { kind: "check", cause: "verification" } };
   assert.equal(classify(empty).lowMemoryFailure, undefined);
   assert.equal(classify(empty, classify(empty)).outcome, "environment");
-  const tests = [{ step: "rust", test: "a" }, { step: "rust", test: "b" }];
-  assert.equal(classify({ ...receipt, failed: tests.toReversed() }, classify({ ...receipt, failed: tests })).outcome, "failed");
+  const tests = [
+    { step: "rust", test: "a" },
+    { step: "rust", test: "b" },
+  ];
+  assert.equal(
+    classify({ ...receipt, failed: tests.toReversed() }, classify({ ...receipt, failed: tests }))
+      .outcome,
+    "failed",
+  );
   const commandFailure = (log) => ({
     ...receipt,
     error: `node failed (1). Log: ${log}`,
     steps: [{ name: "rust", log }],
   });
-  assert.equal(classify(commandFailure("/attempts/2/rust.log"), classify(commandFailure("/attempts/1/rust.log"))).outcome, "failed");
+  assert.equal(
+    classify(
+      commandFailure("/attempts/2/rust.log"),
+      classify(commandFailure("/attempts/1/rust.log")),
+    ).outcome,
+    "failed",
+  );
 });
 
 test("repeated disk and Docker failures stay untrusted, including alongside low memory", () => {
@@ -77,12 +94,10 @@ test("repeated disk and Docker failures stay untrusted, including alongside low 
 });
 
 // The service runs only on private files, a stub worker, and a virtual clock.
-async function serviceHarness(t, {
-  memory = 1.2,
-  memoryFailGb = 1.6,
-  freeDisk = () => 100,
-  docker = async () => true,
-} = {}) {
+async function serviceHarness(
+  t,
+  { memory = 1.2, memoryFailGb = 1.6, freeDisk = () => 100, docker = async () => true } = {},
+) {
   t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"] });
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-memory-"));
   const paths = queuePaths(root);
@@ -100,15 +115,23 @@ async function serviceHarness(t, {
     assert.fail("virtual service did not reach the expected condition");
   };
   const service = runService({
-    root, repo, stop: stop.signal,
-    tickMs: 20, heartbeatMs: 20,
-    floorGb: 1, memoryFailGb,
-    freeDisk, freeMemory: () => memory,
+    root,
+    repo,
+    stop: stop.signal,
+    tickMs: 20,
+    heartbeatMs: 20,
+    floorGb: 1,
+    memoryFailGb,
+    freeDisk,
+    freeMemory: () => memory,
     docker,
-    prepare: async () => {}, sweep: async () => {},
+    prepare: async () => {},
+    sweep: async () => {},
     holdLane: async () => ({ release() {} }),
-    strays: async () => {}, keepAwake: () => () => {},
-    threadOf: () => null, log: () => {},
+    strays: async () => {},
+    keepAwake: () => () => {},
+    threadOf: () => null,
+    log: () => {},
     retryDelay: () => 100,
     worker: ({ grant, output }) => new Promise((done) => pending.push({ grant, output, done })),
   });
@@ -116,7 +139,9 @@ async function serviceHarness(t, {
     stop.abort();
     for (const run of pending.splice(0)) run.done();
     let ended = false;
-    service.finally(() => { ended = true; });
+    service.finally(() => {
+      ended = true;
+    });
     await pump(() => ended);
     await service;
     rmSync(root, { recursive: true, force: true });
@@ -125,8 +150,13 @@ async function serviceHarness(t, {
   const submit = async (id, selected = gates) => {
     mkdirSync(paths.request(id), { recursive: true });
     await writeJson(join(paths.request(id), "request.json"), {
-      id, head: "a".repeat(40), base: "b".repeat(40), gates: selected,
-      checkout: id, scope: "rust", acceptedAt: new Date().toISOString(),
+      id,
+      head: "a".repeat(40),
+      base: "b".repeat(40),
+      gates: selected,
+      checkout: id,
+      scope: "rust",
+      acceptedAt: new Date().toISOString(),
     });
     await writeJson(join(paths.request(id), "status.json"), { state: "queued", attempts: [] });
     await pump(() => pending.length > 0);
@@ -140,7 +170,10 @@ async function serviceHarness(t, {
       ...fields,
       error: `${fields.error} Log: ${log}`,
       steps: [{ name: fields.failure.cause, log }],
-      grant: run.grant, commit: run.grant.head, baseCommit: run.grant.base, final: true,
+      grant: run.grant,
+      commit: run.grant.head,
+      baseCommit: run.grant.base,
+      final: true,
     };
     writeFileSync(join(run.output, "result.json"), JSON.stringify(result));
     run.done();
@@ -172,13 +205,23 @@ test("service trusts the second low-memory failure, keeps its verdict, and reset
   await h.submit("next");
   await h.complete();
   await h.pump(() => h.pending.length > 0);
-  assert.equal(readJson(h.paths.service).health.pausedUntil, null, "one new environment failure does not pause admission after the trusted failure");
+  assert.equal(
+    readJson(h.paths.service).health.pausedUntil,
+    null,
+    "one new environment failure does not pause admission after the trusted failure",
+  );
   await h.complete();
 });
 
-for (const [memory, expected] of [[2.8, "failed"], [1.2, "queued"]]) {
+for (const [memory, expected] of [
+  [2.8, "failed"],
+  [1.2, "queued"],
+]) {
   test(`service on the 16 GiB default records ${memory} GB free as ${expected}`, async (t) => {
-    const h = await serviceHarness(t, { memory, memoryFailGb: defaultMemoryFailGb(16 * 1024 ** 3) });
+    const h = await serviceHarness(t, {
+      memory,
+      memoryFailGb: defaultMemoryFailGb(16 * 1024 ** 3),
+    });
     await h.submit("default");
     await h.complete();
     assert.equal(h.status("default").state, expected);
@@ -198,7 +241,9 @@ for (const changed of [
     const status = h.status("different");
     assert.equal(status.state, "queued");
     assert.equal(status.attempts.length, 2);
-    assert.ok(status.attempts.every((row) => row.outcome === "environment" && row.cause === "host"));
+    assert.ok(
+      status.attempts.every((row) => row.outcome === "environment" && row.cause === "host"),
+    );
   });
 }
 
@@ -206,7 +251,7 @@ for (const cause of ["disk", "docker"]) {
   test(`service keeps repeated ${cause} failures untrusted even with low memory`, async (t) => {
     let failing = false;
     const h = await serviceHarness(t, {
-      freeDisk: () => cause === "disk" && failing ? 0.5 : 100,
+      freeDisk: () => (cause === "disk" && failing ? 0.5 : 100),
       docker: async () => cause !== "docker" || !failing,
     });
     await h.submit("host", { js: true, rust: true });
