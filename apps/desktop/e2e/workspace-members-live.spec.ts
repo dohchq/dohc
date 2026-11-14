@@ -253,10 +253,12 @@ test("@members-live a member at Edit and the owner write in one document and eac
     const freshOpened = Date.now();
     await clickDocument(mine, FRESH);
     const notice = mine.getByTestId("engine-may-hold-document-notice");
-    const freshToast = mine.getByTestId("workspace-shell-error").filter({ hasText: 'dohc could not open "raffle.md" for editing' });
-    // dohc opens the page by itself once the owner's dohc is online, so the page shows its state with a ring at once.
-    await expect(notice).toHaveText(/^You can read this page\.\s*Try again$/, { timeout: 60_000 });
+    // Waiting is a state dohc is fixing, so its toast is a notice with a title that says what is happening.
+    const freshToast = mine.getByTestId("workspace-shell-notice").filter({ hasText: 'Waiting to edit "raffle.md"' });
+    // dohc opens the page by itself once the owner's dohc is online, so the page shows the cause with a ring at once, and no Try again.
+    await expect(notice).toHaveText("Editing starts once the owner's dohc is online.", { timeout: 60_000 });
     await expect(notice.getByTestId("engine-may-hold-document-ring")).toBeVisible();
+    await expect(notice.getByRole("button", { name: "Try again" })).toHaveCount(0);
     const answered = Date.now();
     testInfo.annotations.push({ type: "without-lineage answer ms", description: String(answered - freshOpened) });
     const reader = mine.getByTestId("view-markdown");
@@ -280,7 +282,7 @@ test("@members-live a member at Edit and the owner write in one document and eac
       await mine.bringToFront();
       await mine.screenshot({ path: shot(`without-lineage-toast-member-${theme.toLowerCase()}`), animations: "disabled" });
     }
-    await freshToast.getByRole("button", { name: "Dismiss workspace error" }).click();
+    await freshToast.getByRole("button", { name: "Dismiss workspace notice" }).click();
 
     // --- The owner's dohc starts again and starts the page by itself ---------
     const ownerAgain = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });
@@ -315,7 +317,7 @@ test("@members-live a member at Edit and the owner write in one document and eac
     expect(fillHost(join(ownerTemp.baseDir, "relay-data", "relay.sqlite"), workspaceId)).toBeGreaterThan(0);
     const opened = Date.now();
     await clickDocument(mine, LATER);
-    await expect(notice).toHaveText(/^You can read this page\.\s*Try again$/, { timeout: 60_000 });
+    await expect(notice).toHaveText(/^The server is editing too many pages right now\. You can still read it\.\s*Try again$/, { timeout: 60_000 });
     testInfo.annotations.push({ type: "host-full answer ms", description: String(Date.now() - opened) });
     // A toast says the same once, and its row stays in Notices.
     const toast = mine.getByTestId("workspace-shell-error").filter({ hasText: 'dohc could not open "later.md" for editing' });

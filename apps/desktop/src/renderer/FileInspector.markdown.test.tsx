@@ -280,8 +280,8 @@ describe("FileInspector renders markdown through the shared component map", () =
       }
     },
   );
-  // The toast and its Notices row say why a shared page could not open for
-  // editing. The page's own line says only what the person can do with it.
+  // The page's own line says why it is read-only, in the browser's words, and
+  // offers Try again where dohc is not trying by itself.
   it.each([
     [
       "host-refused",
@@ -291,7 +291,7 @@ describe("FileInspector renders markdown through the shared component map", () =
           "dohc could not open this page for editing. The server is editing too many pages right now.",
         reason: "The server is editing too many pages right now.",
       },
-      "You can read this page.",
+      "The server is editing too many pages right now. You can still read it.",
     ],
     [
       "failed",
@@ -300,7 +300,12 @@ describe("FileInspector renders markdown through the shared component map", () =
         message: "dohc could not open this file for editing.",
         reason: "The server did not start live editing for this page.",
       },
-      "You can read this page.",
+      "The server did not start live editing for this page. You can still read it.",
+    ],
+    [
+      "host-refused without a reason",
+      { state: "host-refused", message: "dohc could not open this page for editing." },
+      "dohc could not open this page for editing. You can still read it.",
     ],
     [
       "pending",
@@ -308,7 +313,7 @@ describe("FileInspector renders markdown through the shared component map", () =
       "Record saved on this device. Waiting to send.",
     ],
   ] as const)(
-    "states a %s shared page on the page and leaves its reason to the toast",
+    "states why a %s shared page is read-only on the page",
     async (_name, waiting, line) => {
       const read = bridgeMock.readWorkspaceText.getMockImplementation();
       bridgeMock.readWorkspaceText.mockImplementation(async () => ({
@@ -330,7 +335,7 @@ describe("FileInspector renders markdown through the shared component map", () =
   );
 
   // A page waiting for its owner's dohc opens live by itself, so the page
-  // shows a ring beside its state at once, and the toast waits.
+  // shows a ring beside its cause at once, with no Try again, and the toast waits.
   it("shows a ring beside the state of a page waiting for its owner's dohc", async () => {
     const read = bridgeMock.readWorkspaceText.getMockImplementation();
     bridgeMock.readWorkspaceText.mockImplementation(async () => ({
@@ -350,7 +355,8 @@ describe("FileInspector renders markdown through the shared component map", () =
     try {
       render(<FileInspector workspaceId="ws-1" path="a.md" />);
       const notice = await screen.findByTestId("engine-may-hold-document-notice");
-      expect(notice.textContent).toBe("You can read this page.Try again");
+      expect(notice.textContent).toBe("Editing starts once the owner's dohc is online.");
+      expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
       expect(within(notice).getByTestId("engine-may-hold-document-ring")).toBeTruthy();
     } finally {
       Object.assign(engineDocState, { liveHostUnavailable: false, sharedWaiting: null });

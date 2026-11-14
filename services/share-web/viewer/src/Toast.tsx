@@ -1,10 +1,13 @@
 import {useEffect, useRef, useState} from "react";
 import {Icon} from "./icons";
 
-/** A member page's error toast: what failed, the one thing to do, a copy control beside the text, Try again and Dismiss. */
-export function Toast({title, body, onRetry, onDismiss}: {title: string; body: string; onRetry(): void; onDismiss(): void}) {
-  return <div className="edit-notice workspace-toast" role="alert">
-    <span className="tile bad"><Icon name="alert"/></span>
+/**
+ * A member page's toast: what failed, the one thing to do, a copy control beside the text, Try again and Dismiss.
+ * A `warning` says what dohc is still fixing by itself, as the desktop's warning notice does.
+ */
+export function Toast({title, body, tone, onRetry, onDismiss}: {title: string; body: string; tone?: "warning"; onRetry(): void; onDismiss(): void}) {
+  return <div className="edit-notice workspace-toast" role={tone ? "status" : "alert"}>
+    {tone ? <span className="tile warn"><Icon name="triangle-alert"/></span> : <span className="tile bad"><Icon name="alert"/></span>}
     <div>
       <div className="toast-text">
         <div><p className="edit-notice-title">{title}</p><p>{body}</p></div>

@@ -156,6 +156,7 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .link-page .icon, .state-page .icon { display: block; flex: none; }
 .tile { display: grid; flex: none; width: 32px; height: 32px; place-items: center; border-radius: 8px; background: var(--viewer-panel-2); color: var(--viewer-muted); }
 .tile.bad { background: var(--viewer-danger-tint); color: var(--viewer-danger); }
+.tile.warn { color: var(--viewer-warning); }
 
 .link-page .handoff-button, .state-page .handoff-button { display: inline-flex; height: 32px; align-items: center; justify-content: center; gap: 8px; border-radius: 6px; padding: 0 12px; font-size: 13px; font-weight: 500; text-decoration: none; white-space: nowrap; transition: background-color 80ms; }
 .link-page .handoff-button.primary:hover { opacity: 1; }

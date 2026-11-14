@@ -184,7 +184,8 @@ export function EngineMayHoldDocumentNotice(props: {
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
-  // dohc is still opening it by itself, so a ring shows beside the message.
+  // dohc is still opening it by itself, so a ring shows beside the message
+  // and no Try again.
   waiting?: boolean;
   children?: ReactNode;
 }) {
@@ -216,13 +217,15 @@ export function EngineMayHoldDocumentNotice(props: {
       </span>
       <span className="flex shrink-0 items-center gap-3">
         {props.children}
-        <button
-          type="button"
-          onClick={props.onRetry}
-          className="whitespace-nowrap text-subtle hover:text-ink"
-        >
-          Try again
-        </button>
+        {props.waiting ? null : (
+          <button
+            type="button"
+            onClick={props.onRetry}
+            className="whitespace-nowrap text-subtle hover:text-ink"
+          >
+            Try again
+          </button>
+        )}
       </span>
     </div>
   );

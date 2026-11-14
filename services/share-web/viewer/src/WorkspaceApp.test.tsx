@@ -394,7 +394,11 @@ it("waits for the owner's dohc with the page readable, raises a toast after 15 s
   expect(container.querySelector(".workspace-toast")).toBeNull();
   await act(async () => vi.advanceTimersByTime(15_000));
   const toast = container.querySelector(".workspace-toast")!;
-  expect(toast.querySelector(".edit-notice-title")?.textContent).toBe('dohc could not open "plan.md" for editing');
+  // Waiting is a state dohc is fixing, so the toast says what is happening, with the desktop's title and the warning mark.
+  expect(toast.querySelector(".edit-notice-title")?.textContent).toBe('Waiting to edit "plan.md"');
+  expect(toast.getAttribute("role")).toBe("status");
+  expect(toast.querySelector(".tile.warn")).not.toBeNull();
+  expect(toast.querySelector(".tile.bad")).toBeNull();
   expect(toast.textContent).toContain("Editing starts once the owner's dohc is online. You can still read it.");
   await act(async () => ready(true));
   await settle(() => container.querySelector('[role="textbox"]') !== null && container.querySelector(".workspace-toast") === null);

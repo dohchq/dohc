@@ -21,7 +21,13 @@ export function sharedOpenNoticed(waiting: SharedDocumentOpenState | null | unde
   return waiting?.state === "failed" || waiting?.state === "host-refused";
 }
 
-/** The page's own line for a shared open that is not live. */
+/**
+ * The page's own line for a shared open that is not live, in share-web's
+ * words: why it is read-only. A page waiting for its owner's dohc says only
+ * what it waits for, beside its ring.
+ */
 export function sharedWaitingLine(waiting: SharedDocumentOpenState | null | undefined): string | undefined {
-  return sharedOpenNoticed(waiting) ? "You can read this page." : waiting?.message;
+  if (!waiting || !sharedOpenNoticed(waiting)) return waiting?.message;
+  if (waiting.awaitsHost && waiting.reason) return waiting.reason;
+  return `${waiting.reason ?? waiting.message} You can still read it.`;
 }

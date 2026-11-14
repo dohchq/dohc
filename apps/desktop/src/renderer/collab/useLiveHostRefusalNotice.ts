@@ -46,6 +46,7 @@ export function useLiveHostRefusalNotice(input: {
       raised.current = key;
       reportLiveHostRefusal(input.workspaceId, input.path, {
         ...(refused.reason ? { reason: refused.reason } : {}),
+        waits,
         quiet,
         retry: () => {
           if (!current.current.mounted || current.current.key !== key) return false;

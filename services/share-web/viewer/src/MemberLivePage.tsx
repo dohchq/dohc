@@ -121,7 +121,9 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
   const reason = phase.kind === "refused" ? phase.reason : phase.kind === "waiting" ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]! : null;
   const toast = !dismissed && (phase.kind === "refused" || (phase.kind === "waiting" && phase.reported));
   const readable = phase.kind === "refused" || phase.kind === "waiting";
-  const toastTitle = `dohc could not open "${name}" for editing`, toastBody = reason ? `${reason} You can still read it.` : "You can still read it.";
+  // Waiting for the owner's dohc is a state dohc is fixing, not a failure. The desktop titles it the same.
+  const toastTitle = phase.kind === "waiting" ? `Waiting to edit "${name}"` : `dohc could not open "${name}" for editing`;
+  const toastBody = reason ? `${reason} You can still read it.` : "You can still read it.";
   // The band says why the page is read-only. While dohc waits for the owner's dohc it is already trying, so only a refusal offers Try again.
   const band = phase.kind === "waiting" ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]! : reason ? toastBody : `dohc could not open this page for editing. ${toastBody}`;
   return <>
@@ -137,7 +139,7 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
       <p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>
       <p>Copy the changes you want to keep. Open the current file, then paste and review them.</p>
       <button className="handoff-button secondary" onClick={() => leave.current?.(open)}>Open current file</button></aside>}
-    {toast && toastSlot && createPortal(<Toast title={toastTitle} body={toastBody} onRetry={open} onDismiss={() => setDismissed(true)}/>, toastSlot)}
+    {toast && toastSlot && createPortal(<Toast title={toastTitle} body={toastBody} {...(phase.kind === "waiting" ? {tone: "warning" as const} : {})} onRetry={open} onDismiss={() => setDismissed(true)}/>, toastSlot)}
     {leaving && <DiscardDraft cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); discarding.current = true; action();}}/>}
   </>;
 }
