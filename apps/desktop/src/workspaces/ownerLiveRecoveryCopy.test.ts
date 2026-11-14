@@ -473,7 +473,7 @@ it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
     (doc: Y.Doc) => paragraph(doc).insert("Start here.".length, " Typed *sentence* [1]."),
     (doc: Y.Doc) => body(doc).delete(1, 1),
     "# Plan\n\nKeep this.\n\n- [ ] tick me\n",
-    "Text added to a part that was deleted:\n\n> Typed \*sentence\* \[1\].\n",
+    "Text added to a part that was deleted:\n\n> Typed *sentence* [1].\n",
   ],
   [
     "a field someone else set at the same moment",

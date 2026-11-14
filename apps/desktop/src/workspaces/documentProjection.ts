@@ -156,7 +156,9 @@ export function createDocumentProjectionWorker(
     void stopped.terminate().catch(() => undefined);
   }
 
-  function send(request: DocumentProjectionRequest): Promise<string | Uint8Array | boolean | RecoveredDocument | null> {
+  function send(
+    request: DocumentProjectionRequest,
+  ): Promise<string | Uint8Array | boolean | RecoveredDocument | null> {
     const current = started();
     const id = nextId++;
     return new Promise((resolve, reject) => {
