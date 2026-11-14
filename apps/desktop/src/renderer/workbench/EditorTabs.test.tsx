@@ -1245,16 +1245,20 @@ describe("EditorTabs overlay scrollbar", () => {
     const strip = overflowStrip();
     const thumb = screen.getByTestId("tab-strip-scrollbar");
     expect(thumb.style.display).toBe("");
-    // 200 of 600 visible -> thumb is a third of the 200px viewport…
-    expect(parseFloat(thumb.style.width)).toBeCloseTo(200 / 3, 1);
+    const viewportWidth = strip.clientWidth;
+    const contentWidth = strip.scrollWidth;
+    const visibleFraction = viewportWidth / contentWidth;
+    const thumbWidth = viewportWidth * visibleFraction;
+    const thumbTravel = viewportWidth - thumbWidth;
+    const overflowWidth = contentWidth - viewportWidth;
+    expect(parseFloat(thumb.style.width)).toBeCloseTo(thumbWidth, 1);
     expect(thumb.style.transform).toBe("translateX(0px)");
 
-    // …and scrolling 100 of the 400 overflow moves it a quarter of its
-    // 133.33px travel.
     strip.scrollLeft = 100;
     fireEvent.scroll(strip);
     const translate = /translateX\(([\d.]+)px\)/.exec(thumb.style.transform);
-    expect(parseFloat(translate?.[1] ?? "")).toBeCloseTo(100 / 3, 1);
+    const scrolledFraction = strip.scrollLeft / overflowWidth;
+    expect(parseFloat(translate?.[1] ?? "")).toBeCloseTo(scrolledFraction * thumbTravel, 1);
   });
 
   it("translates a vertical wheel over the thumb into horizontal scroll", () => {

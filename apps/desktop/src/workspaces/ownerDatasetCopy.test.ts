@@ -141,10 +141,10 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     });
     expect(blob).not.toHaveBeenCalled();
     if (process.platform !== "win32") {
-      // A saved status another user can change reads as none, so this copy has nothing offline.
       const marker = join(options.directory, "archived.json");
       await copy.close();
-      await chmod(marker, 0o666);
+      const writableByEveryUser = 0o666;
+      await chmod(marker, writableByEveryUser);
       copy = await createOwnerDatasetCopy(options);
       offline = true;
       await expect(copy.data(remote, source, signal).inspect!(id(1))).rejects.toThrow(

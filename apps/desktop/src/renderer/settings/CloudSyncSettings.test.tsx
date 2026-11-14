@@ -123,6 +123,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  document.documentElement.removeAttribute("data-theme");
 });
 
 describe("CloudSyncSettings", () => {
@@ -162,24 +163,27 @@ describe("CloudSyncSettings", () => {
     expect(screen.getByTestId("cloud-sync-needs-server").textContent).toBe(SYNC_ON_NEEDS_SERVER);
   });
 
-  it("shows a QR code of the server's origin, and nothing else, for connecting a phone", () => {
-    render(
-      <CloudSyncSettings
-        workspaceId="ws-1"
-        cloud={cloud({ ...SYNCED, serverUrl: "https://dohc.hollis.studio/" })}
-      />,
-    );
+  it.each(["light", "dark"])(
+    "encodes only the server origin in a dark-on-light phone QR in %s",
+    (theme) => {
+      document.documentElement.setAttribute("data-theme", theme);
+      render(
+        <CloudSyncSettings
+          workspaceId="ws-1"
+          cloud={cloud({ ...SYNCED, serverUrl: "https://dohc.hollis.studio/" })}
+        />,
+      );
 
-    const row = screen.getByTestId("settings-row-connect-phone");
-    expect(row.textContent).toBe("Connect a phonedohc.hollis.studio");
-    const code = within(row).getByRole("img", { name: "QR code for dohc.hollis.studio" });
-    expect(drawnCode(code)).toEqual(encoded("https://dohc.hollis.studio"));
-    expect(drawnCode(code)).not.toEqual(encoded("https://relay.hollis.studio"));
-    // Dark on light in both themes.
-    expect(code.querySelector("rect")?.getAttribute("fill")).toBe(palette.light.bg);
-    expect(code.querySelector("path")?.getAttribute("fill")).toBe(palette.light.ink);
-    expect(screen.getByTestId("settings-row-account").nextElementSibling).toBe(row);
-  });
+      const row = screen.getByTestId("settings-row-connect-phone");
+      expect(row.textContent).toBe("Connect a phonedohc.hollis.studio");
+      const code = within(row).getByRole("img", { name: "QR code for dohc.hollis.studio" });
+      expect(drawnCode(code)).toEqual(encoded("https://dohc.hollis.studio"));
+      expect(drawnCode(code)).not.toEqual(encoded("https://relay.hollis.studio"));
+      expect(code.querySelector("rect")?.getAttribute("fill")).toBe(palette.light.bg);
+      expect(code.querySelector("path")?.getAttribute("fill")).toBe(palette.light.ink);
+      expect(screen.getByTestId("settings-row-account").nextElementSibling).toBe(row);
+    },
+  );
 
   it("offers Delete account in More actions beside Disconnect, for the account the row shows", async () => {
     const logout = deferred<void>();

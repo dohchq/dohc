@@ -148,10 +148,12 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
       "# Refreshed legacy projection",
     );
 
-    // Simulate a crash after the generated write committed but before the
-    // bookmark outbox durably recorded upgraded.objectId.
+    const bookmarkBeforeOutboxIdentityCommit = {
+      bookmarkId: "bookmark-legacy",
+      destinationPath: legacyPath,
+    };
     const retried = await writeChatBookmarkProjection({
-      bookmark: { bookmarkId: "bookmark-legacy", destinationPath: legacyPath },
+      bookmark: bookmarkBeforeOutboxIdentityCommit,
       text: bookmarkProjection("bookmark-legacy", "Crash retry projection"),
       capture,
     });

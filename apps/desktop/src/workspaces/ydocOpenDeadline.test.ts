@@ -428,12 +428,8 @@ describe("the document open's capture-chain hold", () => {
     const root = await createTestScratch("dohc-ydoc-deadline-");
     await write(root, "note.md", "hello\n");
     const loopback = new VersionedLoopbackEngine();
-    // A daemon that takes the lease and then cannot get its reply out. It is
-    // stateful on purpose: the busy refusal is a consequence of the first open
-    // landing, not a canned answer, so a fake that never took the session
-    // could not produce it either.
     let leaseHeld = false;
-    const client = {
+    const daemonWithBlockedOpenReply = {
       close: () => undefined,
       onEvent: () => () => undefined,
       async sendRequest(request: Request): Promise<Response> {
@@ -467,7 +463,9 @@ describe("the document open's capture-chain hold", () => {
         return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
       },
     };
-    const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => daemonWithBlockedOpenReply,
+    });
     const engine = createWorkspaceEngineCapture({
       workspaceId: WORKSPACE_ID,
       rootPath: root,

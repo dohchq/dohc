@@ -237,10 +237,12 @@ it("serves the consent page with its own headers and a cookie for this request o
   expect(page.headers.get("x-content-type-options")).toBe("nosniff");
   expect(page.headers.get("cache-control")).toBe("private, no-store");
   expect(page.headers.has("access-control-allow-origin")).toBe(false);
-  // Host-only, for the request's remaining life: ten minutes on this fixed clock.
-  expect(page.headers.get("set-cookie")).toMatch(
-    /^__Host-dohc_consent_[A-Za-z0-9_-]{16}=[A-Za-z0-9_-]{43}; Path=\/; Max-Age=600; Secure; HttpOnly; SameSite=Strict$/u,
+  const requestLifetimeSeconds = 10 * 60;
+  const hostOnlyConsentCookie = new RegExp(
+    String.raw`^__Host-dohc_consent_[A-Za-z0-9_-]{16}=[A-Za-z0-9_-]{43}; Path=/; Max-Age=${requestLifetimeSeconds}; Secure; HttpOnly; SameSite=Strict$`,
+    "u",
   );
+  expect(page.headers.get("set-cookie")).toMatch(hostOnlyConsentCookie);
   const form = await consentForm(page);
   expect(form.cookie.split("=")[1]).toBe(form.secret);
   expect(form.html).toContain('<meta name="referrer" content="same-origin">');

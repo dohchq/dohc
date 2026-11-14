@@ -626,9 +626,10 @@ describe("CollectionPage", () => {
     const page = renderPage(bridge);
     await screen.findByRole("button", { name: "alpha" });
     vi.useFakeTimers();
-    // The second edit reopens the cell before the index shows the first.
+    const indexReadsBeforeEdits = bridge.queryCollectionRecords.mock.calls.length;
     editTags("beta");
     editTags("beta");
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(indexReadsBeforeEdits);
     for (let index = 0; index < 2; index += 1) {
       docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
       page.rerender(pageWithHost());

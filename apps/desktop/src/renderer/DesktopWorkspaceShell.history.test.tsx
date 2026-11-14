@@ -157,7 +157,7 @@ describe("history page", () => {
   // must never paint there. The E2E switch spec covers this only as a smoke
   // test against the real app; here A's answer is held until B has painted.
   it("keeps a history answer workspace A asked for out of workspace B", async () => {
-    const A_CONTROL = "A_CONTROL wrote the A plan";
+    const A_VISIBLE_BEFORE_SWITCH = "A_CONTROL wrote the A plan";
     const A_STALE = "A_STALE answered after the switch";
     const B_ONLY = "B_ONLY wrote the B note";
     const heldA = deferred<TimelinePage>();
@@ -168,7 +168,7 @@ describe("history page", () => {
       if (selected === OTHER_WORKSPACE.workspaceId) {
         return historyPage([historyMoment("m-b", B_ONLY)], "main", OTHER_WORKSPACE.workspaceId);
       }
-      return holdA ? heldA.promise : historyPage([historyMoment("m-a", A_CONTROL)]);
+      return holdA ? heldA.promise : historyPage([historyMoment("m-a", A_VISIBLE_BEFORE_SWITCH)]);
     });
     const shell = (workspace: Workspace) => (
       <DesktopWorkspaceShell
@@ -183,10 +183,8 @@ describe("history page", () => {
     const user = userEvent.setup();
     const view = render(shell(WORKSPACE));
 
-    // A's answers paint in A: the control that makes the absence below mean
-    // something.
     await user.click(screen.getByTestId("activity-history"));
-    expect(await screen.findByText(A_CONTROL)).toBeTruthy();
+    expect(await screen.findByText(A_VISIBLE_BEFORE_SWITCH)).toBeTruthy();
 
     // A asks again, and that answer is held.
     holdA = true;
@@ -209,7 +207,7 @@ describe("history page", () => {
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     await user.click(screen.getByTestId("activity-history"));
     expect(await screen.findByText(B_ONLY)).toBeTruthy();
-    expect(screen.queryByText(A_CONTROL)).toBeNull();
+    expect(screen.queryByText(A_VISIBLE_BEFORE_SWITCH)).toBeNull();
 
     // Only now does A's held answer land, and the renderer consumes it.
     await act(async () => {
@@ -219,7 +217,7 @@ describe("history page", () => {
     await act(async () => {});
 
     expect(screen.queryByText(A_STALE)).toBeNull();
-    expect(screen.queryByText(A_CONTROL)).toBeNull();
+    expect(screen.queryByText(A_VISIBLE_BEFORE_SWITCH)).toBeNull();
     expect(screen.getByText(B_ONLY)).toBeTruthy();
     expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
   });

@@ -996,7 +996,6 @@ describe("an Undo of a page this computer owns live", () => {
       person,
       { capture: null, requestId: "move", trashItem: async () => undefined, markDeleted: vi.fn() },
     );
-    // History recorded the rename, so its Undo asks the engine.
     const trash = join(f.rootPath, ".dohc/local/trash");
     const sidecar = join(
       trash,
@@ -1016,6 +1015,7 @@ describe("an Undo of a page this computer owns live", () => {
       reason: `dohc can't undo renaming "after.txt" while it has live editing on\n${body}`,
       refusal: { code: "live-page-owned", path: "after.txt" },
     });
+    expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce();
     expect(await readFile(join(f.rootPath, "after.txt"), "utf8")).toBe("kept edits");
     await expect(stat(join(f.rootPath, "before.txt"))).rejects.toMatchObject({ code: "ENOENT" });
   });

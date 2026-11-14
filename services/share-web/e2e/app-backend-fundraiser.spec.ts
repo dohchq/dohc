@@ -232,7 +232,7 @@ test("actual fundraiser registers guests and organizers manage the same private 
         [f.field("registrations", "total_php")]: 300,
       },
     });
-    // Deleting the Collection's files stops its public form two minutes after the server sees them gone.
+    const deletedCollectionGracePeriodMs = 2 * 60 * 1_000;
     f.deleteCollectionFile();
     const callsBefore = f.calls.length;
     await refreshedApp.getByRole("button", { name: "My registration", exact: true }).click();
@@ -242,7 +242,7 @@ test("actual fundraiser registers guests and organizers manage the same private 
       .poll(() => f.calls.slice(callsBefore).some((call) => call.status === 200))
       .toBe(true);
     await expect(refreshedApp.getByText("Players: First Player", { exact: true })).toBeVisible();
-    f.advance(120_000);
+    f.advance(deletedCollectionGracePeriodMs);
     await refreshedApp.getByRole("button", { name: "Check status", exact: true }).click();
     await expect(guest.getByRole("status")).toHaveText(LINK_REFUSALS.app_collection_missing.error);
     await expect(guest.locator("iframe")).toHaveCount(0);
