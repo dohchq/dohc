@@ -172,19 +172,30 @@ function jobReadyAt(job, metadata) {
   return readyAt <= Date.parse(job.started_at) ? readyAt : createdAt;
 }
 
-// Rust test jobs start early and poll for the archive engine gate compiles, so their runner
-// wait counts only after that compile ends: an earlier wait delays nothing.
-function archiveBuiltAt(job, metadata) {
-  if (!CLOUD_JOB_GRAPH["rust-tests"].names.includes(job.name)) return -Infinity;
+export const RUST_ARCHIVE_BUILD_STEP = "Compile and inventory every workspace test";
+export const RUST_ARCHIVE_WAIT_STEP = "Wait for the shared Rust archive";
+
+// Rust test jobs start early and set up while engine gate builds their archive. A runner wait
+// delays such a job only by how late it reached its archive wait after the archive was
+// published. Returns null without the steps that show this, keeping the whole wait.
+function archiveLateSeconds(job, metadata) {
+  if (!CLOUD_JOB_GRAPH["rust-tests"].names.includes(job.name)) return null;
   const gates = metadata.filter(
     (gate) => gate.name === "engine gate" && gate.head_sha === job.head_sha,
   );
-  const compiled = gates.length === 1 ? (gates[0].steps ?? []) : [];
-  const steps = compiled.filter(
-    (step) => step.name === "Compile and inventory every workspace test",
-  );
-  const builtAt = steps.length === 1 ? Date.parse(steps[0].completed_at) : NaN;
-  return Number.isFinite(builtAt) ? builtAt : -Infinity;
+  const steps = gates.length === 1 && Array.isArray(gates[0].steps) ? gates[0].steps : [];
+  const built = steps.findIndex((step) => step.name === RUST_ARCHIVE_BUILD_STEP);
+  const upload = steps[built + 1];
+  const waits = (job.steps ?? []).filter((step) => step.name === RUST_ARCHIVE_WAIT_STEP);
+  if (
+    built < 0 ||
+    steps.filter((step) => step.name === RUST_ARCHIVE_BUILD_STEP).length !== 1 ||
+    !upload?.name.startsWith("Run actions/upload-artifact@") ||
+    waits.length !== 1
+  )
+    return null;
+  const late = (Date.parse(waits[0].started_at) - Date.parse(upload.completed_at)) / 1000;
+  return Number.isFinite(late) ? Math.max(0, late) : null;
 }
 
 function gateTiming(scope, required, metadata = required, transferSeconds = null) {
@@ -200,13 +211,12 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   const start = Date.parse(required.find((job) => job.name === "what changed").started_at);
   const spanSeconds =
     (Math.max(...required.map((job) => Date.parse(job.completed_at))) - start) / 1000;
-  const wait = (job) =>
-    Math.max(
-      0,
-      (Date.parse(job.started_at) -
-        Math.max(jobReadyAt(job, metadata), archiveBuiltAt(job, metadata))) /
-        1000,
-    ) || 0;
+  const wait = (job) => {
+    const seconds =
+      Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata)) / 1000) || 0;
+    const late = archiveLateSeconds(job, metadata);
+    return late === null ? seconds : Math.min(seconds, late);
+  };
   const jobs = required.map((job) => ({
     name: job.name,
     createdAt: job.created_at,

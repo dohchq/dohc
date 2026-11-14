@@ -16,6 +16,8 @@ import {
 import { readWorkspacePackages } from "./selection.mjs";
 import {
   CLOUD_JOB_GRAPH,
+  RUST_ARCHIVE_BUILD_STEP,
+  RUST_ARCHIVE_WAIT_STEP,
   aggregateCloud,
   aggregateJavascript,
   aggregateRust,
@@ -2068,29 +2070,45 @@ test("timing warnings name the larger part of a job's scheduling wait", () => {
     }
 });
 
-test("a Rust test job's runner wait counts only after engine gate compiles the archive", () => {
-  for (const [startAfterBuild, timing] of [
-    [-10, "over budget"],
-    [31, "unmeasured"],
+test("a Rust test job's runner wait counts only by how late it reached the published archive", () => {
+  // Each worker sets up for `setup` seconds after its runner starts, then waits for the archive.
+  for (const [startBeforePublish, setup, expected] of [
+    [100, 60, null],
+    [10, 50, 40],
+    [100, undefined, 105],
   ]) {
     const jobs = withoutWaits(),
       worker = jobs.find((job) => job.name === "Rust tests 1"),
       gate = jobs.find((job) => job.name === "engine gate"),
       ready = dependencyFinishedAt(jobs, worker.name),
-      builtAt = ready + 200_000;
+      builtAt = ready + 200_000,
+      publishedAt = builtAt + 5_000,
+      at = (time) => new Date(time).toISOString();
     gate.steps = [
+      { name: RUST_ARCHIVE_BUILD_STEP, started_at: at(ready), completed_at: at(builtAt) },
       {
-        name: "Compile and inventory every workspace test",
-        started_at: new Date(ready).toISOString(),
-        completed_at: new Date(builtAt).toISOString(),
+        name: "Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        started_at: at(builtAt),
+        completed_at: at(publishedAt),
       },
     ];
-    // The worker waits 60 s or more for a runner either way; only a wait past the build delays the gate.
-    worker.created_at = new Date(ready).toISOString();
-    worker.started_at = new Date(builtAt + startAfterBuild * 1000).toISOString();
-    worker.completed_at = new Date(Date.parse(worker.started_at) + 1000).toISOString();
-    gate.completed_at = new Date(Date.parse(jobs[0].started_at) + 750_000).toISOString();
-    if (timing === "over budget")
+    const startedAt = publishedAt - startBeforePublish * 1000;
+    worker.created_at = at(ready);
+    worker.started_at = at(startedAt);
+    worker.completed_at = at(startedAt + 120_000);
+    // Without the wait step the whole runner wait still counts.
+    worker.steps =
+      setup === undefined
+        ? []
+        : [
+            {
+              name: RUST_ARCHIVE_WAIT_STEP,
+              started_at: at(startedAt + setup * 1000),
+              completed_at: at(startedAt + setup * 1000 + 1000),
+            },
+          ];
+    gate.completed_at = at(Date.parse(jobs[0].started_at) + 750_000);
+    if (expected === null)
       assert.throws(
         () => completedGateTiming("rust", jobs, jobs[0].head_sha),
         (error) => error.timing.timing === "over budget",
@@ -2098,7 +2116,7 @@ test("a Rust test job's runner wait counts only after engine gate compiles the a
     else
       assert.match(
         completedGateTiming("rust", jobs, jobs[0].head_sha).warning,
-        /longest runner wait Rust tests 1: 31s/u,
+        new RegExp(`longest runner wait Rust tests 1: ${expected}s`, "u"),
       );
   }
 });

@@ -9,7 +9,11 @@ import test from "node:test";
 import { load } from "js-yaml";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
 import { JS_SHARDS } from "./verification/shards.mjs";
-import { CLOUD_JOB_GRAPH } from "./verification/cloud-aggregate.mjs";
+import {
+  CLOUD_JOB_GRAPH,
+  RUST_ARCHIVE_BUILD_STEP,
+  RUST_ARCHIVE_WAIT_STEP,
+} from "./verification/cloud-aggregate.mjs";
 import { RUST_SHARDS } from "./verification/cloud-rust.mjs";
 import { environmentInputs } from "./verification/build.mjs";
 import {
@@ -676,6 +680,19 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
         assert.equal(workflowExpression(jobs[name].if, failedSelection), false);
     }
   }
+});
+
+test("the timing rule finds engine gate's archive upload and each Rust test job's archive wait", () => {
+  const { jobs } = load(workflow);
+  const steps = jobs.rust.steps,
+    built = steps.findIndex((step) => step.name === RUST_ARCHIVE_BUILD_STEP);
+  assert.equal(steps.filter((step) => step.name === RUST_ARCHIVE_BUILD_STEP).length, 1);
+  assert.match(steps[built + 1].uses, /^actions\/upload-artifact@/u);
+  assert.equal(steps[built + 1].with.name, "rust-tests-${{ github.run_attempt }}");
+  assert.equal(
+    jobs["rust-tests"].steps.filter((step) => step.name === RUST_ARCHIVE_WAIT_STEP).length,
+    1,
+  );
 });
 
 test("shared preparation runs confinement after publishing worker artifacts", () => {
