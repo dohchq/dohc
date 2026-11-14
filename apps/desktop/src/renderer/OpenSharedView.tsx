@@ -439,13 +439,11 @@ export function OpenSharedView(
           {checkingAccess
             ? "Checking the share…"
             : opening
-              ? readFiles !== null
-                ? `Reading ${readFiles} ${readFiles === 1 ? "file" : "files"}`
-                : mounting
-                  ? "Adding the share…"
-                  : membership
-                    ? "Opening the workspace…"
-                    : "Opening the share…"
+              ? mounting
+                ? "Adding the share…"
+                : membership
+                  ? "Opening the workspace…"
+                  : "Opening the share…"
               : membership
                 ? error
                   ? "Try again"
@@ -481,11 +479,20 @@ export function OpenSharedView(
           />
         </div>
       ) : null}
+      {opening && readFiles !== null ? (
+        <p
+          data-testid="open-share-progress"
+          role="status"
+          className="m-0 text-xs tabular-nums text-muted"
+        >
+          {`Copied ${readFiles} ${readFiles === 1 ? "file" : "files"} so far.`}
+        </p>
+      ) : null}
       {opening ? (
         <p className="m-0 text-xs text-subtle">
           {mounting
             ? "If you go back, dohc keeps adding the share to shared-with-me/."
-            : "If you go back, dohc keeps opening the share into the folder you chose."}
+            : `If you go back, dohc keeps opening ${membership ? (membershipName ?? "the workspace") : "the share"} into the folder you chose.`}
         </p>
       ) : null}
     </div>

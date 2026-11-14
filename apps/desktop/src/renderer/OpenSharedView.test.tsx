@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenSharedView } from "./OpenSharedView";
@@ -63,6 +63,11 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
 });
+
+// The folder chip shows its path with PathLine, so the whole path is its title.
+const shownFolder = () =>
+  screen.queryByTestId("open-share-choose-folder")?.getAttribute("title") ?? null;
+const findFolder = (path: string) => waitFor(() => expect(shownFolder()).toBe(path));
 
 describe("OpenSharedView", () => {
   function expectMissingInput(reason: string | null) {
@@ -154,7 +159,7 @@ describe("OpenSharedView", () => {
 
     await user.click(screen.getByTestId("open-share-mode-separate"));
     await user.click(screen.getByTestId("open-share-choose-folder"));
-    await screen.findByText("/home/sam/dohc/shared");
+    await findFolder("/home/sam/dohc/shared");
     await user.click(screen.getByTestId("open-share-start"));
 
     expect(screen.getByTestId("open-share-start").textContent).toBe("Opening the share…");
@@ -261,11 +266,11 @@ describe("OpenSharedView", () => {
     );
 
     await act(async () => rootA.resolve("/home/sam/dohc/shared/share-a"));
-    expect(screen.queryByText("/home/sam/dohc/shared/share-a")).toBeNull();
+    expect(shownFolder()).not.toBe("/home/sam/dohc/shared/share-a");
     expect(button.disabled).toBe(true);
 
     await act(async () => rootB.resolve("/home/sam/dohc/shared/share-b"));
-    await screen.findByText("/home/sam/dohc/shared/share-b");
+    await findFolder("/home/sam/dohc/shared/share-b");
     await user.click(button);
     await waitFor(() =>
       expect(bridgeMock.openSharedView).toHaveBeenCalledWith({
@@ -283,7 +288,7 @@ describe("OpenSharedView", () => {
       await screen.findByTestId("open-share-code"),
       "dohc-share:share-1:http://localhost:1788",
     );
-    await screen.findByText("/home/sam/dohc/shared/share-1");
+    await findFolder("/home/sam/dohc/shared/share-1");
     expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
     await user.click(screen.getByTestId("open-share-start"));
     const panel = await screen.findByTestId("cloud-sync-panel");
@@ -494,11 +499,11 @@ describe("opening a membership", () => {
     );
     // A whole workspace is never a folder inside another one.
     expect(screen.queryByTestId("open-share-mode-mount")).toBeNull();
-    await waitFor(() =>
-      expect(screen.getByTestId("open-share-choose-folder").textContent).toContain(
-        "/home/sam/dohc/Community",
-      ),
-    );
+    await findFolder("/home/sam/dohc/Community");
+    // The folder's own name stays whole however long the path is.
+    expect(
+      within(screen.getByTestId("open-share-choose-folder")).getByText("Community"),
+    ).toBeTruthy();
     expect(bridgeMock.getDefaultShareRoot).toHaveBeenCalledWith({
       shareId: "member-1",
       name: "Community",
@@ -524,10 +529,15 @@ describe("opening a membership", () => {
     });
     // Another share's pull says nothing here.
     act(() => progress!({ workspaceId: "w", shareId: "other", files: 9 }));
+    expect(screen.queryByTestId("open-share-progress")).toBeNull();
+    expect(
+      screen.getByText("If you go back, dohc keeps opening Community into the folder you chose."),
+    ).toBeTruthy();
     act(() => progress!({ workspaceId: "w", shareId: "member-1", files: 1 }));
-    expect(screen.getByTestId("open-share-start").textContent).toBe("Reading 1 file");
+    expect(screen.getByTestId("open-share-start").textContent).toBe("Opening the workspace…");
+    expect(screen.getByTestId("open-share-progress").textContent).toBe("Copied 1 file so far.");
     act(() => progress!({ workspaceId: "w", shareId: "member-1", files: 120 }));
-    expect(screen.getByTestId("open-share-start").textContent).toBe("Reading 120 files");
+    expect(screen.getByTestId("open-share-progress").textContent).toBe("Copied 120 files so far.");
     await act(async () => {
       opened.resolve({ workspace: SHARED_VIEW });
     });

@@ -1,3 +1,4 @@
+import { PathLine } from "./PathLine";
 import { Check, FolderOpen } from "lucide-react";
 import { forwardRef, type ReactNode } from "react";
 
@@ -76,6 +77,7 @@ export const FolderChip = forwardRef<
       type="button"
       data-testid={props.testId}
       aria-label={props.folder ? "Change folder" : "Choose folder"}
+      title={props.folder ?? undefined}
       aria-describedby={props.errorId}
       disabled={props.disabled}
       onClick={props.onClick}
@@ -84,12 +86,13 @@ export const FolderChip = forwardRef<
       }`}
     >
       <FolderOpen size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+      {/* A long path gives up its middle folders first, so the folder's own name stays. */}
       <code
-        className={`min-w-0 flex-1 truncate font-mono text-[13px] leading-snug group-hover:text-ink ${
-          props.folder ? "text-ink" : "text-subtle"
+        className={`min-w-0 flex-1 font-mono text-[13px] leading-snug group-hover:text-ink ${
+          props.folder ? "flex text-ink" : "truncate text-subtle"
         }`}
       >
-        {props.folder ?? props.placeholder}
+        {props.folder ? <PathLine path={props.folder} /> : props.placeholder}
       </code>
       <span aria-hidden className="shrink-0 text-[11px] text-subtle group-hover:text-ink">
         {props.folder ? "Change" : "Browse"}
