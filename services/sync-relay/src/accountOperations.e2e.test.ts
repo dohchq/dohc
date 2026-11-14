@@ -28,6 +28,22 @@ import {
   type ChatsHost,
 } from "@dohc/workspace-operations/chats";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
+import {
+  createChatWakeClient,
+  type ChatWakeClient,
+} from "../../../apps/desktop/src/chatWakes/chatWakeClient";
+import {
+  chatWakeThreadVisibility,
+  createChatWakeConsumer,
+  type ChatWakeConsumer,
+  type ChatWakeWorkspace,
+} from "../../../apps/desktop/src/chatWakes/chatWakeConsumer";
+import {
+  createChatWakeIntents,
+  type ChatWakeIntents,
+} from "../../../apps/desktop/src/chatWakes/chatWakeIntents";
+import { deferred } from "../../../apps/desktop/src/testing/deferred";
+import { findChatMessage } from "@dohc/automation-executor/automation-chat";
 import { phoneWriteIds } from "./accountChatWrites";
 import { replicaChatStore } from "./automationChatWrites";
 import {
@@ -816,6 +832,308 @@ it.skipIf(engine.missing)(
     expect(accepted("chat.message.append", { messageId: postMessage })[0]).not.toHaveProperty(
       "authorActorKey",
     );
+  },
+  120_000,
+);
+
+// The wake path from a phone message to the owner's computer, end to end. Real: the relay and its routes over a
+// loopback port, the server's copy and the owner's computer as two engines, the phone route's write, the
+// desktop's wake client, consumer, and intent file, and the owner engine's chats.dispatch.enqueue. Faked: the
+// desktop's settings and trust (one agent, on and admitted), its workspace binding, which reads the owner's
+// engine directly instead of through main's attachment authority, and the dispatch scan, which only counts.
+
+const INSTALL = "mac";
+const SCOPE = "https://relay.example.test#https://relay.example.test#owner";
+
+/** The owner's computer as the wake consumer sees it: its engine's chats, one agent, and a sync the test runs. */
+function ownerWakes(owner: Awaited<ReturnType<typeof computer>>) {
+  const chats = new ChatsLiveAdapter(owner.client, owner.workspace, { workspaceId: WORKSPACE });
+  const asked = { syncs: 0, dispatches: 0, sync: deferred<void>() };
+  const workspace: ChatWakeWorkspace = {
+    current: () => true,
+    requestSync: () => {
+      asked.syncs += 1;
+      asked.sync.resolve();
+    },
+    message: (_threadId, messageId) => findChatMessage(chats, WORKSPACE, messageId),
+    threadVisibility: async (threadId) => {
+      try {
+        return chatWakeThreadVisibility(
+          (await chats.getThread({ workspaceId: WORKSPACE, threadId })).thread,
+          undefined,
+          process.platform,
+        );
+      } catch (error) {
+        if (error instanceof Error && error.message === "thread-not-found") return "missing";
+        throw error;
+      }
+    },
+    decisions: (threadId) => chats.listThreadDecisions(WORKSPACE, threadId),
+    agent: async (agentId) =>
+      agentId === "default"
+        ? { name: "Claude", enabled: true, launch: true, admitted: true }
+        : null,
+    recordTrigger: (trigger) => chats.recordTrigger({ workspaceId: WORKSPACE, ...trigger }),
+    dispatch: () => {
+      asked.dispatches += 1;
+    },
+    release: async () => undefined,
+  };
+  /** The requests the owner's engine holds for that message, which an agent run would take. */
+  const triggers = async (messageId: string) =>
+    (await chats.listPending(WORKSPACE))
+      .filter((request) => request.triggerMessageId === messageId)
+      .map(({ triggerMessageId, agentId, threadId }) => ({ triggerMessageId, agentId, threadId }));
+  return { chats, workspace, asked, triggers };
+}
+
+/** A consumer for the owner's account and this install, over `client`, with backoffs that wait for stop. */
+function wakeConsumer(input: {
+  client: ChatWakeClient;
+  intents: ChatWakeIntents;
+  workspace: ChatWakeWorkspace;
+  errors: unknown[];
+}): ChatWakeConsumer {
+  return createChatWakeConsumer({
+    account: { scope: SCOPE, userId: "owner", installId: INSTALL },
+    isCurrent: () => true,
+    client: input.client,
+    intents: input.intents,
+    openWorkspace: async (workspaceId) => (workspaceId === WORKSPACE ? input.workspace : null),
+    sleep: (_ms, signal) =>
+      new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      }),
+    backoffMs: () => 1_000,
+    nowMs: () => Date.now(),
+    onError: (error) => {
+      input.errors.push(error);
+    },
+    onStuck: (intent, reason) => {
+      input.errors.push(new Error(`stuck ${reason}: ${intent.wakeId}`));
+    },
+  });
+}
+
+/** The relay's wake rows, as the phone reads their states. */
+const wakeRows = (storage: Awaited<ReturnType<typeof relayAndOwner>>["storage"]) =>
+  (storage as StorageContext).db
+    .prepare(
+      "SELECT message_id, target, generation, state, candidates_json FROM sync_relay_chat_wakes ORDER BY message_id, generation",
+    )
+    .all()
+    .map((row) => ({
+      ...row,
+      candidates_json: JSON.parse(String(row.candidates_json)) as unknown,
+    }));
+
+/** Declares the owner's computer's one agent, then a Group to post in, and opens the server's copy. */
+async function wakeWorld() {
+  const world = await relayAndOwner((userId) => (userId === "owner" ? "Ana" : null));
+  const { relayUrl, owner, openCopy } = world;
+  const client = createChatWakeClient({ relay: { baseUrl: relayUrl, token: "session:owner" } });
+  const chats = new ChatsLiveAdapter(owner.client, owner.workspace, { workspaceId: WORKSPACE });
+  const planning = await chats.createChannel({
+    workspaceId: WORKSPACE,
+    name: "Planning",
+    type: "posts",
+  });
+  await owner.sync();
+  // The computer declares its agent, as the desktop's roster does once the workspace syncs.
+  await client.replaceRunners(
+    WORKSPACE,
+    {
+      installId: INSTALL,
+      computerLabel: "Mac",
+      runners: [{ agentId: "default", displayName: "Claude", enabled: true }],
+    },
+    AbortSignal.timeout(DEADLINE_MS),
+  );
+  await openCopy();
+  const intents = createChatWakeIntents(join(await tempRoot("chat-wakes-e2e"), "chat-wakes.json"));
+  return { ...world, client, planning, intents };
+}
+
+const CANDIDATE = {
+  installId: INSTALL,
+  agentId: "default",
+  label: "Mac",
+  matched: { handle: "claude" },
+};
+
+// What went wrong on the path. A held wake read the relay ends early on an account signal with no new wake is only
+// read again after a backoff, so it isn't counted.
+const failures = (errors: unknown[]) =>
+  errors.filter(
+    (error) =>
+      !(
+        error instanceof Error && error.message.startsWith("The server answered a wake read early")
+      ),
+  );
+
+it.skipIf(engine.missing)(
+  "wakes the owner's computer for a phone mention once its message has synced, records one trigger, and confirms it",
+  async () => {
+    const { storage, owner, route, client, planning, intents } = await wakeWorld();
+    const local = ownerWakes(owner);
+    const errors: unknown[] = [];
+
+    // The phone posts, naming the agent. The relay freezes this computer as the wake's one candidate.
+    const post = {
+      operationId: "op-wake",
+      groupId: planning.channelId,
+      title: "Dinner",
+      body: "@claude book a table",
+    };
+    const posted = (await route("post", post)) as {
+      ok: true;
+      state: "saved";
+      threadId: string;
+      messageId: string;
+    };
+    expect(posted).toMatchObject({ ok: true, state: "saved" });
+    expect(wakeRows(storage)).toEqual([
+      {
+        message_id: posted.messageId,
+        target: "mention:claude",
+        generation: 1,
+        state: "waiting",
+        candidates_json: [CANDIDATE],
+      },
+    ]);
+
+    // The owner's computer hasn't pulled the message yet: the consumer reads the wake, asks for a pull, and claims nothing.
+    const consumer = wakeConsumer({ client, intents, workspace: local.workspace, errors });
+    consumer.start();
+    await local.asked.sync.promise;
+    expect(wakeRows(storage)[0]).toMatchObject({ state: "waiting" });
+    expect(await local.triggers(posted.messageId)).toEqual([]);
+
+    // The pull brings the message. The next pass claims, records the trigger in the owner's engine, and confirms it.
+    await owner.sync();
+    await consumer.resume();
+    expect(wakeRows(storage)[0]).toMatchObject({ state: "queued", generation: 1 });
+    expect(await local.triggers(posted.messageId)).toEqual([
+      { triggerMessageId: posted.messageId, agentId: "default", threadId: posted.threadId },
+    ]);
+    expect(local.asked.dispatches).toBe(1);
+    expect(await intents.list()).toEqual([]);
+
+    // The phone sends the same write again: the same answer, no second message, no second wake, and no second trigger.
+    const appended = () =>
+      Number(
+        (storage as StorageContext).db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM sync_relay_log WHERE workspace_id = ? AND op_kind = 'chat.message.append'",
+          )
+          .get(WORKSPACE)!.n,
+      );
+    const messages = appended();
+    expect(await route("post", post)).toEqual(posted);
+    await owner.sync();
+    await consumer.resume();
+    expect(appended()).toBe(messages);
+    expect(wakeRows(storage)).toHaveLength(1);
+    expect(await local.triggers(posted.messageId)).toHaveLength(1);
+    await consumer.stop();
+    expect(failures(errors)).toEqual([]);
+  },
+  120_000,
+);
+
+it.skipIf(engine.missing)(
+  "finishes a wake whose claim answer, then queued answer, were lost, across restarts, with one trigger",
+  async () => {
+    const { storage, owner, route, client, planning, intents } = await wakeWorld();
+    const local = ownerWakes(owner);
+    const posted = (await route("post", {
+      operationId: "op-lost",
+      groupId: planning.channelId,
+      title: "Trip",
+      body: "@claude find a train",
+    })) as {
+      messageId: string;
+      threadId: string;
+    };
+    await owner.sync();
+
+    // The relay commits each answer; the next one of the kind the test names never reaches the computer.
+    const losing = { claim: false, queued: false };
+    const lost = { claim: deferred<void>(), queued: deferred<void>() };
+    const losingClient: ChatWakeClient = {
+      ...client,
+      async claimWake(wakeId, installId, signal) {
+        const answer = await client.claimWake(wakeId, installId, signal);
+        if (!losing.claim) return answer;
+        losing.claim = false;
+        lost.claim.resolve();
+        throw new Error("The claim's answer was lost.");
+      },
+      async confirmQueued(wakeId, installId, signal) {
+        const answer = await client.confirmQueued(wakeId, installId, signal);
+        if (!losing.queued) return answer;
+        losing.queued = false;
+        lost.queued.resolve();
+        throw new Error("The queued answer was lost.");
+      },
+    };
+
+    // First run: the claim commits and its answer is lost. The intent says the claim may have been sent.
+    losing.claim = true;
+    const first = wakeConsumer({
+      client: losingClient,
+      intents,
+      workspace: local.workspace,
+      errors: [],
+    });
+    first.start();
+    await lost.claim.promise;
+    await first.stop();
+    expect(wakeRows(storage)[0]).toMatchObject({ state: "claimed" });
+    expect(await intents.list()).toMatchObject([{ phase: "claim-pending" }]);
+    expect(await local.triggers(posted.messageId)).toEqual([]);
+
+    // Second run, after a restart: the same claim wins again, the trigger is recorded, queued commits, and its answer is lost.
+    losing.queued = true;
+    const second = wakeConsumer({
+      client: losingClient,
+      intents,
+      workspace: local.workspace,
+      errors: [],
+    });
+    second.start();
+    await lost.queued.promise;
+    await second.stop();
+    expect(wakeRows(storage)[0]).toMatchObject({ state: "queued" });
+    expect(await intents.list()).toMatchObject([{ phase: "recorded" }]);
+    expect(await local.triggers(posted.messageId)).toHaveLength(1);
+
+    // Third run: it only confirms queued again, and clears the intent. Still one trigger and one generation.
+    const errors: unknown[] = [];
+    const third = wakeConsumer({
+      client: losingClient,
+      intents,
+      workspace: local.workspace,
+      errors,
+    });
+    third.start();
+    // A resume's pass runs after the start's recovery, on the same queue.
+    await third.resume();
+    expect(await intents.list()).toEqual([]);
+    expect(await local.triggers(posted.messageId)).toEqual([
+      { triggerMessageId: posted.messageId, agentId: "default", threadId: posted.threadId },
+    ]);
+    expect(wakeRows(storage)).toEqual([
+      {
+        message_id: posted.messageId,
+        target: "mention:claude",
+        generation: 1,
+        state: "queued",
+        candidates_json: [CANDIDATE],
+      },
+    ]);
+    await third.stop();
+    expect(failures(errors)).toEqual([]);
   },
   120_000,
 );

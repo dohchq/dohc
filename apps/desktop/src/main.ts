@@ -554,7 +554,6 @@ import {
   isChatWakeLine,
 } from "@dohc/workspace-contracts/chat-wakes";
 import {
-  CHAT_WAKES_ON,
   chatWakeBackoffMs,
   createChatWakeLifetime,
   sleepUnlessAborted,
@@ -1519,7 +1518,6 @@ const chatRunners = createChatRunnerRoster({
   log: (error) => console.error("[desktop] chat runners:", error),
 });
 const chatWakes = createChatWakeLifetime({
-  on: CHAT_WAKES_ON,
   intents: createChatWakeIntents(chatWakeIntentsFile()),
   roster: chatRunners,
   client: (wakeSession) => createChatWakeClient({ relay: wakeSession.relay }),
@@ -7892,10 +7890,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
         void automationWakeConsumer.resume();
         // Reads the account without waiting for a window, so wakes start at login on an idle computer.
         chatWakes.start();
-        if (CHAT_WAKES_ON)
-          void warmCredentialCache().catch((error: unknown) =>
-            console.error("[desktop] chat wake sign-in:", error),
-          );
+        void warmCredentialCache().catch((error: unknown) =>
+          console.error("[desktop] chat wake sign-in:", error),
+        );
         app.on("browser-window-focus", () => {
           resumeRunNow();
           void automationWakeConsumer.resume();
