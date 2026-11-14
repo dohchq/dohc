@@ -51,7 +51,11 @@ import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { datasetOperations } from "./datasetOperations";
 import type { OwnerAppResponsesRequest, OwnerAppResponsesResult } from "@dohc/cli/app-responses";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
-import { SHARE_ACCESS_VALUES, shareAccessRank } from "@dohc/security-contract/share-selector";
+import {
+  isValidShareVersionId,
+  SHARE_ACCESS_VALUES,
+  shareAccessRank,
+} from "@dohc/security-contract/share-selector";
 import { hasEngineIgnoredSegment, WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
 import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
@@ -304,6 +308,8 @@ export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 // Only edit opens file writes (`shareViewTakesLocalWrites`).
 // The chat grant's own binary access is a different field.
 const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
+// The relay's own rule, so this side reads no version id the relay would refuse.
+const SHARE_VERSION_ID = z.string().refine(isValidShareVersionId);
 export type ShareAccess = z.infer<typeof SHARE_ACCESS>;
 
 // Ops a share pull skipped, and why. Durable state, not a status: the pull
@@ -4571,7 +4577,7 @@ export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 
 export const RelayShareSelector = z.object({
   paths: z.array(PATH_STRING).max(100),
-  versionId: z.string().min(1).max(128).nullable(),
+  versionId: SHARE_VERSION_ID.nullable(),
 });
 export type RelayShareSelector = z.infer<typeof RelayShareSelector>;
 
@@ -4696,7 +4702,7 @@ export const CreateRelaySharePayload = z.object({
   workspaceId: WORKSPACE_ID,
   recipientEmail: EMAIL_STRING,
   paths: z.array(PATH_STRING).min(1).max(100).optional(),
-  versionId: z.string().min(1).max(128).optional(),
+  versionId: SHARE_VERSION_ID.optional(),
   // Required. There is no default at either boundary: the relay
   // refuses a create that names no level, and so does this one. A caller that
   // sends nothing has not chosen `view`, it has failed to say what the share
@@ -4774,7 +4780,7 @@ export const CreateRelayShareLinkPayload = z.union([
     .object({
       workspaceId: WORKSPACE_ID,
       paths: z.never().optional(),
-      versionId: z.string().min(1).max(128),
+      versionId: SHARE_VERSION_ID,
       access: z.enum(["view", "comment"]),
     })
     .strict(),
