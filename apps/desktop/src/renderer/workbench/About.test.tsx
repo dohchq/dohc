@@ -815,3 +815,17 @@ describe("About History", () => {
     ]);
   });
 });
+
+  it("names the membership that reaches a file in a joined workspace", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({
+        unknownReason: null, coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+        rows: [share({ via: "received", sharerName: "Sam", subjectName: "Community", access: "comment", selector: { kind: "workspace", role: "member" } })],
+      }),
+    );
+    render(<Access />);
+    const row = await screen.findByTestId("about-access-row");
+    expect(row.textContent).toContain("You");
+    expect(within(row).getByText("Can comment")).toBeTruthy();
+    expect(screen.queryByText("No share to you includes this file.")).toBeNull();
+  });

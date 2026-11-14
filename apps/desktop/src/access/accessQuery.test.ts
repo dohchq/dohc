@@ -237,6 +237,17 @@ it("lists a received workspace membership for the account without matching it to
     parseReceivedInventory({ received: [member({ access: "read-write" })], removed: [] }),
   ).toBeNull();
 });
+// Inside the joined workspace, its own membership is what reaches each file.
+it("names a joined workspace's membership on its tracked files on main", () => {
+  const inventory = parseReceivedInventory({ received: [{ ...grant("member"), createdAtMs: 1, genericChatWritable: false,
+    subjectName: "Community", selector: { kind: "workspace", role: "member" }, access: "comment" }], removed: [] })!;
+  const query = createAccessQuery(), base = { ...input(), observation: { inventory, checkedAtMs: 100, freshness: "fresh" as const },
+    recipientUserId: "recipient", coverage: "received-own-grant" as const, shareId: "member" };
+  expect(query.answer(base).rows).toMatchObject([{ shareId: "member", access: "comment", via: "received", recipientUserId: "recipient" }]);
+  expect(query.answer({ ...base, ref: { ...ref, path: "Notes/.env" } }).rows).toEqual([]);
+  expect(query.answer({ ...base, ref: { ...ref, versionId: "draft" } }).rows).toEqual([]);
+  expect(query.answer({ ...base, shareId: "other" }).rows).toEqual([]);
+});
 it("treats received Groups with missing file-scope facts as damaged copies", () => {
   expect(
     parseReceivedInventory({
