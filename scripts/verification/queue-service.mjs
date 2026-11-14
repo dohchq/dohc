@@ -310,21 +310,25 @@ export function trustCheckFailure(outcome, receipt, gates, previous, { disk, mem
     .map(({ step, test }) => [step ?? "", test ?? ""])
     .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   const step = receipt?.failure?.cause ?? "";
-  const log = receipt?.steps?.find((row) => row.name === step)?.log;
-  const error = log ? (receipt?.error ?? "").replaceAll(log, "<step log>") : (receipt?.error ?? "");
+  // Every log a receipt names sits under its attempt folder, whose path carries the attempt number.
+  const error = receipt?.output
+    ? (receipt.error ?? "").replaceAll(receipt.output, "<attempt>")
+    : (receipt?.error ?? "");
   const selected = receipt?.gates ?? gates;
   const signature =
     failed.length || error
-      ? JSON.stringify([step, error, failed, Boolean(selected?.js), Boolean(selected?.rust)])
+      ? createHash("sha256")
+          .update(
+            JSON.stringify([step, error, failed, Boolean(selected?.js), Boolean(selected?.rust)]),
+          )
+          .digest("hex")
       : null;
   // Disk and Docker can reproduce the same failure themselves, even when memory is also low.
   const host = disk ?? docker ?? memory;
   if (!host) return outcome;
+  const repeatable = host === memory && signature;
   if (
-    !disk &&
-    !docker &&
-    memory &&
-    signature &&
+    repeatable &&
     previous?.outcome === "environment" &&
     previous.cause === "host" &&
     previous.lowMemoryFailure === signature
@@ -337,7 +341,7 @@ export function trustCheckFailure(outcome, receipt, gates, previous, { disk, mem
     outcome: "environment",
     cause: "host",
     reason: `${host} during the run, so its failure is not trusted.`,
-    ...(!disk && !docker && memory && signature ? { lowMemoryFailure: signature } : {}),
+    ...(repeatable ? { lowMemoryFailure: signature } : {}),
   };
 }
 

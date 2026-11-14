@@ -65,17 +65,24 @@ test("only consecutive matching low-memory failures corroborate a check", () => 
       .outcome,
     "failed",
   );
-  const commandFailure = (log) => ({
+  // A package test failure names a log under the attempt folder, and its step row has no log.
+  const commandFailure = (output) => ({
     ...receipt,
-    error: `node failed (1). Log: ${log}`,
-    steps: [{ name: "rust", log }],
+    output,
+    failure: { kind: "check", cause: "tests" },
+    error: `pnpm failed (1). Log: ${output}/js-tests/pkg.log`,
+    steps: [{ name: "tests", runner: "testWorkspace" }],
   });
   assert.equal(
-    classify(
-      commandFailure("/attempts/2/rust.log"),
-      classify(commandFailure("/attempts/1/rust.log")),
-    ).outcome,
+    classify(commandFailure("/attempts/2"), classify(commandFailure("/attempts/1"))).outcome,
     "failed",
+  );
+  assert.equal(
+    classify(
+      { ...commandFailure("/attempts/2"), output: undefined },
+      classify(commandFailure("/attempts/1")),
+    ).outcome,
+    "environment",
   );
 });
 
@@ -161,15 +168,20 @@ async function serviceHarness(
     await writeJson(join(paths.request(id), "status.json"), { state: "queued", attempts: [] });
     await pump(() => pending.length > 0);
   };
-  const complete = async (fields = receipt) => {
+  const complete = async (fields = receipt, { javascript = false } = {}) => {
     const run = pending.shift();
     // One clock sample while the worker is held records the injected free memory.
     t.mock.timers.tick(20);
-    const log = join(run.output, "rust.log");
+    // A package test failure names a log in a folder of the attempt, and its step row has no log.
+    const log = javascript ? join(run.output, "js-tests", "pkg.log") : join(run.output, "rust.log");
     const result = {
       ...fields,
+      ...(javascript ? { failure: { kind: "check", cause: "tests" } } : {}),
+      output: run.output,
       error: `${fields.error} Log: ${log}`,
-      steps: [{ name: fields.failure.cause, log }],
+      steps: javascript
+        ? [{ name: "tests", runner: "testWorkspace" }]
+        : [{ name: fields.failure.cause, log }],
       grant: run.grant,
       commit: run.grant.head,
       baseCommit: run.grant.base,
@@ -211,6 +223,19 @@ test("service trusts the second low-memory failure, keeps its verdict, and reset
     "one new environment failure does not pause admission after the trusted failure",
   );
   await h.complete();
+});
+
+test("service trusts a repeated JavaScript test failure whose log sits in the attempt folder", async (t) => {
+  const h = await serviceHarness(t);
+  await h.submit("javascript", { rust: false, js: true });
+  await h.complete(receipt, { javascript: true });
+  assert.equal(h.status("javascript").state, "queued");
+  await h.pump(() => h.pending.length > 0);
+  await h.complete(receipt, { javascript: true });
+  const final = h.status("javascript");
+  assert.equal(final.state, "failed");
+  assert.equal(final.attempts[1].cause, "check");
+  assert.match(final.attempts[0].lowMemoryFailure, /^[0-9a-f]{64}$/u);
 });
 
 for (const [memory, expected] of [
