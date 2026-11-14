@@ -39,9 +39,9 @@ export function agentThreadLineWords(
 ): string {
   switch (state) {
     case "in-line":
-      // In line behind work that waits on the person: it will not move until they act.
+      // In line while something in the thread waits on the person. Two sentences, so the second ends.
       return threadWaiting
-        ? `In line. The thread is waiting for you in ${tool}`
+        ? `In line. The thread is waiting for you in ${tool}.`
         : `In line in ${tool}`;
     case "working":
       return "Working";
@@ -247,7 +247,7 @@ function Line(props: {
 }) {
   const { agent, line } = props;
   // Only a question can be answered here. An approval stays in the tool. A
-  // message in line behind a question offers it too: answering is what moves the line.
+  // message in line while the thread waits on a question offers that question too.
   const questionId = line.threadWaiting ? line.questionId : null;
   const { presentation } = agentChatIdentity({ agentId: agent.id, name: agent.name }, [agent]);
   const ink = useAgentInk(presentation);

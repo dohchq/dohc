@@ -40,8 +40,7 @@ export interface AgentThreadLine {
   questionId: string | null;
   /**
    * The thread waits on its person. True for a message whose own work waits,
-   * and for one in line behind work that does: nothing moves until the
-   * person acts in the tool.
+   * and for one in line while anything in the thread does.
    */
   threadWaiting: boolean;
 }
@@ -192,8 +191,7 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
     if (!isCurrent(row)) return;
     const key = keyOf(row);
     const before = lines.get(key);
-    const { questionId } = waiting;
-    const threadWaiting = waiting.on;
+    const { questionId, on: threadWaiting } = waiting;
     if (before?.state === state) {
       // The same state, and the time it began, with another question or wait:
       // one question answered and the next asked, or the work ahead of a
@@ -280,7 +278,7 @@ export function createThreadStates(dependencies: ThreadStatesDependencies) {
       reminder: { state: "sent", runId: sent?.runId ?? null, atMs: at },
     };
     const saved = replace(recorded, reminded);
-    show(reminded, "in-line", at, at);
+    show(reminded, "in-line", at, at, waiting);
     await saved;
   }
 
