@@ -261,8 +261,9 @@ describe("share-level tool profiles", () => {
             : {
                 ok: true,
                 copyPath: null,
-                packagePath: "plan (recovered).dohc-recovery.json",
-                folder: ".",
+                packagePath: ".dohc/local/live-recovery/plan (recovered).dohc-recovery.json",
+                notInNote: 0,
+                folder: ".dohc/local/live-recovery",
                 storedOn: "this-computer",
                 keptEdits: "kept",
               };

@@ -163,7 +163,8 @@ describe("edits the server refused", () => {
     await act(async () => {
       saving.resolve({
         copyPath: "notes/plan (recovered).md",
-        packagePath: "notes/plan (recovered).dohc-recovery.json",
+        packagePath: ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json",
+        notInNote: 2,
         storedOn: "this-computer",
         keptEdits: "kept",
       });
@@ -171,7 +172,7 @@ describe("edits the server refused", () => {
     });
     expect(
       await screen.findByText(
-        "Saved a recovery copy of notes/plan.md in notes. Your kept edits stay on this computer.",
+        "Saved a recovery copy of notes/plan.md in notes. 2 edits didn't fit in the note and are listed at the end. Your kept edits stay on this computer.",
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();
@@ -183,6 +184,47 @@ describe("edits the server refused", () => {
       ),
     ).toBeTruthy();
     expect(bridge.stopOwnerLiveDocument).not.toHaveBeenCalled();
+  });
+
+  it("keeps a row naming the saved package, with its path to copy, when no readable copy can be made", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.getSyncStatus = vi.fn(async () =>
+      quarantined({ ...quarantine, recovery: "stopped-kept" }),
+    );
+    const packagePath = ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json";
+    bridge.saveOwnerLiveRecoveryCopy = vi.fn(async () => ({
+      copyPath: null,
+      packagePath,
+      notInNote: 0,
+      storedOn: "this-computer" as const,
+      keptEdits: "ended" as const,
+    }));
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.click(
+      within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {
+        name: "Save recovery copy",
+      }),
+    );
+    const words = "dohc could not make a readable copy";
+    const toast = (await screen.findByText(words, { exact: false })).closest<HTMLElement>(
+      "[data-testid='workspace-shell-notice']",
+    )!;
+    // The edits ended, so the package is their only record, not a copy.
+    expect(toast.textContent).toContain("They are saved on this computer, in the file below.");
+    // The toast is closed; the row is what still says where the edits are.
+    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace notice" }));
+    await waitFor(() => expect(screen.queryByText(words, { exact: false })).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const row = within(await screen.findByTestId("notice-center"))
+      .getByText(words, { exact: false })
+      .closest<HTMLElement>("[data-notice-row]")!;
+    expect(row.textContent).toContain(packagePath);
+    await navigator.clipboard.writeText("");
+    const details = within(row).queryByRole("button", { name: "Details" });
+    if (details) await user.click(details);
+    await user.click(within(row).getByRole("button", { name: "Copy details" }));
+    expect((await navigator.clipboard.readText()).split("\n")).toContain(`Path: ${packagePath}`);
   });
 
   it("never paints workspace A's late Try again failure into workspace B", async () => {

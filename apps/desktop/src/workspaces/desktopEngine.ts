@@ -1858,6 +1858,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const writes = {
         create: (relative: string, text: string) =>
           createDurableFile(workspace.rootPath, relative, text),
+        keep: recovery.keepOnThisComputer(workspace),
         exists: (relative: string) =>
           lstat(join(workspace.rootPath, relative)).then(
             () => true,
@@ -1963,6 +1964,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         writes,
         dependencies.documentProjection,
       );
+      // A package without a readable copy means these edits can't become one,
+      // so Try again would fail the same way. A copy that couldn't be written
+      // throws instead, and the record stays.
       await end();
       return { ...files, keptEdits: "ended" };
     },

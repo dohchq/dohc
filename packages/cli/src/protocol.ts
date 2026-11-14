@@ -2323,8 +2323,9 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
     .strict(),
   rawFailureSchema,
 ]);
-// The package always holds every kept edit. `copyPath` is null when dohc
-// could not read the edits as a document. Both sit in `folder`. The edits
+// The package always holds every kept edit, on this computer only.
+// `copyPath` is null when dohc could not read the edits as a document; it
+// sits in `folder`, and lists `notInNote` kept edits at its end. The edits
 // came from where `storedOn` says. `keptEdits` is kept while they stay there,
 // copied once the server may release them, and ended once dohc no longer
 // keeps a Stop's edits it could not write.
@@ -2334,6 +2335,7 @@ const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
       ok: z.literal(true),
       copyPath: z.string().min(1).nullable(),
       packagePath: z.string().min(1),
+      notInNote: z.number().int().nonnegative(),
       folder: z.string().min(1),
       storedOn: keptEditsStoredOnSchema,
       keptEdits: z.enum(["kept", "copied", "ended"]),

@@ -57,7 +57,7 @@ export interface DurableFileOperations extends AsyncReplaceDependencies {
   >;
 }
 
-async function syncAndClose(handle: SyncHandle): Promise<void> {
+export async function syncAndClose(handle: SyncHandle): Promise<void> {
   try {
     await handle.sync();
   } catch (error) {

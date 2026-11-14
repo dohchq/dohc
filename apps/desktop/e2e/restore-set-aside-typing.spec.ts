@@ -48,7 +48,8 @@ const BASELINE = "The owner prepared this plan.";
 const R1 = "Recipient continued.";
 const HELD = "Owner typed during the hold.";
 const COPY = "notes/plan (recovered).md";
-const PACKAGE = "notes/plan (recovered).dohc-recovery.json";
+// Kept on this computer only, outside what syncs.
+const PACKAGE = ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json";
 const COPY_AFTER_STOP = "notes/plan (recovered 2).md";
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 const saveState = (page: Page) => page.getByTestId("markdown-save-state");

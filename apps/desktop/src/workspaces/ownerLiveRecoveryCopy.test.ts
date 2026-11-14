@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { access, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, open as openFile, readFile, writeFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import type { OwnerYDocOutboxEntry, OwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
 import {
+  keepOnThisComputer,
   liveRecoveryPackage,
   parseLiveRecoveryPackage,
   saveLiveRecoveryCopy,
@@ -13,7 +14,9 @@ import {
 import { directDocumentProjection, type DocumentProjection } from "./documentProjection";
 import { createDurableFile } from "./workspaceFiles";
 import { createTestScratch } from "./testTemp";
+import { openedLocalState } from "../testing/preparedLocalState";
 
+const KEPT = ".dohc/local/live-recovery";
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const binding = {
   workspaceId: "workspace",
@@ -87,8 +90,11 @@ function queue(
 
 async function workspace() {
   const root = await createTestScratch("dohc-live-recovery-");
+  const local = { workspaceId: "live-recovery", rootPath: root };
+  await openedLocalState(local);
   const writes = {
     create: (relative: string, text: string) => createDurableFile(root, relative, text),
+    keep: keepOnThisComputer(local),
     exists: (relative: string) =>
       access(join(root, relative)).then(
         () => true,
@@ -133,7 +139,8 @@ it("rebuilds the kept edits from the package alone after the server accepted the
   );
   expect(saved).toEqual({
     copyPath: "notes/plan (recovered).md",
-    packagePath: "notes/plan (recovered).dohc-recovery.json",
+    packagePath: `${KEPT}/notes/plan (recovered).dohc-recovery.json`,
+    notInNote: 0,
     storedOn: "this-computer",
   });
   expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(markdown);
@@ -183,7 +190,8 @@ it("keeps the original bytes in a package when the edits cannot be read as a doc
   );
   expect(saved).toEqual({
     copyPath: null,
-    packagePath: "notes/plan (recovered).dohc-recovery.json",
+    packagePath: `${KEPT}/notes/plan (recovered).dohc-recovery.json`,
+    notInNote: 0,
     storedOn: "this-computer",
   });
   const written = JSON.parse(await readFile(join(root, saved.packagePath), "utf8"));
@@ -192,10 +200,36 @@ it("keeps the original bytes in a package when the edits cannot be read as a doc
   ).toEqual(recovery.entries.map((entry) => Buffer.from(entry.update)));
 });
 
-it("writes the package before the copy is projected, and keeps it when the projection fails", async () => {
+it("makes the copy when the projection fails once and works when run again", async () => {
   const { root, writes } = await workspace(),
     { recovery } = queue(3);
-  const packaged = join(root, "notes/plan (recovered).dohc-recovery.json");
+  let runs = 0;
+  const projection: DocumentProjection = {
+    async run(request) {
+      runs += 1;
+      if (runs === 1) throw new Error("dohc could not prepare the document in time.");
+      return directDocumentProjection.run(request);
+    },
+  };
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const saved = await saveLiveRecoveryCopy(
+      liveRecoveryPackage(recovery, source),
+      writes,
+      projection,
+    );
+    expect(runs).toBe(2);
+    expect(saved.copyPath).toBe("notes/plan (recovered).md");
+    await expect(access(join(root, saved.copyPath!))).resolves.toBeUndefined();
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
+it("writes the package before the copy is projected, and keeps it when the projection fails twice", async () => {
+  const { root, writes } = await workspace(),
+    { recovery } = queue(3);
+  const packaged = join(root, KEPT, "notes/plan (recovered).dohc-recovery.json");
   const projection: DocumentProjection = {
     run: vi.fn(async () => {
       await expect(access(packaged)).resolves.toBeUndefined();
@@ -211,21 +245,39 @@ it("writes the package before the copy is projected, and keeps it when the proje
     );
     expect(saved).toEqual({
       copyPath: null,
-      packagePath: "notes/plan (recovered).dohc-recovery.json",
+      packagePath: `${KEPT}/notes/plan (recovered).dohc-recovery.json`,
+      notInNote: 0,
       storedOn: "this-computer",
     });
-    expect(projection.run).toHaveBeenCalledOnce();
+    expect(projection.run).toHaveBeenCalledTimes(2);
     expect(reopen(JSON.parse(await readFile(packaged, "utf8")))).toBeTruthy();
   } finally {
     vi.restoreAllMocks();
   }
 });
 
+it("fails, keeping the package, when the readable copy can't be written", async () => {
+  const { root, writes } = await workspace(),
+    { recovery } = queue(3);
+  const failing = {
+    ...writes,
+    create: vi.fn(async () => {
+      throw new Error("The disk is full.");
+    }),
+  };
+  await expect(
+    saveLiveRecoveryCopy(liveRecoveryPackage(recovery, source), failing, directDocumentProjection),
+  ).rejects.toThrow("The disk is full.");
+  expect(failing.create).toHaveBeenCalledOnce();
+  const packaged = join(root, KEPT, "notes/plan (recovered).dohc-recovery.json");
+  expect(reopen(JSON.parse(await readFile(packaged, "utf8")))).toBeTruthy();
+});
+
 it("never replaces a file, and gives the copy and its package the same free number", async () => {
   const { root, writes } = await workspace(),
     { recovery } = queue(2);
   await writes.create("notes/plan (recovered).md", "older copy");
-  await writes.create("notes/plan (recovered 2).dohc-recovery.json", "older package");
+  await writes.keep("notes/plan (recovered 2).dohc-recovery.json", "older package");
   const saved = await saveLiveRecoveryCopy(
     liveRecoveryPackage(recovery, source),
     writes,
@@ -233,13 +285,14 @@ it("never replaces a file, and gives the copy and its package the same free numb
   );
   expect(saved).toEqual({
     copyPath: "notes/plan (recovered 3).md",
-    packagePath: "notes/plan (recovered 3).dohc-recovery.json",
+    packagePath: `${KEPT}/notes/plan (recovered 3).dohc-recovery.json`,
+    notInNote: 0,
     storedOn: "this-computer",
   });
   expect(await readFile(join(root, "notes/plan (recovered).md"), "utf8")).toBe("older copy");
-  expect(await readFile(join(root, "notes/plan (recovered 2).dohc-recovery.json"), "utf8")).toBe(
-    "older package",
-  );
+  expect(
+    await readFile(join(root, KEPT, "notes/plan (recovered 2).dohc-recovery.json"), "utf8"),
+  ).toBe("older package");
   await writeFile(join(root, "untouched.md"), "x");
   await expect(writes.create("untouched.md", "y")).rejects.toMatchObject({ code: "EEXIST" });
 });
@@ -263,7 +316,7 @@ it("refuses a queue whose bytes do not match their digests, and writes nothing",
       parseLiveRecoveryPackage(text),
       {
         ...writes,
-        create: async () => {
+        keep: async () => {
           throw new Error("disk full");
         },
       },
@@ -349,4 +402,260 @@ it("keeps who wrote each edit: a declaration, a person, and the author a native 
     ...[3, 4, 5, 6, 7].map((sequence) => kinds[sequence]!.nativeSource!.origin),
     undefined,
   ]);
+});
+
+/**
+ * A kept edit that conflicts with a change the server already accepted from
+ * someone else. The person (client 1) and the other editor (client 2) both
+ * start from the same note; the other editor's change is in the checkpoint.
+ * Each of `mine` is one kept update.
+ */
+function conflict(
+  mine: ((doc: Y.Doc) => void) | readonly ((doc: Y.Doc) => void)[],
+  theirs: (doc: Y.Doc) => void,
+): OwnerYDocOutboxRecovery {
+  const start = markdownToYDoc("# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me");
+  const baseUpdate = Y.encodeStateAsUpdate(start);
+  start.destroy();
+  const editor = (clientID: number) => {
+    const doc = new Y.Doc();
+    doc.clientID = clientID;
+    Y.applyUpdate(doc, baseUpdate);
+    return doc;
+  };
+  const person = editor(1),
+    other = editor(2);
+  const updates = (typeof mine === "function" ? [mine] : mine).map((edit) => {
+    const before = Y.encodeStateVector(person);
+    edit(person);
+    return Y.encodeStateAsUpdate(person, before);
+  });
+  theirs(other);
+  const checkpoint = Y.encodeStateAsUpdate(other);
+  person.destroy();
+  other.destroy();
+  return {
+    outboxId: "outbox",
+    binding,
+    baseUpdateDigest: sha256(baseUpdate),
+    baseUpdate,
+    checkpoint,
+    checkpointDigest: sha256(checkpoint),
+    state: "quarantined",
+    pendingBytes: updates.reduce((total, update) => total + update.byteLength, 0),
+    oldestEntryAtMs: 1_001,
+    entries: updates.map((update, index) => ({
+      sequence: index + 1,
+      appendKey: `append-${index + 1}`,
+      deliveryId: `delivery-${index + 1}`,
+      updateDigest: sha256(update),
+      update,
+      byteLength: update.byteLength,
+      createdAtMs: 1_001 + index,
+    })),
+    quarantineReason: "invalid-update",
+    observedBinding: null,
+    retryDeliveryId: null,
+  };
+}
+
+const body = (doc: Y.Doc) => doc.getXmlFragment("body");
+const paragraph = (doc: Y.Doc) => (body(doc).get(1) as Y.XmlElement).get(0) as Y.XmlText;
+const task = (doc: Y.Doc) => (body(doc).get(3) as Y.XmlElement).get(0) as Y.XmlElement;
+const LISTED =
+  "***\n\n## Kept edits that aren’t in this copy\n\nThese edits were kept on the computer that made them. A change saved at the same moment removed or replaced the place they were made, so the note above doesn’t have them.\n\n";
+
+type Edit = (doc: Y.Doc) => void;
+
+it.each<[string, Edit | readonly Edit[], Edit, string, string]>([
+  [
+    "text typed into a paragraph someone else deleted",
+    (doc: Y.Doc) => paragraph(doc).insert("Start here.".length, " Typed *sentence* [1]."),
+    (doc: Y.Doc) => body(doc).delete(1, 1),
+    "# Plan\n\nKeep this.\n\n- [ ] tick me\n",
+    "Text added to a part that was deleted:\n\n> Typed *sentence* [1].\n",
+  ],
+  [
+    "a field someone else set at the same moment",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("status", "mine"),
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("status", "theirs"),
+    "---\nstatus: theirs\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    "Set status to “mine”. The note has “theirs”.\n",
+  ],
+  [
+    "a whole number too large for a float, in a field someone else set at the same moment",
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740993n),
+    (doc: Y.Doc) => doc.getMap("frontmatter").set("count", 9007199254740995n),
+    "---\ncount: 9007199254740995\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    "Set count to “9007199254740993”. The note has “9007199254740995”.\n",
+  ],
+  [
+    "a to-do someone else set at the same moment",
+    (doc: Y.Doc) => task(doc).setAttribute("checked", true as never),
+    (doc: Y.Doc) => task(doc).setAttribute("checked", false as never),
+    "# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+    "Ticked “tick me”. The note has it unticked.\n",
+  ],
+  [
+    "the words a later kept edit left, of text typed into a paragraph someone else deleted",
+    [
+      (doc: Y.Doc) => paragraph(doc).insert("Start here.".length, " Kept words."),
+      (doc: Y.Doc) => paragraph(doc).delete("Start here.".length, " Kept".length),
+    ],
+    (doc: Y.Doc) => body(doc).delete(1, 1),
+    "# Plan\n\nKeep this.\n\n- [ ] tick me\n",
+    "Text added to a part that was deleted:\n\n> words.\n",
+  ],
+  [
+    "the words a later kept edit left at the start, of text typed into a paragraph someone else deleted",
+    [
+      (doc: Y.Doc) => paragraph(doc).insert("Start here.".length, " Kept words."),
+      (doc: Y.Doc) => paragraph(doc).delete("Start here. Kept".length, " words.".length),
+    ],
+    (doc: Y.Doc) => body(doc).delete(1, 1),
+    "# Plan\n\nKeep this.\n\n- [ ] tick me\n",
+    "Text added to a part that was deleted:\n\n> Kept\n",
+  ],
+  [
+    "a tick on a to-do someone else deleted",
+    (doc: Y.Doc) => task(doc).setAttribute("checked", true as never),
+    (doc: Y.Doc) => body(doc).delete(3, 1),
+    "# Plan\n\nStart here.\n\nKeep this.\n",
+    "Ticked a to-do that was deleted.\n",
+  ],
+  [
+    "an image added to a to-do someone else deleted",
+    (doc: Y.Doc) => {
+      const image = new Y.XmlElement("image");
+      image.setAttribute("src", "photo.png");
+      task(doc).insert(task(doc).length, [image]);
+    },
+    (doc: Y.Doc) => body(doc).delete(3, 1),
+    "# Plan\n\nStart here.\n\nKeep this.\n",
+    "1 more kept edit, such as an image, can’t be shown as text.\n",
+  ],
+])("lists %s at the end of the readable copy", async (_case, mine, theirs, note, listed) => {
+  const { root, writes } = await workspace();
+  const saved = await saveLiveRecoveryCopy(
+    liveRecoveryPackage(conflict(mine, theirs), source),
+    writes,
+    directDocumentProjection,
+  );
+  expect(saved).toMatchObject({ copyPath: "notes/plan (recovered).md", notInNote: 1 });
+  expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(`${note}\n${LISTED}${listed}`);
+});
+
+it("lists nothing when a kept edit's own later edit removed it", async () => {
+  const { root, writes } = await workspace();
+  const saved = await saveLiveRecoveryCopy(
+    liveRecoveryPackage(
+      conflict(
+        (doc) => {
+          paragraph(doc).insert(0, "Gone ");
+          paragraph(doc).delete(0, "Gone ".length);
+          doc.getMap("frontmatter").set("status", "first");
+          doc.getMap("frontmatter").set("status", "second");
+        },
+        (doc) => doc.getMap("frontmatter").set("owner", "Sam"),
+      ),
+      source,
+    ),
+    writes,
+    directDocumentProjection,
+  );
+  expect(saved.notInNote).toBe(0);
+  expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(
+    "---\nowner: Sam\nstatus: second\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+  );
+});
+
+it("quotes text once when a later kept update repeats an earlier one", async () => {
+  const { root, writes } = await workspace();
+  const recovery = conflict(
+    [
+      (doc) => paragraph(doc).insert("Start here.".length, " Kept"),
+      (doc) => paragraph(doc).insert("Start here. Kept".length, " words."),
+    ],
+    (doc) => body(doc).delete(1, 1),
+  );
+  const [first, second] = recovery.entries;
+  const both = Y.mergeUpdates([first!.update, second!.update]);
+  const repeated = {
+    ...recovery,
+    pendingBytes: first!.byteLength + both.byteLength,
+    entries: [
+      first!,
+      { ...second!, update: both, updateDigest: sha256(both), byteLength: both.byteLength },
+    ],
+  };
+  const saved = await saveLiveRecoveryCopy(
+    liveRecoveryPackage(repeated, source),
+    writes,
+    directDocumentProjection,
+  );
+  expect(saved.notInNote).toBe(1);
+  expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(
+    `# Plan\n\nKeep this.\n\n- [ ] tick me\n\n${LISTED}Text added to a part that was deleted:\n\n> Kept words.\n`,
+  );
+});
+
+it("lists nothing when someone else set the same value at the same moment", async () => {
+  const { root, writes } = await workspace();
+  const same = (doc: Y.Doc) => {
+    task(doc).setAttribute("checked", true as never);
+    doc.getMap("frontmatter").set("status", "done");
+    doc.getMap("frontmatter").set("count", 9007199254740993n);
+  };
+  const saved = await saveLiveRecoveryCopy(
+    liveRecoveryPackage(conflict(same, same), source),
+    writes,
+    directDocumentProjection,
+  );
+  expect(saved.notInNote).toBe(0);
+  expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(
+    "---\ncount: 9007199254740993\nstatus: done\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [x] tick me\n",
+  );
+});
+
+it("flushes the entry of every folder a kept package sits in", async () => {
+  const root = await createTestScratch("dohc-live-recovery-");
+  const local = { workspaceId: "live-recovery", rootPath: root };
+  await openedLocalState(local);
+  // Only a folder is opened read-only; its flush is recorded, not made.
+  const flushed: string[] = [];
+  const open = async (path: string, flags: string, mode?: number) => {
+    if (flags !== "r") return openFile(path, flags, mode);
+    flushed.push(relative(root, path).replaceAll("\\", "/"));
+    return { sync: async () => {}, close: async () => {}, writeFile: async () => {} };
+  };
+  const keep = keepOnThisComputer(local, { open, platform: "linux" });
+  expect(await keep("notes/plan (recovered).dohc-recovery.json", "{}")).toBe(
+    `${KEPT}/notes/plan (recovered).dohc-recovery.json`,
+  );
+  expect(flushed.toSorted()).toEqual([".dohc/local", KEPT, `${KEPT}/notes`]);
+});
+
+it.each([
+  ['a relative path with ".."', "../../../notes/plan (recovered).dohc-recovery.json"],
+  ["an absolute path", "/notes/plan (recovered).dohc-recovery.json"],
+])(
+  "validates a kept package's path, %s, and writes nothing for an invalid one",
+  async (_case, path) => {
+    const { root, writes } = await workspace();
+    await expect(writes.keep(path, "{}")).rejects.toThrow("Invalid file path");
+    await expect(access(join(root, "notes"))).rejects.toThrow();
+  },
+);
+
+it("validates the note's path before keeping its package", async () => {
+  const { root, writes } = await workspace(),
+    { recovery } = queue(5, 2);
+  await expect(
+    saveLiveRecoveryCopy(
+      liveRecoveryPackage(recovery, { ...source, path: "../../../notes/plan.md" }),
+      writes,
+      directDocumentProjection,
+    ),
+  ).rejects.toThrow("Invalid file path");
+  await expect(access(join(root, "notes"))).rejects.toThrow();
 });
