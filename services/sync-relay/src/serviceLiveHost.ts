@@ -3908,8 +3908,8 @@ export async function startServiceLiveHost(options: {
               objectId: binding.objectId,
               lineageClaimId: binding.lineageClaimId,
             });
-            // An open whose caller gives up stops waiting at once, even for a reload already in the engine,
-            // so the relay frees what it holds for that open. The reload keeps its turn until the engine answers.
+            // An open whose caller gives up stops waiting at once, even for a started reload step that can't stop
+            // at once, so the relay frees what it holds for that open. The reload keeps its turn until it ends.
             const waitFor = <T>(work: Promise<T>) =>
               callerSignal ? untilAborted(work, callerSignal) : work;
             await waitFor(wake(document, callerSignal));
