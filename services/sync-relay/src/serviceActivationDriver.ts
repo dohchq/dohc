@@ -291,6 +291,8 @@ export class ServiceActivationDriver {
       ): Promise<T>;
       /** Whether a submission's drain holds or waits for the document. */
       applying?(document: LiveDocumentKey): boolean;
+      /** The host's count of engine requests that could add to an owner queue. */
+      changes?(): number;
       /** Ends with the host, and ends the wait for a validation slot with it. */
       lifetime: AbortSignal;
       /** Runs another pass soon: validation may have a slot for a capture it found busy. */
@@ -1610,6 +1612,7 @@ export class ServiceActivationDriver {
       restore: o.restore,
       publish: (signal) => workspace.replica.publish(signal),
       seedDelivery: transport.seedDelivery,
+      changes: o.changes,
       ownerAdmission: {
         trustedAccount: o.trustedAccount,
         activation: access,

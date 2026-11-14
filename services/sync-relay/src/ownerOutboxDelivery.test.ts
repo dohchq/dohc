@@ -418,7 +418,7 @@ it("keeps a service seed's application for a later pass, which neither a later h
     "apply",
     "acknowledge",
   ]);
-  expect(await f.run(options)).toEqual({ admittedEntries: 0, hasMore: false });
+  expect(await f.run(options)).toEqual({ admittedEntries: 0, hasMore: false, empty: true });
   expect(f.applied).not.toHaveBeenCalled();
 });
 
@@ -508,7 +508,7 @@ it("retains configured entry and byte limits without acknowledging unread update
   expect(one.receipts).toHaveLength(1);
   expect(await one.run()).toEqual({ admittedEntries: 1, hasMore: true });
   expect(await one.run()).toEqual({ admittedEntries: 1, hasMore: false });
-  expect(await one.run()).toEqual({ admittedEntries: 0, hasMore: false });
+  expect(await one.run()).toEqual({ admittedEntries: 0, hasMore: false, empty: true });
   const bounded = fixture(3, 1);
   await expect(bounded.run()).rejects.toThrow("byte budget exceeded");
   expect(bounded.receipts).toHaveLength(0);
@@ -722,7 +722,7 @@ it("delivers a Try again a later validator accepts under its original delivery, 
   ]);
   expect(f.state).toEqual({ value: "active", retryDeliveryId: null });
   expect(reasons).toEqual(["invalid-update"]);
-  expect(await f.run()).toEqual({ admittedEntries: 0, hasMore: false });
+  expect(await f.run()).toEqual({ admittedEntries: 0, hasMore: false, empty: true });
   expect(committedDeliveries(f)).toHaveLength(4);
 });
 

@@ -8754,6 +8754,139 @@ it("settles and publishes an editor's edit on an idle host at once, with the fix
   expect(held()).toBe(true);
 });
 
+// An open drains its note at each step: the ticket, its redemption, the upgrade and the first sync.
+// Proves: on an idle host a step after a drain that read the owner queue empty and applied nothing sends the engine
+// nothing, and a step after one that applied an edit drains once more.
+it("drains an idle note at most once across an open's four steps", async () => {
+  const { o, held } = await idleNote();
+  // Passes leave the note alone, so each drain counted is an open's.
+  o.passes.deliver = false;
+  const drains = vi.spyOn(OwnerCommittedDelivery.prototype, "drain");
+  try {
+    const open = async () => {
+      await o.host.captureNative(o.binding);
+      for (let step = 0; step < 3; step++)
+        await expect(o.host.drain(o.document)).resolves.toEqual({
+          kind: "done",
+          terminalReceipt: o.tip(),
+          continueDrain: false,
+        });
+    };
+    const requests = o.ownerRequests();
+    await open();
+    // The pass that settled the note read its owner queue empty, so the open drains nothing.
+    expect(drains).toHaveBeenCalledTimes(0);
+    expect(o.ownerRequests()).toBe(requests);
+    const edit = o.acceptEdit("typed");
+    await open();
+    // One drain applies the edit, and the next reads the queue empty with nothing to apply.
+    expect(drains).toHaveBeenCalledTimes(2);
+    expect(o.tip()).toEqual(edit);
+    expect(held()).toBe(true);
+  } finally {
+    drains.mockRestore();
+  }
+});
+
+// Proves: a drain after a hosted pull still runs, and admits the owner edit that pull queued.
+it("drains an idle note again after a hosted pull queued an owner edit", async () => {
+  const { o, passes } = await idleNote();
+  o.native.binding = o.binding;
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+  // The pass pulls but leaves the note to the drain below.
+  o.passes.deliver = false;
+  let queued = false;
+  o.requestListeners.add((method) => {
+    if (method === "sync.pullHosted" && !queued) {
+      queued = true;
+      o.nativeEdits("desktop");
+    }
+  });
+  const before = passes();
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  notifyRelayWrite(o.f.storage);
+  await vi.waitFor(() => expect(passes()).toBeGreaterThan(before));
+  expect(queued).toBe(true);
+  expect(journaled(o, "edit-desktop")).toEqual([]);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+  expect(journaled(o, "edit-desktop")).toHaveLength(1);
+});
+
+// Proves: a settlement right after a drain does not record the note quiet when a hosted pull queued an owner edit
+// between the two, so the next drain still runs and admits it.
+it("drains an idle note again after a pull between a drain and its settlement", async () => {
+  const { o, passes } = await idleNote();
+  o.native.binding = o.binding;
+  o.passes.deliver = false;
+  const drains = vi.spyOn(OwnerCommittedDelivery.prototype, "drain"),
+    checks = vi.spyOn(OwnerCommittedDelivery.prototype, "drained");
+  try {
+    // The pass that settled the note recorded it quiet, so this drain is answered from that record.
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(drains).toHaveBeenCalledTimes(0);
+    const consumer = checks.mock.contexts.at(-1) as OwnerCommittedDelivery;
+    let queued = false;
+    o.requestListeners.add((method) => {
+      if (method === "sync.pullHosted" && !queued) {
+        queued = true;
+        o.nativeEdits("desktop");
+      }
+    });
+    const before = passes();
+    appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+    notifyRelayWrite(o.f.storage);
+    await vi.waitFor(() => expect(passes()).toBeGreaterThan(before));
+    expect(queued).toBe(true);
+    await consumer.settleDrained(o.document);
+    expect(journaled(o, "edit-desktop")).toEqual([]);
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(journaled(o, "edit-desktop")).toHaveLength(1);
+  } finally {
+    drains.mockRestore();
+    checks.mockRestore();
+  }
+});
+
+// Proves: a drain after a journal row arrived, after a drain that ended pending, and after an owner's Try again, still
+// runs, as does each drain while the owner queue is held for its owner.
+it("drains an idle note again after a new row, a pending drain, and a Try again", async () => {
+  const { o } = await idleNote();
+  o.passes.deliver = false;
+  const drains = vi.spyOn(OwnerCommittedDelivery.prototype, "drain");
+  try {
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(drains).toHaveBeenCalledTimes(0);
+    const edit = o.acceptEdit("row");
+    o.lost.pending = true;
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "pending" });
+    o.lost.pending = false;
+    await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(o.tip()).toEqual(edit);
+    expect(drains).toHaveBeenCalledTimes(2);
+    const refused = refusedNative(o);
+    for (let drain = 0; drain < 2; drain++)
+      await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+    expect(drains).toHaveBeenCalledTimes(4);
+    expect(journaled(o, "edit-d")).toEqual([]);
+    await refused.grant();
+    await o.host.drain(o.document);
+    expect(drains).toHaveBeenCalledTimes(5);
+    expect(journaled(o, "edit-d")).toHaveLength(1);
+  } finally {
+    drains.mockRestore();
+  }
+});
+
+// Proves: after a restore moves the note's binding, a drain does not answer from the drain before it.
+it("does not answer a drain from before a restore fence", async () => {
+  const { o } = await idleNote();
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({ kind: "done" });
+  o.restore();
+  await expect(o.host.drain(o.document)).rejects.toThrow(
+    "Service document activation is incomplete.",
+  );
+});
+
 // An owner's desktop that is not in a live session pushes its edit to the relay's log. The host's pull brings it to
 // the engine, which queues it for the note's owner, and the next pass admits it.
 // Proves: the relay write wakes the pass that pulls, and the pass after it, one poll interval later as before, admits the edit.
