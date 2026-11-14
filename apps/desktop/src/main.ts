@@ -608,6 +608,7 @@ import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThr
 import { cliForThread } from "./agentThreads/forwardedText";
 import { createForwardLedger } from "./agentThreads/forwardLedger";
 import { T3CodeError } from "./agentThreads/t3Code";
+import { createAgentThreadChanges } from "./agentThreads/threadChanges";
 import { createT3CodeCodeMaker } from "./agentThreads/t3CodeCli";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
@@ -10786,6 +10787,15 @@ function registerIpcHandlers(): void {
 
   // One wait for the person's answer in T3 Code at a time.
   let allowingT3Code: AbortController | null = null;
+  const agentThreadChanges = createAgentThreadChanges({
+    agents: async () => listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+    changeAgent: settingsIpc.changeAgent,
+    threads: {
+      setAside: (workspaceId, agent) => agentThreads().setAside(workspaceId, agent),
+      tellOfWorkspace: (workspaceId, agent) => agentThreads().tellOfWorkspace(workspaceId, agent),
+      change: (workspaceId, agent) => agentThreads().change(workspaceId, agent),
+    },
+  });
   const t3CodeConnectionState = async () => ({
     canKeep: t3Code().canKeep(),
     signedInUntilMs: await t3Code().signedInUntil(),
@@ -10876,19 +10886,22 @@ function registerIpcHandlers(): void {
         throw error;
       }
     },
-    changeAgentThread: async ({ workspaceId, agentId, threadId }) => {
-      const agent = await agentWithThreadFor(workspaceId, agentId);
-      if (agent.thread.id === threadId)
-        throw new Error(`${agent.name} is already connected to this thread.`);
-      // One thread is one agent (ADR 0016).
-      const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
-      const connected = Object.values(agents).find((other) => other.thread?.id === threadId);
-      if (connected) throw new Error(`${connected.name} is already connected to this thread.`);
-      await agentThreads().change(workspaceId, {
-        ...agent,
-        thread: { ...agent.thread, id: threadId },
-      });
-    },
+    // Each change is refused once the window shows another workspace, so the
+    // answer the window gets then, that nothing changed, is true.
+    changeAgentThread: ({ workspaceId, agentId, threadId }, { operation }) =>
+      agentThreadChanges.changeThread({
+        workspaceId,
+        agentId,
+        threadId,
+        assertCurrent: operation.assertCurrent,
+      }),
+    setAgentThreadWorkspace: ({ workspaceId, agentId, on }, { operation }) =>
+      agentThreadChanges.setWorkspace({
+        workspaceId,
+        agentId,
+        on,
+        assertCurrent: operation.assertCurrent,
+      }),
     readyAgentThread: async ({ workspaceId, agentId, name, threadId }) => {
       const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
       // A new agent only: this marks the agent's unread messages read.

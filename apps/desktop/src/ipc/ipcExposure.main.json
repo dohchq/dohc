@@ -333,6 +333,7 @@
     "desktop:send-chat-message",
     "desktop:send-crash-report",
     "desktop:set-agent-color",
+    "desktop:set-agent-thread-workspace",
     "desktop:set-chat-archived",
     "desktop:set-app-pinned",
     "desktop:set-chat-dispatch-paused",

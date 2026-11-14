@@ -8397,6 +8397,7 @@ export const agentThreadOperations = {
     }),
     guard: "active-workspace",
     inactiveMessage: "The thread was not changed because this window changed workspaces.",
+    // Main saves the agent with the thread once the thread is ready.
   },
   // Reads the question the agent's thread waits on. Main finds the thread from
   // the agent's saved settings, and keeps no copy of the question.
@@ -8435,6 +8436,23 @@ export const agentThreadOperations = {
     }),
     guard: "active-workspace",
     inactiveMessage: "The thread was not connected because this window changed workspaces.",
+  },
+  // Turns this workspace on or off for an agent's thread, and saves the agent
+  // with the change. On: sets aside what the agent has unread here, tells the
+  // thread, then saves. Main finds the thread from the agent, so a window
+  // cannot name one, and makes the change from the settings as they are then,
+  // so two windows cannot write over each other.
+  setAgentThreadWorkspace: {
+    capabilityId: "agent.thread.connect",
+    scope: "workspace",
+    channel: "desktop:set-agent-thread-workspace",
+    payload: z.strictObject({
+      workspaceId: z.string().min(1),
+      agentId: AgentId,
+      on: z.boolean(),
+    }),
+    guard: "active-workspace",
+    inactiveMessage: "Nothing was changed because this window changed workspaces.",
   },
 } as const satisfies OperationTable;
 

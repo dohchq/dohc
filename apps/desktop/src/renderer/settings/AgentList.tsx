@@ -1145,6 +1145,7 @@ export function AgentList(props: {
             agent={agent}
             agents={settings.agents}
             workspaceId={workspaceId}
+            workspaceName={props.workspaceName}
             tools={tools}
             mcpConfig={mcpConfig(agent.id)}
             mcpUnavailable={mcpUnavailable}

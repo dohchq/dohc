@@ -8,7 +8,13 @@ import {
 import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { subscribeChatWrites } from "../workspaces/chatWriteSignals";
-import { introductionText, quoted, reminderText, type CliForThread } from "./forwardedText";
+import {
+  anotherWorkspaceText,
+  introductionText,
+  quoted,
+  reminderText,
+  type CliForThread,
+} from "./forwardedText";
 import type { ForwardLedger } from "./forwardLedger";
 import { T3CodeError } from "./t3Code";
 import { createForwarding, type ForwardingDependencies, type ServedAgent } from "./forwarding";
@@ -96,9 +102,12 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     const settings = await dependencies.readSettings();
     return {
       name: workspace.name,
-      agents: forwardingAgents(settings, workspaceId).flatMap(
-        (agent) => served(agent, workspace) ?? [],
-      ),
+      agents: forwardingAgents(settings, workspaceId).flatMap((agent) => {
+        const reaching = served(agent, workspace);
+        if (!reaching) return [];
+        servedAt.set(reaching, turnedOn.get(pair(workspaceId, agent.id)) ?? 0);
+        return [reaching];
+      }),
     };
   };
   const states = createThreadStates({
@@ -132,6 +141,11 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     onProblem: dependencies.onProblem,
     workspace: serving,
     onForwarded: (forwarded) => {
+      // The workspace was turned on for the agent again after this message
+      // went out. What the agent had there was set aside then, so the message
+      // gets no line and no reminder.
+      const turns = turnedOn.get(pair(forwarded.workspaceId, forwarded.agent.id)) ?? 0;
+      if ((servedAt.get(forwarded.agent) ?? turns) !== turns) return;
       states.forwarded({
         workspaceId: forwarded.workspaceId,
         agentId: forwarded.agent.id,
@@ -158,6 +172,11 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
         ),
     );
   };
+  const pair = (workspaceId: string, agentId: string) => `${workspaceId}\n${agentId}`;
+  // How many times each workspace has been turned on for an agent. A pass
+  // keeps, for each agent it reads, the count it began with.
+  const turnedOn = new Map<string, number>();
+  const servedAt = new WeakMap<ServedAgent, number>();
   /** The agent as its thread is reached from a workspace. Throws when dohc cannot connect the thread. */
   const reached = (
     workspaceId: string,
@@ -180,11 +199,11 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     return reaching;
   };
   /** Tells a thread what dohc will send it. Rejects when the tool does not take it. */
-  const introduce = (threadId: string, agentName: string) =>
+  const introduce = (threadId: string, agentName: string, severalWorkspaces = false) =>
     dependencies.t3Code.forward({
       threadId,
       how: "line",
-      message: introductionText({ cli: dependencies.cli, agentName }),
+      message: introductionText({ cli: dependencies.cli, agentName, severalWorkspaces }),
       // One introduction for each time a person connects this thread as this agent.
       forwardId: `dohc-intro-${randomUUID()}`,
     });
@@ -268,13 +287,51 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
      * before the agent is saved with it: tells the thread what dohc will send
      * it. Nothing is set aside. A message that still waits for the agent goes
      * to the new thread once it is saved, as when the old thread was gone
-     * from the tool. Rejects when T3 Code does not take the introduction.
+     * from the tool. The new thread gets every workspace the agent forwards
+     * from, so the introduction says when that is more than one. Rejects when
+     * T3 Code does not take the introduction.
      */
     async change(
       workspaceId: string,
+      agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note" | "workspaces">,
+    ): Promise<void> {
+      await introduce(
+        reached(workspaceId, agent).threadId,
+        agent.name,
+        (agent.workspaces?.length ?? 0) > 1,
+      );
+    },
+    /**
+     * Marks read, without forwarding, what the agent has unread in a
+     * workspace that is being turned on for its thread, as connecting does.
+     * A pass that began before this gives its messages no line.
+     */
+    async setAside(
+      workspaceId: string,
       agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note">,
     ): Promise<void> {
-      await introduce(reached(workspaceId, agent).threadId, agent.name);
+      const reaching = reached(workspaceId, agent);
+      const turning = pair(workspaceId, agent.id);
+      turnedOn.set(turning, (turnedOn.get(turning) ?? 0) + 1);
+      await forwarding.setAside(workspaceId, reaching);
+    },
+    /**
+     * Tells the thread an agent has that it now gets one more workspace's
+     * messages. Rejects when T3 Code does not take that.
+     */
+    async tellOfWorkspace(
+      workspaceId: string,
+      agent: Pick<AgentWithThread, "id" | "name" | "thread" | "whileBusy" | "note">,
+    ): Promise<void> {
+      const reaching = reached(workspaceId, agent);
+      const workspaceName = dependencies.workspace(workspaceId)?.name ?? "";
+      await dependencies.t3Code.forward({
+        threadId: reaching.threadId,
+        how: "line",
+        message: anotherWorkspaceText({ agentName: agent.name, workspaceName }),
+        // One for each time a person adds this workspace.
+        forwardId: `dohc-workspace-${randomUUID()}`,
+      });
     },
     stop(): void {
       states.stop();
