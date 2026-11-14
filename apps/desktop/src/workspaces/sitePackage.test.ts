@@ -17,6 +17,7 @@ import { listFiles } from "./workspaceFiles";
 import { createOwnedSiteCatalog } from "./ownedSiteCatalog";
 import { createOwnedWorkspaceReadPort } from "./ownedWorkspaceReadPort";
 import { selectListedSitePackage } from "../testing/sitePackageTestOracle";
+import { ListSitesResult } from "../ipc/bridgeContract";
 
 async function listSitePackages(rootPath: string): Promise<SitePackageInfo[]> {
   return listKnownSitePackages(rootPath, await listFiles(rootPath));
@@ -2384,13 +2385,19 @@ describe("listSitePackages", () => {
 
   it("drops an over-length package script (name or body) with a diagnostic instead of hiding the whole site", async () => {
     await mkdir(root, { recursive: true });
-    const longName = "x".repeat(201);
-    const longBody = `echo ${"y".repeat(10_000)}`;
+    const scripts = ListSitesResult.shape.sites.element.shape.scripts;
+    const maxName = scripts.keyType.maxLength!;
+    const maxBody = scripts.valueType.maxLength!;
+    const boundaryName = "x".repeat(maxName);
+    const boundaryBody = "y".repeat(maxBody);
+    const longName = `${boundaryName}x`;
+    const longBody = `${boundaryBody}y`;
     await writeFile(
       join(root, "package.json"),
       JSON.stringify({
         scripts: {
           dev: "vite",
+          [boundaryName]: boundaryBody,
           [longName]: "echo short",
           "long-body": longBody,
         },
@@ -2400,7 +2407,8 @@ describe("listSitePackages", () => {
 
     const site = (await listSitePackages(root)).find((candidate) => candidate.root === ".");
 
-    expect(site?.scripts).toEqual({ dev: "vite" });
+    expect(site?.scripts).toEqual({ dev: "vite", [boundaryName]: boundaryBody });
+    expect(scripts.parse(site?.scripts)).toEqual(site?.scripts);
     expect(site?.diagnostics).toContainEqual(expect.objectContaining({ code: "script-too-large" }));
     expect(site?.diagnostics.filter((d) => d.code === "script-too-large")).toHaveLength(2);
   });

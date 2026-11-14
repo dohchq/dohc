@@ -1,4 +1,5 @@
 import type { ListJoinedSharedChannelsResult } from "./bridgeContract";
+import { ListChatChannelSharesResult, MAX_CHAT_CHANNEL_SHARE_ROWS } from "./bridgeContract";
 import { describe, expect, it, vi } from "vitest";
 import { sharedChannelOperations } from "./shareOperations";
 import { registerOperations } from "./operationTable";
@@ -356,6 +357,31 @@ describe("registered shared-channel handlers", () => {
         workspaceId: "workspace",
       }),
     ).rejects.toThrow();
+  });
+
+  it("answers exactly the requested local channels beyond the relay row cap", async () => {
+    const h = await harness();
+    try {
+      const rows = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, i) =>
+        joined(`s${i}`),
+      );
+      h.workspace.sharedChannels = [...rows, joined("unrequested")];
+      const channelWireIds = [...rows.map((row) => row.channelWireId), "missing"];
+      const result = ListChatChannelSharesResult.parse(
+        await h.invoke(sharedChannelOperations.listChatChannelShares.channel, {
+          workspaceId: "workspace",
+          channelWireIds: [...channelWireIds, channelWireIds[0]],
+        }),
+      );
+      expect(result.joined.map((answer) => answer.channelWireId)).toEqual(channelWireIds);
+      expect(result.joined.slice(0, -1).map((answer) => answer.joined?.shareId)).toEqual(
+        rows.map((row) => row.shareId),
+      );
+      expect(result.joined.at(-1)).toEqual({ channelWireId: "missing", joined: null });
+      expect(result.relay).toMatchObject({ state: "answered", received: [], granted: [] });
+    } finally {
+      await h.authorities.close();
+    }
   });
 
   it.each(["credentials", "renderer", "authority"] as const)(
