@@ -9928,7 +9928,13 @@ mod projection_tests {
                     }
                 }
                 // Lines in a row, an empty heading between them, and empty lines at the end.
-                for tag in ["paragraph", "paragraph", "heading", "paragraph", "paragraph"] {
+                for tag in [
+                    "paragraph",
+                    "paragraph",
+                    "heading",
+                    "paragraph",
+                    "paragraph",
+                ] {
                     let line = body.push_back(&mut txn, XmlElementPrelim::empty(tag));
                     if tag == "heading" {
                         line.insert_attribute(&mut txn, "level", 1i64);
