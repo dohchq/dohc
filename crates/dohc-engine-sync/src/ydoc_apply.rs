@@ -3246,8 +3246,9 @@ pub(crate) fn recorded_head_matches_in_tx(
 }
 
 /// Decide, before capture ingests `text` at `path`, what it does with the
-/// prepared lineage. An adopted owner, in any relay and on any lineage of
-/// the document, takes no rewrite of it, so a file that differs from the
+/// prepared lineage. A note live for its owner, through a relay host's
+/// activation or the owner's own binding, on any lineage of the document,
+/// takes no rewrite of it, so a file that differs from the
 /// Y.Doc is held here before any other branch, unless it holds the bytes dohc
 /// last recorded and is only behind the note. A lineage a released
 /// chain left with no current activation folds only as
@@ -3266,7 +3267,7 @@ pub fn admit_capture_in_tx(
     let Some((marker, head)) = prepared.complete.state.as_ref() else {
         return Ok(CaptureLineage::Fold);
     };
-    if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, key)
+    if dohc_engine_collab::owner_outbox::owner_holds_live_in(tx, key)
         .map_err(map_collab_hard_error)?
     {
         if prepared

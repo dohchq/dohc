@@ -2103,7 +2103,7 @@ fn ensure_not_held_outside(tx: &Transaction<'_>, input: &CaptureIngest) -> Resul
         return Ok(());
     }
     let key = DocKey::new(&hold.workspace_id, &hold.version_id, &hold.object_id)?;
-    if dohc_engine_collab::owner_outbox::has_adopted_owner_in(tx, &key)? {
+    if dohc_engine_collab::owner_outbox::owner_holds_live_in(tx, &key)? {
         return Err(RuntimeError::CaptureFileHeld {
             path: input.path.clone(),
         });
