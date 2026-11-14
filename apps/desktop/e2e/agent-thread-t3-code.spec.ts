@@ -1,6 +1,6 @@
 import { activityPin, desktopPins, settingsNavPin, settingsSectionPin } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
@@ -43,6 +43,27 @@ const THREADS = [
   ...thread,
   updatedAt: new Date(Date.UTC(2026, 10, 13, 20 - index, 5)).toISOString(),
 }));
+
+// A stand-in for T3 Code's own program, where its desktop app writes it. It
+// prints the file beside it, as the real one prints the sign-in code it made,
+// and fails while that file is not there. The test puts a code from the
+// stand-in server in that file, so each code approves one sign-in.
+async function writeT3CodeProgram(home: string): Promise<{ make(code: string): Promise<void> }> {
+  const bin = join(home, ".t3", "bin");
+  await mkdir(bin, { recursive: true });
+  if (process.platform === "win32")
+    await writeFile(join(bin, "t3.cmd"), '@type "%~dp0made.json" 2>nul\r\n');
+  else {
+    await writeFile(
+      join(bin, "t3"),
+      '#!/bin/sh\nexec cat "$(dirname "$0")/made.json" 2>/dev/null\n',
+    );
+    await chmod(join(bin, "t3"), 0o755);
+  }
+  return {
+    make: (code) => writeFile(join(bin, "made.json"), JSON.stringify({ credential: code })),
+  };
+}
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
   await page.evaluate(async (value) => {
@@ -139,6 +160,7 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
       join(temp.homeDir, ".t3", "userdata", "server-runtime.json"),
       JSON.stringify({ origin: t3.origin }),
     );
+    const program = await writeT3CodeProgram(temp.homeDir);
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     // The person's browser: it follows T3 Code's page to where T3 Code sends
@@ -168,10 +190,33 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     await sheet.getByTestId("agent-runs-with-t3-code").click();
     await expect(sheet.getByTestId("t3-code-allow")).toBeVisible();
     await expect(sheet.getByTestId("agent-add-confirm")).toHaveCount(0);
+    // The person picks the mode. dohc picks none for them.
+    const modes = sheet.getByTestId("t3-code-allow-modes");
+    await expect(modes.getByRole("radio")).toHaveCount(4);
+    await expect(modes.getByRole("radio", { checked: true })).toHaveCount(0);
     await shoot(page, page, "t3-code-a-allow");
 
+    // T3 Code's program makes no code, as when a policy on the computer
+    // forbids such codes. dohc says so, and offers T3 Code's page.
+    await sheet.getByTestId("t3-code-allow-mode-full-access").click();
+    await sheet.getByTestId("t3-code-allow-start").click();
+    await expect(sheet.getByTestId("t3-code-allow-error")).toHaveText(
+      "dohc could not make its own sign-in code in T3 Code.",
+    );
+    await expect(sheet.getByTestId("t3-code-allow-on-page")).toBeVisible();
+    expect(t3.decisions).toEqual([]);
+    await shoot(page, page, "t3-code-a-could-not");
+
+    // With a code from the program, the same button allows dohc. No page
+    // opens, and T3 Code is asked for the mode the person picked.
+    const code = t3.issueCode();
+    await program.make(code);
     await sheet.getByTestId("t3-code-allow-start").click();
     await expect(sheet.getByTestId("t3-code-thread")).toHaveCount(4);
+    expect(t3.authorizations).toEqual([]);
+    expect(t3.decisions.map((sent) => sent.decision)).toEqual([
+      { _tag: "pairing-code", access: "full-access", code },
+    ]);
     await shoot(page, page, "t3-code-b-threads");
 
     await sheet.getByTestId("t3-code-thread-search").fill("owner");
@@ -197,10 +242,30 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
 
     await row.click();
     const agentPage = section.getByTestId("agent-page");
-    await expect(agentPage.getByTestId("agent-thread-access")).toContainText("Allowed until");
+    const access = agentPage.getByTestId("agent-thread-access");
+    await expect(access).toContainText("Allowed with Full access until");
     await agentPage.getByTestId("agent-note").fill("Post decisions and a daily status here.");
     await agentPage.getByTestId("agent-note").blur();
     await shoot(page, dialog, "t3-code-e-page");
+
+    // Allowing again starts from the mode dohc has. T3 Code takes a code
+    // once, so the program's old one is refused, and the person goes to T3
+    // Code's page. dohc does not learn the mode they pick there.
+    await agentPage.getByTestId("t3-code-allow-again-start").click();
+    await expect(
+      agentPage.getByTestId("t3-code-allow-modes").getByRole("radio", { checked: true }),
+    ).toHaveText(/^Full access/);
+    await agentPage.getByTestId("t3-code-allow-mode-auto").click();
+    await agentPage.getByTestId("t3-code-allow-start").click();
+    await expect(agentPage.getByTestId("t3-code-allow-error")).toHaveText(
+      "T3 Code did not take dohc's own sign-in code.",
+    );
+    await expect(access).toContainText("Allowed with Full access until");
+    await shoot(page, dialog, "t3-code-e-again");
+    await agentPage.getByTestId("t3-code-allow-on-page").click();
+    await expect(access).toHaveText(/^Allowed until /);
+    await expect(agentPage.getByTestId("t3-code-allow-modes")).toHaveCount(0);
+    expect(t3.authorizations).toHaveLength(1);
 
     await page.getByRole("button", { name: "Close settings" }).click();
     await expect(dialog).toHaveCount(0);

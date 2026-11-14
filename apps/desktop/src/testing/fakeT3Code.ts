@@ -12,6 +12,12 @@ export interface FakeT3Code {
   origin: string;
   registrations: Array<Record<string, unknown>>;
   authorizations: URLSearchParams[];
+  /** What was sent to approve or deny a sign-in without the page. */
+  decisions: Array<{ authorization: Record<string, string>; decision: Record<string, unknown> }>;
+  /** Makes a sign-in code that approves one sign-in, as T3 Code's own program does. */
+  issueCode(): string;
+  /** Answers an approval with another address, made from the sign-in's own. */
+  redirectTo: ((own: URL) => string) | null;
   calls: Array<{ tool: string; args: Record<string, unknown> }>;
   /** What each tool answers, keyed by name. */
   tools: Record<string, (args: Record<string, unknown>) => unknown>;
@@ -37,10 +43,20 @@ export async function startFakeT3Code(): Promise<FakeT3Code & { close(): Promise
     string,
     { clientId: string; redirectUri: string; challenge: string; resource: string }
   >();
+  // The sign-in codes that have not approved a sign-in yet. Each approves one.
+  const codes = new Set<string>();
+  let used = 0;
   const fake: FakeT3Code = {
     origin: "",
     registrations: [],
     authorizations: [],
+    decisions: [],
+    issueCode: () => {
+      const code = `CODE${String(codes.size + used + 1).padStart(8, "0")}`;
+      codes.add(code);
+      return code;
+    },
+    redirectTo: null,
     calls: [],
     tools: {},
     refusals: {},
@@ -91,6 +107,26 @@ export async function startFakeT3Code(): Promise<FakeT3Code & { close(): Promise
           });
         }
         return response.writeHead(302, { location: redirect.href }).end();
+      }
+      if (request.method === "POST" && url.pathname === "/oauth/mcp/decision") {
+        const sent = JSON.parse(await bodyOf(request)) as FakeT3Code["decisions"][number];
+        fake.decisions.push(sent);
+        const { authorization, decision } = sent;
+        const code = decision._tag === "pairing-code" ? String(decision.code) : "";
+        if (!codes.delete(code))
+          return json(400, { _tag: "AuthMcpApprovalError", message: "unknown_or_used" });
+        used += 1;
+        const redirect = new URL(authorization.redirect_uri!);
+        redirect.searchParams.set("state", authorization.state!);
+        redirect.searchParams.set("iss", fake.origin);
+        redirect.searchParams.set("code", "code-1");
+        pending.set("code-1", {
+          clientId: authorization.client_id!,
+          redirectUri: authorization.redirect_uri!,
+          challenge: authorization.code_challenge!,
+          resource: authorization.resource!,
+        });
+        return json(200, { redirectTo: fake.redirectTo?.(redirect) ?? redirect.href });
       }
       if (request.method === "POST" && url.pathname === "/oauth/mcp/token") {
         const form = new URLSearchParams(await bodyOf(request));
