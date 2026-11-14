@@ -178,8 +178,8 @@ fn an_unchanged_outside_save_changes_nothing() {
 
 #[test]
 fn an_outside_save_keeps_lines_that_differ_only_by_an_empty_text_piece() {
-    // A note made before every empty line carried a text piece holds empty
-    // lines without one, and a line can keep an empty piece beside its text.
+    // An editor can leave an empty piece beside a line's text; the file
+    // holds the same lines without them.
     let doc = Ydoc::wire();
     let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
     {
@@ -187,11 +187,11 @@ fn an_outside_save_keeps_lines_that_differ_only_by_an_empty_text_piece() {
         let first = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
         first.push_back(&mut txn, XmlTextPrelim::new("One."));
         first.push_back(&mut txn, XmlTextPrelim::new(""));
-        for _ in 0..2 {
-            body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
-        }
+        let second = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        second.push_back(&mut txn, XmlTextPrelim::new(""));
+        second.push_back(&mut txn, XmlTextPrelim::new("Two."));
         let last = body.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
-        last.push_back(&mut txn, XmlTextPrelim::new("Two."));
+        last.push_back(&mut txn, XmlTextPrelim::new("Three."));
     }
     let lines = || -> Vec<yrs::XmlElementRef> {
         let txn = doc.doc.transact();
@@ -204,13 +204,14 @@ fn an_outside_save_keeps_lines_that_differ_only_by_an_empty_text_piece() {
     };
     let before = lines();
     let markdown = doc.project_richdoc().unwrap();
-    // The file reads back as the same four lines, so the save changes none.
+    // The file reads back as the same three lines without their empty
+    // pieces, so the save changes none.
     assert_eq!(
         body_json(&folded(&markdown))["children"]
             .as_array()
             .unwrap()
             .len(),
-        4,
+        3,
         "{markdown:?}"
     );
     doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &markdown)
