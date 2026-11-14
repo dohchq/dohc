@@ -46,11 +46,62 @@ async function earlyState(discriminator: string, path: string, signal: AbortSign
   }
 }
 
+// The state the page fetched when it showed a note. A press uses it only while it is this young, counted from when the
+// request left, so nobody types on a copy much older than the press's own fetch would give. After that the press
+// fetches its own.
+export const SHOWN_STATE_FRESH_MS = 3_000;
+let shown:
+  | {
+      key: string;
+      startedAt: number;
+      request: AbortController;
+      state: ReturnType<typeof earlyState>;
+    }
+  | undefined;
+const shownKey = (discriminator: string, path: string) => JSON.stringify([discriminator, path]);
+function dropShown() {
+  shown?.request.abort();
+  shown = undefined;
+}
+
+/**
+ * Fetch the state of a note an Edit link can change while the page shows it, for a press soon after. The returned
+ * function lets the state go, unless a press has taken it.
+ */
+export function showLinkDocument(discriminator: string, path: string) {
+  dropShown();
+  const request = new AbortController();
+  const entry = {
+    key: shownKey(discriminator, path),
+    startedAt: Date.now(),
+    request,
+    state: earlyState(discriminator, path, request.signal),
+  };
+  shown = entry;
+  return () => {
+    if (shown === entry) dropShown();
+  };
+}
+
+function takeShown(discriminator: string, path: string, signal: AbortSignal) {
+  const taken = shown;
+  if (
+    taken?.key !== shownKey(discriminator, path) ||
+    Date.now() - taken.startedAt > SHOWN_STATE_FRESH_MS
+  ) {
+    dropShown();
+    return undefined;
+  }
+  shown = undefined;
+  signal.addEventListener("abort", () => taken.request.abort(), { once: true });
+  return taken.state;
+}
+
 /** The discriminator selects a protected cookie; it never grants access by itself. */
 export async function openLinkDocument(discriminator: string, path: string, signal: AbortSignal) {
   if (!/^[A-Za-z0-9_-]{12}$/.test(discriminator) || !/\.md$/i.test(path) || path.length > 1024)
     throw Error("Invalid file");
-  const state = earlyState(discriminator, path, signal);
+  const state = takeShown(discriminator, path, signal) ?? earlyState(discriminator, path, signal);
   const metadata = await namedRequest("/api/live/link-document", signal, { discriminator, path });
   signal.throwIfAborted();
   if (!exact(metadata, "limits,objectId")) throw Error("Invalid file");

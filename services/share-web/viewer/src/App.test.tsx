@@ -580,7 +580,8 @@ describe("App", () => {
     const fallback = viewerFetch(() => {
       throw new Error("Unexpected handoff");
     });
-    let opens = 0;
+    let opens = 0,
+      states = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn<typeof fetch>(async (input, init) => {
@@ -588,6 +589,10 @@ describe("App", () => {
         if (route === "/api/view/meta") return jsonResponse(meta);
         if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
         if (route.startsWith("/api/view/blob/")) return new Response("Shared content");
+        if (route === "/api/live/link-document-state") {
+          states += 1;
+          return new Response(null, { status: 204 });
+        }
         if (route === "/api/live/link-document") {
           opens += 1;
           return jsonResponse(
@@ -600,9 +605,12 @@ describe("App", () => {
     );
     await renderApp();
     await settle(() => container.querySelector("article.markdown") !== null);
+    // The page asks for the note's state once while it shows it, and a press right after takes that answer.
+    await settle(() => states === 1);
 
     await act(async () => buttonNamed("Edit file")!.click());
     await settle(() => container.querySelector(".edit-notice") !== null);
+    expect(states).toBe(1);
 
     expect(container.querySelector(".edit-notice")?.textContent).toContain(
       "dohc could not start editing this page.You can still read and comment here.",
@@ -612,6 +620,7 @@ describe("App", () => {
 
     await act(async () => buttonNamed("Try again")!.click());
     await settle(() => opens === 2 && container.querySelector(".edit-notice") !== null);
+    expect(states).toBe(2);
 
     await act(async () => buttonNamed("Done")!.click());
     expect(buttonNamed("Edit file")).toBeDefined();
