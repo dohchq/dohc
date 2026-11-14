@@ -1465,6 +1465,8 @@ describe("ShareViewFiles", () => {
       relayUrl: "https://relay.example",
       recipientEmail: "recipient@example.com",
     };
+    const simulateEngineStoreOpen = () =>
+      mkdir(join(prepared.rootPath, ".dohc", "local"), { recursive: true });
     let registered = false;
     let leakedOwner: ShareViewFilesOwnerCapability | null = null;
     const files = createShareViewFiles({
@@ -1481,8 +1483,7 @@ describe("ShareViewFiles", () => {
       createMount: async (owner) => {
         leakedOwner = owner;
         await shareViewFilesMountProjection(owner).create();
-        // The engine's open of the mount's store makes its `.dohc/local`.
-        await mkdir(join(prepared.rootPath, ".dohc", "local"), { recursive: true });
+        await simulateEngineStoreOpen();
         registered = true;
       },
       removeMount: async (owner) => {

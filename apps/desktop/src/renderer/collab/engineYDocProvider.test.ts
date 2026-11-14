@@ -1165,19 +1165,16 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     const winner = new Y.Doc();
     typeIntoBody(winner, "Winning root.");
-    const replacing = mock.replaceLineage({
+    const replacementAwaitingMainAcceptance = mock.replaceLineage({
       update: Y.encodeStateAsUpdate(winner),
       recoveredPaths: ["notes/live (recovered).md"],
       artifactAssets: [],
       lineageGeneration: 2,
     });
 
-    // Main has announced the winner but has not accepted its generation yet.
-    // The losing editor must be inert throughout that handoff: a transaction
-    // already queued against it cannot be silently shipped under generation 1.
-    const shippedBeforeHandoff = mock.shipped.length;
+    const shippedBeforeMainAcceptsWinner = mock.shipped.length;
     typeIntoBody(losingDoc, "Late losing edit.");
-    expect(mock.shipped).toHaveLength(shippedBeforeHandoff);
+    expect(mock.shipped).toHaveLength(shippedBeforeMainAcceptsWinner);
     expect(binding.doc).toBe(losingDoc);
     expect(mock.acknowledgedGenerations).toEqual([2]);
 
@@ -1185,7 +1182,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     typeIntoBody(winner, "Remote during handoff.");
     mock.bufferDuringReplacement(Y.encodeStateAsUpdate(winner, winnerBeforeRemote));
     mock.releaseReplacement();
-    await replacing;
+    await replacementAwaitingMainAcceptance;
 
     expect(binding.doc).not.toBe(losingDoc);
     expect(bodyText(binding.doc!)).toContain("Winning root.");

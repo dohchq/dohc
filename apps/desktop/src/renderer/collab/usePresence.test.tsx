@@ -179,15 +179,17 @@ describe("usePresence gating + guard", () => {
         await flush();
       }
       expect(t.publishes.length).toBe(before + 1); // still just the one edge
-      // …and the repeated keystrokes kept the idle window alive: at t=7s the
-      // window measured from the first keystroke (t=5s) has lapsed, but the
-      // one from the last keystroke (t=3s+5s=8s) has not — no clear yet…
+      const idleWindowMs = 5_000;
+      const lastKeystrokeAtMs = 3 * 1_000;
+      const firstKeystrokeDeadlineMs = idleWindowMs;
+      const lastKeystrokeDeadlineMs = lastKeystrokeAtMs + idleWindowMs;
+      const observationAtMs = firstKeystrokeDeadlineMs + 2_000;
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(4_000);
+        await vi.advanceTimersByTimeAsync(observationAtMs - lastKeystrokeAtMs);
       });
       expect(t.publishes.length).toBe(before + 1);
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_000);
+        await vi.advanceTimersByTimeAsync(lastKeystrokeDeadlineMs - observationAtMs);
       });
       expect(t.publishes.length).toBe(before + 2);
       expect(t.publishes.at(-1)).toMatchObject({ typing: false });

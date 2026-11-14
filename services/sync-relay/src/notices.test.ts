@@ -716,7 +716,9 @@ describe("limits on notices from other people", () => {
         (await post(h, "owner", notice({ recipientUserId: "ana", noticeId: `n${index}` }))).status,
       ).toBe(200);
     }
-    await mark(h, "ana", [{ noticeId: "from:owner:n5", mark: "read" }]);
+    const readRowEvictedFirst = "from:owner:n5";
+    const oldestUnreadRowEvictedNext = "from:owner:n0";
+    await mark(h, "ana", [{ noticeId: readRowEvictedFirst, mark: "read" }]);
 
     expect(
       (await post(h, "owner", notice({ recipientUserId: "ana", noticeId: "n100" }))).status,
@@ -728,9 +730,8 @@ describe("limits on notices from other people", () => {
     expect(ids).toHaveLength(NOTICE_ROWS_PER_SENDER + 1);
     expect(ids).toContain("ana-own");
     expect(ids).toContain("from:owner:n101");
-    // The read row goes first, then the oldest unread.
-    expect(ids).not.toContain("from:owner:n5");
-    expect(ids).not.toContain("from:owner:n0");
+    expect(ids).not.toContain(readRowEvictedFirst);
+    expect(ids).not.toContain(oldestUnreadRowEvictedNext);
   });
 
   it("sends a row removed to make room as an ordinary change", async () => {

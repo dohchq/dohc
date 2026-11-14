@@ -179,12 +179,17 @@ describe("chat share selector (DM grants)", () => {
       channelWireId: DM_WIRE,
       access: "read-write",
     };
+    const threadBoundToOtherChannel = "t2";
     const chat: ChatShareThreadResolver = {
       channelKind: (wireId) =>
         wireId === DM_WIRE ? "dm" : wireId === OTHER_WIRE ? "channel" : undefined,
       ...NO_FILE_CHAT,
       threadChannelWireId: (threadId) =>
-        threadId === "t" ? DM_WIRE : threadId === "t2" ? OTHER_WIRE : undefined,
+        threadId === "t"
+          ? DM_WIRE
+          : threadId === threadBoundToOtherChannel
+            ? OTHER_WIRE
+            : undefined,
     };
     const allow = (opKind: string, payload: Record<string, unknown>) =>
       filterOpForShare(selector, opKind, JSON.stringify(payload), chat).allowed;
@@ -245,17 +250,15 @@ describe("chat share selector (DM grants)", () => {
     ).toBe(false);
     expect(
       allow("chat.thread.create", {
-        threadId: "t2",
+        threadId: threadBoundToOtherChannel,
         title: "",
         createdAtMs: 1,
         channelWireId: OTHER_WIRE,
       }),
     ).toBe(false);
-    // A thread.create that forges the granted wire id for a thread already bound
-    // elsewhere is excluded (earliest-binding wins).
     expect(
       allow("chat.thread.create", {
-        threadId: "t2",
+        threadId: threadBoundToOtherChannel,
         title: "",
         createdAtMs: 1,
         channelWireId: DM_WIRE,
@@ -264,7 +267,7 @@ describe("chat share selector (DM grants)", () => {
     expect(
       allow("chat.message.append", {
         messageId: "m2",
-        threadId: "t2",
+        threadId: threadBoundToOtherChannel,
         channelWireId: DM_WIRE,
         body: "leak",
         authorKind: "human",
@@ -286,7 +289,7 @@ describe("chat share selector (DM grants)", () => {
       allow("chat.reaction.set", {
         reactionId: "r2",
         messageId: "m",
-        threadId: "t2",
+        threadId: threadBoundToOtherChannel,
         emoji: "👍",
         authorId: "u",
         authorKind: "human",

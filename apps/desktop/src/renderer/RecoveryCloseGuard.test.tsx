@@ -571,7 +571,8 @@ describe("RecoveryCloseGuard", () => {
     const user = userEvent.setup();
     const harness = confirmedRestartHarness();
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
-    const [approvedId] = atRiskOrphanedDraftIds();
+    const approvedIds = atRiskOrphanedDraftIds();
+    const [approvedId] = approvedIds;
     render(
       <RecoveryCloseGuard>
         <div />
@@ -584,14 +585,11 @@ describe("RecoveryCloseGuard", () => {
     await user.click(screen.getByTestId("recovery-close-anyway"));
     await waitFor(() => expect(harness.installUpdate).toHaveBeenCalledTimes(1));
 
-    // A reopen queued behind the click sets one more edit aside. The guard
-    // must answer from what is there, not from "the user already confirmed".
-    // The approved draft is dismissed in the same window, so the COUNT is
-    // unchanged: only the drafts' identity says the list is no longer the one
-    // that was approved.
     dismissOrphanedDraft("ws-1", "a.md", approvedId);
     captureOrphanedDraft("ws-1", "b.md", "Never shown");
     expect(atRiskOrphanedDraftIds()).toHaveLength(1);
+    expect(atRiskOrphanedDraftIds()).toHaveLength(approvedIds.length);
+    expect(atRiskOrphanedDraftIds()).not.toEqual(approvedIds);
 
     harness.askBoundaryCheck(1);
     await waitFor(() =>
