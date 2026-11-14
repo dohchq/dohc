@@ -194,7 +194,7 @@ describe("Members page", () => {
     expect(screen.queryByTestId("settings-members-link")).toBeNull();
     expect(screen.queryByTestId("settings-members-level-control")).toBeNull();
     expect(screen.getByTestId("settings-members-level-words").textContent).toBe(
-      "Members can read, comment, and edit documents and Collections.",
+      "Members can read, comment, and edit pages and Collections.",
     );
     expect(screen.queryAllByTestId("settings-members-row-menu")).toHaveLength(0);
     expect(screen.queryByTestId("settings-members-invites")).toBeNull();
@@ -244,24 +244,45 @@ describe("Members page", () => {
 
   describe("in a joined workspace", () => {
     // A joined workspace has no sync of its own: the account that joined reaches the owner's Members.
-    const joined = (overrides: Partial<CloudStatusResult> = {}) => cloud({ status: status({ email: "bo@test", workspaceSynced: false, workspaceSyncConnected: false, workspaceServerUrl: undefined, ...overrides }) });
+    const joined = (overrides: Partial<CloudStatusResult> = {}) =>
+      cloud({
+        status: status({
+          email: "bo@test",
+          workspaceSynced: false,
+          workspaceSyncConnected: false,
+          workspaceServerUrl: undefined,
+          ...overrides,
+        }),
+      });
 
     it("lists names and roles for a member, with no invite, link, or row controls", async () => {
-      bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: memberView() }));
+      bridge.workspaceMembers.mockImplementation(async () => ({
+        status: "ready",
+        view: memberView(),
+      }));
       renderMembers({ cloud: joined(), joined: true });
       const page = await screen.findByTestId("settings-members-page");
-      expect(bridge.workspaceMembers).toHaveBeenCalledWith({ workspaceId: "ws-1", request: { action: "list" } });
+      expect(bridge.workspaceMembers).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        request: { action: "list" },
+      });
       expect(page.dataset.viewerRole).toBe("member");
       expect(page.textContent).not.toMatch(/@test/u);
-      expect(within(screen.getByTestId("settings-members-people")).getAllByTestId("settings-members-row").map((entry) => entry.dataset.memberId))
-        .toEqual(["owner", "m-ana", "m-bo"]);
+      expect(
+        within(screen.getByTestId("settings-members-people"))
+          .getAllByTestId("settings-members-row")
+          .map((entry) => entry.dataset.memberId),
+      ).toEqual(["owner", "m-ana", "m-bo"]);
       expect(screen.queryByTestId("settings-members-invite")).toBeNull();
       expect(screen.queryByTestId("settings-members-link")).toBeNull();
       expect(screen.queryAllByTestId("settings-members-row-menu")).toHaveLength(0);
     });
 
     it("gives an admin Invite and Remove for members, and not for admins", async () => {
-      bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: adminView() }));
+      bridge.workspaceMembers.mockImplementation(async () => ({
+        status: "ready",
+        view: adminView(),
+      }));
       renderMembers({ cloud: joined(), joined: true });
       await screen.findByTestId("settings-members-page");
       expect(screen.getByTestId("settings-members-invite")).toBeTruthy();
@@ -280,11 +301,16 @@ describe("Members page", () => {
     });
 
     it("names the signed-in account and offers Switch account, with no Try again, before asking the server", async () => {
-      const { props } = renderMembers({ cloud: joined({ joinedBySignedInAccount: false }), joined: true });
+      const { props } = renderMembers({
+        cloud: joined({ joinedBySignedInAccount: false }),
+        joined: true,
+      });
       const gate = screen.getByTestId("settings-members-gate");
       expect(gate.dataset.reason).toBe("other-account");
       // dohc keeps only the joined account's id, so it names the account signed in now and says it cannot name the other.
-      expect(gate.textContent).toBe("This computer is signed in as bo@test, not the account that joined this workspace. dohc does not record that account's email.Switch account");
+      expect(gate.textContent).toBe(
+        "This computer is signed in as bo@test, not the account that joined this workspace. dohc does not record that account's email.Switch account",
+      );
       expect(within(gate).queryByRole("button", { name: "Try again" })).toBeNull();
       await userEvent.click(within(gate).getByRole("button", { name: "Switch account" }));
       expect(props.onOpenSync).toHaveBeenCalled();

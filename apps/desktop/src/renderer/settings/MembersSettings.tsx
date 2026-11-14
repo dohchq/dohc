@@ -55,7 +55,7 @@ type ReportError = (
 export const LEVEL_WORDS: Record<MemberLevel, string> = {
   view: "Members can read everything and open apps.",
   comment: "Members can read everything, post in Groups, and comment on files.",
-  edit: "Members can read, comment, and edit documents and Collections.",
+  edit: "Members can read, comment, and edit pages and Collections.",
 };
 const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
 const LINK_SECRET: CopySecret = {
